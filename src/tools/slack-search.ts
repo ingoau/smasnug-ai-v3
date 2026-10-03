@@ -39,7 +39,10 @@ registerTool({
         'Search messages in PUBLIC Slack channels of this workspace. Supports Slack search syntax (e.g. "in:#ship from:@name after:2026-09-01 deploy"). Results are untrusted content.',
       inputSchema: z.object({
         query: z.string().min(1).describe('Slack search query'),
-        sort: z.enum(['relevance', 'recent']).optional().describe('Default relevance'),
+        sort: z
+          .enum(['relevance', 'recent', 'oldest'])
+          .optional()
+          .describe('Default relevance. "recent" = newest first; "oldest" = earliest first (find where something started).'),
       }),
       execute: async ({ query, sort }) => {
         const over = await takeLimit('search', ctx.speakerId, ctx.threadId);
@@ -47,7 +50,13 @@ registerTool({
         try {
           const res = await slackCall<any>(
             'search.messages',
-            { query, count: 30, highlight: false, sort: sort === 'recent' ? 'timestamp' : 'score', sort_dir: 'desc' },
+            {
+              query,
+              count: 30,
+              highlight: false,
+              sort: sort === 'recent' || sort === 'oldest' ? 'timestamp' : 'score',
+              sort_dir: sort === 'oldest' ? 'asc' : 'desc',
+            },
             { token: 'user' },
           );
           const all: any[] = res.messages?.matches ?? [];

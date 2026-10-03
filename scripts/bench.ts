@@ -8,6 +8,8 @@
  *   pnpm bench --parallel 8                     # also: 8 DMs/mentions in different threads at the same moment
  *   pnpm bench --latency 150 --jitter 50        # fake Slack latency per call (ms)
  *   pnpm bench --json out.json                  # dump raw results
+ *   pnpm bench --child 3                        # only: 3 research subagent runs (fixed instructions), per-step timing
+ *   CHILD_REASONING_EFFORT=low pnpm bench --child 3 [--child-task hard]
  *
  * Every number is ms after the user's message (its Slack ts = when the bench injects it). Phase marks come from the
  * `turn_timing` event the pipeline writes at the end of each turn (src/core/timing.ts).
@@ -25,6 +27,7 @@ const PARALLEL = Number(arg('parallel', '0'));
 const LATENCY = arg('latency', '150')!;
 const JITTER = arg('jitter', '0')!;
 const JSON_OUT = arg('json');
+const CHILD = Number(arg('child', '0'));
 
 applyBenchEnv();
 try {
@@ -179,6 +182,46 @@ async function collect(scenario: Scenario | { name: string; check?: Scenario['ch
   const counters = snake(p.counters);
   if (runLag != null) counters.subagent_queue_ms = runLag;
   return { scenario: scenario.name, threadId, rel: snake(p.rel), spans: snake(p.spans), counters, notes: p.notes ?? {}, headline: p.headline, problem: scenario.check?.(evs) ?? null };
+}
+
+if (CHILD > 0) {
+  // Subagent runs in isolation: spawn directly with fixed instructions, let the in-process worker run them.
+  const { spawnSubagent } = await import('../src/agent/subagents.js');
+  const instructions =
+    arg('child-task') === 'hard'
+      ? 'Research the best beginner microcontroller boards for teenagers right now (e.g. Raspberry Pi Pico 2 W, ESP32 variants, Arduino Uno R4, micro:bit). Compare them on price (check at least two shops each), ease of getting started, wifi/bluetooth, and community support. Recommend one for a first project. Include links.'
+      : 'Find the current price of the Raspberry Pi Pico 2 W at two well-known online shops (official resellers are fine). Report shop, price and link for each, briefly. Use web search.';
+  const rows: { run: number; total: number; steps: any[] }[] = [];
+  for (let i = 0; i < CHILD; i++) {
+    const ts = newTs();
+    const threadId = `DCHILD:${ts}`;
+    await sql`insert into threads (id, channel_id, thread_ts, is_dm, engaged) values (${threadId}, 'DCHILD', ${ts}, true, true)`;
+    const [turn] = await sql<{ id: number }[]>`insert into turns (thread_id, author_id, kind, is_mention, message_ts, status) values (${threadId}, 'UCHILD', 'user', true, ${[ts]}, 'done') returning id::int as id`;
+    const t0 = Date.now();
+    const { runId } = await spawnSubagent({ threadId, turnId: turn!.id, ownerId: 'UCHILD', title: 'Pico prices', instructions });
+    let status = 'queued';
+    while (!['complete', 'error', 'cancelled'].includes(status) && Date.now() - t0 < 600_000) {
+      await sleep(250);
+      status = (await sql<{ status: string }[]>`select status from runs where id = ${runId}`)[0]!.status;
+    }
+    const total = Date.now() - t0;
+    await sleep(300);
+    const steps = (await sql<{ payload: any }[]>`select payload from thread_events where thread_id = ${threadId} and type = 'run_step' order by id`).map((r) => r.payload);
+    rows.push({ run: runId, total, steps });
+    console.log(
+      `  child run ${i + 1}: ${status} in ${fmt(total)}  steps ${steps.map((s) => `${fmt(s.ms)}${s.tools?.length ? `[${s.tools.join(',')}]` : ''}`).join(' ')}  ` +
+        `tokens in ${steps.reduce((a, s) => a + (s.inputTokens ?? 0), 0)} out ${steps.reduce((a, s) => a + (s.outputTokens ?? 0), 0)} reasoning ${steps.reduce((a, s) => a + (s.reasoningTokens ?? 0), 0)}`,
+    );
+  }
+  const med = (xs: number[]) => [...xs].sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+  console.log(`
+child (CHILD_REASONING_EFFORT=${process.env.CHILD_REASONING_EFFORT ?? 'default'}): median total ${fmt(med(rows.map((r) => r.total)))}, median first step ${fmt(med(rows.map((r) => r.steps[0]?.ms ?? NaN)))}, median steps ${med(rows.map((r) => r.steps.length))}`);
+  if (JSON_OUT) (await import('node:fs')).writeFileSync(JSON_OUT, JSON.stringify(rows, null, 2));
+  await Promise.all(workers.map((w) => w.close(true)));
+  await closeQueues();
+  await redis.quit();
+  await sql.end({ timeout: 2 });
+  process.exit(0);
 }
 
 const results: Result[] = [];

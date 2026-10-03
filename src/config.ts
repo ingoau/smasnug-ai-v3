@@ -19,6 +19,11 @@ const Env = z.object({
   STATUS_ACTIVITY_MODE: z.enum(['overlay', 'text', 'off']).default('overlay'),
   /** Front agent reasoning effort on OpenRouter (see docs/perf.md for the latency/quality comparison). */
   FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('low'),
+  /**
+   * Reasoning effort for regular (Luna) subagent runs; `default` = the model's own default. `strong` runs (Sol) always
+   * use the model default. `low` roughly halves research runs (docs/perf.md).
+   */
+  CHILD_REASONING_EFFORT: z.enum(['default', 'none', 'minimal', 'low', 'medium', 'high']).default('low'),
 });
 
 export const env = Env.parse(process.env);

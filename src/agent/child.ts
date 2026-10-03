@@ -4,7 +4,7 @@
  * card is re-rendered (coalesced). History is persisted (compacted) at run end.
  */
 import { streamText, stepCountIs, type ModelMessage } from 'ai';
-import { limits } from '../config.js';
+import { env, limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { toolsFor } from '../core/tools.js';
@@ -20,6 +20,16 @@ import { addSource, compactHistory, describeToolStep, oneLine, splitResult, urls
 
 /** Step cap per run (each web-search step costs ~11–20k input tokens; the token cap applies too). */
 const MAX_STEPS = 50;
+
+/** Card text while the first step runs (a server-side web search step can take a minute without any event). */
+export const FIRST_STEP_DETAILS = 'Researching…';
+/** A step running longer than this shows its elapsed time on the card, refreshed at this interval. */
+export const ELAPSED_TICK_MS = 15_000;
+
+/** "Searching the web for “x”" + 45s → "Searching the web for “x” (45s)". */
+export function withElapsed(details: string, ms: number): string {
+  return `${details} (${Math.round(ms / 1000)}s)`;
+}
 
 /** Runs executing in this process, for shutdown. */
 const active = new Map<number, AbortController>();
@@ -88,6 +98,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
   let searchOverLimit = false;
   const modelId = run.model ?? MODELS.child;
   const model = openrouter(modelId);
+  const reasoningEffort = modelId === MODELS.child && env.CHILD_REASONING_EFFORT !== 'default' ? env.CHILD_REASONING_EFFORT : null;
   const history: ModelMessage[] = Array.isArray(sa.history) ? sa.history : [];
   const messages: ModelMessage[] = [
     ...history,
@@ -111,15 +122,28 @@ export async function processSubagentRun(runId: number): Promise<void> {
     return cancelRequested;
   };
 
+  let detailsSince = Date.now();
   const setDetails = async (details: string) => {
     if (details === lastDetails) return;
     lastDetails = details;
+    detailsSince = Date.now();
     await sql`update runs set details = ${details} where id = ${run.id} and status = 'running'`;
     await scheduleCardRender(run.cardId);
-    if (details !== 'Starting' && details !== 'Thinking') {
+    if (details !== FIRST_STEP_DETAILS && details !== 'Thinking') {
       await appendEvent(run.threadId, 'run_progress', `subagent:${run.subagentId}`, { runId: run.id, details });
     }
   };
+  // Long steps (server-side web search, long generations) produce no events: show the elapsed time instead of a
+  // card that looks stuck. Goes through the coalesced card render, at most every ELAPSED_TICK_MS.
+  const elapsedTicker = setInterval(() => {
+    const ms = Date.now() - detailsSince;
+    if (!lastDetails || ms < ELAPSED_TICK_MS) return;
+    const shown = withElapsed(lastDetails, ms);
+    sql`update runs set details = ${shown} where id = ${run.id} and status = 'running'`
+      .then(() => scheduleCardRender(run.cardId))
+      .catch((err) => log.debug({ err, runId: run.id }, 'elapsed update failed'));
+  }, ELAPSED_TICK_MS);
+  elapsedTicker.unref();
 
   try {
     let finalText = '';
@@ -135,9 +159,12 @@ export async function processSubagentRun(runId: number): Promise<void> {
       if (overBudget) {
         messages.push({ role: 'user', content: '[Orchestrator update] You are out of budget for this task. Stop using tools and report what you have now, ending with the SUMMARY line.' });
       }
-      if (step === 0) await setDetails('Starting');
-      else if (!lastDetails || lastDetails === 'Starting') await setDetails('Thinking');
+      if (step === 0) await setDetails(FIRST_STEP_DETAILS);
+      else if (!lastDetails || lastDetails === FIRST_STEP_DETAILS) await setDetails('Thinking');
 
+      const stepStart = Date.now();
+      let firstChunkAt = 0;
+      let stepTools: string[] = [];
       const result = streamText({
         model,
         instructions: childSystemPrompt(),
@@ -151,12 +178,13 @@ export async function processSubagentRun(runId: number): Promise<void> {
         },
         stopWhen: stepCountIs(1),
         abortSignal: controller.signal,
-        providerOptions: { openrouter: { usage: { include: true } } },
+        providerOptions: { openrouter: { ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}), usage: { include: true } } },
       });
       let stepText = '';
       let finishReason = '';
       let lastSearchNoted = false;
       for await (const part of result.fullStream) {
+        if (!firstChunkAt && part.type !== 'raw' && part.type !== 'start' && part.type !== 'start-step') firstChunkAt = Date.now();
         if (part.type === 'raw') meter.observeChunk(part);
         else if (part.type === 'text-delta') stepText += part.text;
         else if (part.type === 'source') {
@@ -166,12 +194,26 @@ export async function processSubagentRun(runId: number): Promise<void> {
             await setDetails('Searching the web');
           }
         } else if (part.type === 'tool-call') {
+          stepTools.push(part.toolName);
           if (part.toolName === 'fetch_url' && addSource(sources, (part.input as any)?.url)) sourcesDirty = true;
           await setDetails(describeToolStep(part.toolName, part.input));
         }
         else if (part.type === 'finish-step') {
           finishReason = part.finishReason;
           tokens += part.usage.totalTokens ?? (part.usage.inputTokens ?? 0) + (part.usage.outputTokens ?? 0);
+          // Per-step latency (the card and `pnpm bench --child` read it): server-side web searches show up as
+          // `searches` (no client tool call).
+          void appendEvent(run.threadId, 'run_step', `subagent:${run.subagentId}`, {
+            runId: run.id,
+            step,
+            ms: Date.now() - stepStart,
+            firstChunkMs: firstChunkAt ? firstChunkAt - stepStart : null,
+            tools: stepTools,
+            sources: sources.length,
+            inputTokens: part.usage.inputTokens,
+            outputTokens: part.usage.outputTokens,
+            reasoningTokens: part.usage.outputTokenDetails?.reasoningTokens,
+          }).catch(() => {});
           void recordModelUsage({
             userId: sa.ownerId,
             threadId: run.threadId,
@@ -215,6 +257,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
   } finally {
     clearTimeout(timeout);
     clearInterval(heartbeat);
+    clearInterval(elapsedTicker);
     active.delete(run.id);
   }
 }
