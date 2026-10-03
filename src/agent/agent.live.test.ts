@@ -15,12 +15,12 @@ if (LIVE) {
 }
 
 const requested: any[] = [];
-const threadText = new Map<string, { history: string; newMessages: string }>();
+const threadText = new Map<string, { history: string; newMessages: string; channelContext?: string }>();
 
 vi.mock('../context/thread.js', () => ({
   renderThreadContext: async (threadId: string) => ({
     history: threadText.get(threadId)?.history ?? '',
-    channelContext: '',
+    channelContext: threadText.get(threadId)?.channelContext ?? '',
     newMessages: threadText.get(threadId)?.newMessages ?? '',
   }),
   renderMessages: async (_threadId: string, ts: string[]) => ts.map((t) => `<@U_TEST> Tester: (message ${t})`).join('\n'),
@@ -237,6 +237,28 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(posts.length).toBeLessThanOrEqual(1);
     void saId;
   }, 90_000);
+
+  it('a bare ping does not answer someone else\'s message from the channel background', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const th = await freshThread('PING');
+    const pingTs = th.ts;
+    const ch = th.id.split(':')[0]!;
+    await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${ch}, ${th.ts}, ${th.id}, ${user}, ${'<@UBOT>'}) on conflict do nothing`;
+    threadText.set(th.id, {
+      history: '',
+      channelContext: `[${Number(th.ts) - 60}.000100] <@U_SAM> Sam: how do i make a basic html page? like what's the starter code\n[${Number(th.ts) - 30}.000100] <@U_SAM> Sam: :rac_woah:`,
+      newMessages: `[${th.ts}] <@${user}> Tester: <@UBOT>`,
+    });
+    const before = (await fakeCalls()).length;
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${th.id}, ${user}, true, ${[pingTs]}, 'running') returning *`;
+    await runFrontTurn({ ...t, id: Number(t.id) }, io(true));
+    const posts = (await fakeCalls()).slice(before).filter((c) => ['chat.postMessage', 'chat.startStream', 'chat.appendStream'].includes(c.method));
+    const text = posts.map((c) => c.args.markdown_text ?? c.args.text ?? '').join('');
+    // eslint-disable-next-line no-console
+    console.log('ping reply:', text);
+    expect(text.length).toBeGreaterThan(0);
+    expect(text.toLowerCase()).not.toMatch(/<!doctype|<html|```/);
+  }, 60_000);
 
   it('unmentioned chatter between people stays silent (no fallback)', async () => {
     const { runFrontTurn } = await import('./front.js');
