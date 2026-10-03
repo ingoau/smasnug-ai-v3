@@ -10,7 +10,7 @@ import { env, limits } from '../../config.js';
 import { redis } from '../../core/redis.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
-import { MODELS, openrouter } from '../../models.js';
+import { chatModel, MODELS } from '../../models.js';
 import { recordModelUsage } from '../guard.js';
 import { userProfile } from '../util.js';
 import { addFact, cleanFactText, deleteFact, factLabel, FACTS_PER_USER_MAX, listFacts, updateFact, type Fact } from './store.js';
@@ -187,7 +187,7 @@ export async function proposeOps(opts: {
   threadId?: string;
 }): Promise<MemoryOp[]> {
   const res = await generateText({
-    model: openrouter(MODELS.child),
+    model: chatModel(MODELS.child),
     instructions: extractionInstructions(opts.participant),
     prompt: extractionPrompt(opts.transcript, opts.existing),
     output: Output.object({ schema: MemoryOpsSchema, name: 'memory_ops' }),

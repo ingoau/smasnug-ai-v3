@@ -13,6 +13,9 @@ const Env = z.object({
   SEMOJI_KEY: z.string().optional(),
   /** Exa search API key for `web_search` (src/tools/web-search.ts). Unset → the tool says web search isn't configured. */
   EXA_API_KEY: z.string().optional(),
+  /** Hack Club AI (OpenRouter proxy): primary chat provider when set, OpenRouter is the fallback (src/models.ts). */
+  HACKCLUB_AI_KEY: z.string().optional(),
+  HACKCLUB_AI_URL: z.string().default('https://ai.hackclub.com/proxy/v1'),
   MODEL_LUNA: z.string().default('openai/gpt-6-luna'),
   /** Relevance gate: a decisions model on OpenRouter's Decisions API, or 'luna' to use the chat model. */
   GATE_MODEL: z.string().default('typesafe/jev-1.13'),

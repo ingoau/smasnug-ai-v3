@@ -9,7 +9,7 @@ import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { toolsFor } from '../core/tools.js';
 import { recordModelUsage } from '../features/guard.js';
-import { MODELS, openrouter } from '../models.js';
+import { chatModel, MODELS } from '../models.js';
 import { log } from '../log.js';
 import { WORKER_ID } from '../worker/identity.js';
 import { scheduleCardRender } from './cards.js';
@@ -95,7 +95,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
   });
   // Every subagent runs on MODELS.child (runs.model records it).
   const modelId = MODELS.child;
-  const model = openrouter(modelId);
+  const model = chatModel(modelId);
   const reasoningEffort = env.CHILD_REASONING_EFFORT !== 'default' ? env.CHILD_REASONING_EFFORT : null;
   const history: ModelMessage[] = Array.isArray(sa.history) ? sa.history : [];
   const messages: ModelMessage[] = [

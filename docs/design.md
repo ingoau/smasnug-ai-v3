@@ -17,7 +17,7 @@ Abuse controls: limits, reports, auto-suspension
 **Deferred:** a code sandbox for subagents (decisions recorded in Deferred and open items), and coding agents that open PRs.
 **Scale:** a few users at first, but the architecture is built to scale horizontally from day one. Hosted at home or on a VPS.
 ## Stack and architecture
-TypeScript on the Vercel AI SDK and Chat SDK, with models through OpenRouter. Ingress and workers are separate processes from day one so the bot scales horizontally.
+TypeScript on the Vercel AI SDK and Chat SDK, with models through Hack Club AI (an OpenRouter proxy), falling back to OpenRouter. Ingress and workers are separate processes from day one so the bot scales horizontally.
 Layer
 Choice
 Language
@@ -27,7 +27,7 @@ Chat SDK for streaming and plan chunks; `@slack/web-api` for card updates, ephem
 Agent loop
 Vercel AI SDK tool loop. A per-step hook drains the inbox; streamed tool input feeds the `reply` stream
 Models
-OpenRouter. GPT-6 Luna for the gate (reasoning off), front agent (low) and subagents (low)
+Hack Club AI first, OpenRouter as fallback. GPT-6 Luna for the gate (reasoning off), front agent (low) and subagents (low)
 Storage
 Postgres for the event log, runs, memory and locks; Redis for the shared rate limiter and short-lived coordination
 Hosting
@@ -239,7 +239,7 @@ Subagents get the same tool; the front agent passes relevant IDs in its instruct
 - 
 If the model doesn't accept images in tool results, the tool returns "image loaded" and the image is appended as a user message instead.
 ### Web search
-A client tool, `web_search` (`src/tools/web-search.ts`), backed by Exa's search API (`EXA_API_KEY`), available to the front agent and subagents. (It replaced OpenRouter's `openrouter:web_search` server tool, which cost $0.01 per search plus the result tokens and couldn't be announced or rate-limited before running.) Parameters: `query`; `mode` = `fast` (default, Exa `instant`, ~0.5s, $0.004), `thorough` (Exa `auto`, $0.007) or, for subagents only, `deep` (Exa `deep-lite`, ~4s, $0.012); `num_results` (default 5, max 10); `include_domains`; `start_published_date` (news / "latest"); `full_text` (subagents only: capped page text instead of highlights). Results are numbered title / URL / published date / highlight, wrapped as untrusted content; their URLs feed `runs.sources`. Each call counts towards the per-user hourly web-search limit; failures and timeouts (10s, 25s for `deep`) come back as a short message.
+A client tool, `web_search` (`src/tools/web-search.ts`), backed by Exa's search API (through Hack Club AI's Exa proxy first, then Exa direct with `EXA_API_KEY`), available to the front agent and subagents. (It replaced OpenRouter's `openrouter:web_search` server tool, which cost $0.01 per search plus the result tokens and couldn't be announced or rate-limited before running.) Parameters: `query`; `mode` = `fast` (default, Exa `instant`, ~0.5s, $0.004), `thorough` (Exa `auto`, $0.007) or, for subagents only, `deep` (Exa `deep-lite`, ~4s, $0.012); `num_results` (default 5, max 10); `include_domains`; `start_published_date` (news / "latest"); `full_text` (subagents only: capped page text instead of highlights). Results are numbered title / URL / published date / highlight, wrapped as untrusted content; their URLs feed `runs.sources`. Each call counts towards the per-user hourly web-search limit; failures and timeouts (10s, 25s for `deep`) come back as a short message.
 ### Fetch URL
 A custom `fetch_url` tool, available to both roles, that can never reach local addresses:
 - 

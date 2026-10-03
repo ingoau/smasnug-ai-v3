@@ -1,6 +1,6 @@
 /**
- * `web_search`: a normal client tool backed by Exa's search API (`POST https://api.exa.ai/search`, header
- * `x-api-key`). Replaces OpenRouter's `openrouter:web_search` server tool ($0.01/search plus the result tokens);
+ * `web_search`: a normal client tool backed by Exa's search API: Hack Club AI's Exa proxy first (same body, Bearer
+ * HACKCLUB_AI_KEY), Exa direct (`POST https://api.exa.ai/search`, header `x-api-key`) when that fails or isn't set. Replaces OpenRouter's `openrouter:web_search` server tool ($0.01/search plus the result tokens);
  * Exa costs $0.004 (instant) to $0.012 (deep-lite) per search including highlights for up to 10 results.
  *
  * Modes → Exa `type`:
@@ -23,6 +23,7 @@ import { errMsg, truncateChars, untrusted } from './util.js';
 
 export const WEB_SEARCH_TOOL = 'web_search';
 export const EXA_SEARCH_URL = 'https://api.exa.ai/search';
+export const HACKCLUB_EXA_SEARCH_PATH = '/exa/search';
 
 export type WebSearchMode = 'fast' | 'thorough' | 'deep';
 
@@ -130,7 +131,10 @@ export function webSearchSources(output: unknown): WebSearchSource[] {
 }
 
 export interface WebSearchDeps {
+  /** Exa key (default env.EXA_API_KEY). */
   apiKey?: string;
+  /** Hack Club AI key (default env.HACKCLUB_AI_KEY, but none when a test passes only `apiKey`). */
+  hackclubKey?: string;
   fetch?: typeof fetch;
   /** Overrides the per-mode timeout (tests). */
   timeoutMs?: number;
@@ -139,7 +143,12 @@ export interface WebSearchDeps {
 /** Runs one search for a tool call. Never throws: errors come back as a short message for the model. */
 export async function runWebSearch(ctx: Pick<ToolContext, 'speakerId' | 'threadId' | 'abortSignal'>, input: WebSearchInput, deps: WebSearchDeps = {}): Promise<WebSearchOutput | string> {
   const apiKey = 'apiKey' in deps ? deps.apiKey : env.EXA_API_KEY;
-  if (!apiKey) return "Web search isn't configured (no EXA_API_KEY). Answer from what you know or use fetch_url on a known URL.";
+  const hackclubKey = 'hackclubKey' in deps ? deps.hackclubKey : 'apiKey' in deps ? undefined : env.HACKCLUB_AI_KEY;
+  const endpoints: { name: string; url: string; headers: Record<string, string> }[] = [
+    ...(hackclubKey ? [{ name: 'hackclub', url: env.HACKCLUB_AI_URL + HACKCLUB_EXA_SEARCH_PATH, headers: { authorization: `Bearer ${hackclubKey}` } }] : []),
+    ...(apiKey ? [{ name: 'exa', url: EXA_SEARCH_URL, headers: { 'x-api-key': apiKey } }] : []),
+  ];
+  if (!endpoints.length) return "Web search isn't configured (no EXA_API_KEY). Answer from what you know or use fetch_url on a known URL.";
   if (input.start_published_date && !normalizeStartDate(input.start_published_date)) return 'start_published_date must be a date like 2026-09-01.';
   const over = await takeLimit('websearch', ctx.speakerId, ctx.threadId);
   if (over) return over;
@@ -147,32 +156,38 @@ export async function runWebSearch(ctx: Pick<ToolContext, 'speakerId' | 'threadI
   const mode = input.mode ?? 'fast';
   const body = buildExaRequest(input);
   const timeoutMs = deps.timeoutMs ?? TIMEOUT_MS[mode];
-  const signals = [AbortSignal.timeout(timeoutMs), ...(ctx.abortSignal ? [ctx.abortSignal] : [])];
-  const started = Date.now();
-  try {
-    const res = await (deps.fetch ?? fetch)(EXA_SEARCH_URL, {
-      method: 'POST',
-      headers: { 'x-api-key': apiKey, 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.any(signals),
-    });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      log.warn({ status: res.status, detail: detail.slice(0, 300), type: body.type }, 'web search failed');
-      return `Web search failed (HTTP ${res.status}). Try a different query, or answer with what you have.`;
+  let failure = '';
+  for (const ep of endpoints) {
+    const signals = [AbortSignal.timeout(timeoutMs), ...(ctx.abortSignal ? [ctx.abortSignal] : [])];
+    const started = Date.now();
+    try {
+      const res = await (deps.fetch ?? fetch)(ep.url, {
+        method: 'POST',
+        headers: { ...ep.headers, 'content-type': 'application/json', accept: 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.any(signals),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        log.warn({ via: ep.name, status: res.status, detail: detail.slice(0, 300), type: body.type }, 'web search failed');
+        failure = `Web search failed (HTTP ${res.status}). Try a different query, or answer with what you have.`;
+        continue;
+      }
+      const json: any = await res.json();
+      const out = formatExaResults(input.query, json, { fullText: !!input.full_text });
+      log.info(
+        { via: ep.name, type: body.type, results: out.sources.length, ms: Date.now() - started, costUsd: json?.costDollars?.total, speaker: ctx.speakerId },
+        'web search',
+      );
+      return out;
+    } catch (err) {
+      if (ctx.abortSignal?.aborted) return 'Web search cancelled.';
+      const timedOut = (err as any)?.name === 'TimeoutError';
+      log.warn({ via: ep.name, err: timedOut ? 'timeout' : err, type: body.type, ms: Date.now() - started }, 'web search failed');
+      failure = timedOut ? `Web search timed out after ${Math.round(timeoutMs / 1000)}s. Try again with a simpler query or mode "fast".` : `Web search failed: ${errMsg(err)}`;
     }
-    const json: any = await res.json();
-    const out = formatExaResults(input.query, json, { fullText: !!input.full_text });
-    log.info(
-      { type: body.type, results: out.sources.length, ms: Date.now() - started, costUsd: json?.costDollars?.total, speaker: ctx.speakerId },
-      'web search',
-    );
-    return out;
-  } catch (err) {
-    const timedOut = (err as any)?.name === 'TimeoutError';
-    log.warn({ err: timedOut ? 'timeout' : err, type: body.type, ms: Date.now() - started }, 'web search failed');
-    return timedOut ? `Web search timed out after ${Math.round(timeoutMs / 1000)}s. Try again with a simpler query or mode "fast".` : `Web search failed: ${errMsg(err)}`;
   }
+  return failure;
 }
 
 function inputSchema(role: Role) {

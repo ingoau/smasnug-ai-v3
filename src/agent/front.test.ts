@@ -59,7 +59,7 @@ vi.mock('../context/thread.js', () => ({
 }));
 vi.mock('../models.js', () => ({
   MODELS: { gate: 'm', front: 'm', child: 'm' },
-  openrouter: () => h.model,
+  chatModel: () => h.model,
 }));
 vi.mock('../features/guard.js', async (orig) => ({ ...(await orig<typeof import('../features/guard.js')>()), takeLimit: async () => null }));
 vi.mock('../context/users.js', () => ({ getUserInfo: async (id: string) => ({ id, name: 'Tess', tz: 'Europe/Berlin', isBot: false }) }));

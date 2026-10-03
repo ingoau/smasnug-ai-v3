@@ -1,7 +1,7 @@
 /** Relevance gate: a cheap yes/no model call for unmentioned follow-ups in engaged threads. No tools. */
 import { generateText } from 'ai';
 import { env, limits } from '../config.js';
-import { openrouter, MODELS } from '../models.js';
+import { chatModel, MODELS } from '../models.js';
 import type { StoredMessage } from '../core/types.js';
 import { gateSystemPrompt, gateUserPrompt } from './gate-prompt.js';
 
@@ -111,7 +111,7 @@ export async function runGate(opts: { context: StoredMessage[]; newMessages: Sto
   }
   try {
     const res = await generateText({
-      model: openrouter(MODELS.gate),
+      model: chatModel(MODELS.gate),
       system: gateSystemPrompt(env.BOT_DISPLAY_NAME),
       prompt: gateUserPrompt({
         context: renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId),

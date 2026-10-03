@@ -305,10 +305,10 @@ describe('web_search (Exa)', () => {
     costDollars: { total: 0.004 },
   };
   type Call = { url: string; init: any; body: any };
-  const fakeFetch = (calls: Call[], respond: () => Response | Promise<Response> = () => Response.json(exaResponse)) =>
+  const fakeFetch = (calls: Call[], respond: (url: string) => Response | Promise<Response> | undefined = () => Response.json(exaResponse)) =>
     (async (url: any, init: any) => {
       calls.push({ url: String(url), init, body: JSON.parse(init.body) });
-      return respond();
+      return (await respond(String(url))) ?? Response.json(exaResponse);
     }) as typeof fetch;
   const ctxFor = (role: 'front' | 'child', speakerId = 'U0WEB') => ({ ...baseCtx({ speakerId }), role });
 
@@ -360,6 +360,22 @@ describe('web_search (Exa)', () => {
     const model = await t.toModelOutput({ toolCallId: 'tc1', input: {}, output: out });
     expect(model).toEqual({ type: 'text', value: out.text });
     expect(await t.toModelOutput({ toolCallId: 'tc1', input: {}, output: 'failed' })).toEqual({ type: 'text', value: 'failed' });
+  });
+
+  it('tries the Hack Club Exa proxy first and falls back to Exa direct', async () => {
+    const calls: Call[] = [];
+    const viaHc = webSearchTool(ctxFor('front'), { apiKey: 'k_exa', hackclubKey: 'sk-hc-test', fetch: fakeFetch(calls) });
+    expect(((await exec(viaHc, { query: 'q' })) as WebSearchOutput).sources).toHaveLength(2);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toMatch(/\/proxy\/v1\/exa\/search$/);
+    expect(calls[0]!.init.headers.authorization).toBe('Bearer sk-hc-test');
+    expect(calls[0]!.init.headers['x-api-key']).toBeUndefined();
+
+    calls.length = 0;
+    const hcDown = fakeFetch(calls, (url) => (url.includes('hackclub') ? new Response('limit', { status: 402 }) : undefined));
+    const fellBack = webSearchTool(ctxFor('front'), { apiKey: 'k_exa', hackclubKey: 'sk-hc-test', fetch: hcDown });
+    expect(((await exec(fellBack, { query: 'q' })) as WebSearchOutput).sources).toHaveLength(2);
+    expect(calls.map((c) => c.url)).toEqual([expect.stringContaining('hackclub'), EXA_SEARCH_URL]);
   });
 
   it('front gets fast/thorough only; deep and full_text are child-only', async () => {

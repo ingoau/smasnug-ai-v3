@@ -8,8 +8,10 @@ TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK 
 `node_modules/ai/docs`), `@openrouter/ai-sdk-provider`, `@slack/web-api` + `@slack/socket-mode`, Postgres via
 `postgres` (camelCase transform on), Redis via `ioredis`, queues via BullMQ, zod, pino, vitest.
 
-Models on OpenRouter: `openai/gpt-6-luna` (gate: reasoning off; front: low; children: low). Web search: Exa
-(`EXA_API_KEY`, `src/tools/web-search.ts`). `OPENROUTER_KEY` in `.env` works — live-test against it (keep test calls small).
+Models: `openai/gpt-6-luna` (gate: reasoning off; front: low; children: low). Provider: Hack Club AI
+(`HACKCLUB_AI_KEY`, an OpenRouter proxy, free up to $3/day) first, OpenRouter as fallback, via `chatModel()` in
+`src/models.ts` (402 → skip Hack Club until UTC midnight). Web search: Exa via Hack Club's Exa proxy, then Exa direct
+(`EXA_API_KEY`, `src/tools/web-search.ts`). Live-test against Hack Club where possible; OpenRouter credit is limited.
 Relevance gate: `typesafe/jev-1.13` (a decisions model, OpenRouter's alpha Decisions API, ~0.45s, probability ≥ `GATE_THRESHOLD` 0.8 = respond); falls back to Luna on any error/timeout.
 
 Local infra: `docker compose up -d` (Postgres on 5433, Redis on 6380), `pnpm migrate`.

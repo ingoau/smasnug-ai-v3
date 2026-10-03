@@ -11,7 +11,7 @@ import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
 import { recordModelUsage } from '../features/guard.js';
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
-import { MODELS, openrouter } from '../models.js';
+import { chatModel, MODELS } from '../models.js';
 import { log } from '../log.js';
 import { TurnTiming } from '../core/timing.js';
 import { freezeCard, postCard } from './cards.js';
@@ -329,7 +329,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (await checkStop()) throw new TurnStopped();
     timing.mark('model_request');
     const result = streamText({
-      model: openrouter(MODELS.front),
+      model: chatModel(MODELS.front),
       providerOptions: { openrouter: { reasoning: { effort: env.FRONT_REASONING_EFFORT }, usage: { include: true } } },
       instructions: system,
       messages,
