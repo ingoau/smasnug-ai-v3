@@ -76,7 +76,6 @@ export async function spawnSubagent(opts: {
   ownerId: string;
   title: string;
   instructions: string;
-  strong?: boolean;
   seedFrom?: string;
 }): Promise<{ subagentId: string; runId: number; cardId: number }> {
   await checkStartLimits(opts.ownerId, opts.threadId);
@@ -91,7 +90,7 @@ export async function spawnSubagent(opts: {
   }
   const subagentId = shortId('sa');
   const title = oneLine(opts.title, 80) || 'Subagent';
-  const model = opts.strong ? MODELS.childHard : MODELS.child;
+  const model = MODELS.child;
   const cardId = await ensureTurnCard({ threadId: opts.threadId, turnId: opts.turnId });
   const runId = await sql.begin(async (tx) => {
     await tx`insert into subagents (id, thread_id, owner_id, title, status, seeded_from) values (${subagentId}, ${opts.threadId}, ${opts.ownerId}, ${title}, 'running', ${seededFrom})`;

@@ -8,8 +8,8 @@ TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK 
 `node_modules/ai/docs`), `@openrouter/ai-sdk-provider`, `@slack/web-api` + `@slack/socket-mode`, Postgres via
 `postgres` (camelCase transform on), Redis via `ioredis`, queues via BullMQ, zod, pino, vitest.
 
-Models on OpenRouter: `openai/gpt-6-luna` (gate: reasoning off; front: low; children) and `openai/gpt-6-sol`
-(children, hard tasks). `OPENROUTER_KEY` in `.env` works — live-test against it (keep test calls small).
+Models on OpenRouter: `openai/gpt-6-luna` (gate: reasoning off; front: low; children: low). Web search: Exa
+(`EXA_API_KEY`, `src/tools/web-search.ts`). `OPENROUTER_KEY` in `.env` works — live-test against it (keep test calls small).
 
 Local infra: `docker compose up -d` (Postgres on 5433, Redis on 6380), `pnpm migrate`.
 Checks: `pnpm typecheck`, `pnpm test`. Full suite: `LIVE=1 INTEGRATION=1 pnpm vitest run --no-file-parallelism`.

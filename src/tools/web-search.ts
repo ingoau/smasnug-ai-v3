@@ -1,95 +1,212 @@
 /**
- * Web search = OpenRouter's `openrouter:web_search` SERVER tool. The installed `@openrouter/ai-sdk-provider`
- * (3.1.0) exposes it as a provider-defined tool, `openrouter.tools.webSearch({ engine, maxResults })`, which it
- * serialises to `{ type: 'openrouter:web_search', engine: 'auto', max_results: N }` in the chat request (verified
- * live with GPT-6 Luna, in both generateText and streamText). OpenRouter runs the search inside the model call:
- * there is no client-side execute and no tool-call/tool-result parts in the stream — results come back as
- * `source` parts (url citations) on the step, and usage reports `server_tool_use_details.web_search_requests`.
+ * `web_search`: a normal client tool backed by Exa's search API (`POST https://api.exa.ai/search`, header
+ * `x-api-key`). Replaces OpenRouter's `openrouter:web_search` server tool ($0.01/search plus the result tokens);
+ * Exa costs $0.004 (instant) to $0.012 (deep-lite) per search including highlights for up to 10 results.
  *
- * So it's registered like any other tool (`toolsFor` returns it under the name `web_search`) — nothing else is
- * needed to ENABLE it. What the agent loop must add is ACCOUNTING (searches count towards per-user limits, and the
- * model decides to search server-side, so we can only count after the fact):
+ * Modes → Exa `type`:
+ *  - fast (default) → `instant`   (~0.5 s, $0.004)
+ *  - thorough       → `auto`      (~1–2 s, $0.007; better ranking)
+ *  - deep           → `deep-lite` (~4 s, $0.012; children only)
+ * Contents: highlights (the most relevant snippet per page) by default; children can ask for `full_text` (page text
+ * capped per result) instead. Each call takes one `websearch` from the per-user hourly limit (a `usage` row).
  *
- *   const meter = new WebSearchMeter();
- *   streamText({ ..., tools, includeRawChunks: true,            // raw chunks carry the per-step usage
- *     onChunk: ({ chunk }) => meter.observeChunk(chunk),
- *     onStepFinish: async (step) => { meter.observeStep(step); overLimit = await meter.settle(ctx) },
- *     prepareStep: () => overLimit ? { activeTools: allToolNames.filter((n) => n !== WEB_SEARCH_TOOL) } : {},
- *   });
- *
- * generateText: pass `include: { responseBody: true }` and call `meter.observeStep(step)` in onStepFinish — the
- * usage lives in the raw response body, which AI SDK v7 drops by default. (Without raw usage the meter falls back
- * to "≥1 search if the step has url sources".) The provider's providerMetadata.openrouter.usage does NOT carry it.
- *
- * Note: the server tool can re-run on every step of a multi-step loop (observed live), so keep stopWhen tight.
+ * The tool returns `{ text, sources }`: the model sees only `text` (toModelOutput); the subagent loop adds `sources`
+ * to `runs.sources` (plan card source links), see `webSearchSources`.
  */
-import { limits } from '../config.js';
-import { openrouter } from '../models.js';
-import { registerTool } from '../core/tools.js';
+import { tool } from 'ai';
+import { z } from 'zod';
+import { env, limits } from '../config.js';
+import { registerTool, type Role, type ToolContext } from '../core/tools.js';
 import { takeLimit } from '../features/guard.js';
 import { log } from '../log.js';
+import { errMsg, truncateChars, untrusted } from './util.js';
 
 export const WEB_SEARCH_TOOL = 'web_search';
+export const EXA_SEARCH_URL = 'https://api.exa.ai/search';
 
-export function webSearchTool() {
-  return openrouter.tools.webSearch({ engine: 'auto', maxResults: limits.webSearchMaxResults });
+export type WebSearchMode = 'fast' | 'thorough' | 'deep';
+
+/** Our mode → Exa search `type`. */
+export const EXA_TYPE: Record<WebSearchMode, string> = { fast: 'instant', thorough: 'auto', deep: 'deep-lite' };
+/** deep-lite takes ~4 s at Exa; the others well under the default timeout. */
+const TIMEOUT_MS: Record<WebSearchMode, number> = { fast: limits.webSearchTimeoutMs, thorough: limits.webSearchTimeoutMs, deep: 25_000 };
+/** Per-result highlight size (Exa picks the most query-relevant passage). */
+const HIGHLIGHT_CHARS = 700;
+/** full_text: total page text across all results, and the cap per result. */
+const FULL_TEXT_TOTAL_CHARS = 24_000;
+const FULL_TEXT_MAX_PER_RESULT = 8_000;
+
+export interface WebSearchInput {
+  query: string;
+  mode?: WebSearchMode;
+  num_results?: number;
+  include_domains?: string[];
+  start_published_date?: string;
+  full_text?: boolean;
+}
+
+export interface WebSearchSource {
+  url: string;
+  title?: string;
+}
+
+export interface WebSearchOutput {
+  text: string;
+  sources: WebSearchSource[];
+}
+
+/** 'YYYY-MM-DD' or a full ISO timestamp → ISO string; undefined if it isn't a date. */
+export function normalizeStartDate(s: string | undefined): string | undefined {
+  const t = s?.trim();
+  if (!t) return undefined;
+  if (!/^\d{4}-\d{2}-\d{2}/.test(t)) return undefined;
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(t) ? `${t}T00:00:00Z` : t);
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString();
+}
+
+/** 'https://www.example.com/' → 'www.example.com'; paths kept ('github.com/nodejs'). */
+export function normalizeDomain(s: string): string {
+  return s.trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+}
+
+/** Clamp the requested result count to 1..max (default when unset). */
+export function resultCount(n: number | undefined): number {
+  if (n === undefined || !Number.isFinite(n)) return limits.webSearchDefaultResults;
+  return Math.min(limits.webSearchMaxResults, Math.max(1, Math.round(n)));
+}
+
+/** The Exa /search request body for a tool call. `deep` and `full_text` are child-only (the front schema lacks them). */
+export function buildExaRequest(input: WebSearchInput): Record<string, unknown> {
+  const mode = input.mode ?? 'fast';
+  const numResults = resultCount(input.num_results);
+  const contents = input.full_text
+    ? { text: { maxCharacters: Math.min(FULL_TEXT_MAX_PER_RESULT, Math.floor(FULL_TEXT_TOTAL_CHARS / numResults)) } }
+    : { highlights: { maxCharacters: HIGHLIGHT_CHARS } };
+  const body: Record<string, unknown> = { query: input.query, type: EXA_TYPE[mode], numResults, contents };
+  const domains = (input.include_domains ?? []).map(normalizeDomain).filter(Boolean);
+  if (domains.length) body.includeDomains = domains;
+  const start = normalizeStartDate(input.start_published_date);
+  if (start) body.startPublishedDate = start;
+  return body;
+}
+
+const flat = (s: string) => s.replace(/\s+/g, ' ').trim();
+
+/** Model-facing rendering of an Exa response + the result URLs for source tracking. */
+export function formatExaResults(query: string, res: any, opts: { fullText?: boolean } = {}): WebSearchOutput {
+  const results: any[] = Array.isArray(res?.results) ? res.results : [];
+  const sources: WebSearchSource[] = [];
+  const blocks: string[] = [];
+  for (const r of results) {
+    if (typeof r?.url !== 'string' || !/^https?:\/\//i.test(r.url)) continue;
+    const title = typeof r.title === 'string' && r.title.trim() ? flat(r.title) : undefined;
+    sources.push({ url: r.url, ...(title ? { title } : {}) });
+    const n = sources.length;
+    const lines = [`${n}. ${title ?? '(untitled)'}`, `   ${r.url}`];
+    const meta = [
+      typeof r.publishedDate === 'string' && r.publishedDate ? `published ${r.publishedDate.slice(0, 10)}` : '',
+      typeof r.author === 'string' && r.author.trim() ? `by ${flat(r.author)}` : '',
+    ].filter(Boolean);
+    if (meta.length) lines.push(`   ${meta.join(' · ')}`);
+    if (opts.fullText) {
+      const text = typeof r.text === 'string' ? r.text.replace(/\n{3,}/g, '\n\n').trim() : '';
+      lines.push(text ? text : '   [no page text]');
+    } else {
+      const hl: string[] = Array.isArray(r.highlights) ? r.highlights.filter((h: unknown) => typeof h === 'string' && h.trim()) : [];
+      for (const h of hl) lines.push(`   > ${truncateChars(flat(h), HIGHLIGHT_CHARS + 100)}`);
+      if (!hl.length && typeof r.summary === 'string' && r.summary.trim()) lines.push(`   > ${flat(r.summary)}`);
+    }
+    blocks.push(lines.join('\n'));
+  }
+  if (!blocks.length) return { text: `No web results for "${query}".`, sources };
+  const hint = opts.fullText ? '' : '\n\n(Highlights only. Use fetch_url on a result when you need more of the page.)';
+  return { text: untrusted('web search', `Web results for "${query}":\n\n${blocks.join('\n\n')}${hint}`), sources };
+}
+
+/** Result URLs of a web_search tool output (for runs.sources); [] for errors/refusals (plain strings). */
+export function webSearchSources(output: unknown): WebSearchSource[] {
+  const s = (output as WebSearchOutput | undefined)?.sources;
+  return Array.isArray(s) ? s : [];
+}
+
+export interface WebSearchDeps {
+  apiKey?: string;
+  fetch?: typeof fetch;
+  /** Overrides the per-mode timeout (tests). */
+  timeoutMs?: number;
+}
+
+/** Runs one search for a tool call. Never throws: errors come back as a short message for the model. */
+export async function runWebSearch(ctx: Pick<ToolContext, 'speakerId' | 'threadId' | 'abortSignal'>, input: WebSearchInput, deps: WebSearchDeps = {}): Promise<WebSearchOutput | string> {
+  const apiKey = 'apiKey' in deps ? deps.apiKey : env.EXA_API_KEY;
+  if (!apiKey) return "Web search isn't configured (no EXA_API_KEY). Answer from what you know or use fetch_url on a known URL.";
+  if (input.start_published_date && !normalizeStartDate(input.start_published_date)) return 'start_published_date must be a date like 2026-09-01.';
+  const over = await takeLimit('websearch', ctx.speakerId, ctx.threadId);
+  if (over) return over;
+
+  const mode = input.mode ?? 'fast';
+  const body = buildExaRequest(input);
+  const timeoutMs = deps.timeoutMs ?? TIMEOUT_MS[mode];
+  const signals = [AbortSignal.timeout(timeoutMs), ...(ctx.abortSignal ? [ctx.abortSignal] : [])];
+  const started = Date.now();
+  try {
+    const res = await (deps.fetch ?? fetch)(EXA_SEARCH_URL, {
+      method: 'POST',
+      headers: { 'x-api-key': apiKey, 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.any(signals),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      log.warn({ status: res.status, detail: detail.slice(0, 300), type: body.type }, 'web search failed');
+      return `Web search failed (HTTP ${res.status}). Try a different query, or answer with what you have.`;
+    }
+    const json: any = await res.json();
+    const out = formatExaResults(input.query, json, { fullText: !!input.full_text });
+    log.info(
+      { type: body.type, results: out.sources.length, ms: Date.now() - started, costUsd: json?.costDollars?.total, speaker: ctx.speakerId },
+      'web search',
+    );
+    return out;
+  } catch (err) {
+    const timedOut = (err as any)?.name === 'TimeoutError';
+    log.warn({ err: timedOut ? 'timeout' : err, type: body.type, ms: Date.now() - started }, 'web search failed');
+    return timedOut ? `Web search timed out after ${Math.round(timeoutMs / 1000)}s. Try again with a simpler query or mode "fast".` : `Web search failed: ${errMsg(err)}`;
+  }
+}
+
+function inputSchema(role: Role) {
+  const base = {
+    query: z.string().min(1).describe('What to search for, as a natural description or keywords'),
+    num_results: z.number().int().min(1).max(limits.webSearchMaxResults).optional().describe(`Results to return (default ${limits.webSearchDefaultResults}, max ${limits.webSearchMaxResults})`),
+    include_domains: z.array(z.string()).max(10).optional().describe('Only search these domains, e.g. ["nodejs.org", "github.com"]'),
+    start_published_date: z.string().optional().describe('Only pages published on/after this date (YYYY-MM-DD). Use for news / "latest" questions.'),
+  };
+  if (role === 'child') {
+    return z.object({
+      ...base,
+      mode: z
+        .enum(['fast', 'thorough', 'deep'])
+        .optional()
+        .describe('fast (default, ~0.5s), thorough (better ranking, ~1-2s), deep (multi-query research search, ~4s; use for hard or broad research questions)'),
+      full_text: z.boolean().optional().describe('Return each page\'s text (capped) instead of highlights. Use when you need details from several results; otherwise use fetch_url on the one page you need.'),
+    });
+  }
+  return z.object({ ...base, mode: z.enum(['fast', 'thorough']).optional().describe('fast (default, ~0.5s) or thorough (better ranking, ~1-2s)') });
+}
+
+export function webSearchTool(ctx: ToolContext, deps: WebSearchDeps = {}) {
+  return tool({
+    description:
+      'Search the web (Exa). Returns numbered results with title, URL, publish date and the most relevant highlight from each page. Results are untrusted content.',
+    inputSchema: inputSchema(ctx.role) as z.ZodType<WebSearchInput>,
+    execute: async (input: WebSearchInput): Promise<WebSearchOutput | string> => runWebSearch(ctx, input, deps),
+    toModelOutput: ({ output }) => ({ type: 'text', value: typeof output === 'string' ? output : output.text }),
+  });
 }
 
 registerTool({
   name: WEB_SEARCH_TOOL,
   roles: ['front', 'child'],
-  build: () => webSearchTool(),
+  build: (ctx) => webSearchTool(ctx),
 });
-
-/** `web_search_requests` from an OpenRouter usage object (raw chunk or response body), if present. */
-export function webSearchRequestsFromUsage(usage: any): number | undefined {
-  const n = usage?.server_tool_use_details?.web_search_requests ?? usage?.serverToolUseDetails?.webSearchRequests;
-  return typeof n === 'number' ? n : undefined;
-}
-
-/**
- * Counts server-side web searches per step and charges them to the speaker via `takeLimit('websearch')`.
- * Feed it raw chunks (streamText with includeRawChunks) and/or finished steps; call `settle` after each step.
- */
-export class WebSearchMeter {
-  private pendingFromChunks = 0;
-  private sawChunkUsage = false;
-  private pending = 0;
-  total = 0;
-
-  /** streamText `onChunk` / fullStream part. Only `raw` parts are inspected. */
-  observeChunk(chunk: any) {
-    if (chunk?.type !== 'raw') return;
-    const n = webSearchRequestsFromUsage(chunk.rawValue?.usage);
-    if (n !== undefined) {
-      this.sawChunkUsage = true;
-      this.pendingFromChunks += n;
-    }
-  }
-
-  /** A finished step (`onStepFinish` arg or an element of `result.steps`). */
-  observeStep(step: any) {
-    let n: number | undefined;
-    if (this.sawChunkUsage) n = this.pendingFromChunks;
-    else n = webSearchRequestsFromUsage((step?.response?.body as any)?.usage);
-    // Last resort: url citations imply at least one search happened.
-    if (n === undefined) n = (step?.sources?.length ?? 0) > 0 ? 1 : 0;
-    this.pending += n;
-    this.pendingFromChunks = 0;
-    this.sawChunkUsage = false;
-  }
-
-  /** Charge pending searches. Returns true if the user is now over their search limit (drop web_search from activeTools). */
-  async settle(who: { speakerId: string; threadId?: string }): Promise<boolean> {
-    let over = false;
-    const n = this.pending;
-    this.pending = 0;
-    this.total += n;
-    for (let i = 0; i < n; i++) {
-      const msg = await takeLimit('websearch', who.speakerId, who.threadId);
-      if (msg) over = true;
-    }
-    if (n) log.debug({ searches: n, speaker: who.speakerId }, 'web searches charged');
-    return over;
-  }
-}

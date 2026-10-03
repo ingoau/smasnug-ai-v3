@@ -11,8 +11,9 @@ const Env = z.object({
   ADMIN_USER_ID: z.string().optional(),
   SEMOJI_URL: z.string().default('https://emojis.raygen.dev'),
   SEMOJI_KEY: z.string().optional(),
+  /** Exa search API key for `web_search` (src/tools/web-search.ts). Unset → the tool says web search isn't configured. */
+  EXA_API_KEY: z.string().optional(),
   MODEL_LUNA: z.string().default('openai/gpt-6-luna'),
-  MODEL_SOL: z.string().default('openai/gpt-6-sol'),
   BOT_DISPLAY_NAME: z.string().default('smasnug ai'),
   LOG_LEVEL: z.string().default('info'),
   /** Turn status text: see src/pipeline/session-status.ts (overlay = native processing + activity text). */
@@ -20,8 +21,8 @@ const Env = z.object({
   /** Front agent reasoning effort on OpenRouter (see docs/perf.md for the latency/quality comparison). */
   FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('none'),
   /**
-   * Reasoning effort for regular (Luna) subagent runs; `default` = the model's own default. `strong` runs (Sol) always
-   * use the model default. `low` roughly halves research runs (docs/perf.md).
+   * Reasoning effort for subagent runs; `default` = the model's own default. `low` roughly halves research runs
+   * (docs/perf.md).
    */
   CHILD_REASONING_EFFORT: z.enum(['default', 'none', 'minimal', 'low', 'medium', 'high']).default('low'),
 });
@@ -64,5 +65,7 @@ export const limits = {
   autoSuspendReporters: 3,
   fetchMaxBytes: 3 * 1024 * 1024,
   fetchTimeoutMs: 10_000,
-  webSearchMaxResults: 4,
+  webSearchDefaultResults: 5,
+  webSearchMaxResults: 10,
+  webSearchTimeoutMs: 10_000,
 } as const;

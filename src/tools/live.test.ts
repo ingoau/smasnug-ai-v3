@@ -1,8 +1,8 @@
 /**
  * LIVE tests (real OpenRouter + internet; Slack still faked). Run: LIVE=1 pnpm vitest run src/tools/live.test.ts
  * They answer the design doc's open questions:
- *  - the AI SDK OpenRouter provider passes `openrouter:web_search` through (provider tool) → searches happen;
- *  - GPT-6 Luna (and Sol) accept images inside tool results.
+ *  - web_search (Exa) returns results with highlights and source URLs (no model call);
+ *  - GPT-6 Luna accepts images inside tool results.
  */
 import './test-env.js';
 import { readFile } from 'node:fs/promises';
@@ -18,7 +18,7 @@ import { ensureThread } from '../context/thread.js';
 import { assignImageIds } from '../context/images.js';
 import './index.js';
 import { loadThreadImage } from './read-image.js';
-import { WebSearchMeter, WEB_SEARCH_TOOL } from './web-search.js';
+import { runWebSearch, type WebSearchOutput } from './web-search.js';
 import { fetchPage } from './fetch-url.js';
 
 const LIVE = process.env.LIVE === '1';
@@ -34,33 +34,16 @@ afterAll(async () => {
 });
 
 describe.skipIf(!LIVE)('live', () => {
-  it('web_search: provider tool is passed through and searches run server-side', async () => {
-    const meter = new WebSearchMeter();
-    const sent: string[] = [];
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = ((url: any, init: any) => {
-      if (String(url).includes('openrouter.ai')) sent.push(String(init?.body ?? ''));
-      return realFetch(url, init);
-    }) as typeof fetch;
-    const tools = { [WEB_SEARCH_TOOL]: toolsFor('front', ctx)[WEB_SEARCH_TOOL]! };
-    const r = await generateText({
-      model: openrouter(MODELS.front, { reasoning: { effort: 'low' } }),
-      prompt: 'Use web search: what is the latest stable version of Node.js? Answer in one short sentence.',
-      tools,
-      stopWhen: stepCountIs(2),
-      include: { responseBody: true },
-      onStepFinish: (step) => meter.observeStep(step),
-    }).finally(() => (globalThis.fetch = realFetch));
-    const usage = (r.steps[0]!.response.body as any)?.usage;
-    console.log('web_search answer:', r.text, '| sources:', r.sources.length, '| usage.server_tool_use_details:', usage?.server_tool_use_details);
-    expect(sent[0]).toContain('"type":"openrouter:web_search","engine":"auto","max_results":4');
-    expect(r.sources.length).toBeGreaterThan(0);
-    await meter.settle({ speakerId: 'U0LIVE', threadId });
-    expect(meter.total).toBe(usage.server_tool_use_details.web_search_requests);
-    expect(meter.total).toBeGreaterThan(0);
-  }, 120_000);
+  it.skipIf(!process.env.EXA_API_KEY)('web_search: Exa returns highlighted results with URLs (one instant search, $0.004)', async () => {
+    const out = (await runWebSearch(ctx, { query: 'latest Node.js LTS release', num_results: 3 })) as WebSearchOutput;
+    console.log('web_search:', typeof out === 'string' ? out : out.text.slice(0, 600));
+    expect(typeof out).toBe('object');
+    expect(out.sources.length).toBeGreaterThan(0);
+    expect(out.text).toContain(out.sources[0]!.url);
+    expect(out.text).toContain('   > ');
+  }, 30_000);
 
-  it('read_image: the model reads an image returned inside a tool result (Luna + Sol)', async () => {
+  it('read_image: the model reads an image returned inside a tool result (Luna)', async () => {
     await ensureThread(threadId);
     // A public image fetched through the real download path (SLACK_FAKE allows public URLs without auth).
     await assignImageIds(threadId, [
@@ -79,7 +62,7 @@ describe.skipIf(!LIVE)('live', () => {
     const primed = await loadThreadImage(threadId, 'img_2', async () => heic);
     expect(typeof primed).not.toBe('string');
 
-    for (const model of [MODELS.front, MODELS.childHard]) {
+    for (const model of [MODELS.front]) {
       const tools = { read_image: toolsFor('child', ctx).read_image! };
       const r = await generateText({
         model: openrouter(model, { reasoning: { effort: 'low' } }),

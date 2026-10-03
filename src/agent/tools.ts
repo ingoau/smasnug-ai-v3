@@ -80,10 +80,9 @@ registerTool({
       inputSchema: z.object({
         title: z.string().describe('Short task title for the plan card, e.g. "Research hosting options" (≤ 6 words)'),
         instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, image ids img_N), and what a good result looks like'),
-        strong: z.boolean().optional().describe('Use a stronger, slower model for genuinely hard reasoning tasks'),
         seed_from: z.string().optional().describe('Id of an expired subagent whose summary should seed this one'),
       }),
-      execute: async ({ title, instructions, strong, seed_from }) => {
+      execute: async ({ title, instructions, seed_from }) => {
         const s = turnState(ctx);
         const r = await spawnSubagent({
           threadId: s.threadId,
@@ -91,7 +90,6 @@ registerTool({
           ownerId: s.turn.authorId,
           title,
           instructions,
-          strong,
           seedFrom: seed_from,
         });
         s.cardId = r.cardId;

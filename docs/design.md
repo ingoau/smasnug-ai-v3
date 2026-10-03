@@ -27,7 +27,7 @@ Chat SDK for streaming and plan chunks; `@slack/web-api` for card updates, ephem
 Agent loop
 Vercel AI SDK tool loop. A per-step hook drains the inbox; streamed tool input feeds the `reply` stream
 Models
-OpenRouter. GPT-6 Luna for the gate (reasoning off), front agent (low) and subagents; GPT-6 Sol for subagent tasks Luna struggles with
+OpenRouter. GPT-6 Luna for the gate (reasoning off), front agent (low) and subagents (low)
 Storage
 Postgres for the event log, runs, memory and locks; Redis for the shared rate limiter and short-lived coordination
 Hosting
@@ -51,7 +51,7 @@ Slack search (user token, public channels only: each result's channel is verifie
 
 ✓
 ✓
-Web search (`openrouter:web_search`)
+Web search (`web_search`, Exa)
 
 ✓
 ✓
@@ -101,7 +101,7 @@ The bot always runs on a mention or DM. In threads where it has been mentioned, 
 `<>` **prefix: don't reply unless mentioned.** A message whose trimmed raw text starts with a literal `<>` (Slack delivers it as `&lt;&gt;`) never triggers a turn or the gate unless it @mentions the bot, in which case it's a normal mention. It is still stored and visible as context. DMs included.
 - 
 **The bot never pings groups.** `reply` text (also while streaming) and card fallback text have `<!channel>`, `<!here>`, `<!everyone>`, `<!subteam^…>` and plain `@here`/`@channel`/`@everyone` neutralised; `send_message` already did this.
-**Status indicator.** `agents.sessions.setStatus` `processing` (Slack's "Working…" plus the native stop button, which behaves like saying "stop") and `active` when the turn ends, always (also on errors). Mentions and DMs show it as soon as the message is accepted at intake ("Thinking…"), before the debounce window; the turn takes it over, and it is cleared if no turn follows. Status calls never delay the model call. Unmentioned follow-ups show it only once the turn commits to work — its first tool call other than `reply`/`react`/`unreact`/`search_emojis`; a turn that stays silent or goes straight to `reply` never shows a status (the streamed reply is its own indicator) and gets no acknowledgement reaction. The activity text is code-derived from the tool being started ("Searching Slack…", "Reading the page…", "Starting a subagent…"), coalesced to at most one update per second, and sent through the legacy `assistant.threads.setStatus` (the only free-text status; it still works through Slack's compatibility bridge) on top of the session status. Server-side web search has no client tool call and isn't announced. A turn the user stopped never sets `processing` again.
+**Status indicator.** `agents.sessions.setStatus` `processing` (Slack's "Working…" plus the native stop button, which behaves like saying "stop") and `active` when the turn ends, always (also on errors). Mentions and DMs show it as soon as the message is accepted at intake ("Thinking…"), before the debounce window; the turn takes it over, and it is cleared if no turn follows. Status calls never delay the model call. Unmentioned follow-ups show it only once the turn commits to work — its first tool call other than `reply`/`react`/`unreact`/`search_emojis`; a turn that stays silent or goes straight to `reply` never shows a status (the streamed reply is its own indicator) and gets no acknowledgement reaction. The activity text is code-derived from the tool being started ("Searching Slack…", "Reading the page…", "Starting a subagent…"), coalesced to at most one update per second, and sent through the legacy `assistant.threads.setStatus` (the only free-text status; it still works through Slack's compatibility bridge) on top of the session status. Web search shows "Searching the web…". A turn the user stopped never sets `processing` again.
 ## Turns
 Every front-agent turn has exactly one speaker, and only one front agent runs per thread at a time. This keeps "current speaker" well defined for memory, tools and steering.
 **Debounce per (thread, author).** Messages from the same person within the window merge into one turn; messages from different people never merge. The window scales: about 300 ms for messages that skip the relevance gate (DMs, mentions, two-party follow-ups, "stop"), about 1 second for gated messages, 3 seconds while the thread has running subagents. It is re-evaluated as each message arrives. A same-author message that misses the short window still reaches the running turn through its inbox (or starts the next turn once the reply is out).
@@ -179,7 +179,7 @@ Steering a running subagent does not create a card. The steer appears on the ori
 - 
 Resuming an idle subagent is a new run, so it appears on the new turn's card, marked `↻`.
 - 
-Task rows show results, not just a one-liner: a finished run's `output` is its summary in bold plus a markdown→rich_text excerpt of `runs.result` (≤ 600 chars / 8 lines with ≤ 3 runs, 300/4 with ≤ 6, 150/2 with ≤ 12, summary only beyond); failed runs show the reason, cancelled ones "Cancelled". `sources` lists the URLs the run used (`runs.sources`: fetch_url targets and web-search citations, tracking params stripped, deduped; falls back to URLs in the result text), up to 5 (fewer with more runs). Slack documents a 50-task limit per plan (enforced: latest 50) and 50 blocks per message; no per-task output limit is documented.
+Task rows show results, not just a one-liner: a finished run's `output` is its summary in bold plus a markdown→rich_text excerpt of `runs.result` (≤ 600 chars / 8 lines with ≤ 3 runs, 300/4 with ≤ 6, 150/2 with ≤ 12, summary only beyond); failed runs show the reason, cancelled ones "Cancelled". `sources` lists the URLs the run used (`runs.sources`: fetch_url targets and web-search result URLs, tracking params stripped, deduped; falls back to URLs in the result text), up to 5 (fewer with more runs). Slack documents a 50-task limit per plan (enforced: latest 50) and 50 blocks per message; no per-task output limit is documented.
 - 
 Cards are updated with `chat.update`, never a held-open stream. The message is a pure render of task state from the DB; children write progress to the DB and schedule a re-render.
 - 
@@ -239,7 +239,7 @@ Subagents get the same tool; the front agent passes relevant IDs in its instruct
 - 
 If the model doesn't accept images in tool results, the tool returns "image loaded" and the image is appended as a user message instead.
 ### Web search
-OpenRouter's `openrouter:web_search` server tool, available to the front agent and subagents. The model decides when to search; OpenRouter runs it. The default engine is `auto` (native provider search, falling back to Exa). Set `max_results` to 3–5 to keep costs down. Server tools are in beta. Searches count towards per-user limits.
+A client tool, `web_search` (`src/tools/web-search.ts`), backed by Exa's search API (`EXA_API_KEY`), available to the front agent and subagents. (It replaced OpenRouter's `openrouter:web_search` server tool, which cost $0.01 per search plus the result tokens and couldn't be announced or rate-limited before running.) Parameters: `query`; `mode` = `fast` (default, Exa `instant`, ~0.5s, $0.004), `thorough` (Exa `auto`, $0.007) or, for subagents only, `deep` (Exa `deep-lite`, ~4s, $0.012); `num_results` (default 5, max 10); `include_domains`; `start_published_date` (news / "latest"); `full_text` (subagents only: capped page text instead of highlights). Results are numbered title / URL / published date / highlight, wrapped as untrusted content; their URLs feed `runs.sources`. Each call counts towards the per-user hourly web-search limit; failures and timeouts (10s, 25s for `deep`) come back as a short message.
 ### Fetch URL
 A custom `fetch_url` tool, available to both roles, that can never reach local addresses:
 - 
@@ -342,7 +342,7 @@ Writing memory about other users.
 - 
 Does GPT-6 Luna via OpenRouter accept images in tool results, or is the user-message fallback needed?
 - 
-Does the AI SDK's OpenRouter provider pass `openrouter:*` server tool types through?
+Does the AI SDK's OpenRouter provider pass `openrouter:*` server tool types through? (Yes; no longer used: web search is an Exa client tool.)
 - 
 Can a message be edited with `chat.update` after `stopStream`? (docs.slack.dev chat.update: only refused while streaming, `streaming_state_conflict`; editable once the stream completed.)
 - 

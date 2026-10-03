@@ -117,8 +117,9 @@ thread's first text is within ~0.1s of the single-thread number; subagent runs s
 - **Queue hops**: debounce → thread-run job pickup is ~1ms; not collapsed.
 - **Slack client overhead**: rate limiter (Redis Lua) + idempotency insert/update add ~15ms per keyed call
   (startStream measured 165ms at 150ms fake latency); left as is.
-- **Child web search `max_results`**: the first step is dominated by model reasoning over the server-side search
-  (reasoning effort low halves it); max_results (4) left as is.
+- **Child web search `max_results`** (measured with the old OpenRouter server tool): the first step is dominated by
+  model reasoning over the search results (reasoning effort low halves it). Web search is now an Exa client tool
+  (default 5 results, highlights only).
 
 ### Remaining bottlenecks
 

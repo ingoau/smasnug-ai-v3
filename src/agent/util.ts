@@ -143,7 +143,6 @@ export function describeToolStep(toolName: string, input: unknown): string {
   const q = (k: string) => (typeof i[k] === 'string' ? oneLine(i[k] as string, 60) : '');
   switch (toolName) {
     case 'web_search':
-    case 'openrouter:web_search':
       return q('query') ? `Searching the web for “${q('query')}”` : 'Searching the web';
     case 'slack_search':
       return q('query') ? `Searching Slack for “${q('query')}”` : 'Searching Slack';

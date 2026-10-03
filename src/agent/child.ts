@@ -15,13 +15,13 @@ import { WORKER_ID } from '../worker/identity.js';
 import { scheduleCardRender } from './cards.js';
 import { childSystemPrompt } from './prompts/child.js';
 import { failRuns, finishRun, type RunRow, type SubagentRow } from './subagents.js';
-import { WEB_SEARCH_TOOL, WebSearchMeter } from '../tools/web-search.js';
+import { WEB_SEARCH_TOOL, webSearchSources } from '../tools/web-search.js';
 import { addSource, compactHistory, describeToolStep, oneLine, splitResult, urlsInText, type RunSource } from './util.js';
 
-/** Step cap per run (each web-search step costs ~11–20k input tokens; the token cap applies too). */
+/** Step cap per run (the token cap applies too). */
 const MAX_STEPS = 50;
 
-/** Card text while the first step runs (a server-side web search step can take a minute without any event). */
+/** Card text while the first step runs (until its first tool call). */
 export const FIRST_STEP_DETAILS = 'Researching…';
 /** A step running longer than this shows its elapsed time on the card, refreshed at this interval. */
 export const ELAPSED_TICK_MS = 15_000;
@@ -90,15 +90,13 @@ export async function processSubagentRun(runId: number): Promise<void> {
     subagentId: sa.id,
     runId: run.id,
     abortSignal: controller.signal,
-    // queueUserImage deliberately unset: Luna/Sol accept images in tool results.
+    // queueUserImage deliberately unset: Luna accepts images in tool results.
     extras: {},
   });
-  const toolNames = Object.keys(tools);
-  const meter = new WebSearchMeter();
-  let searchOverLimit = false;
-  const modelId = run.model ?? MODELS.child;
+  // Every subagent runs on MODELS.child (runs.model records it).
+  const modelId = MODELS.child;
   const model = openrouter(modelId);
-  const reasoningEffort = modelId === MODELS.child && env.CHILD_REASONING_EFFORT !== 'default' ? env.CHILD_REASONING_EFFORT : null;
+  const reasoningEffort = env.CHILD_REASONING_EFFORT !== 'default' ? env.CHILD_REASONING_EFFORT : null;
   const history: ModelMessage[] = Array.isArray(sa.history) ? sa.history : [];
   const messages: ModelMessage[] = [
     ...history,
@@ -133,7 +131,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
       await appendEvent(run.threadId, 'run_progress', `subagent:${run.subagentId}`, { runId: run.id, details });
     }
   };
-  // Long steps (server-side web search, long generations) produce no events: show the elapsed time instead of a
+  // Long steps (deep web searches, long generations) produce no events: show the elapsed time instead of a
   // card that looks stuck. Goes through the coalesced card render, at most every ELAPSED_TICK_MS.
   const elapsedTicker = setInterval(() => {
     const ms = Date.now() - detailsSince;
@@ -170,39 +168,27 @@ export async function processSubagentRun(runId: number): Promise<void> {
         instructions: childSystemPrompt(),
         messages,
         tools,
-        activeTools: overBudget ? [] : searchOverLimit ? toolNames.filter((n) => n !== WEB_SEARCH_TOOL) : undefined,
-        includeRawChunks: true,
-        onStepFinish: async (stepResult) => {
-          meter.observeStep(stepResult);
-          if (await meter.settle({ speakerId: sa.ownerId, threadId: run.threadId }).catch(() => false)) searchOverLimit = true;
-        },
+        activeTools: overBudget ? [] : undefined,
         stopWhen: stepCountIs(1),
         abortSignal: controller.signal,
         providerOptions: { openrouter: { ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}), usage: { include: true } } },
       });
       let stepText = '';
       let finishReason = '';
-      let lastSearchNoted = false;
       for await (const part of result.fullStream) {
-        if (!firstChunkAt && part.type !== 'raw' && part.type !== 'start' && part.type !== 'start-step') firstChunkAt = Date.now();
-        if (part.type === 'raw') meter.observeChunk(part);
-        else if (part.type === 'text-delta') stepText += part.text;
-        else if (part.type === 'source') {
-          if (part.sourceType === 'url' && addSource(sources, part.url, part.title)) sourcesDirty = true;
-          if (!lastSearchNoted) {
-            lastSearchNoted = true;
-            await setDetails('Searching the web');
-          }
-        } else if (part.type === 'tool-call') {
+        if (!firstChunkAt && part.type !== 'start' && part.type !== 'start-step') firstChunkAt = Date.now();
+        if (part.type === 'text-delta') stepText += part.text;
+        else if (part.type === 'tool-call') {
           stepTools.push(part.toolName);
           if (part.toolName === 'fetch_url' && addSource(sources, (part.input as any)?.url)) sourcesDirty = true;
           await setDetails(describeToolStep(part.toolName, part.input));
+        } else if (part.type === 'tool-result' && part.toolName === WEB_SEARCH_TOOL) {
+          for (const src of webSearchSources(part.output)) if (addSource(sources, src.url, src.title)) sourcesDirty = true;
         }
         else if (part.type === 'finish-step') {
           finishReason = part.finishReason;
           tokens += part.usage.totalTokens ?? (part.usage.inputTokens ?? 0) + (part.usage.outputTokens ?? 0);
-          // Per-step latency (the card and `pnpm bench --child` read it): server-side web searches show up as
-          // `searches` (no client tool call).
+          // Per-step latency (the card and `pnpm bench --child` read it).
           void appendEvent(run.threadId, 'run_step', `subagent:${run.subagentId}`, {
             runId: run.id,
             step,

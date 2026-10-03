@@ -62,10 +62,10 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     expect(Number(card.turnId)).toBe(turn1);
 
     // Second spawn in the same turn shares the card.
-    const s2 = await sub.spawnSubagent({ threadId, turnId: turn1, ownerId: 'U_A', title: 'Research Y', instructions: 'Find Y', strong: true });
+    const s2 = await sub.spawnSubagent({ threadId, turnId: turn1, ownerId: 'U_A', title: 'Research Y', instructions: 'Find Y' });
     expect(s2.cardId).toBe(s.cardId);
     const [run2] = await sql<any[]>`select model from runs where id = ${s2.runId}`;
-    expect(run2.model).toContain('sol');
+    expect(run2.model).toBe((await import('../models.js')).MODELS.child);
 
     // Steer while running.
     await sql`update runs set status = 'running' where id = ${s.runId}`;

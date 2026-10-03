@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.hoisted(() => {
   process.env.OPENROUTER_KEY ||= 'test-key';
+  process.env.EXA_API_KEY ||= 'test-exa';
   process.env.LOG_LEVEL = 'silent';
 });
 
@@ -57,11 +58,10 @@ vi.mock('../context/thread.js', () => ({
   renderMessages: async (_t: string, ts: string[]) => `<@U1> Tess: INBOX ${ts.join(',')}`,
 }));
 vi.mock('../models.js', () => ({
-  MODELS: { gate: 'm', front: 'm', child: 'm', childHard: 'm' },
-  openrouter: Object.assign(() => h.model, {
-    tools: { webSearch: () => ({ type: 'provider', id: 'openrouter.web_search', name: 'web_search', args: {} }) },
-  }),
+  MODELS: { gate: 'm', front: 'm', child: 'm' },
+  openrouter: () => h.model,
 }));
+vi.mock('../features/guard.js', async (orig) => ({ ...(await orig<typeof import('../features/guard.js')>()), takeLimit: async () => null }));
 vi.mock('../context/users.js', () => ({ getUserInfo: async (id: string) => ({ id, name: 'Tess', tz: 'Europe/Berlin', isBot: false }) }));
 
 const { MockLanguageModelV4 } = await import('ai/test');
@@ -358,6 +358,26 @@ describe('runFrontTurn: status activity', () => {
     const { io: tio, activity } = ioWithActivity(false);
     await runFrontTurn(turn({ id: 60, isMention: false }), tio);
     expect(activity).toEqual(['Starting a subagent…']);
+  });
+
+  it('web_search is a client tool: announced as "Searching the web…", Exa results go back to the model', async () => {
+    const exa: any[] = [];
+    vi.stubGlobal('fetch', async (url: any, init: any) => {
+      exa.push({ url: String(url), body: JSON.parse(init.body) });
+      return Response.json({ results: [{ title: 'Pico 2 W', url: 'https://example.com/pico', highlights: ['Costs $7.'] }], costDollars: { total: 0.004 } });
+    });
+    try {
+      h.model = mockModel([toolStep(['web_search', { query: 'pico 2 w price' }]), replyStep('About $7.'), textStep('')]);
+      const { io: tio, activity } = ioWithActivity(true);
+      await runFrontTurn(turn({ id: 64 }), tio);
+      expect(activity).toEqual(['Searching the web…']);
+      expect(exa).toEqual([{ url: 'https://api.exa.ai/search', body: expect.objectContaining({ query: 'pico 2 w price', type: 'instant' }) }]);
+      const second = JSON.stringify(h.model.doStreamCalls[1].prompt);
+      expect(second).toContain('https://example.com/pico');
+      expect(second).toContain('Costs $7.');
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('a turn that only replies or reacts reports no activity', async () => {

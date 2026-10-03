@@ -6,7 +6,6 @@ import { appendEvent, parseThreadId } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { getUserInfo } from '../context/users.js';
 import { EXTRAS } from '../tools/extras.js';
-import { WEB_SEARCH_TOOL, WebSearchMeter } from '../tools/web-search.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
@@ -297,9 +296,6 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   // Naming a card only makes sense when writing up its results.
   if (turn.kind !== 'synthesis') delete tools.set_card_title;
 
-  const toolNames = Object.keys(tools);
-  const meter = new WebSearchMeter();
-  let searchOverLimit = false;
   const timing = io.timing ?? new TurnTiming();
   timing.mark('context_start');
   const speaker = await timing.span('ctx_speaker', () => speakerInfo(turn.authorId));
@@ -341,11 +337,6 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       // The model decides when it's done (a step without tool calls ends the loop). Native stop ends it at the next
       // step boundary.
       stopWhen: [stepCountIs(MAX_STEPS), hasToolCall('end_turn'), () => checkStop()],
-      includeRawChunks: true,
-      onStepFinish: async (stepResult) => {
-        meter.observeStep(stepResult);
-        if (await meter.settle({ speakerId: turn.authorId, threadId: turn.threadId }).catch(() => false)) searchOverLimit = true;
-      },
       prepareStep: async ({ messages: current }) => {
         const extra: ModelMessage[] = [];
         const inbox = await takeInbox();
@@ -357,9 +348,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
           await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
         }
-        // Over the web-search rate limit: take web search away for the rest of the turn.
-        const activeTools = searchOverLimit ? toolNames.filter((n) => n !== WEB_SEARCH_TOOL) : undefined;
-        return { ...(extra.length ? { messages: [...current, ...extra] } : {}), ...(activeTools ? { activeTools } : {}) };
+        return extra.length ? { messages: [...current, ...extra] } : {};
       },
     });
 
@@ -368,9 +357,6 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     for await (const part of result.fullStream) {
       if (part.type !== 'start' && part.type !== 'start-step') timing.mark('first_chunk');
       switch (part.type) {
-        case 'raw':
-          meter.observeChunk(part);
-          break;
         case 'text-delta':
           stepText += part.text;
           break;

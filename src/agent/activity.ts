@@ -2,11 +2,6 @@
  * Code-derived activity labels for the status indicator (never model-facing). The front loop reports each tool
  * call as it starts; tools that just respond (reply / react / unreact, and the emoji lookup that precedes a
  * reaction) return null: they don't commit the turn to work, and a streamed reply is its own indicator.
- *
- * `web_search` is OpenRouter's server tool: the search runs inside the model call and the stream carries no
- * tool-call part before the answer (verified live: the first chunk after the search is already the reply call, the
- * `source` parts come after it). So it normally can't be announced; the label is here for providers that do emit
- * a provider-executed tool call.
  */
 const LABELS: Record<string, string> = {
   web_search: 'Searching the web…',

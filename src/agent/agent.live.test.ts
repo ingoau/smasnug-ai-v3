@@ -299,7 +299,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(posts).toHaveLength(0);
   }, 60_000);
 
-  it('a subagent can use web search (server tool) and reports with sources', async () => {
+  it('a subagent can use web search (Exa client tool) and reports with sources', async () => {
     const { spawnSubagent } = await import('./subagents.js');
     const { processSubagentRun } = await import('./child.js');
     const th = await freshThread('WEB');
@@ -321,6 +321,12 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     // The URLs it used are stored for the card's sources.
     expect(run.sources.length).toBeGreaterThan(0);
     expect(run.sources[0].url).toMatch(/^https?:\/\//);
+    // web_search is a client tool now: a real tool call, shown on the card as progress.
+    const ev = await sql<any[]>`select type, payload from thread_events where thread_id = ${th.id} and type in ('run_step', 'run_progress') order by id`;
+    const tools = ev.filter((e) => e.type === 'run_step').flatMap((e) => e.payload.tools ?? []);
+    console.log('web run steps:', JSON.stringify(ev.map((e) => e.payload.details ?? e.payload.tools)));
+    expect(tools).toContain('web_search');
+    expect(ev.some((e) => e.type === 'run_progress' && String(e.payload.details).startsWith('Searching the web for'))).toBe(true);
   }, 120_000);
 
   // ---- Behaviour (the real-Slack incident replayed): decisive delegation, rare reactions. ----
