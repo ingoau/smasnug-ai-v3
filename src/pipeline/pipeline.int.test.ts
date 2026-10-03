@@ -619,7 +619,26 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(m).toEqual({ text: '', files: [], deleted: true });
       expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 1 })).toBeNull();
       const types = (await sql`select type from thread_events where thread_id = ${tid} order by id`).map((e) => e.type);
-      expect(types).toEqual(['message', 'message_edited', 'message_deleted']);
+      expect(types).toEqual(['message', 'message_edited', 'message_deleted', 'root_deleted']);
+    });
+
+    it('deleting the thread root blocks posting into it, cancels pending turns and stops the running turn', async () => {
+      const { slackCall, ThreadGoneError } = await import('../core/slack.js');
+      const { stopRequestedSince } = await import('./stop.js');
+      const root = nextTs();
+      const tid = `${C}:${root}`;
+      const before = Date.now() - 1;
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> help me', ts: root }));
+      await sql`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${tid}, 'U1', true, ${[root]}, 'pending')`;
+      await processSlackEvent(messageEnvelope({ subtype: 'message_deleted', deleted_ts: root, previous_message: { user: 'U1', ts: root } }));
+      expect((await sql`select status from turns where thread_id = ${tid}`).map((t) => t.status)).toEqual(['cancelled']);
+      expect((await sql`select root_deleted_at is not null as gone, engaged from threads where id = ${tid}`)[0]).toEqual({ gone: true, engaged: false });
+      expect(await stopRequestedSince(tid, before)).toBe(true);
+      await expect(slackCall('chat.postMessage', { channel: C, thread_ts: root, text: 'hi' })).rejects.toBeInstanceOf(ThreadGoneError);
+      await expect(slackCall('chat.startStream', { channel: C, thread_ts: root, markdown_text: 'hi' })).rejects.toBeInstanceOf(ThreadGoneError);
+      // Other threads and non-posting calls are unaffected.
+      await expect(slackCall('chat.postMessage', { channel: C, thread_ts: nextTs(), text: 'hi' })).resolves.toMatchObject({ ok: true });
+      await expect(slackCall('chat.update', { channel: C, ts: root, text: 'x' })).resolves.toMatchObject({ ok: true });
     });
 
     it('out-of-order processing: edit or delete before the original message', async () => {

@@ -6,7 +6,7 @@
 import type { Job } from 'bullmq';
 import { runFrontTurn, type TurnIO } from '../agent/front.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
-import { slackCall } from '../core/slack.js';
+import { slackCall, ThreadGoneError } from '../core/slack.js';
 import type { TurnRow } from '../core/types.js';
 import { log } from '../log.js';
 import { loadMessageMarks, timingReport, TurnTiming } from '../core/timing.js';
@@ -91,18 +91,24 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     // DM / agent-container turns: what the user is looking at next to the container.
     viewingChannelId: turn.kind === 'user' && channelId.startsWith('D') ? await currentlyViewing(turn.authorId, channelId) : null,
   };
-  let status: 'done' | 'error' = 'done';
+  let status: 'done' | 'error' | 'cancelled' = 'done';
   let error: string | undefined;
   try {
     await runFrontTurn(turn, io);
   } catch (err) {
     status = 'error';
     error = (err as Error)?.message ?? String(err);
-    log.error({ err, turnId: turn.id, threadId: turn.threadId }, 'front turn failed');
-    try {
-      await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, text: ERROR_TEXT }, { idempotencyKey: `turn-error:${turn.id}` });
-    } catch (postErr) {
-      log.error({ err: postErr, turnId: turn.id }, 'failed to post error message');
+    if (err instanceof ThreadGoneError) {
+      // The thread's root was deleted mid-turn: nothing to post, nowhere to post it.
+      status = 'cancelled';
+      log.info({ turnId: turn.id, threadId: turn.threadId }, 'thread root deleted during the turn; turn cancelled');
+    } else {
+      log.error({ err, turnId: turn.id, threadId: turn.threadId }, 'front turn failed');
+      try {
+        await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, text: ERROR_TEXT }, { idempotencyKey: `turn-error:${turn.id}` });
+      } catch (postErr) {
+        log.error({ err: postErr, turnId: turn.id }, 'failed to post error message');
+      }
     }
   } finally {
     await indicator.finish();

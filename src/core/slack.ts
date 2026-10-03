@@ -80,12 +80,37 @@ async function pauseFor(method: string) {
   if (until && until > Date.now()) await sleep(until - Date.now());
 }
 
+/** Thrown instead of posting into a thread whose root message was deleted (Slack would post it top-level). */
+export class ThreadGoneError extends Error {
+  readonly code = 'thread_root_deleted';
+  constructor(channel: string, threadTs: string) {
+    super(`thread ${channel}:${threadTs} no longer exists (root message deleted)`);
+  }
+}
+
+const threadGoneKey = (channel: string, threadTs: string) => `thread:gone:${channel}:${threadTs}`;
+const POSTING_METHODS = new Set(['chat.postMessage', 'chat.startStream', 'chat.postEphemeral', 'files.completeUploadExternal']);
+
+/** Remember that a thread's root was deleted, so nothing gets posted into it (30 days, like other thread data). */
+export async function markThreadGone(channel: string, threadTs: string): Promise<void> {
+  await redis.set(threadGoneKey(channel, threadTs), '1', 'EX', 30 * 24 * 60 * 60);
+}
+
+async function assertThreadExists(method: string, args: Record<string, unknown>): Promise<void> {
+  if (!POSTING_METHODS.has(method)) return;
+  const channel = (args.channel ?? args.channel_id) as string | undefined;
+  const threadTs = args.thread_ts as string | undefined;
+  if (!channel || !threadTs) return;
+  if (await redis.exists(threadGoneKey(channel, threadTs))) throw new ThreadGoneError(channel, threadTs);
+}
+
 export async function slackCall<T extends WebAPICallResult = WebAPICallResult & Record<string, any>>(
   method: string,
   args: Record<string, unknown>,
   opts: SlackCallOpts = {},
 ): Promise<T> {
   const token = opts.token ?? 'bot';
+  await assertThreadExists(method, args);
   if (opts.idempotencyKey) {
     const key = `${method}:${opts.idempotencyKey}`;
     const claimed = await sql`insert into idempotency_keys (key) values (${key}) on conflict do nothing returning key`;

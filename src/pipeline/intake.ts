@@ -2,8 +2,10 @@
  * Message intake: storage, engagement bookkeeping, deterministic rules, entry guard, then into the debounce batch.
  * The relevance gate runs later, once per debounced batch (see fire.ts).
  */
-import { appendEvent, threadIdOf } from '../core/events.js';
-import { getBotIdentity, slackCall } from '../core/slack.js';
+import { appendEvent, parseThreadId, threadIdOf } from '../core/events.js';
+import { getBotIdentity, markThreadGone, slackCall } from '../core/slack.js';
+import { cancelThreadRuns } from '../agent/subagents.js';
+import { requestThreadStop } from './stop.js';
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
@@ -187,4 +189,19 @@ async function handleDelete(channelId: string, ts: string | undefined, prev?: Sl
   const authorId = row?.userId ?? prev?.user;
   if (authorId) await removeFromBatch(threadId, authorId, ts);
   await removeMessageFromTurns(threadId, ts);
+  if (ts === parseThreadId(threadId).threadTs) await handleRootDeleted(threadId);
+}
+
+/**
+ * The thread's root message is gone: Slack would turn any reply into a top-level channel message. Block posting
+ * into it, stop the running turn at its next step, drop pending turns and cancel the thread's subagents.
+ */
+async function handleRootDeleted(threadId: string): Promise<void> {
+  const { channelId, threadTs } = parseThreadId(threadId);
+  await markThreadGone(channelId, threadTs);
+  await requestThreadStop(threadId);
+  await sql`update threads set root_deleted_at = now(), engaged = false where id = ${threadId}`;
+  await sql`update turns set status = 'cancelled', finished_at = now() where thread_id = ${threadId} and status = 'pending'`;
+  const cards = await cancelThreadRuns(threadId, 'system').catch((err) => (log.error({ err, threadId }, 'cancelThreadRuns failed'), []));
+  await appendEvent(threadId, 'root_deleted', 'system', { cancelledCards: cards });
 }
