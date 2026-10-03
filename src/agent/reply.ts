@@ -6,6 +6,7 @@
 import { appendEvent } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
+import type { TurnTiming } from '../core/timing.js';
 import { uploadFiles, type OutgoingFile } from './files.js';
 import { stripCitationMarkers } from '../tools/web-search.js';
 import { extractPartialString } from './partial-json.js';
@@ -33,6 +34,8 @@ export interface ReplyTarget {
   stopRequested?: () => Promise<boolean>;
   /** Returns a model-facing reason when a new reply must not be delivered (checked when it starts and before posting). */
   blockReply?: () => string | null;
+  /** Latency instrumentation: first reply delta, stream start/stop, post. */
+  timing?: TurnTiming;
 }
 
 /** Stream errors meaning Slack is no longer streaming this message (e.g. the user pressed stop). */
@@ -122,6 +125,7 @@ export class ReplyManager {
 
   delta(toolCallId: string, d: string) {
     const e = this.start(toolCallId);
+    this.t.timing?.mark('first_reply_delta');
     e.buf += d;
     if (!e.timer) {
       e.timer = setTimeout(() => {
@@ -173,6 +177,7 @@ export class ReplyManager {
         { idempotencyKey: this.key(e) },
       );
       e.streamTs = res.ts ?? null;
+      this.t.timing?.mark('stream_started');
       if (!e.streamTs) throw new Error('chat.startStream returned no ts');
     } else {
       await slackCall('chat.appendStream', { channel: this.t.channelId, ts: e.streamTs, markdown_text: piece });
@@ -291,6 +296,7 @@ export class ReplyManager {
       { channel: this.t.channelId, thread_ts: this.t.threadTs, ...msg, unfurl_links: false },
       { idempotencyKey: this.key(e, suffix) },
     );
+    this.t.timing?.mark('reply_posted');
     return res?.ts ?? null;
   }
 
@@ -302,6 +308,7 @@ export class ReplyManager {
       { channel: this.t.channelId, ts: e.streamTs, ...(extra ? { markdown_text: extra } : {}) },
       { idempotencyKey: this.key(e, ':stop') },
     );
+    this.t.timing?.mark('stream_stopped');
   }
 
   /** On a model/API failure (or stop): close any open stream, with a short note if given. Returns true if one was open. */

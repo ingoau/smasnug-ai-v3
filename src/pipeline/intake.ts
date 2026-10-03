@@ -7,6 +7,7 @@ import { getBotIdentity, slackCall } from '../core/slack.js';
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
+import { markMessage } from '../core/timing.js';
 import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { decide, isStopMessage, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
@@ -106,6 +107,7 @@ async function handleNewMessage(ev: MessageEvent) {
   }
 
   await addToBatch(threadId, authorId, ev.ts, decision.reason);
+  markMessage(channelId, ev.ts, { debounce_scheduled: Date.now() });
 }
 
 /** Count an unaddressed human message; returns true when the thread should disengage. */

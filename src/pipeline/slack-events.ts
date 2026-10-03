@@ -1,6 +1,7 @@
 /** slack-events processor: routes raw envelopes enqueued by ingress. */
 import type { Job } from 'bullmq';
 import { log } from '../log.js';
+import { markMessage } from '../core/timing.js';
 import { handleAppHomeOpened, handleInteractive, handleSlash } from './interactions.js';
 import { handleMessageEvent } from './intake.js';
 import { handleReactionEvent } from './reactions.js';
@@ -11,6 +12,8 @@ export interface SlackEnvelopeJob {
   kind: 'event' | 'interactive' | 'slash';
   /** events: the Events API payload ({ event, event_id, … }); interactive/slash: the payload as delivered. */
   body: any;
+  /** Epoch ms when ingress received the envelope (latency instrumentation). */
+  receivedAt?: number;
 }
 
 export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
@@ -20,6 +23,7 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
       const event = body?.event;
       switch (event?.type) {
         case 'message':
+          if (!event.subtype && event.channel && event.ts) markMessage(event.channel, event.ts, { intake_start: Date.now() });
           return handleMessageEvent(event);
         case 'app_home_opened':
           return handleAppHomeOpened(event);

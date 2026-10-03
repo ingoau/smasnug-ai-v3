@@ -158,7 +158,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
         ['assistant.threads.setStatus', '', undefined],
         ['agents.sessions.setStatus', 'active', 'U1'],
       ]);
-      const events = await sql`select type from thread_events where thread_id = ${THREAD} order by id`;
+      const events = await sql`select type from thread_events where thread_id = ${THREAD} and type <> 'turn_timing' order by id`;
       expect(events.map((e) => e.type)).toEqual(['turn_started', 'turn_finished', 'turn_started', 'turn_finished']);
     });
 

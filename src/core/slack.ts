@@ -102,14 +102,15 @@ export async function slackCall<T extends WebAPICallResult = WebAPICallResult & 
 }
 
 async function rawCall<T>(method: string, args: Record<string, unknown>, token: TokenKind): Promise<T> {
-  if (FAKE) return (await fakeCall(method, args, token)) as T;
   const channel = typeof args.channel === 'string' ? args.channel : undefined;
+  if (FAKE) {
+    // Benchmarks can include the shared rate limiter's overhead (SLACK_FAKE_LIMITER=1).
+    if (process.env.SLACK_FAKE_LIMITER === '1') await throttle(method, token, channel);
+    return (await fakeCall(method, args, token)) as T;
+  }
   for (let attempt = 0; ; attempt++) {
     await pauseFor(method);
-    await acquire(`slack:rl:${token}:${method}`, METHOD_RPM[method] ?? 50);
-    if (channel && method.startsWith('chat.') && method !== 'chat.appendStream') {
-      await acquire(`slack:rl:chan:${channel}`, PER_CHANNEL_PER_MIN);
-    }
+    await throttle(method, token, channel);
     try {
       return (await clients[token].apiCall(method, args)) as T;
     } catch (err: any) {
@@ -126,6 +127,13 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
       }
       throw err;
     }
+  }
+}
+
+async function throttle(method: string, token: TokenKind, channel: string | undefined) {
+  await acquire(`slack:rl:${token}:${method}`, METHOD_RPM[method] ?? 50);
+  if (channel && method.startsWith('chat.') && method !== 'chat.appendStream') {
+    await acquire(`slack:rl:chan:${channel}`, PER_CHANNEL_PER_MIN);
   }
 }
 

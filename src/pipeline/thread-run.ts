@@ -9,6 +9,7 @@ import { appendEvent, parseThreadId } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import type { TurnRow } from '../core/types.js';
 import { log } from '../log.js';
+import { loadMessageMarks, timingReport, TurnTiming } from '../core/timing.js';
 import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from './lock.js';
 import { claimNextPending, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
 import { TurnStatus } from './session-status.js';
@@ -24,12 +25,15 @@ let shuttingDown = false;
 
 export async function processThreadRun(job: Job<{ threadId: string }>) {
   const { threadId } = job.data;
+  const pickedAt = Date.now();
   if (shuttingDown) {
     await ensureThreadRun(threadId); // leave it for another worker
     return;
   }
   const lock = await acquireLock(threadLockKey(threadId), THREAD_LOCK_TTL_MS);
   if (!lock) return;
+  const lockedAt = Date.now();
+  let first = true;
   try {
     // We hold the lock, so nothing else is running here: any 'running' turn is left over from a crash.
     for (const id of await runningTurnIds(threadId)) {
@@ -40,10 +44,17 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
     while (!shuttingDown && lock.held) {
       const turn = await claimNextPending(threadId);
       if (!turn) break;
+      const timing = new TurnTiming();
+      if (first) {
+        timing.mark('run_picked', pickedAt);
+        timing.mark('lock_acquired', lockedAt);
+        first = false;
+      }
+      timing.mark('turn_claimed');
       const entry: { threadId: string; lock: HeldLock; turn: TurnRow; status?: TurnStatus } = { threadId, lock, turn };
       inFlight.set(turn.id, entry);
       try {
-        await runTurn(turn, (status) => (entry.status = status));
+        await runTurn(turn, (status) => (entry.status = status), timing);
       } finally {
         inFlight.delete(turn.id);
       }
@@ -54,7 +65,7 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
   if (await hasPendingTurns(threadId)) await ensureThreadRun(threadId);
 }
 
-export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => void) {
+export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => void, timing = new TurnTiming()) {
   const { channelId, threadTs } = parseThreadId(turn.threadId);
   const started = Date.now();
   const stopRequested = () => stopRequestedSince(turn.threadId, started);
@@ -64,8 +75,12 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
   // finally below.
   const indicator = new TurnStatus({ channelId, threadTs, userId: turn.authorId, stopped: stopRequested });
   onStatus?.(indicator);
-  if (turn.isMention) await indicator.start();
+  if (turn.isMention) {
+    await indicator.start();
+    timing.mark('status_done');
+  }
   const io: TurnIO = {
+    timing,
     drainInbox: () => drainInbox(turn.id, turn.threadId),
     setPhase: (phase) => setPhase(turn.id, phase),
     isMention: turn.isMention,
@@ -97,7 +112,19 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
       ...(error ? { error: error.slice(0, 500) } : {}),
       ...(followUp ? { leftoverInboxTurnId: followUp } : {}),
     });
+    timing.mark('turn_end');
+    await reportTiming(turn, timing).catch((err) => log.debug({ err }, 'turn timing report failed'));
   }
+}
+
+/** One `turn_timing` event + log line per turn: pipeline marks of its first message plus the turn's own marks. */
+async function reportTiming(turn: TurnRow, timing: TurnTiming) {
+  const { channelId } = parseThreadId(turn.threadId);
+  const firstTs = [...(turn.messageTs ?? [])].sort((a, b) => Number(a) - Number(b))[0];
+  const msgMarks = firstTs ? await loadMessageMarks(channelId, firstTs) : {};
+  const report = timingReport(msgMarks, timing);
+  await appendEvent(turn.threadId, 'turn_timing', 'system', { turnId: turn.id, kind: turn.kind, messageTs: firstTs ?? null, ...report });
+  log.info({ turnId: turn.id, threadId: turn.threadId, ...report.headline, rel: report.rel, spans: report.spans, counters: report.counters, notes: report.notes }, 'turn_timing');
 }
 
 /**

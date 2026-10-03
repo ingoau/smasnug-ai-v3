@@ -26,8 +26,20 @@ export function fakeSlackError(code: string) {
 }
 const nextTs = () => `${Math.floor(Date.now() / 1000)}.${String(++counter).padStart(6, '0')}`;
 
+/**
+ * Simulated network latency per call (ms), read per call so a benchmark can set it at runtime. Default 0 (tests);
+ * `pnpm bench` uses ~150ms. `SLACK_FAKE_LATENCY_JITTER_MS` adds uniform random jitter on top.
+ */
+function fakeLatencyMs(): number {
+  const base = Number(process.env.SLACK_FAKE_LATENCY_MS ?? 0) || 0;
+  const jitter = Number(process.env.SLACK_FAKE_LATENCY_JITTER_MS ?? 0) || 0;
+  return Math.max(0, base + (jitter ? Math.random() * jitter : 0));
+}
+
 export async function fakeCall(method: string, args: Record<string, unknown>, token: string): Promise<any> {
+  const latency = fakeLatencyMs();
   await redis.rpush('slack:fake:calls', JSON.stringify({ at: Date.now(), method, token, args }));
+  if (latency > 0) await new Promise((r) => setTimeout(r, latency));
   for (const h of handlers) {
     const res = await h(method, args, token);
     if (res !== undefined) return res;

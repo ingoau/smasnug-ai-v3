@@ -5,6 +5,7 @@ import { closeQueues, enqueue, QUEUE } from '../core/queues.js';
 import { redis } from '../core/redis.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
+import { markMessage, slackTsMs } from '../core/timing.js';
 import type { SlackEnvelopeJob } from '../pipeline/slack-events.js';
 
 interface SocketEvent {
@@ -30,7 +31,7 @@ export async function claimEvent(key: string): Promise<boolean> {
   return rows.length > 0;
 }
 
-export async function handleEnvelope(e: SocketEvent) {
+export async function handleEnvelope(e: SocketEvent, receivedAt = Date.now()) {
   const kind = KIND[e.type];
   if (!kind) return;
   const key = dedupeKey(e);
@@ -39,7 +40,11 @@ export async function handleEnvelope(e: SocketEvent) {
     return;
   }
   try {
-    await enqueue(QUEUE.slackEvents, { kind, body: e.body } satisfies SlackEnvelopeJob, { jobId: `se-${key.replaceAll(':', '_')}` });
+    await enqueue(QUEUE.slackEvents, { kind, body: e.body, receivedAt } satisfies SlackEnvelopeJob, { jobId: `se-${key.replaceAll(':', '_')}` });
+    const ev = e.body?.event;
+    if (ev?.type === 'message' && !ev.subtype && ev.channel && ev.ts) {
+      markMessage(ev.channel, ev.ts, { slack_sent: slackTsMs(ev.ts), ingress_received: receivedAt, enqueued: Date.now() });
+    }
   } catch (err) {
     // Already acked, so Slack won't retry; free the key so a manual replay isn't swallowed.
     await sql`delete from slack_events_seen where event_id = ${key}`.catch(() => {});
@@ -53,6 +58,7 @@ async function main() {
   let inflight = 0;
 
   client.on('slack_event', async (e: SocketEvent) => {
+    const receivedAt = Date.now();
     // Ack first, always: never risk Slack's 3-second window. Responses (e.g. view errors) are not supported.
     try {
       await e.ack();
@@ -62,7 +68,7 @@ async function main() {
     log.info({ type: e.type, event: e.body?.event?.type ?? e.body?.type, subtype: e.body?.event?.subtype, channelType: e.body?.event?.channel_type }, 'envelope received');
     inflight++;
     try {
-      await handleEnvelope(e);
+      await handleEnvelope(e, receivedAt);
     } catch (err) {
       log.error({ err, type: e.type, envelope: e.envelope_id }, 'failed to enqueue envelope');
     } finally {

@@ -14,6 +14,7 @@ import { recordModelUsage } from '../features/guard.js';
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { MODELS, openrouter } from '../models.js';
 import { log } from '../log.js';
+import { TurnTiming } from '../core/timing.js';
 import { freezeCard, postCard } from './cards.js';
 import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
@@ -44,6 +45,8 @@ export interface TurnIO {
   stopRequested?(): Promise<boolean>;
   /** DM / agent-container turns: the channel the speaker is currently viewing next to the container, if known. */
   viewingChannelId?: string | null;
+  /** Latency instrumentation (the pipeline reports it as a `turn_timing` event when the turn ends). */
+  timing?: TurnTiming;
 }
 
 const MAX_STEPS = 12;
@@ -144,11 +147,11 @@ function section(tag: string, body: string, attrs = ''): string {
   return body.trim() ? `<${tag}${attrs}>\n${body.trim()}\n</${tag}>` : '';
 }
 
-async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: string | undefined }, viewingChannelId?: string | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean }> {
+async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: string | undefined }, viewingChannelId?: string | null, timing = new TurnTiming()): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean }> {
   const [memory, snapshot, ctx] = await Promise.all([
-    renderSpeakerMemory(turn.authorId).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
-    renderSnapshot(turn.threadId),
-    renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs }),
+    timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId)).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
+    timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
+    timing.span('ctx_thread', () => renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs, timing })),
   ]);
   const parts: string[] = [];
   parts.push(
@@ -209,6 +212,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     activeRuns: () => activeRunsInThread(turn.threadId),
     stopRequested: checkStop,
     blockReply: () => replyBlockReason(state),
+    timing: io.timing,
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
   const state: FrontTurnState = {
@@ -239,8 +243,12 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const toolNames = Object.keys(tools);
   const meter = new WebSearchMeter();
   let searchOverLimit = false;
-  const speaker = await speakerInfo(turn.authorId);
-  const [system, built] = await Promise.all([buildSystem(), buildTurnMessage(turn, speaker, io.viewingChannelId)]);
+  const timing = io.timing ?? new TurnTiming();
+  timing.mark('context_start');
+  const speaker = await timing.span('ctx_speaker', () => speakerInfo(turn.authorId));
+  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem()), buildTurnMessage(turn, speaker, io.viewingChannelId, timing)]);
+  timing.mark('context_built');
+  timing.set('prompt_chars', system.length + built.text.length);
   const messages: ModelMessage[] = [{ role: 'user', content: built.text }];
   const ph: { current: 'tools' | 'final' } = { current: 'tools' };
   const setPhase = async (p: 'tools' | 'final') => {
@@ -268,6 +276,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (await checkStop()) throw new TurnStopped();
     // Everything on the card was cancelled (user stop, or the turn cancelled its own subagent): nothing to report.
     if (turn.kind === 'synthesis' && built.allCancelled) throw new SkipModel();
+    timing.mark('model_request');
     const result = streamText({
       model: openrouter(MODELS.front),
       providerOptions: { openrouter: { reasoning: { effort: 'low' }, usage: { include: true } } },
@@ -312,6 +321,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     let stepText = '';
     let stepTools: string[] = [];
     for await (const part of result.fullStream) {
+      if (part.type !== 'start' && part.type !== 'start-step') timing.mark('first_chunk');
       switch (part.type) {
         case 'raw':
           meter.observeChunk(part);
@@ -320,6 +330,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           stepText += part.text;
           break;
         case 'tool-input-start':
+          timing.mark('first_tool_input');
+          if (part.toolName === 'reply') timing.mark('first_reply_input');
           announce(part.id, part.toolName);
           if (ph.current === 'final' && part.toolName !== 'reply' && part.toolName !== 'react') await setPhase('tools');
           break;
@@ -336,6 +348,13 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           log.warn({ tool: part.toolName, error: String((part as any).error) }, 'front tool error');
           break;
         case 'finish-step': {
+          timing.add('model_steps', 1);
+          timing.add('input_tokens', part.usage.inputTokens);
+          timing.add('output_tokens', part.usage.outputTokens);
+          timing.add('reasoning_tokens', part.usage.outputTokenDetails?.reasoningTokens);
+          timing.add('cached_tokens', part.usage.inputTokenDetails?.cacheReadTokens);
+          timing.mark(`step${timing.counters.model_steps}_end`);
+          ((timing.notes.step_tools ??= []) as string[][]).push([...stepTools]);
           void recordModelUsage({
             userId: turn.authorId,
             threadId: turn.threadId,
@@ -358,6 +377,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           break;
       }
     }
+    timing.mark('loop_done');
   } catch (err) {
     if (err instanceof SkipModel) await appendEvent(turn.threadId, 'synthesis_silent', 'system', { turnId, cardId: turn.cardId }).catch(() => {});
     else if (!(err instanceof TurnStopped)) failed = err;

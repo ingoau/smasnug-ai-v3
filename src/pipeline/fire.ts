@@ -10,6 +10,7 @@ import { sql } from '../db/index.js';
 import { recordModelUsage } from '../features/guard.js';
 import { MODELS } from '../models.js';
 import { log } from '../log.js';
+import { markMessage } from '../core/timing.js';
 import { takeBatch, type DebounceJob } from './debounce.js';
 import { runGate, type GateResult } from './gate.js';
 import { batchIsMention, batchNeedsGate } from './rules.js';
@@ -21,6 +22,7 @@ export const gateImpl: { run: typeof runGate } = { run: runGate };
 
 export async function processDebounce(job: Job<DebounceJob>) {
   const { threadId, authorId } = job.data;
+  const firedAt = Date.now();
   const batch = await takeBatch(job.data);
   if (!batch) return; // superseded by a newer message's job, or emptied by deletions
 
@@ -65,5 +67,6 @@ export async function processDebounce(job: Job<DebounceJob>) {
   }
 
   const res = await scheduleMessages(threadId, authorId, ts, isMention);
+  for (const t of ts) markMessage(channelId, t, { debounce_fired: firedAt, turn_created: Date.now() });
   if (res.kind === 'inbox') await appendEvent(threadId, 'inbox_push', authorId, { turnId: res.turnId, messageTs: ts });
 }

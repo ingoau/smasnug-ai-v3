@@ -12,6 +12,7 @@ import { getBotIdentity } from '../core/slack.js';
 import { parseThreadId } from '../core/events.js';
 import type { StoredMessage } from '../core/types.js';
 import { log } from '../log.js';
+import type { TurnTiming } from '../core/timing.js';
 import { compareTs, formatMessages, formatThread, selectThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
 import { assignImageIds } from './images.js';
 import { fetchHistoryAfter, fetchHistoryBefore, fetchReplies, fromStored, storeMessages } from './slack-messages.js';
@@ -108,23 +109,24 @@ export async function formatEnvFor(threadId: string, msgs: RenderMsg[]): Promise
  * Render a thread for a front-agent turn. Backfills from conversations.replies on first use of a thread
  * (threads.backfilled), and assigns stable `img_N` ids to images (thread_images).
  */
-export async function renderThreadContext(threadId: string, opts: { newMessageTs: string[] }): Promise<RenderedThreadContext> {
-  const thread = await ensureThread(threadId);
-  await backfillThread(thread);
+export async function renderThreadContext(threadId: string, opts: { newMessageTs: string[]; timing?: TurnTiming }): Promise<RenderedThreadContext> {
+  const span = <T,>(name: string, fn: () => Promise<T>) => (opts.timing ? opts.timing.span(name, fn) : fn());
+  const thread = await span('ctx_ensure_thread', () => ensureThread(threadId));
+  await span('ctx_backfill', () => backfillThread(thread));
 
-  const all = await loadThreadMessages(threadId);
+  const all = await span('ctx_load_thread', () => loadThreadMessages(threadId));
   const newSet = new Set(opts.newMessageTs);
   // New messages may live outside the thread rows (e.g. a top-level DM message) — load them by ts too.
-  const newMsgs = opts.newMessageTs.length ? await loadByTs(thread.channelId, opts.newMessageTs) : [];
+  const newMsgs = opts.newMessageTs.length ? await span('ctx_load_new', () => loadByTs(thread.channelId, opts.newMessageTs)) : [];
   const newest = newMsgs.reduce<string | undefined>((acc, m) => (!acc || compareTs(m.ts, acc) > 0 ? m.ts : acc), undefined);
   // History = everything before the turn's newest message, minus the new messages themselves. Anything newer
   // arrives via the inbox (renderMessages), so it would be duplicated here.
   const history = all.filter((m) => !newSet.has(m.ts) && (!newest || compareTs(m.ts, newest) < 0 || m.ts === thread.threadTs));
   const sel = selectThread(history, thread.threadTs, limits.contextReplies);
-  const channelMsgs = thread.isDm ? [] : await loadChannelContext(thread);
+  const channelMsgs = thread.isDm ? [] : await span('ctx_channel', () => loadChannelContext(thread));
 
   const shown = [...(sel.parent ? [sel.parent] : []), ...sel.replies, ...newMsgs, ...channelMsgs];
-  const fenv = await formatEnvFor(threadId, shown);
+  const fenv = await span('ctx_format_env', () => formatEnvFor(threadId, shown));
   return {
     history: formatThread(sel, fenv),
     channelContext: formatMessages(channelMsgs, fenv),
