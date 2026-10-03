@@ -144,8 +144,8 @@ describe('slack_search privacy', () => {
   it('the tool output never mentions private results, totals or context fields', async () => {
     const out: string = await exec(toolsFor('child', ctx()).slack_search, { query: 'guidelines' });
     expect(out).toContain('(2 shown, public channels only)');
-    expect(out).toContain('#ship');
-    expect(out).toContain('#lounge');
+    expect(out).toContain('|ship>');
+    expect(out).toContain('|lounge>');
     for (const leak of ['secret staff', 'staff', 'flagged', 'old private', 'dm text', 'mpim', 'mystery', 'unknown channel', 'flaky', 'C0NEWPRIV', '2345', 'context from elsewhere', 'hidden search hit']) {
       expect(out).not.toContain(leak);
     }

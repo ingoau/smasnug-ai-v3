@@ -101,8 +101,8 @@ describe('slack_search', () => {
     const out: string = await exec(toolsFor('child', baseCtx()).slack_search, { query: 'deploy' });
     const call = calls.find((c) => c.method === 'search.messages')!;
     expect(call.token).toBe('user');
-    expect(out).toContain('#ship');
-    expect(out).toContain('#announcements');
+    expect(out).toContain('|ship>');
+    expect(out).toContain('|announcements>');
     expect(out).toContain('https://fixture.slack.com/archives/C0PUB/');
     expect(out).toContain('PR (https://github.com/hackclub/site)');
     expect(out).not.toMatch(/secret-staff|dm about|group dm|private deploy/);

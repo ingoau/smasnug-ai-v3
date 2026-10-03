@@ -1,5 +1,6 @@
 // OWNER: pipeline module. Worker process entry: starts BullMQ workers for every queue.
 import { Worker, type Job } from 'bullmq';
+import { warmChannelNames } from '../agent/channel-links.js';
 import '../tools/index.js';
 import * as agent from '../agent/register.js';
 import * as features from '../features/register.js';
@@ -64,6 +65,8 @@ async function scheduleMaintenance(tasks: Map<string, Task>) {
 
 export async function startWorker() {
   pipeline.onStart();
+  // Warm the public channel name → id cache used to link bare #channel mentions in replies (background).
+  void warmChannelNames().catch(() => {});
   const processors = collectProcessors();
   const tasks = collectMaintenance();
   await scheduleMaintenance(tasks);

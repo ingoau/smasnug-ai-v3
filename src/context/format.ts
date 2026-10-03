@@ -72,7 +72,8 @@ export function authorName(m: RenderMsg, env: FormatEnv): string {
 export function renderSlackText(text: string, names: Map<string, string>): string {
   return text
     .replace(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g, (_m, id: string) => (names.get(id) ? `<@${id}|${names.get(id)}>` : `<@${id}>`))
-    .replace(/<#(C[A-Z0-9]+)\|([^>]*)>/g, (_m, id: string, name: string) => (name ? `#${name}` : `<#${id}>`))
+    // Keep channel ids so the agent can link channels as <#ID> (Slack renders only that form as a link).
+    .replace(/<#(C[A-Z0-9]+)\|([^>]*)>/g, (_m, id: string, name: string) => (name ? `<#${id}|${name}>` : `<#${id}>`))
     .replace(/<!subteam\^[A-Z0-9]+(?:\|([^>]*))?>/g, (_m, label?: string) => label || '@group')
     .replace(/<!(here|channel|everyone)(?:\|[^>]*)?>/g, '@$1')
     .replace(/<!date\^\d+\^[^|>]*\|([^>]*)>/g, '$1')

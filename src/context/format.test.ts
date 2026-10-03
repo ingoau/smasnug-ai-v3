@@ -46,7 +46,7 @@ describe('formatMessage', () => {
   it('decodes Slack mrkdwn', () => {
     const names = env().names;
     expect(renderSlackText('cc <@U0BOB> &amp; <@U0ZZZ|zed> <!here> <#C1|general> <https://a.com|site> <https://b.com> &lt;3', names)).toBe(
-      'cc <@U0BOB|Bob Builder> & <@U0ZZZ> @here #general site (https://a.com) https://b.com <3',
+      'cc <@U0BOB|Bob Builder> & <@U0ZZZ> @here <#C1|general> site (https://a.com) https://b.com <3',
     );
     expect(renderSlackText('<!subteam^S123|@staff> ping', names)).toBe('@staff ping');
   });

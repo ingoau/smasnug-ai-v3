@@ -83,7 +83,8 @@ export function formatSearchMatches(matches: any[], names: Map<string, string>):
     .map((m, i) => {
       const who = m.user ? `<@${m.user}> ${names.get(m.user) ?? m.username ?? ''}`.trim() : m.username || 'unknown';
       const text = truncateChars(renderSlackText(m.text ?? '', names).replace(/\s+/g, ' ').trim(), TEXT_CHARS);
-      return `${i + 1}. #${m.channel?.name ?? m.channel?.id} · ${who} · ts ${m.ts}\n   ${m.permalink ?? ''}\n   ${text}`;
+      const ch = m.channel?.id ? (m.channel?.name ? `<#${m.channel.id}|${m.channel.name}>` : `<#${m.channel.id}>`) : '#unknown';
+      return `${i + 1}. ${ch} · ${who} · ts ${m.ts}\n   ${m.permalink ?? ''}\n   ${text}`;
     })
     .join('\n');
 }
