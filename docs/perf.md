@@ -110,7 +110,7 @@ thread's first text is within ~0.1s of the single-thread number; subagent runs s
 
 ### Evaluated, not changed
 
-- **Front reasoning effort** (`FRONT_REASONING_EFFORT`): low / minimal / none give the same TTFT within noise
+- **Front reasoning effort** (`FRONT_REASONING_EFFORT`, default now `none`): the bench showed no difference because its prompts rarely triggered reasoning, but in real Slack turns with even 29–59 reasoning tokens took ~4.0–4.3s to the first token vs ~1.2–1.5s without. With `none`, the LIVE behaviour tests (delegation, silence, reports, e2e) passed 11/11 twice. Subagents keep `low`.
   (~1.2s; reasoning tokens are already 0 at low). Probe with a tiny prompt and one tool: 0.8–1.1s, so the 8k-token
   prompt (98% cached) costs ~0.2s at most; not worth trimming tool descriptions. Kept `low`; `none` delegated the
   search scenario more often.

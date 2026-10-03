@@ -18,7 +18,7 @@ const Env = z.object({
   /** Turn status text: see src/pipeline/session-status.ts (overlay = native processing + activity text). */
   STATUS_ACTIVITY_MODE: z.enum(['overlay', 'text', 'off']).default('overlay'),
   /** Front agent reasoning effort on OpenRouter (see docs/perf.md for the latency/quality comparison). */
-  FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('low'),
+  FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('none'),
   /**
    * Reasoning effort for regular (Luna) subagent runs; `default` = the model's own default. `strong` runs (Sol) always
    * use the model default. `low` roughly halves research runs (docs/perf.md).
