@@ -423,6 +423,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
       run
         .mockImplementationOnce(async (_turn, io) => {
           seen.push(await io.stopRequested!());
+          await new Promise((r) => setTimeout(r, 5)); // the stop must land after the turn's start (ms resolution)
           await processSlackEvent(stopEnvelope('U1'));
           seen.push(await io.stopRequested!());
         })

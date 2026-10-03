@@ -75,7 +75,9 @@ export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: C
 export async function ensureTurnCard(opts: { threadId: string; turnId: number }): Promise<number> {
   const { channelId } = parseThreadId(opts.threadId);
   const [row] = await sql<{ id: number }[]>`
-    insert into cards (thread_id, turn_id, channel_id) values (${opts.threadId}, ${opts.turnId}, ${channelId})
+    insert into cards (thread_id, turn_id, channel_id, parent_card_id)
+    values (${opts.threadId}, ${opts.turnId}, ${channelId},
+      (select card_id from turns where id = ${opts.turnId} and kind = 'synthesis'))
     on conflict (turn_id) where turn_id is not null do update set turn_id = excluded.turn_id
     returning id`;
   return Number(row!.id);
