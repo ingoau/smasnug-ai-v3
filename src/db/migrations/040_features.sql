@@ -21,4 +21,4 @@ create index usage_created_idx on usage (created_at);
 create index usage_user_kind_idx on usage (user_id, kind, created_at);
 create index threads_last_activity_idx on threads (last_activity_at);
 create index idempotency_keys_created_idx on idempotency_keys (created_at);
-create index slack_events_seen_received_idx on slack_events_seen (received_at);
+create index if not exists slack_events_seen_received_idx on slack_events_seen (received_at);

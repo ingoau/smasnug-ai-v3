@@ -9,7 +9,9 @@ async function dispatch(ctx: ActionContext) {
     log.warn({ actionId: ctx.actionId }, 'no handler for interaction');
     return;
   }
-  const entry = await guardEntry(ctx.userId, ctx.channelId);
+  // Not a conversation turn: don't count it, and don't pass the channel (channel disable must not block
+  // `/smasnug on`). Memory actions stay available to suspended users so they can delete their own memory.
+  const entry = await guardEntry(ctx.userId, undefined, { countMessage: false, allowSuspended: ctx.actionId.startsWith('mem:') });
   if (!entry.ok) return;
   try {
     await handler(ctx);
@@ -92,8 +94,9 @@ export async function handleAppHomeOpened(event: any) {
   if (event?.tab !== 'home' || !event.user) return;
   const handler = getAppHomeHandler();
   if (!handler) return;
-  const entry = await guardEntry(event.user);
-  if (!entry.ok && entry.reason !== 'rate_limited') return; // viewing Home shouldn't be rate-limited away
+  // Suspended users still see Home (memory deletion lives there); opens aren't counted against messages/hour.
+  const entry = await guardEntry(event.user, undefined, { countMessage: false, allowSuspended: true });
+  if (!entry.ok) return;
   try {
     await handler(event.user);
   } catch (err) {
