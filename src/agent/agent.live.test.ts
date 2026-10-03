@@ -248,28 +248,35 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const before = (await fakeCalls()).length;
     const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${th.id}, ${user}, false, ${[`${Number(th.ts) + 3}.000300`]}, 'running') returning *`;
     await runFrontTurn({ ...t, id: Number(t.id) }, io(false));
-    const calls = (await fakeCalls()).slice(before);
-    expect(calls.filter((c) => ['chat.postMessage', 'chat.startStream'].includes(c.method))).toHaveLength(0);
+    const calls = (await fakeCalls()).slice(before).filter((c) => c.args.channel === th.id.split(':')[0]);
+    const posts = calls.filter((c) => ['chat.postMessage', 'chat.startStream'].includes(c.method));
+    // eslint-disable-next-line no-console
+    if (posts.length) console.log('chatter posts:', posts.map((c) => c.args.text ?? c.args.markdown_text));
+    expect(posts).toHaveLength(0);
   }, 60_000);
 
   it('a subagent can use web search (server tool) and reports with sources', async () => {
     const { spawnSubagent } = await import('./subagents.js');
     const { processSubagentRun } = await import('./child.js');
     const th = await freshThread('WEB');
-    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, status) values (${th.id}, ${user}, 'running') returning id`;
+    const owner = `${user}W`; // own owner: other tests leave runs active, which count towards the per-user limit
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, status) values (${th.id}, ${owner}, 'running') returning id`;
     const s = await spawnSubagent({
       threadId: th.id,
       turnId: Number(t.id),
-      ownerId: user,
+      ownerId: owner,
       title: 'Node LTS version',
       instructions: 'Use one web search to find the current Node.js LTS major version. Report the version and the source URL.',
     });
     await processSubagentRun(s.runId);
-    const [run] = await sql<any[]>`select status, result, output, error, tokens from runs where id = ${s.runId}`;
+    const [run] = await sql<any[]>`select status, result, output, error, tokens, sources from runs where id = ${s.runId}`;
     // eslint-disable-next-line no-console
-    console.log('web run:', run.status, run.output, run.tokens, String(run.result).slice(0, 300));
+    console.log('web run:', run.status, run.output, run.tokens, JSON.stringify(run.sources), String(run.result).slice(0, 300));
     expect(run.status).toBe('complete');
     expect(run.result).toMatch(/https?:\/\//);
+    // The URLs it used are stored for the card's sources.
+    expect(run.sources.length).toBeGreaterThan(0);
+    expect(run.sources[0].url).toMatch(/^https?:\/\//);
   }, 120_000);
 
   // ---- Behaviour (the real-Slack incident replayed): decisive delegation, rare reactions. ----
@@ -279,8 +286,10 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const tid = `D_${tag}${Math.random().toString(36).slice(2, 6).toUpperCase()}:${ts}`;
     await sql`insert into threads (id, channel_id, thread_ts, engaged) values (${tid}, ${tid.split(':')[0]!}, ${ts}, true)`;
     const msgTs = `${Number(ts) + 30}.000100`;
-    threadText.set(tid, { history, newMessages: `[${msgTs}] <@${user}> Tester: ${text}` });
-    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${tid}, ${user}, true, ${[msgTs]}, 'running') returning *`;
+    // Own speaker per test: other tests leave subagents "running" (no worker), which count towards the user limit.
+    const speaker = `${user}${tag}`;
+    threadText.set(tid, { history: history.replaceAll(user, speaker), newMessages: `[${msgTs}] <@${speaker}> Tester: ${text}` });
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${tid}, ${speaker}, true, ${[msgTs]}, 'running') returning *`;
     return { tid, turn: { ...t, id: Number(t.id) } };
   }
 

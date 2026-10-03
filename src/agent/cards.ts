@@ -31,8 +31,19 @@ export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: C
   const [card] = await sql<CardRow[]>`select * from cards where id = ${cardId}`;
   if (!card) return undefined;
   const rows = await sql<
-    { id: number; title: string; status: RunStatus; isResume: boolean; details: string | null; steerNotes: string[]; output: string | null; error: string | null }[]
-  >`select r.id, s.title, r.status, r.is_resume, r.details, r.steer_notes, r.output, r.error
+    {
+      id: number;
+      title: string;
+      status: RunStatus;
+      isResume: boolean;
+      details: string | null;
+      steerNotes: string[];
+      output: string | null;
+      result: string | null;
+      error: string | null;
+      sources: { url: string; title?: string }[];
+    }[]
+  >`select r.id, s.title, r.status, r.is_resume, r.details, r.steer_notes, r.output, r.result, r.error, r.sources
     from runs r join subagents s on s.id = r.subagent_id where r.card_id = ${cardId} order by r.id`;
   const runs: CardRun[] = rows.map((r) => ({
     id: Number(r.id),
@@ -42,7 +53,9 @@ export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: C
     details: r.details,
     steerNotes: Array.isArray(r.steerNotes) ? r.steerNotes : [],
     output: r.output,
+    result: r.result,
     error: r.error,
+    sources: Array.isArray(r.sources) ? r.sources : [],
   }));
   return { card: { ...card, id: Number(card.id) }, runs };
 }

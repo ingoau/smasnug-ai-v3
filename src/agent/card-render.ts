@@ -1,10 +1,17 @@
 /**
  * Plan card rendering: a pure function of DB state → Slack message (blocks + text). No I/O here.
  */
+import { markdownToRich, type RichTextElement, type RichTextInline } from './rich-text.js';
+
 // Shapes mirror @slack/types PlanBlock / TaskCardBlock (not a direct dependency).
 export interface RichTextBlock {
   type: 'rich_text';
-  elements: { type: 'rich_text_section'; elements: { type: 'text'; text: string }[] }[];
+  elements: RichTextElement[];
+}
+export interface URLSource {
+  type: 'url';
+  url: string;
+  text: string;
 }
 export interface TaskCardBlock {
   type: 'task_card';
@@ -12,6 +19,7 @@ export interface TaskCardBlock {
   title: string;
   details?: RichTextBlock;
   output?: RichTextBlock;
+  sources?: URLSource[];
   status: 'pending' | 'in_progress' | 'complete' | 'error';
 }
 export interface PlanBlock {
@@ -53,9 +61,29 @@ export interface CardRun {
   isResume: boolean;
   details: string | null;
   steerNotes: string[];
+  /** One-line summary. */
   output: string | null;
+  /** Full result text (markdown). */
+  result?: string | null;
   error: string | null;
+  /** URLs the run used (fetch_url targets, web-search sources). */
+  sources?: { url: string; title?: string }[];
 }
+
+/**
+ * How much of each run's result the card shows. Slack: a plan holds at most 50 tasks and a message at most 50
+ * blocks (a plan is one block); no per-task output limit is documented, so we keep the whole card compact and
+ * shrink excerpts as runs pile up.
+ */
+export function outputBudget(runCount: number): { maxChars: number; maxLines: number; sources: number } {
+  if (runCount <= 3) return { maxChars: 600, maxLines: 8, sources: 5 };
+  if (runCount <= 6) return { maxChars: 300, maxLines: 4, sources: 3 };
+  if (runCount <= 12) return { maxChars: 150, maxLines: 2, sources: 2 };
+  return { maxChars: 0, maxLines: 0, sources: 0 };
+}
+
+/** Slack's plan block limit. */
+export const MAX_PLAN_TASKS = 50;
 
 export const STOP_ALL_ACTION = 'card:stop_all';
 const TITLE_MAX = 40;
@@ -81,14 +109,40 @@ function clip(s: string, max: number) {
   return t.length > max ? `${t.slice(0, max - 1)}…` : t;
 }
 
-function richText(text: string): RichTextBlock {
-  return { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text }] }] };
+function richText(text: string, style?: { bold?: boolean }): RichTextBlock {
+  const el: RichTextInline = { type: 'text', text, ...(style ? { style } : {}) };
+  return { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [el] }] };
 }
 
-export function taskFor(run: CardRun): TaskCardBlock {
+function sourceLabel(s: { url: string; title?: string }): string {
+  if (s.title?.trim()) return clip(s.title, 80);
+  try {
+    const u = new URL(s.url);
+    return clip(`${u.hostname.replace(/^www\./, '')}${u.pathname === '/' ? '' : u.pathname}`, 80);
+  } catch {
+    return clip(s.url, 80);
+  }
+}
+
+/** Result output: the summary in bold, then an excerpt of the result within the budget. */
+function resultOutput(run: CardRun, budget: ReturnType<typeof outputBudget>): RichTextBlock {
+  const summary = clip(run.output || 'Done', 200);
+  const head: RichTextElement = { type: 'rich_text_section', elements: [{ type: 'text', text: summary, style: { bold: true } }] };
+  const result = (run.result ?? '').trim();
+  if (!budget.maxChars || !result || result === run.output?.trim()) return { type: 'rich_text', elements: [head] };
+  return { type: 'rich_text', elements: [head, ...markdownToRich(result, { maxChars: budget.maxChars, maxLines: budget.maxLines })] };
+}
+
+export function taskFor(run: CardRun, budget = outputBudget(1)): TaskCardBlock {
   const title = clip(`${run.isResume ? '↻ ' : ''}${run.subagentTitle}`, 120);
   const base = { type: 'task_card' as const, task_id: `run_${run.id}`, title };
   const steer = run.steerNotes.map((n) => `↪ ${clip(n, 80)}`);
+  const sources = (run.sources ?? []).slice(0, budget.sources).map((s) => ({ type: 'url' as const, url: s.url, text: sourceLabel(s) }));
+  const withSources = <T extends TaskCardBlock>(t: T): T => (sources.length ? { ...t, sources } : t);
+  return withSources(taskBody(run, base, steer, budget));
+}
+
+function taskBody(run: CardRun, base: Pick<TaskCardBlock, 'type' | 'task_id' | 'title'>, steer: string[], budget: ReturnType<typeof outputBudget>): TaskCardBlock {
   switch (run.status) {
     case 'queued':
       return { ...base, status: 'pending', details: richText(['Queued', ...steer].join('\n')) };
@@ -97,11 +151,11 @@ export function taskFor(run: CardRun): TaskCardBlock {
       return { ...base, status: 'in_progress', details: richText(lines.join('\n')) };
     }
     case 'complete':
-      return { ...base, status: 'complete', output: richText(clip(run.output || 'Done', 200)) };
+      return { ...base, status: 'complete', output: resultOutput(run, budget) };
     case 'error':
-      return { ...base, status: 'error', details: richText(clip(run.error || 'Failed', 200)) };
+      return { ...base, status: 'error', output: richText(clip(run.error || 'Failed', 200)) };
     case 'cancelled':
-      return { ...base, status: 'error', details: richText('Cancelled') };
+      return { ...base, status: 'error', output: richText('Cancelled') };
   }
 }
 
@@ -133,7 +187,8 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   const sorted = [...runs].sort((a, b) => a.id - b.id);
   const anyActive = sorted.some((r) => isActive(r.status));
   const title = card.frozen ? frozenTitle(card.title, sorted.length) : liveTitle(sorted);
-  const plan: PlanBlock = { type: 'plan', title, tasks: sorted.map(taskFor) };
+  const budget = outputBudget(sorted.length);
+  const plan: PlanBlock = { type: 'plan', title, tasks: sorted.slice(-MAX_PLAN_TASKS).map((r) => taskFor(r, budget)) };
   const blocks: RenderedCard['blocks'] = [];
   const reply = card.replyText;
   if (reply != null) blocks.push({ type: 'markdown', text: reply.length > MAX_MD ? `${reply.slice(0, MAX_MD)}\n\n_[message truncated]_` : reply });

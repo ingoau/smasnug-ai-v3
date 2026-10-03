@@ -157,6 +157,8 @@ Steering a running subagent does not create a card. The steer appears on the ori
 - 
 Resuming an idle subagent is a new run, so it appears on the new turn's card, marked `↻`.
 - 
+Task rows show results, not just a one-liner: a finished run's `output` is its summary in bold plus a markdown→rich_text excerpt of `runs.result` (≤ 600 chars / 8 lines with ≤ 3 runs, 300/4 with ≤ 6, 150/2 with ≤ 12, summary only beyond); failed runs show the reason, cancelled ones "Cancelled". `sources` lists the URLs the run used (`runs.sources`: fetch_url targets and web-search citations, tracking params stripped, deduped; falls back to URLs in the result text), up to 5 (fewer with more runs). Slack documents a 50-task limit per plan (enforced: latest 50) and 50 blocks per message; no per-task output limit is documented.
+- 
 Cards are updated with `chat.update`, never a held-open stream. The message is a pure render of task state from the DB; children write progress to the DB and schedule a re-render.
 - 
 Updates are coalesced per thread to at most one every 1–2 seconds, always rendering the full latest state. Always set `text` alongside `blocks`.

@@ -198,3 +198,36 @@ export function isNearDuplicate(a: string, b: string): boolean {
   for (const w of wa) if (wb.has(w)) inter++;
   return inter / (wa.size + wb.size - inter) >= 0.7;
 }
+
+/** Sources stored per run (the card shows fewer). */
+const MAX_SOURCES = 10;
+
+export interface RunSource {
+  url: string;
+  title?: string;
+}
+
+/** Add a source if it's an http(s) URL not seen yet (ignoring the fragment and a trailing slash). Returns true if added. */
+export function addSource(list: RunSource[], url: unknown, title?: unknown): boolean {
+  if (typeof url !== 'string' || list.length >= MAX_SOURCES) return false;
+  let u: URL;
+  try {
+    u = new URL(url.trim());
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  u.hash = '';
+  // Tracking parameters (search engines append utm_source=openai etc.).
+  for (const k of [...u.searchParams.keys()]) if (/^(utm_|trk$|ref_src$)/.test(k)) u.searchParams.delete(k);
+  u.pathname = u.pathname.replace(/[.,;:]+$/, ''); // citation URLs sometimes carry the sentence's punctuation
+  const key = u.toString().replace(/\/$/, '');
+  if (list.some((s) => s.url.replace(/\/$/, '') === key)) return false;
+  list.push({ url: u.toString().slice(0, 2000), ...(typeof title === 'string' && title.trim() ? { title: title.trim().slice(0, 200) } : {}) });
+  return true;
+}
+
+/** URLs written in a result text (markdown links and bare URLs), in order. */
+export function urlsInText(text: string): string[] {
+  return [...text.matchAll(/https?:\/\/[^\s<>()\[\]"'`]+[^\s<>()\[\]"'`.,;:!?*_]/g)].map((m) => m[0]);
+}

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelMessage } from 'ai';
-import { chooseDelivery, clipTokens, compactHistory, describeToolStep, isNearDuplicate, splitResult } from './util.js';
+import { addSource, urlsInText, chooseDelivery, clipTokens, compactHistory, describeToolStep, isNearDuplicate, splitResult, type RunSource } from './util.js';
 
 describe('chooseDelivery', () => {
   it('streams when nothing runs, posts whole while runs are active, streams synthesis', () => {
@@ -83,5 +83,28 @@ describe('isNearDuplicate', () => {
     expect(isNearDuplicate('On it — digging through the docs.', 'The Pico 2 has an RP2350 with 520 KB SRAM and costs $5.')).toBe(false);
     expect(isNearDuplicate('ok', 'sure')).toBe(false);
     expect(isNearDuplicate('', 'anything')).toBe(false);
+  });
+});
+
+describe('addSource', () => {
+  it('keeps http(s) URLs once (ignoring fragment / trailing slash), with titles, capped', () => {
+    const list: RunSource[] = [];
+    expect(addSource(list, 'https://www.raspberrypi.com/products/pico-2/', 'Pico 2')).toBe(true);
+    expect(addSource(list, 'https://www.raspberrypi.com/products/pico-2#specs')).toBe(false);
+    expect(addSource(list, 'javascript:alert(1)')).toBe(false);
+    expect(addSource(list, 'not a url')).toBe(false);
+    expect(addSource(list, 42)).toBe(false);
+    expect(list).toEqual([{ url: 'https://www.raspberrypi.com/products/pico-2/', title: 'Pico 2' }]);
+    for (let i = 0; i < 20; i++) addSource(list, `https://example.com/${i}`);
+    expect(list).toHaveLength(10);
+    const l2: RunSource[] = [];
+    addSource(l2, 'https://nodejs.org/en/download/current?trk=article&utm_source=openai&v=1');
+    expect(l2[0]!.url).toBe('https://nodejs.org/en/download/current?v=1');
+    addSource(l2, 'https://nodejs.org/en/download.?utm_source=openai');
+    expect(l2[1]!.url).toBe('https://nodejs.org/en/download');
+  });
+
+  it('finds URLs in result text', () => {
+    expect(urlsInText('See [docs](https://a.com/x). Also https://b.org/y, and **https://c.net/z**.')).toEqual(['https://a.com/x', 'https://b.org/y', 'https://c.net/z']);
   });
 });

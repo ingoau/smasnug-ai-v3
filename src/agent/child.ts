@@ -16,7 +16,7 @@ import { scheduleCardRender } from './cards.js';
 import { childSystemPrompt } from './prompts/child.js';
 import { failRuns, finishRun, type RunRow, type SubagentRow } from './subagents.js';
 import { WEB_SEARCH_TOOL, WebSearchMeter } from '../tools/web-search.js';
-import { compactHistory, describeToolStep, oneLine, splitResult } from './util.js';
+import { addSource, compactHistory, describeToolStep, oneLine, splitResult, urlsInText, type RunSource } from './util.js';
 
 /** Step cap per run (each web-search step costs ~11–20k input tokens; the token cap applies too). */
 const MAX_STEPS = 25;
@@ -95,6 +95,14 @@ export async function processSubagentRun(runId: number): Promise<void> {
   ];
   let tokens = 0;
   let lastDetails = '';
+  const sources: RunSource[] = Array.isArray(run.sources) ? [...run.sources] : [];
+  let sourcesDirty = false;
+  const saveSources = async () => {
+    if (!sourcesDirty) return;
+    sourcesDirty = false;
+    await sql`update runs set sources = ${sql.json(sources as any)} where id = ${run.id} and status = 'running'`;
+    await scheduleCardRender(run.cardId);
+  };
 
   const checkCancel = async () => {
     if (cancelRequested) return true;
@@ -151,11 +159,16 @@ export async function processSubagentRun(runId: number): Promise<void> {
       for await (const part of result.fullStream) {
         if (part.type === 'raw') meter.observeChunk(part);
         else if (part.type === 'text-delta') stepText += part.text;
-        else if (part.type === 'source' && !lastSearchNoted) {
-          lastSearchNoted = true;
-          await setDetails('Searching the web');
+        else if (part.type === 'source') {
+          if (part.sourceType === 'url' && addSource(sources, part.url, part.title)) sourcesDirty = true;
+          if (!lastSearchNoted) {
+            lastSearchNoted = true;
+            await setDetails('Searching the web');
+          }
+        } else if (part.type === 'tool-call') {
+          if (part.toolName === 'fetch_url' && addSource(sources, (part.input as any)?.url)) sourcesDirty = true;
+          await setDetails(describeToolStep(part.toolName, part.input));
         }
-        else if (part.type === 'tool-call') await setDetails(describeToolStep(part.toolName, part.input));
         else if (part.type === 'finish-step') {
           finishReason = part.finishReason;
           tokens += part.usage.totalTokens ?? (part.usage.inputTokens ?? 0) + (part.usage.outputTokens ?? 0);
@@ -170,9 +183,15 @@ export async function processSubagentRun(runId: number): Promise<void> {
         else if (part.type === 'abort') throw controller.signal.reason ?? new Error('aborted');
       }
       messages.push(...(await result.responseMessages));
+      await saveSources().catch((err) => log.warn({ err, runId: run.id }, 'saving run sources failed'));
       if (finishReason === 'tool-calls' && !overBudget) continue;
 
       finalText = stepText;
+      // No citations / fetches recorded: fall back to the URLs the result itself cites.
+      if (sources.length === 0) {
+        for (const u of urlsInText(finalText)) if (addSource(sources, u)) sourcesDirty = true;
+        await saveSources().catch((err) => log.warn({ err, runId: run.id }, 'saving run sources failed'));
+      }
       const { result: full, output } = splitResult(finalText);
       const done = await finishRun(
         run,

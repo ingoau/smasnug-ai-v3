@@ -48,6 +48,7 @@ export interface RunRow {
   tokens: number;
   model: string | null;
   workerId: string | null;
+  sources?: { url: string; title?: string }[];
 }
 
 /** Thrown from tools as a model-facing error (becomes a tool-error part the model can read). */
