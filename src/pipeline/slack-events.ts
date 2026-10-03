@@ -3,6 +3,7 @@ import type { Job } from 'bullmq';
 import { log } from '../log.js';
 import { handleAppHomeOpened, handleInteractive, handleSlash } from './interactions.js';
 import { handleMessageEvent } from './intake.js';
+import { handleAgentSessionStopped } from './stop.js';
 
 export interface SlackEnvelopeJob {
   kind: 'event' | 'interactive' | 'slash';
@@ -20,6 +21,8 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
           return handleMessageEvent(event);
         case 'app_home_opened':
           return handleAppHomeOpened(event);
+        case 'agent_session_stopped':
+          return handleAgentSessionStopped(event);
         case 'app_mention':
           return; // duplicates the `message` event, which is what triggers turns
         default:

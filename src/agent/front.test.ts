@@ -14,6 +14,8 @@ const h = vi.hoisted(() => ({
   events: [] as { type: string; payload: any }[],
   activeRuns: 0,
   model: undefined as any,
+  /** Optional per-call hook; may throw to simulate a Slack error. */
+  slackHook: undefined as undefined | ((method: string, args: any) => void),
 }));
 
 vi.mock('../db/index.js', () => {
@@ -24,8 +26,10 @@ vi.mock('../db/index.js', () => {
 });
 vi.mock('../core/redis.js', () => ({ redis: {}, bullConnection: () => ({}) }));
 vi.mock('../core/slack.js', () => ({
+  slackErrorCode: (err: any) => err?.data?.error,
   slackCall: async (method: string, args: any) => {
     h.slack.push({ method, args });
+    h.slackHook?.(method, args);
     if (method === 'auth.test') return { ok: true, team_id: 'T1' };
     if (method === 'users.info') return { ok: true, user: { real_name: 'Tess', tz: 'Europe/Berlin' } };
     return { ok: true, ts: '200.000001' };
@@ -111,6 +115,7 @@ beforeEach(() => {
   h.slack = [];
   h.events = [];
   h.activeRuns = 0;
+  h.slackHook = undefined;
 });
 
 describe('runFrontTurn (mock model)', () => {
@@ -182,6 +187,68 @@ describe('runFrontTurn (mock model)', () => {
     await runFrontTurn(turn({ id: 11 }), io().io);
     const streamed = h.slack.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => c.args.markdown_text).join('');
     expect(streamed).toBe('Russell won the race. Next season starts in March.');
+  });
+});
+
+describe('runFrontTurn: native stop', () => {
+  const slackError = (code: string) => Object.assign(new Error(code), { data: { ok: false, error: code } });
+
+  it('ends at the next step boundary after stop, with no fallback', async () => {
+    h.activeRuns = 1; // post mode
+    h.model = mockModel([replyStep('first'), replyStep('second'), textStep('')]);
+    const { io: tio } = io();
+    let stop = false;
+    // Baseline: without a stop, all three steps run.
+    await runFrontTurn(turn({ id: 21 }), { ...tio, stopRequested: async () => stop });
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(3);
+
+    h.slack = [];
+    h.events = [];
+    h.model = mockModel([replyStep('first'), replyStep('second'), textStep('')]);
+    stop = false;
+    h.slackHook = (method) => {
+      if (method === 'chat.postMessage') stop = true; // user presses stop right after the first reply lands
+    };
+    await runFrontTurn(turn({ id: 22 }), { ...io().io, stopRequested: async () => stop });
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(1);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['first']);
+    expect(h.events.some((e) => e.type === 'turn_stopped')).toBe(true);
+  });
+
+  it('does not call the model when stop was already requested, and posts no fallback', async () => {
+    h.model = mockModel([replyStep('hello')]);
+    await runFrontTurn(turn({ id: 23 }), { ...io().io, stopRequested: async () => true });
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(0);
+    expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
+  });
+
+  it('a stream Slack halted is not re-posted, and the reply tool reports the stop', async () => {
+    const text = 'This is a long streamed answer that the user will stop halfway through, sorry.';
+    h.model = mockModel([replyStep(text, 4), textStep('')], 30);
+    let stop = false;
+    h.slackHook = (method) => {
+      if (method === 'chat.appendStream') {
+        stop = true;
+        throw slackError('message_not_in_streaming_state');
+      }
+      if (method === 'chat.stopStream' && stop) throw slackError('message_not_in_streaming_state');
+    };
+    await expect(runFrontTurn(turn({ id: 24 }), { ...io().io, stopRequested: async () => stop })).resolves.toBeUndefined();
+    const chat = h.slack.map((c) => c.method).filter((m) => m.startsWith('chat.'));
+    expect(chat[0]).toBe('chat.startStream');
+    expect(chat).not.toContain('chat.postMessage');
+    expect(h.events.find((e) => e.type === 'reply')?.payload).toMatchObject({ stopped: true });
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(1);
+  });
+
+  it('a halted stream is not re-posted even before the stop flag is visible', async () => {
+    const text = 'Another long streamed answer, halted by Slack before our worker saw the stop event.';
+    h.model = mockModel([replyStep(text, 4), textStep('')], 30);
+    h.slackHook = (method) => {
+      if (method === 'chat.appendStream' || method === 'chat.stopStream') throw slackError('message_not_in_streaming_state');
+    };
+    await runFrontTurn(turn({ id: 25 }), { ...io().io, stopRequested: async () => false });
+    expect(h.slack.map((c) => c.method)).not.toContain('chat.postMessage');
   });
 });
 

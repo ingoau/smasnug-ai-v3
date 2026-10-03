@@ -252,6 +252,77 @@ describe.skipIf(!infra)('pipeline integration', () => {
     });
   });
 
+  describe('native stop (agent_session_stopped)', () => {
+    const stopEnvelope = (user = 'U1', eventTs = '1700000099.000001') =>
+      job({
+        kind: 'event' as const,
+        body: { event_id: `Ev${Math.random()}`, event: { type: 'agent_session_stopped', channel: C, thread_ts: T, user, event_ts: eventTs, streaming_message_ts: ['1700000000.000900'] } },
+      });
+
+    it('cancels runs, drops the user\'s pending turns, disengages, sets active and confirms once', async () => {
+      const { stopKey } = await import('./stop.js');
+      await makeThread();
+      await scheduler.scheduleMessages(THREAD, 'U1', ['1.1'], true);
+      await scheduler.scheduleMessages(THREAD, 'U2', ['1.2'], false);
+      await debounce.addToBatch(THREAD, 'U1', '1.3', 'direct');
+      const [card] = await sql`insert into cards (thread_id, channel_id) values (${THREAD}, ${C}) returning id::int as id`;
+      await sql`insert into subagents (id, thread_id, owner_id, title, status) values ('sa_q', ${THREAD}, 'U1', 'queued one', 'running'), ('sa_r', ${THREAD}, 'U2', 'running one', 'running')`;
+      await sql`insert into runs (subagent_id, thread_id, card_id, instructions, status) values ('sa_q', ${THREAD}, ${card!.id}, 'x', 'queued'), ('sa_r', ${THREAD}, ${card!.id}, 'y', 'running')`;
+
+      await processSlackEvent(stopEnvelope());
+
+      expect((await turns()).map((t) => [t.authorId, t.status])).toEqual([
+        ['U1', 'cancelled'],
+        ['U2', 'pending'],
+      ]);
+      expect(await debounce.takeBatch({ threadId: THREAD, authorId: 'U1', seq: 1 })).toBeNull();
+      const runs = await sql`select subagent_id, status, cancel_requested from runs order by id`;
+      expect(runs.map((r) => [r.subagentId, r.status, r.cancelRequested])).toEqual([
+        ['sa_q', 'cancelled', true],
+        ['sa_r', 'running', true],
+      ]);
+      expect((await sql`select engaged from threads where id = ${THREAD}`)[0]!.engaged).toBe(false);
+      expect(Number(await redis.get(stopKey(THREAD)))).toBeGreaterThan(Date.now() - 5000);
+      const calls = await fakeCalls();
+      expect(calls.filter((c) => c.method === 'agents.sessions.setStatus').map((c) => c.args)).toEqual([
+        { channel_id: C, thread_ts: T, status: 'active', initiator_user_id: 'U1' },
+      ]);
+      expect(calls.filter((c) => c.method === 'chat.postMessage').map((c) => c.args)).toEqual([{ channel: C, thread_ts: T, text: 'Stopped.' }]);
+      const types = (await sql`select type from thread_events where thread_id = ${THREAD} order by id`).map((e) => e.type);
+      expect(types).toEqual(expect.arrayContaining(['stop_all', 'disengaged', 'session_stopped']));
+
+      // A redelivered event (same event_ts) doesn't post a second confirmation.
+      await processSlackEvent(stopEnvelope());
+      expect((await fakeCalls()).filter((c) => c.method === 'chat.postMessage')).toHaveLength(1);
+    });
+
+    it('the running turn sees stopRequested; turns started afterwards do not', async () => {
+      await makeThread();
+      await scheduler.scheduleMessages(THREAD, 'U1', ['1.1'], true);
+      await scheduler.scheduleMessages(THREAD, 'U2', ['1.2'], true);
+      const seen: boolean[] = [];
+      run
+        .mockImplementationOnce(async (_turn, io) => {
+          seen.push(await io.stopRequested!());
+          await processSlackEvent(stopEnvelope('U1'));
+          seen.push(await io.stopRequested!());
+        })
+        .mockImplementationOnce(async (_turn, io) => {
+          seen.push(await io.stopRequested!());
+        });
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(seen).toEqual([false, true, false]);
+      expect((await turns()).map((t) => t.status)).toEqual(['done', 'done']);
+    });
+
+    it('works without a stored thread (nothing to cancel) and ignores malformed events', async () => {
+      await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'agent_session_stopped', channel: 'D9', user: 'U1' } } }));
+      expect(await fakeCalls()).toHaveLength(0);
+      await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'agent_session_stopped', channel: 'D9', thread_ts: '1.5', user: 'U1', event_ts: '2.0' } } }));
+      expect((await fakeCalls()).map((c) => c.method)).toEqual(['agents.sessions.setStatus', 'chat.postMessage']);
+    });
+  });
+
   describe('debounce', () => {
     it('only the latest job takes the batch; deletions can empty it', async () => {
       await makeThread();

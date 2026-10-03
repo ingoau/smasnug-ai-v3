@@ -4,7 +4,7 @@
  * posted whole with a markdown block. Files are uploaded after the message (after stopStream when streaming).
  */
 import { appendEvent } from '../core/events.js';
-import { slackCall } from '../core/slack.js';
+import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import { uploadFiles, type OutgoingFile } from './files.js';
 import { stripCitationMarkers } from '../tools/web-search.js';
@@ -25,7 +25,13 @@ export interface ReplyTarget {
   recipientUserId: string;
   /** Count of queued/running runs in the thread right now. */
   activeRuns: () => Promise<number>;
+  /** True once the user pressed the native stop button: nothing more gets delivered. */
+  stopRequested?: () => Promise<boolean>;
 }
+
+/** Stream errors meaning Slack is no longer streaming this message (e.g. the user pressed stop). */
+const HALTED_STREAM = /stream|not_in_streaming_state/;
+const STOPPED_RESULT = 'Not delivered: the user pressed stop. Do not retry; end your turn.';
 
 interface ReplyEntry {
   index: number;
@@ -40,6 +46,8 @@ interface ReplyEntry {
   chain: Promise<void>;
   timer: NodeJS.Timeout | null;
   failed: boolean;
+  /** Slack stopped the stream itself (native stop button): never post the rest. */
+  halted: boolean;
 }
 
 let teamIdCache: string | undefined;
@@ -90,7 +98,7 @@ export class ReplyManager {
       (n) => chooseDelivery({ turnKind: this.t.turnKind, runningRuns: n }),
       () => 'post' as const,
     );
-    e = { index: this.nextIndex++, mode, buf: '', sent: 0, streamed: '', streamTs: null, stopped: false, chain: Promise.resolve(), timer: null, failed: false };
+    e = { index: this.nextIndex++, mode, buf: '', sent: 0, streamed: '', streamTs: null, stopped: false, chain: Promise.resolve(), timer: null, failed: false, halted: false };
     this.entries.set(toolCallId, e);
     return e;
   }
@@ -112,7 +120,7 @@ export class ReplyManager {
 
   /** Send any newly decoded text from the partial arguments to the stream. */
   private async flush(e: ReplyEntry, finalText?: string) {
-    if (e.failed || e.stopped) return;
+    if (e.failed || e.stopped || e.halted) return;
     if ((await e.mode) !== 'stream') return;
     const value = finalText ?? streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '');
     if (value.length <= e.sent) return;
@@ -143,8 +151,18 @@ export class ReplyManager {
   }
 
   private onStreamError(e: ReplyEntry, err: unknown) {
-    log.warn({ err, index: e.index }, 'reply stream failed; will fall back to posting');
     e.failed = true;
+    const code = slackErrorCode(err);
+    if (e.streamTs && code && HALTED_STREAM.test(code)) {
+      e.halted = true;
+      log.info({ code, index: e.index }, 'reply stream halted by Slack (stop button?)');
+    } else {
+      log.warn({ err, index: e.index }, 'reply stream failed; will fall back to posting');
+    }
+  }
+
+  private async isStopped(): Promise<boolean> {
+    return this.t.stopRequested ? this.t.stopRequested().catch(() => false) : false;
   }
 
   /** Called from the tool's execute with the complete, validated input. */
@@ -156,6 +174,12 @@ export class ReplyManager {
       e.timer = null;
     }
     await e.chain.catch(() => {});
+    if (e.halted || (await this.isStopped())) {
+      // Close our side quietly (Slack may already have stopped it) and deliver nothing else.
+      if (e.streamTs) await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after stop failed'));
+      await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, stopped: true, streamed: e.streamed });
+      return STOPPED_RESULT;
+    }
     const mode = await e.mode;
     let delivered: 'streamed' | 'posted' = 'posted';
     if (mode === 'stream' && !e.failed && text.length <= MAX_MD) {
@@ -228,15 +252,19 @@ export class ReplyManager {
     );
   }
 
-  /** On a model/API failure: close any open stream with a short error note. Returns true if one was open. */
-  async abortOpenStreams(note: string): Promise<boolean> {
+  /** On a model/API failure (or stop): close any open stream, with a short note if given. Returns true if one was open. */
+  async abortOpenStreams(note?: string): Promise<boolean> {
     let any = false;
     for (const e of this.entries.values()) {
       if (e.timer) clearTimeout(e.timer);
       await e.chain.catch(() => {});
+      if (e.halted) {
+        any = true; // visible, and Slack already stopped it
+        continue;
+      }
       if (e.streamTs && !e.stopped) {
         any = true;
-        await this.stopStream(e, `\n\n${note}`).catch((err) => log.warn({ err }, 'stopStream failed'));
+        await this.stopStream(e, note ? `\n\n${note}` : undefined).catch((err) => log.warn({ err }, 'stopStream failed'));
       }
     }
     return any;

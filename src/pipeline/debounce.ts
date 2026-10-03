@@ -65,3 +65,8 @@ export async function takeBatch(job: DebounceJob): Promise<{ ts: string; reason:
   for (let i = 0; i < res.length; i += 2) out.push({ ts: res[i]!, reason: res[i + 1] as BatchReason });
   return out.sort((a, b) => compareTs(a.ts, b.ts));
 }
+
+/** Drop the author's open batch (native stop): the pending debounce job then finds nothing to take. */
+export async function clearBatch(threadId: string, authorId: string): Promise<void> {
+  await redis.del(batchKey(threadId, authorId));
+}

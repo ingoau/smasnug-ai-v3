@@ -28,6 +28,11 @@ export interface TurnIO {
   setPhase(phase: 'tools' | 'final'): Promise<void>;
   /** True when this turn was triggered by a mention or DM (status indicator allowed). */
   isMention: boolean;
+  /**
+   * True once the user pressed Slack's native stop button for this thread while this turn was running. The turn
+   * then ends at its next step boundary, delivers no further replies and posts no fallback.
+   */
+  stopRequested?(): Promise<boolean>;
 }
 
 const MAX_STEPS = 12;
@@ -179,6 +184,11 @@ function latestTs(ts: string[]): string | undefined {
 export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const { channelId, threadTs } = parseThreadId(turn.threadId);
   const turnId = Number(turn.id);
+  let stopped = false;
+  const checkStop = async (): Promise<boolean> => {
+    if (!stopped && io.stopRequested) stopped = await io.stopRequested().catch((err) => (log.warn({ err }, 'stopRequested check failed'), false));
+    return stopped;
+  };
   const replies = new ReplyManager({
     threadId: turn.threadId,
     channelId,
@@ -187,6 +197,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     turnKind: turn.kind,
     recipientUserId: turn.authorId,
     activeRuns: () => activeRunsInThread(turn.threadId),
+    stopRequested: checkStop,
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
   const state: FrontTurnState = { turn, threadId: turn.threadId, channelId, threadTs, replies, visible: new Set(), cardId: null };
@@ -213,13 +224,15 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 
   let failed: unknown;
   try {
+    if (await checkStop()) throw new TurnStopped();
     const result = streamText({
       model: openrouter(MODELS.front),
       providerOptions: { openrouter: { reasoning: { effort: 'low' }, usage: { include: true } } },
       instructions: system,
       messages,
       tools,
-      stopWhen: stepCountIs(MAX_STEPS),
+      // Native stop: end at the next step boundary.
+      stopWhen: [stepCountIs(MAX_STEPS), () => checkStop()],
       includeRawChunks: true,
       onStepFinish: async (stepResult) => {
         meter.observeStep(stepResult);
@@ -291,7 +304,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       }
     }
   } catch (err) {
-    failed = err;
+    if (!(err instanceof TurnStopped)) failed = err;
   } finally {
     // The card goes in right after this turn's replies (or alone if there was no reply).
     if (state.cardId) await postCard(state.cardId).catch((err) => log.error({ err }, 'postCard failed'));
@@ -299,6 +312,14 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       await sql`update runs set reported = true where id = any(${built.synthesisRunIds}::bigint[])`.catch(() => {});
       await freezeCard(turn.cardId).catch((err) => log.error({ err }, 'freezeCard failed'));
     }
+  }
+
+  if (stopped || (await checkStop())) {
+    // The user pressed stop: the pipeline confirms ("Stopped."). Close anything still open quietly; no error note,
+    // no fallback. Streams Slack already halted just make stopStream fail, which is fine.
+    await replies.abortOpenStreams().catch(() => {});
+    await appendEvent(turn.threadId, 'turn_stopped', 'system', { turnId, ...(failed ? { error: String((failed as any)?.message ?? failed) } : {}) }).catch(() => {});
+    return;
   }
 
   if (failed) {
@@ -319,6 +340,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, text: FALLBACK_TEXT });
   }
 }
+
+class TurnStopped extends Error {}
 
 function needsFallback(turn: TurnRow, io: TurnIO, allCancelled: boolean): boolean {
   // A synthesis where everything was cancelled (user said stop) may stay silent.

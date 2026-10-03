@@ -213,6 +213,32 @@ export async function cancelCardRuns(cardId: number, actor: string): Promise<voi
   await maybeSynthesize(cardId);
 }
 
+/**
+ * Native stop / "stop everything" for a thread: cancel every active run in it (queued → cancelled now, running →
+ * cancel_requested, stops at the next step), like "Stop all" on each card. Returns the affected card ids.
+ */
+export async function cancelThreadRuns(threadId: string, actor: string): Promise<number[]> {
+  const rows = await sql.begin(async (tx) => {
+    const queued = await tx<{ subagentId: string; cardId: number | null }[]>`
+      update runs set status = 'cancelled', cancel_requested = true, finished_at = now()
+      where thread_id = ${threadId} and status = 'queued' returning subagent_id, card_id`;
+    for (const q of queued) {
+      await tx`update subagents set status = 'cancelled' where id = ${q.subagentId}
+               and not exists (select 1 from runs where subagent_id = ${q.subagentId} and status = 'running')`;
+    }
+    const running = await tx<{ cardId: number | null }[]>`
+      update runs set cancel_requested = true where thread_id = ${threadId} and status = 'running' returning card_id`;
+    return [...queued, ...running];
+  });
+  const cards = [...new Set(rows.map((r) => Number(r.cardId)).filter(Boolean))];
+  if (rows.length) await appendEvent(threadId, 'stop_all', actor, { thread: true, cards, runs: rows.length });
+  for (const c of cards) {
+    await scheduleCardRender(c);
+    await maybeSynthesize(c);
+  }
+  return cards;
+}
+
 export type RunOutcome =
   | { status: 'complete'; result: string; output: string }
   | { status: 'error'; error: string }

@@ -184,3 +184,22 @@ export async function runningTurnIds(threadId: string): Promise<number[]> {
   const rows = await sql<{ id: number }[]>`select id::int as id from turns where thread_id = ${threadId} and status = 'running'`;
   return rows.map((r) => r.id);
 }
+
+/**
+ * Native stop: drop the author's not-yet-started user turns in this thread, and the unconsumed inbox rows of their
+ * running turn (so finishTurn doesn't turn them into a new turn). Synthesis turns are kept: they freeze the plan card.
+ * Returns the cancelled turn ids.
+ */
+export async function dropPendingUserTurns(threadId: string, authorId: string): Promise<number[]> {
+  return sql.begin(async (tx) => {
+    await lockThread(tx, threadId);
+    const rows = await tx<{ id: number }[]>`
+      update turns set status = 'cancelled', finished_at = now()
+      where thread_id = ${threadId} and author_id = ${authorId} and kind = 'user' and status = 'pending'
+      returning id::int as id`;
+    await tx`
+      update thread_inbox set consumed_at = now() where consumed_at is null
+        and turn_id in (select id from turns where thread_id = ${threadId} and author_id = ${authorId} and status = 'running')`;
+    return rows.map((r) => r.id);
+  });
+}
