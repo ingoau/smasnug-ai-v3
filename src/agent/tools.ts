@@ -9,7 +9,6 @@ import { sql } from '../db/index.js';
 import { registerTool } from '../core/tools.js';
 import { cancelSubagent, messageSubagent, spawnSubagent } from './subagents.js';
 import { MAX_BUTTONS, MAX_LABEL_CHARS } from './reply-buttons.js';
-import { retractReaction } from './turn-guards.js';
 import { turnState } from './turn-state.js';
 
 const fileSchema = z.object({
@@ -28,6 +27,18 @@ export const buttonsSchema = z
   .describe(
     `Optional quick-reply buttons under the message, only when you ask the speaker a question with a few clear options. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars each), each exactly what the user would reply; a press posts that label as their message. Omit for normal answers.`,
   );
+
+registerTool({
+  name: 'end_turn',
+  roles: ['front'],
+  build: () =>
+    tool({
+      description:
+        "End your turn. Call it when you've done everything you want to do this turn (you can call it in the same step as your last reply or reaction). Nothing is shown to anyone.",
+      inputSchema: z.object({}),
+      execute: async () => 'Turn ended.',
+    }),
+});
 
 registerTool({
   name: 'reply',
@@ -52,8 +63,7 @@ registerTool({
         const res = await s.replies.finish(toolCallId, text, files, buttons);
         if (res.startsWith('Replied')) {
           s.visible.add('reply');
-          await retractReaction(s);
-          return `${res} Don't send another reply unless you have something new; end your turn when done.`;
+          return `${res} Don't send another reply unless you have something new; call end_turn when you're done.`;
         } else if (s.replies.anyVisible) s.visible.add('reply'); // e.g. a stream the user stopped halfway
         return res;
       },
@@ -91,7 +101,7 @@ registerTool({
         return {
           subagent_id: r.subagentId,
           status: 'queued',
-          note: 'Plan card will be posted below your reply. Do not research this yourself or answer it now; at most one short acknowledgement (if you have not replied yet), then end your turn. You get the results in a later turn.',
+          note: 'Plan card will be posted below your reply. Do not research this yourself or answer it now; at most one short acknowledgement (if you have not replied yet), then call end_turn. You get the results in a later turn.',
         };
       },
     }),

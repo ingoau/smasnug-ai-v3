@@ -102,7 +102,7 @@ thread's first text is within ~0.1s of the single-thread number; subagent runs s
 | Debounce window 300ms for messages that skip the gate (DM, mention, two-party, stop); 1s for gated, 3s while subagents run | −0.7s |
 | Debounce fired by an in-process timer (delayed job = crash-safe backup, +1.5s) | −0–100ms (Redis expires blocking timeouts on its 10Hz cron) |
 | No conversations.replies backfill when the thread's parent is the turn's own message; channel-context reads in parallel | −1 Slack round trip (DMs); mentions −1 |
-| Loop ends after a reply-only step (unless new inbox messages, or the reply announces more work: "on it", "let me check"…) | turn end −1.3–2.5s (no wrap-up model call) |
+| ~~Loop ends after a reply-only step (heuristic)~~ replaced: the model calls `end_turn`, usually in the same step as its reply, so the turn still ends without a wrap-up model call | turn end −1.3 s when the model ends in the reply step |
 | First stream flush as soon as ~8 chars are there (80ms cap), then 250ms coalescing | first text −0.2–0.4s |
 | Redundant inbox-push transaction skipped in debounce fire | −~10ms |
 | Per-channel Slack limiter only counts message-creating calls; Postgres pool 10 → 20 | headroom for many threads in one DM channel |

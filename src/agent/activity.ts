@@ -27,7 +27,7 @@ const LABELS: Record<string, string> = {
 };
 
 /** Tools that only respond; they never show or change the indicator. */
-const RESPONDING = new Set(['reply', 'react', 'unreact', 'search_emojis']);
+const RESPONDING = new Set(['reply', 'react', 'unreact', 'search_emojis', 'end_turn']);
 /** Tools that must stay invisible in the thread (report_user is never hinted at). */
 const SILENT = new Set(['report_user']);
 

@@ -14,7 +14,7 @@ import { uploadFiles, type OutgoingFile } from './files.js';
 import { stripCitationMarkers } from '../tools/web-search.js';
 import { extractPartialString } from './partial-json.js';
 import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guidelines.js';
-import { chooseDelivery, isNearDuplicate, type DeliveryMode } from './util.js';
+import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type ButtonsActionsBlock } from './reply-buttons.js';
 import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 
@@ -27,9 +27,7 @@ const FIRST_FLUSH_MS = 80;
 const MAX_MD = 11_500; // markdown limit is 12k chars per block / stream call
 const MAX_TEXT = 3_000; // `text` fallback
 /** A later reply in a turn is held back until this many chars arrived, so it can be checked for duplication first. */
-const HOLD_CHARS = 160;
-export const EMPTY_RESULT = 'Not posted: the reply was empty. To stay silent, just end your turn.';
-export const DUPLICATE_RESULT = "Not posted: nearly identical to a reply you already sent this turn. Don't repeat yourself; end your turn.";
+export const EMPTY_RESULT = 'Not posted: the reply was empty. To stay silent, call end_turn.';
 
 export interface ReplyTarget {
   threadId: string;
@@ -43,15 +41,13 @@ export interface ReplyTarget {
   activeRuns: () => Promise<number>;
   /** True once the user pressed the native stop button: nothing more gets delivered. */
   stopRequested?: () => Promise<boolean>;
-  /** Returns a model-facing reason when a new reply must not be delivered (checked when it starts and before posting). */
-  blockReply?: () => string | null;
   /** Latency instrumentation: first reply delta, stream start/stop, post. */
   timing?: TurnTiming;
 }
 
 /** Stream errors meaning Slack is no longer streaming this message (e.g. the user pressed stop). */
 const HALTED_STREAM = /stream|not_in_streaming_state/;
-const STOPPED_RESULT = 'Not delivered: the user pressed stop. Do not retry; end your turn.';
+const STOPPED_RESULT = 'Not delivered: the user pressed stop. Do not retry; call end_turn.';
 
 interface ReplyEntry {
   index: number;
@@ -129,7 +125,7 @@ export class ReplyManager {
       (n) => chooseDelivery({ turnKind: this.t.turnKind, runningRuns: n }),
       () => 'post' as const,
     );
-    e = { index: this.nextIndex++, mode, buf: '', sent: 0, streamed: '', streamTs: null, stopped: false, chain: Promise.resolve(), timer: null, failed: false, halted: false, dropped: this.t.blockReply?.() ?? null };
+    e = { index: this.nextIndex++, mode, buf: '', sent: 0, streamed: '', streamTs: null, stopped: false, chain: Promise.resolve(), timer: null, failed: false, halted: false, dropped: null };
     this.entries.set(toolCallId, e);
     return e;
   }
@@ -170,14 +166,6 @@ export class ReplyManager {
     // Group pings (@channel/@here/@everyone, user groups) are neutralised: the bot never notifies a group.
     const value = finalText ?? broadcastSafePrefix(streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? ''));
     if (value.length <= e.sent) return;
-    if (!e.streamTs && finalText === undefined && this.deliveredTexts.length) {
-      // A later reply in this turn: don't start streaming until it can be compared with the earlier ones.
-      if (value.length < HOLD_CHARS) return;
-      if (this.isDuplicate(value)) {
-        e.dropped = DUPLICATE_RESULT;
-        return;
-      }
-    }
     if (e.sent + (value.length - e.sent) > MAX_MD) return; // too long to stream further; finish() handles overflow
     const piece = value.slice(e.sent);
     if (await this.isStopped()) {
@@ -223,10 +211,6 @@ export class ReplyManager {
     }
   }
 
-  private isDuplicate(text: string): boolean {
-    return this.deliveredTexts.some((prev) => isNearDuplicate(text, prev));
-  }
-
   private async isStopped(): Promise<boolean> {
     return this.t.stopRequested ? this.t.stopRequested().catch(() => false) : false;
   }
@@ -247,9 +231,8 @@ export class ReplyManager {
       return STOPPED_RESULT;
     }
     if (!e.streamTs) {
-      // Nothing visible yet: an empty, blocked or repeated reply is dropped instead of posted.
-      const empty = !text.trim() && !files?.length ? EMPTY_RESULT : null;
-      const reason = empty ?? e.dropped ?? this.t.blockReply?.() ?? (this.isDuplicate(text) ? DUPLICATE_RESULT : null);
+      // Nothing visible yet: an empty reply has nothing to post (Slack rejects empty messages).
+      const reason = !text.trim() && !files?.length ? EMPTY_RESULT : null;
       if (reason) {
         e.dropped = reason;
         await appendEvent(this.t.threadId, 'reply_dropped', 'bot', { turnId: this.t.turnId, index: e.index, reason, text });

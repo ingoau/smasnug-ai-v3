@@ -1,12 +1,12 @@
 // OWNER: agent module. Front agent turn: the only agent that talks to users.
-import { streamText, stepCountIs, type ModelMessage } from 'ai';
+import { hasToolCall, streamText, stepCountIs, type ModelMessage } from 'ai';
 import { env } from '../config.js';
 import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { getUserInfo } from '../context/users.js';
 import { EXTRAS } from '../tools/extras.js';
-import { WebSearchMeter } from '../tools/web-search.js';
+import { WEB_SEARCH_TOOL, WebSearchMeter } from '../tools/web-search.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
@@ -20,7 +20,7 @@ import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
 import { activityForTool } from './activity.js';
-import { activeToolsFor, announcesMoreWork, delegatedAndAcknowledged, guardReact, isFinalReplyStep, isReplyOnlyStep, reactedAsResponse, replyBlockReason } from './turn-guards.js';
+;
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 
@@ -211,7 +211,6 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     recipientUserId: turn.authorId,
     activeRuns: () => activeRunsInThread(turn.threadId),
     stopRequested: checkStop,
-    blockReply: () => replyBlockReason(state),
     timing: io.timing,
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
@@ -244,7 +243,6 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, extras });
   // Naming a card only makes sense when writing up its results.
   if (turn.kind !== 'synthesis') delete tools.set_card_title;
-  guardReact(tools, state);
 
   const toolNames = Object.keys(tools);
   const meter = new WebSearchMeter();
@@ -280,8 +278,6 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   let failed: unknown;
   try {
     if (await checkStop()) throw new TurnStopped();
-    // Everything on the card was cancelled (user stop, or the turn cancelled its own subagent): nothing to report.
-    if (turn.kind === 'synthesis' && built.allCancelled) throw new SkipModel();
     timing.mark('model_request');
     const result = streamText({
       model: openrouter(MODELS.front),
@@ -289,35 +285,16 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       instructions: system,
       messages,
       tools,
-      // Native stop: end at the next step boundary. A turn that delegated and acknowledged, or whose step only
-      // reacted, is done.
-      stopWhen: [
-        stepCountIs(MAX_STEPS),
-        () => checkStop(),
-        async ({ steps }) => {
-          const last = steps.at(-1);
-          const names = last?.toolCalls.map((c) => c.toolName);
-          if (delegatedAndAcknowledged(state, names) || reactedAsResponse(state, names)) return true;
-          // Two reply-only steps in a row: the second was a repeat (dropped); don't let the model keep trying.
-          if (steps.length >= 2 && isReplyOnlyStep(names) && isReplyOnlyStep(steps.at(-2)?.toolCalls.map((c) => c.toolName))) return true;
-          // The step replied (and nothing failed): that's the answer. End now unless the speaker wrote more meanwhile.
-          const replyTexts = (last?.toolCalls ?? []).filter((c) => c.toolName === 'reply').map((c) => String((c.input as any)?.text ?? ''));
-          if (isFinalReplyStep(names) && !last?.content.some((p) => p.type === 'tool-error') && !replyTexts.some(announcesMoreWork)) {
-            const fresh = await takeInbox();
-            if (!fresh.length) return true;
-            inboxBuffer.push(...fresh);
-          }
-          return false;
-        },
-      ],
+      // The model decides when it's done (a step without tool calls ends the loop). Native stop ends it at the next
+      // step boundary.
+      stopWhen: [stepCountIs(MAX_STEPS), hasToolCall('end_turn'), () => checkStop()],
       includeRawChunks: true,
       onStepFinish: async (stepResult) => {
         meter.observeStep(stepResult);
         if (await meter.settle({ speakerId: turn.authorId, threadId: turn.threadId }).catch(() => false)) searchOverLimit = true;
       },
-      prepareStep: async ({ messages: current, steps }) => {
+      prepareStep: async ({ messages: current }) => {
         const extra: ModelMessage[] = [];
-        state.afterReplyOnlyStep = isReplyOnlyStep(steps.at(-1)?.toolCalls.map((c) => c.toolName));
         const inbox = await takeInbox();
         if (inbox.length) {
           inbox.forEach((m) => seenTs.add(m.ts));
@@ -326,9 +303,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           const rendered = await renderMessages(turn.threadId, inbox.map((m) => m.ts)).catch(() => inbox.map((m) => m.text).join('\n'));
           extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
           await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
-          state.afterReplyOnlyStep = false; // new messages may need their own reply
         }
-        const activeTools = activeToolsFor(state, toolNames, { searchOverLimit });
+        // Over the web-search rate limit: take web search away for the rest of the turn.
+        const activeTools = searchOverLimit ? toolNames.filter((n) => n !== WEB_SEARCH_TOOL) : undefined;
         return { ...(extra.length ? { messages: [...current, ...extra] } : {}), ...(activeTools ? { activeTools } : {}) };
       },
     });
@@ -394,8 +371,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     }
     timing.mark('loop_done');
   } catch (err) {
-    if (err instanceof SkipModel) await appendEvent(turn.threadId, 'synthesis_silent', 'system', { turnId, cardId: turn.cardId }).catch(() => {});
-    else if (!(err instanceof TurnStopped)) failed = err;
+    if (!(err instanceof TurnStopped)) failed = err;
   } finally {
     // The card goes in right after this turn's replies (or alone if there was no reply). Not when the turn cancelled
     // every subagent it started (then it is no longer delegating anything).
@@ -434,7 +410,6 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 }
 
 class TurnStopped extends Error {}
-class SkipModel extends Error {}
 
 function needsFallback(turn: TurnRow, io: TurnIO, allCancelled: boolean): boolean {
   // A synthesis where everything was cancelled (user said stop) may stay silent.

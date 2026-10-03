@@ -8,7 +8,6 @@ vi.mock('../core/redis.js', () => ({ redis: {} }));
 
 const { botReportAllowed, botReportBlocks, BOT_REPORT_LIMITS, registerReportUserTool } = await import('./bot-reports.js');
 const { activityForTool } = await import('../agent/activity.js');
-const { isFinalReplyStep } = await import('../agent/turn-guards.js');
 const { registeredTools } = await import('../core/tools.js');
 
 describe('botReportAllowed', () => {
@@ -57,11 +56,9 @@ describe('botReportBlocks', () => {
 });
 
 describe('report_user stays invisible', () => {
-  it('is front-only, shows no status and does not prevent ending after the reply', () => {
+  it('is front-only and shows no status', () => {
     registerReportUserTool();
     expect(registeredTools().find((t) => t.name === 'report_user')?.roles).toEqual(['front']);
     expect(activityForTool('report_user')).toBeNull();
-    expect(isFinalReplyStep(['report_user', 'reply'])).toBe(true);
-    expect(isFinalReplyStep(['report_user'])).toBe(false);
   });
 });

@@ -260,12 +260,9 @@ export async function finishRun(
   const res = await sql.begin(async (tx) => {
     await tx`select id from subagents where id = ${run.subagentId} for update`;
     if (outcome.status === 'complete') {
-      const [c] = await tx<{ cancelRequested: boolean }[]>`select cancel_requested from runs where id = ${run.id}`;
-      if (c?.cancelRequested) finalStatus = 'cancelled';
-      else {
-        const [p] = await tx<{ n: number }[]>`select count(*)::int as n from subagent_inbox where subagent_id = ${run.subagentId} and consumed_at is null`;
-        if ((p?.n ?? 0) > 0) return 'inbox' as const;
-      }
+      // A run that finished despite a cancel request still reports its result; the front agent decides what to say.
+      const [p] = await tx<{ n: number }[]>`select count(*)::int as n from subagent_inbox where subagent_id = ${run.subagentId} and consumed_at is null`;
+      if ((p?.n ?? 0) > 0) return 'inbox' as const;
     }
     const updated = await tx`
       update runs set status = ${finalStatus},
@@ -295,7 +292,6 @@ export async function finishRun(
   await appendEvent(run.threadId, 'run_finished', `subagent:${run.subagentId}`, {
     runId: run.id,
     status: finalStatus,
-    ...(finalStatus !== outcome.status ? { finishedAfterCancel: true } : {}),
     output: outcome.status === 'complete' ? outcome.output : undefined,
     error: outcome.status === 'error' ? outcome.error : undefined,
   });
