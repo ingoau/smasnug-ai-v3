@@ -160,6 +160,17 @@ No stream. Steers fold into the plan card; other replies are posted whole with `
 All subagents finished
 Front agent streams its synthesis into a new message below the card
 The stream-or-post choice is made in code from `thread.tasks.some(running)`, never by the model.
+### Quick-reply buttons
+- 
+`reply(text, files?, buttons?)`: `buttons` is an optional list of 1–5 short labels (≤ 30 chars, enforced in code: clipped, deduped, group pings neutralised, extra labels dropped; the schema stays lenient so a violation can't fail a reply whose text already streamed). The prompt asks for them only when the reply ends with a question with a few clear answers; each label is exactly what the user would reply.
+- 
+Rendering: an `actions` block (`block_id` `reply_<id>_buttons`, `action_id` `reply:choice:<i>`, `value` = `reply_buttons.id`) right under the reply markdown. Posted replies include it directly. Streamed replies pass it as `blocks` to `chat.stopStream` (documented: "A list of blocks that will be rendered at the bottom of the finalized message"; separate 50-block limit). If that is refused, the stream is stopped plainly and the buttons are added with `chat.update`; if that fails too, they are posted as a small follow-up message (logged).
+- 
+State lives in `reply_buttons` (labels, message ts + text, presser, pressed label, the press's message ts). A plan card attached to the same reply re-renders [reply, buttons or pressed note, plan] from the DB.
+- 
+Press (`reply:choice`): entry guard (counted as a message; blocked users get nothing, rate-limited ones an ephemeral); the first press is claimed atomically (`pressed_at is null`), later presses get an ephemeral "already answered". The buttons are replaced by a context block "<@presser> pressed *label*" (`chat.update`, through the card renderer when a card lives there). Then it acts as if the presser replied with the label: a synthetic message (ts = the action's `action_ts`) is stored, a `message` event appended, the thread marked addressed/engaged, and a mention turn scheduled for the presser (inbox push into their running turn, or a pending turn). The presser is the turn's speaker.
+- 
+Context: the bot's reply shows `[buttons: A | B]` (`[buttons: A | B; Ingo pressed "B"]` once pressed) and the press renders as `<@U> Ingo: B (button)`.
 ### Plan cards
 - 
 A card is attached to the reply of the turn that started runs, and shows only the runs started in that turn. One task row per run. Implementation: after the turn, the turn's last reply message is updated (`chat.update`) to [reply markdown, plan]; every re-render rewrites the reply text plus the current plan. If that update fails (e.g. Slack refuses `chat.update` on a streamed message — unverified), the card is posted as its own message and a `card_attach_failed` event + warning (with the Slack error code) is logged. A turn without a reply posts the card alone.
@@ -333,7 +344,7 @@ Does GPT-6 Luna via OpenRouter accept images in tool results, or is the user-mes
 - 
 Does the AI SDK's OpenRouter provider pass `openrouter:*` server tool types through?
 - 
-Can a message be edited with `chat.update` after `stopStream`?
+Can a message be edited with `chat.update` after `stopStream`? (docs.slack.dev chat.update: only refused while streaming, `streaming_state_conflict`; editable once the stream completed.)
 - 
 Does `assistant.threads.setStatus` render for mentions in regular channels?
 - 
