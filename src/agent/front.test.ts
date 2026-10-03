@@ -516,10 +516,10 @@ describe('runFrontTurn: status activity', () => {
 describe('end-of-turn heuristics', async () => {
   const { announcesMoreWork, isFinalReplyStep } = await import('./turn-guards.js');
   it('announcesMoreWork: acknowledgements yes, answers no', () => {
-    for (const t of ['on it!', 'one sec, checking #ship', "let me dig into that", "I'll look into it", 'gonna search slack for that', 'hang on', 'Lemme check']) {
+    for (const t of ['on it!', 'one sec, checking #ship', "let me dig into that", "I'll look into it", 'gonna search slack for that', 'hang on', 'Lemme check', 'sure, checking it now', 'Searching #ship for that...']) {
       expect(announcesMoreWork(t), t).toBe(true);
     }
-    for (const t of ['hey! i can answer questions, search slack and the web, and research stuff. what are you building?', 'tcp is reliable and ordered, udp is fast and fire-and-forget. let me know if you want more', 'nice, congrats!', `${'long answer '.repeat(30)} let me check`]) {
+    for (const t of ['hey! i can answer questions, search slack and the web, and research stuff. what are you building?', 'yo! mostly answering questions, searching slack, checking docs and researching stuff for you', 'tcp is reliable and ordered, udp is fast and fire-and-forget. let me know if you want more', 'nice, congrats!', `${'long answer '.repeat(30)} let me check`]) {
       expect(announcesMoreWork(t), t).toBe(false);
     }
   });

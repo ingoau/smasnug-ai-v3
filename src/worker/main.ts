@@ -63,6 +63,7 @@ async function scheduleMaintenance(tasks: Map<string, Task>) {
 }
 
 export async function startWorker() {
+  pipeline.onStart();
   const processors = collectProcessors();
   const tasks = collectMaintenance();
   await scheduleMaintenance(tasks);

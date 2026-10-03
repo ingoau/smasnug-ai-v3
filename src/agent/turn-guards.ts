@@ -95,8 +95,17 @@ export function isFinalReplyStep(toolNames: string[] | undefined): boolean {
 export function announcesMoreWork(text: string): boolean {
   const t = text.toLowerCase().replace(/[’']/g, "'");
   if (t.length > 300) return false; // an acknowledgement is short; a long reply is the answer
-  return /\b(on it|let me(?! know)|lemme|let's see|i'll (?:go |quickly |just )?(?:look|check|dig|research|find|search|get|pull|ask|spin|start|kick|have|take|read|grab|try|see)|i'm (?:going to|gonna) |gonna (?:look|check|dig|search|find)|digging|looking (?:into|it up|around)|checking|one (?:sec|moment|min)|give me a (?:sec|moment|min|bit)|hang on|hold on|brb|working on it|researching|searching|starting (?:a|some)|spinning up|kicking off)\b/.test(t);
+  // Unambiguous anywhere in the reply…
+  if (STRONG_ACK.test(t)) return true;
+  // …while words like "searching" / "checking" also describe capabilities ("i can search slack, check docs…"),
+  // so they only count at the start of a sentence.
+  return WEAK_ACK.test(t);
 }
+
+const STRONG_ACK =
+  /\b(on it|let me(?! know)|lemme|let's see|one (?:sec|moment|min)|give me (?:a )?(?:sec|second|moment|min|minute|bit)|hang on|hold on|brb|working on it|spinning up|kicking off|digging (?:in|into|through)|looking into (?:it|this|that)|i'll (?:go |quickly |just )?(?:look|check|dig|research|find|search|get back|pull|ask|spin|kick|take a look|read|grab|see)|i'm (?:going to|gonna) (?:look|check|dig|research|find|search|pull|ask|spin|kick|read|grab|see)|gonna (?:look|check|dig|research|search|find))\b/;
+const WEAK_ACK =
+  /(?:^|[.!?\n]\s*)(?:(?:ok(?:ay)?|sure(?: thing)?|yep|yeah|yes|cool|alright|got it|gotcha|bet|hmm+|ooh|oh)[,!. ]+\s*)*(?:checking|searching|researching|looking|digging|starting)\b/;
 
 /** Stop condition: a user turn that delegated and acknowledged is done once a step only acknowledged / delegated. */
 export function delegatedAndAcknowledged(s: FrontTurnState, lastStepToolNames: string[] | undefined): boolean {

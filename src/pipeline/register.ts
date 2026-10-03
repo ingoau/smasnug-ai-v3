@@ -2,6 +2,7 @@
 import type { Job } from 'bullmq';
 import { QUEUE, type QueueName } from '../core/queues.js';
 import { processDebounce } from './fire.js';
+import { enableLocalDebounce } from './debounce.js';
 import { recoverOrphanedTurns } from './maintenance.js';
 import { processSlackEvent } from './slack-events.js';
 import { processThreadRun, shutdownThreadRuns } from './thread-run.js';
@@ -16,6 +17,11 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {
   'pipeline:recover-turns': { everyMs: 30_000, run: recoverOrphanedTurns },
 };
+
+/** Worker start: fire debounce windows from precise in-process timers (delayed jobs remain the backup). */
+export function onStart(): void {
+  enableLocalDebounce((data) => processDebounce({ data, id: `local-${data.seq}` } as Job<typeof data>));
+}
 
 /** Called on SIGTERM before the worker exits. */
 export async function onShutdown(): Promise<void> {

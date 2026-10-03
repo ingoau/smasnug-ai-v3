@@ -17,6 +17,8 @@ const Env = z.object({
   LOG_LEVEL: z.string().default('info'),
   /** Turn status text: see src/pipeline/session-status.ts (overlay = native processing + activity text). */
   STATUS_ACTIVITY_MODE: z.enum(['overlay', 'text', 'off']).default('overlay'),
+  /** Front agent reasoning effort on OpenRouter (see docs/perf.md for the latency/quality comparison). */
+  FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('low'),
 });
 
 export const env = Env.parse(process.env);

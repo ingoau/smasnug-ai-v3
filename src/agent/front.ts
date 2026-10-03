@@ -285,7 +285,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     timing.mark('model_request');
     const result = streamText({
       model: openrouter(MODELS.front),
-      providerOptions: { openrouter: { reasoning: { effort: 'low' }, usage: { include: true } } },
+      providerOptions: { openrouter: { reasoning: { effort: env.FRONT_REASONING_EFFORT }, usage: { include: true } } },
       instructions: system,
       messages,
       tools,

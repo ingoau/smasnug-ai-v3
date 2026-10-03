@@ -8,6 +8,7 @@ import { redis } from '../core/redis.js';
 import { enqueue, queue, QUEUE } from '../core/queues.js';
 import { sql } from '../db/index.js';
 import { limits } from '../config.js';
+import { log } from '../log.js';
 import { compareTs, debounceWindowMs, type BatchReason } from './rules.js';
 
 const batchKey = (threadId: string, authorId: string) => `debounce:batch:${threadId}:${authorId}`;
@@ -36,6 +37,19 @@ export interface DebounceJob {
   seq: number;
 }
 
+/**
+ * Precise windows. A delayed BullMQ job fires up to ~100ms late (Redis expires blocking BZPOPMIN timeouts on its
+ * `hz` cron, 10/s by default) — a third of a 300ms window. Workers therefore also fire the window from an
+ * in-process timer; the delayed job (scheduled LOCAL_BACKUP_MS later) stays as the crash-safe backup and is
+ * removed once the local fire ran. Both paths go through processDebounce, and takeBatch is atomic per sequence, so
+ * a window is only ever taken once. Off unless enabled (the worker does; unit/integration tests drive jobs by hand).
+ */
+const LOCAL_BACKUP_MS = 1500;
+let localFire: ((job: DebounceJob) => Promise<void>) | null = null;
+export function enableLocalDebounce(fire: (job: DebounceJob) => Promise<void>): void {
+  localFire = fire;
+}
+
 export async function hasActiveRuns(threadId: string): Promise<boolean> {
   const [row] = await sql<{ active: boolean }[]>`
     select exists(select 1 from runs where thread_id = ${threadId} and status in ('queued', 'running')) as active`;
@@ -46,7 +60,17 @@ export async function hasActiveRuns(threadId: string): Promise<boolean> {
 export async function addToBatch(threadId: string, authorId: string, ts: string, reason: BatchReason): Promise<number> {
   const seq = Number(await redis.eval(ADD, 2, batchKey(threadId, authorId), seqKey(threadId, authorId), ts, reason, KEY_TTL_MS));
   const delay = debounceWindowMs(await hasActiveRuns(threadId), { idleMs: limits.debounceIdleMs, busyMs: limits.debounceBusyMs, directMs: limits.debounceDirectMs }, reason);
-  await enqueue(QUEUE.turnDebounce, { threadId, authorId, seq } satisfies DebounceJob, { delay, jobId: jobIdFor(threadId, authorId, seq) });
+  const data: DebounceJob = { threadId, authorId, seq };
+  const jobId = jobIdFor(threadId, authorId, seq);
+  const fire = localFire;
+  await enqueue(QUEUE.turnDebounce, data, { delay: fire ? delay + LOCAL_BACKUP_MS : delay, jobId });
+  if (fire) {
+    setTimeout(() => {
+      fire(data)
+        .then(() => queue(QUEUE.turnDebounce).remove(jobId))
+        .catch((err) => log.warn({ err, threadId }, 'local debounce fire failed; the delayed job will retry'));
+    }, delay);
+  }
   // Best effort: drop the superseded job so the delayed set doesn't fill with no-ops.
   if (seq > 1) await queue(QUEUE.turnDebounce).remove(jobIdFor(threadId, authorId, seq - 1)).catch(() => {});
   return delay;
