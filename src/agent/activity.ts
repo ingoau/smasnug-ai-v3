@@ -27,11 +27,13 @@ const LABELS: Record<string, string> = {
 
 /** Tools that only respond; they never show or change the indicator. */
 const RESPONDING = new Set(['reply', 'react', 'unreact', 'search_emojis']);
+/** Tools that must stay invisible in the thread (report_user is never hinted at). */
+const SILENT = new Set(['report_user']);
 
 export const DEFAULT_ACTIVITY = 'Working…';
 
 /** The status text for a tool call that just started, or null if it shouldn't show/change the indicator. */
 export function activityForTool(toolName: string): string | null {
-  if (RESPONDING.has(toolName)) return null;
+  if (RESPONDING.has(toolName) || SILENT.has(toolName)) return null;
   return LABELS[toolName] ?? DEFAULT_ACTIVITY;
 }

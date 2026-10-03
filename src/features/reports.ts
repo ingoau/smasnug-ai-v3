@@ -168,7 +168,7 @@ export function confirmDialog(title: string, text: string, confirm: string) {
 }
 
 /** Admin-facing confirmation of a moderation action: thread reply under the mod message, App Home refresh, or ephemeral. */
-async function modNote(ctx: ActionContext, text: string, refreshHome: (userId: string) => Promise<void>) {
+export async function modNote(ctx: ActionContext, text: string, refreshHome: (userId: string) => Promise<void>) {
   if (fromAppHome(ctx)) return refreshHome(ctx.userId);
   if (ctx.channelId && ctx.messageTs) {
     await slackCall('chat.postMessage', { channel: ctx.channelId, thread_ts: ctx.messageTs, text }).catch(() => ephemeral(ctx, text));
