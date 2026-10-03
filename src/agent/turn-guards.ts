@@ -78,6 +78,26 @@ export function isReplyOnlyStep(toolNames: string[] | undefined): boolean {
   return !!toolNames?.length && toolNames.includes('reply') && toolNames.every((n) => n === 'reply' || n === 'react');
 }
 
+/**
+ * Stop condition: the step delivered the turn's answer — its tool calls were only reply / react (and
+ * set_card_title in a synthesis), with at least one reply. Ending here saves a wrap-up model call that almost
+ * always just ends the turn (or repeats the reply). The caller checks for new inbox messages first.
+ */
+export function isFinalReplyStep(toolNames: string[] | undefined): boolean {
+  return !!toolNames?.length && toolNames.includes('reply') && toolNames.every((n) => n === 'reply' || n === 'react' || n === 'set_card_title');
+}
+
+/**
+ * True when a reply reads like "on it / let me check / one sec": the model announced work it hasn't started (it
+ * sometimes acknowledges first and calls spawn_subagent / a lookup in the next step). Such a step is not the end of
+ * the turn. Deliberately broad: a false positive only costs the wrap-up model call we'd otherwise skip.
+ */
+export function announcesMoreWork(text: string): boolean {
+  const t = text.toLowerCase().replace(/[’']/g, "'");
+  if (t.length > 300) return false; // an acknowledgement is short; a long reply is the answer
+  return /\b(on it|let me(?! know)|lemme|let's see|i'll (?:go |quickly |just )?(?:look|check|dig|research|find|search|get|pull|ask|spin|start|kick|have|take|read|grab|try|see)|i'm (?:going to|gonna) |gonna (?:look|check|dig|search|find)|digging|looking (?:into|it up|around)|checking|one (?:sec|moment|min)|give me a (?:sec|moment|min|bit)|hang on|hold on|brb|working on it|researching|searching|starting (?:a|some)|spinning up|kicking off)\b/.test(t);
+}
+
 /** Stop condition: a user turn that delegated and acknowledged is done once a step only acknowledged / delegated. */
 export function delegatedAndAcknowledged(s: FrontTurnState, lastStepToolNames: string[] | undefined): boolean {
   if (s.turn.kind !== 'user' || !s.delegated || s.replies.delivered < 1 || !lastStepToolNames?.length) return false;

@@ -42,8 +42,13 @@ const METHOD_RPM: Record<string, number> = {
   'users.info': 100,
   'views.publish': 100,
 };
-/** chat.* posting is ~1/sec per channel in Slack's docs; allow short bursts. */
+/**
+ * Posting a new message is ~1/sec per channel in Slack's docs; allow short bursts. Only calls that create a message
+ * count: updates, stream appends/stops and reads are limited per method only, so several threads in one DM channel
+ * (or a long stream next to a card) don't throttle each other.
+ */
 const PER_CHANNEL_PER_MIN = 60;
+const PER_CHANNEL_METHODS = new Set(['chat.postMessage', 'chat.startStream', 'chat.postEphemeral', 'chat.scheduleMessage']);
 
 async function acquire(key: string, perMin: number) {
   // Sliding window over 60s in a sorted set; wait until a slot frees.
@@ -132,7 +137,7 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
 
 async function throttle(method: string, token: TokenKind, channel: string | undefined) {
   await acquire(`slack:rl:${token}:${method}`, METHOD_RPM[method] ?? 50);
-  if (channel && method.startsWith('chat.') && method !== 'chat.appendStream') {
+  if (channel && PER_CHANNEL_METHODS.has(method)) {
     await acquire(`slack:rl:chan:${channel}`, PER_CHANNEL_PER_MIN);
   }
 }

@@ -20,7 +20,7 @@ import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
 import { activityForTool } from './activity.js';
-import { activeToolsFor, delegatedAndAcknowledged, guardReact, isReplyOnlyStep, reactedAsResponse, replyBlockReason } from './turn-guards.js';
+import { activeToolsFor, announcesMoreWork, delegatedAndAcknowledged, guardReact, isFinalReplyStep, isReplyOnlyStep, reactedAsResponse, replyBlockReason } from './turn-guards.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 
@@ -230,6 +230,12 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     afterReplyOnlyStep: false,
   };
   const seenTs = new Set(turn.messageTs);
+  /** Inbox messages drained by a stop check, injected by the next prepareStep. */
+  const inboxBuffer: StoredMessage[] = [];
+  const takeInbox = async () => {
+    inboxBuffer.push(...(await io.drainInbox()));
+    return inboxBuffer.splice(0).filter((m) => !seenTs.has(m.ts));
+  };
   const extras: Record<string, unknown> = {
     agentTurn: state,
     [EXTRAS.defaultReactTs]: latestTs(turn.messageTs),
@@ -288,11 +294,20 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       stopWhen: [
         stepCountIs(MAX_STEPS),
         () => checkStop(),
-        ({ steps }) => {
-          const names = steps.at(-1)?.toolCalls.map((c) => c.toolName);
+        async ({ steps }) => {
+          const last = steps.at(-1);
+          const names = last?.toolCalls.map((c) => c.toolName);
+          if (delegatedAndAcknowledged(state, names) || reactedAsResponse(state, names)) return true;
           // Two reply-only steps in a row: the second was a repeat (dropped); don't let the model keep trying.
-          const repeated = steps.length >= 2 && isReplyOnlyStep(names) && isReplyOnlyStep(steps.at(-2)?.toolCalls.map((c) => c.toolName));
-          return repeated || delegatedAndAcknowledged(state, names) || reactedAsResponse(state, names);
+          if (steps.length >= 2 && isReplyOnlyStep(names) && isReplyOnlyStep(steps.at(-2)?.toolCalls.map((c) => c.toolName))) return true;
+          // The step replied (and nothing failed): that's the answer. End now unless the speaker wrote more meanwhile.
+          const replyTexts = (last?.toolCalls ?? []).filter((c) => c.toolName === 'reply').map((c) => String((c.input as any)?.text ?? ''));
+          if (isFinalReplyStep(names) && !last?.content.some((p) => p.type === 'tool-error') && !replyTexts.some(announcesMoreWork)) {
+            const fresh = await takeInbox();
+            if (!fresh.length) return true;
+            inboxBuffer.push(...fresh);
+          }
+          return false;
         },
       ],
       includeRawChunks: true,
@@ -303,7 +318,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       prepareStep: async ({ messages: current, steps }) => {
         const extra: ModelMessage[] = [];
         state.afterReplyOnlyStep = isReplyOnlyStep(steps.at(-1)?.toolCalls.map((c) => c.toolName));
-        const inbox = (await io.drainInbox()).filter((m) => !seenTs.has(m.ts));
+        const inbox = await takeInbox();
         if (inbox.length) {
           inbox.forEach((m) => seenTs.add(m.ts));
           const latest = latestTs(inbox.map((m) => m.ts));

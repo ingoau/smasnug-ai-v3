@@ -12,7 +12,12 @@ import { stripCitationMarkers } from '../tools/web-search.js';
 import { extractPartialString } from './partial-json.js';
 import { chooseDelivery, isNearDuplicate, type DeliveryMode } from './util.js';
 
-const FLUSH_MS = 300;
+/** Coalescing interval for appends once the stream is open. */
+const FLUSH_MS = 250;
+/** Before the stream is open: open it as soon as this many characters of text are there… */
+const FIRST_FLUSH_CHARS = 12;
+/** …or after this long, whichever comes first. */
+const FIRST_FLUSH_MS = 100;
 const MAX_MD = 11_500; // markdown limit is 12k chars per block / stream call
 const MAX_TEXT = 3_000; // `text` fallback
 /** A later reply in a turn is held back until this many chars arrived, so it can be checked for duplication first. */
@@ -127,11 +132,22 @@ export class ReplyManager {
     const e = this.start(toolCallId);
     this.t.timing?.mark('first_reply_delta');
     e.buf += d;
+    // First reply of the turn, stream not open yet: open it as soon as a few words are there (then coalesce).
+    const opening = !e.streamTs && this.deliveredTexts.length === 0;
+    if (opening && e.timer) {
+      if (streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '').trim().length < FIRST_FLUSH_CHARS) return;
+      clearTimeout(e.timer);
+      e.timer = null;
+    }
     if (!e.timer) {
-      e.timer = setTimeout(() => {
-        e.timer = null;
-        e.chain = e.chain.then(() => this.flush(e)).catch((err) => this.onStreamError(e, err));
-      }, FLUSH_MS);
+      const ready = opening && streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '').trim().length >= FIRST_FLUSH_CHARS;
+      e.timer = setTimeout(
+        () => {
+          e.timer = null;
+          e.chain = e.chain.then(() => this.flush(e)).catch((err) => this.onStreamError(e, err));
+        },
+        opening ? (ready ? 0 : FIRST_FLUSH_MS) : FLUSH_MS,
+      );
     }
   }
 

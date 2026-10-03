@@ -155,7 +155,8 @@ describe('runFrontTurn (mock model)', () => {
     expect(start.args).toMatchObject({ channel: 'C1', thread_ts: '100.000001', recipient_user_id: 'U1' });
     expect(phases).toEqual(['final']);
     expect(h.events.find((e) => e.type === 'reply')?.payload).toMatchObject({ mode: 'streamed', text, index: 0 });
-    expect(h.events.find((e) => e.type === 'discarded_text')?.payload.text).toBe('done');
+    // The reply step was the answer: no wrap-up model call.
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(1);
   });
 
   it('posts the reply whole with a markdown block while runs are active', async () => {
@@ -229,7 +230,8 @@ describe('runFrontTurn: native stop', () => {
 
   it('ends at the next step boundary after stop, with no fallback', async () => {
     h.activeRuns = 1; // post mode
-    h.model = mockModel([replyStep('first'), toolStep(['search_emojis', { query: 'x' }]), textStep('')]);
+    const steps = () => [toolStep(['reply', { text: 'first' }], ['search_emojis', { query: 'y' }]), toolStep(['search_emojis', { query: 'x' }]), textStep('')];
+    h.model = mockModel(steps());
     const { io: tio } = io();
     let stop = false;
     // Baseline: without a stop, all three steps run.
@@ -238,7 +240,7 @@ describe('runFrontTurn: native stop', () => {
 
     h.slack = [];
     h.events = [];
-    h.model = mockModel([replyStep('first'), toolStep(['search_emojis', { query: 'x' }]), textStep('')]);
+    h.model = mockModel(steps());
     stop = false;
     h.slackHook = (method) => {
       if (method === 'chat.postMessage') stop = true; // user presses stop right after the first reply lands
@@ -333,7 +335,7 @@ describe('runFrontTurn: behaviour guards', () => {
 
   it('refuses a reaction once the turn replied', async () => {
     h.activeRuns = 1;
-    h.model = mockModel([toolStep(['reply', { text: 'Hey! I can answer questions and research things.' }]), toolStep(['react', { emoji: 'wave' }]), textStep('')]);
+    h.model = mockModel([toolStep(['reply', { text: 'Hey! I can answer questions and research things.' }], ['search_emojis', { query: 'wave' }]), toolStep(['react', { emoji: 'wave' }]), textStep('')]);
     await runFrontTurn(turn({ id: 41 }), io().io);
     expect(methods()).not.toContain('reactions.add');
     expect(prompts()[2]).toContain('you already replied this turn');
@@ -350,9 +352,9 @@ describe('runFrontTurn: behaviour guards', () => {
   it('drops a near-duplicate second reply', async () => {
     h.activeRuns = 1;
     h.model = mockModel([
-      toolStep(['reply', { text: "I'm checking the official Raspberry Pi specs now." }]),
+      toolStep(['reply', { text: "I'm checking the official Raspberry Pi specs now." }], ['search_emojis', { query: 'pi' }]),
       toolStep(['search_emojis', { query: 'raspberry' }]),
-      toolStep(['reply', { text: "**I'm checking the official Raspberry Pi specs now** — one sec" }]),
+      toolStep(['reply', { text: "**I'm checking the official Raspberry Pi specs now** — one sec" }], ['search_emojis', { query: 'x' }]),
       textStep(''),
     ]);
     await runFrontTurn(turn({ id: 43 }), io().io);
@@ -361,23 +363,36 @@ describe('runFrontTurn: behaviour guards', () => {
     expect(prompts()[3]).toContain('nearly identical');
   });
 
-  it('drops a second reply right after a reply-only step (the wrap-up repeats itself)', async () => {
+  it('ends the turn right after a reply-only step: no wrap-up model call', async () => {
     h.model = mockModel([
       toolStep(['reply', { text: 'I can help with coding questions, project ideas and research.' }]),
       toolStep(['reply', { text: 'I can help with coding, debugging, brainstorming and looking things up. What are you building?' }]),
       textStep(''),
     ]);
-    await runFrontTurn(turn({ id: 51 }), io().io);
+    const { io: tio, phases } = io();
+    await runFrontTurn(turn({ id: 51 }), tio);
+    expect(h.slack.filter((c) => ['chat.startStream', 'chat.postMessage'].includes(c.method))).toHaveLength(1);
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(1);
+    expect(phases).toEqual(['final']);
+  });
+
+  it('a reply that announces more work does not end the turn; a repeat right after it is dropped', async () => {
+    h.model = mockModel([
+      toolStep(['reply', { text: 'one sec, let me check the docs' }]),
+      toolStep(['reply', { text: 'One sec, let me check the docs!' }]),
+      textStep(''),
+    ]);
+    await runFrontTurn(turn({ id: 55 }), io().io);
     expect(h.slack.filter((c) => ['chat.startStream', 'chat.postMessage'].includes(c.method))).toHaveLength(1);
     expect(h.events.find((e) => e.type === 'reply_dropped')?.payload.reason).toContain('nothing new has happened since');
-    expect(((h.model as any).doStreamCalls as any[]).length).toBe(2); // and the loop ends there
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(2); // the dropped repeat ends it
   });
 
   it('drops an empty reply (no fallback for an unmentioned turn)', async () => {
     h.model = mockModel([toolStep(['reply', { text: '  ' }]), textStep('')]);
     await runFrontTurn(turn({ id: 54, isMention: false }), io(false).io);
     expect(methods().filter((m) => m.startsWith('chat.'))).toHaveLength(0);
-    expect(prompts()[1]).toContain('the reply was empty');
+    expect(h.events.find((e) => e.type === 'reply_dropped')?.payload.reason).toContain('the reply was empty');
   });
 
   it('still allows a reply to a message that arrived after the first reply', async () => {
@@ -495,5 +510,24 @@ describe('runFrontTurn: status activity', () => {
     const c = ioWithActivity(false);
     await runFrontTurn(turn({ id: 63, isMention: false }), c.io);
     expect([a.activity, b.activity, c.activity]).toEqual([[], [], []]);
+  });
+});
+
+describe('end-of-turn heuristics', async () => {
+  const { announcesMoreWork, isFinalReplyStep } = await import('./turn-guards.js');
+  it('announcesMoreWork: acknowledgements yes, answers no', () => {
+    for (const t of ['on it!', 'one sec, checking #ship', "let me dig into that", "I'll look into it", 'gonna search slack for that', 'hang on', 'Lemme check']) {
+      expect(announcesMoreWork(t), t).toBe(true);
+    }
+    for (const t of ['hey! i can answer questions, search slack and the web, and research stuff. what are you building?', 'tcp is reliable and ordered, udp is fast and fire-and-forget. let me know if you want more', 'nice, congrats!', `${'long answer '.repeat(30)} let me check`]) {
+      expect(announcesMoreWork(t), t).toBe(false);
+    }
+  });
+  it('isFinalReplyStep: reply (with react / set_card_title) only', () => {
+    expect(isFinalReplyStep(['reply'])).toBe(true);
+    expect(isFinalReplyStep(['set_card_title', 'reply'])).toBe(true);
+    expect(isFinalReplyStep(['reply', 'spawn_subagent'])).toBe(false);
+    expect(isFinalReplyStep(['react'])).toBe(false);
+    expect(isFinalReplyStep([])).toBe(false);
   });
 });

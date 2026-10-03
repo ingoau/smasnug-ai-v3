@@ -49,26 +49,30 @@ export async function ensureThread(threadId: string): Promise<ThreadRow> {
   return row!;
 }
 
-/** Pull the thread (and channel context around its parent) from Slack into `messages`, once per thread. */
-export async function backfillThread(thread: ThreadRow): Promise<void> {
+/**
+ * Pull the thread (and channel context around its parent) from Slack into `messages`, once per thread. All Slack
+ * reads run in parallel. `rootIsNew`: the thread's parent is one of the turn's new messages (a fresh DM or a
+ * top-level mention), which the pipeline already stored, so there are no replies to fetch.
+ */
+export async function backfillThread(thread: ThreadRow, opts: { rootIsNew?: boolean } = {}): Promise<void> {
   if (thread.backfilled) return;
-  try {
-    const replies = await fetchReplies(thread.channelId, thread.threadTs);
-    await storeMessages(thread.channelId, thread.id, replies);
-  } catch (err) {
+  const replies = opts.rootIsNew
+    ? Promise.resolve()
+    : fetchReplies(thread.channelId, thread.threadTs).then((r) => storeMessages(thread.channelId, thread.id, r));
+  const channel = thread.isDm
+    ? Promise.resolve()
+    : Promise.all([
+        // Over-fetch: joins/leaves are dropped when stored.
+        fetchHistoryBefore(thread.channelId, { latest: thread.threadTs, limit: CHANNEL_BEFORE + 7 }),
+        CHANNEL_AFTER > 0 ? fetchHistoryAfter(thread.channelId, thread.threadTs, CHANNEL_AFTER) : Promise.resolve([]),
+      ])
+        .then(([before, after]) => storeMessages(thread.channelId, null, [...before, ...after]))
+        .catch((err) => log.warn({ err, threadId: thread.id }, 'channel context backfill failed'));
+  const [r] = await Promise.allSettled([replies, channel]);
+  if (r.status === 'rejected') {
     // Transient failures retry on the next turn; the context still renders from whatever is stored.
-    log.warn({ err, threadId: thread.id }, 'thread backfill failed');
+    log.warn({ err: r.reason, threadId: thread.id }, 'thread backfill failed');
     return;
-  }
-  if (!thread.isDm) {
-    try {
-      // Over-fetch: joins/leaves are dropped when stored.
-      const before = await fetchHistoryBefore(thread.channelId, { latest: thread.threadTs, limit: CHANNEL_BEFORE + 7 });
-      const after = CHANNEL_AFTER > 0 ? await fetchHistoryAfter(thread.channelId, thread.threadTs, CHANNEL_AFTER) : [];
-      await storeMessages(thread.channelId, null, [...before, ...after]);
-    } catch (err) {
-      log.warn({ err, threadId: thread.id }, 'channel context backfill failed');
-    }
   }
   await sql`update threads set backfilled = true where id = ${thread.id}`;
   thread.backfilled = true;
@@ -112,7 +116,7 @@ export async function formatEnvFor(threadId: string, msgs: RenderMsg[]): Promise
 export async function renderThreadContext(threadId: string, opts: { newMessageTs: string[]; timing?: TurnTiming }): Promise<RenderedThreadContext> {
   const span = <T,>(name: string, fn: () => Promise<T>) => (opts.timing ? opts.timing.span(name, fn) : fn());
   const thread = await span('ctx_ensure_thread', () => ensureThread(threadId));
-  await span('ctx_backfill', () => backfillThread(thread));
+  await span('ctx_backfill', () => backfillThread(thread, { rootIsNew: opts.newMessageTs.includes(thread.threadTs) }));
 
   const all = await span('ctx_load_thread', () => loadThreadMessages(threadId));
   const newSet = new Set(opts.newMessageTs);
