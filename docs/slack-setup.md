@@ -40,3 +40,12 @@ scopes.
   confirms with "Stopped.".
 - `agent_session_title_changed` is only logged.
 - `/smasnug off|on|status` in a channel: only the channel's creator or the admin can toggle it.
+
+## Dev and production apps (Hack Club workspace)
+
+- **smasnug ai v3** (`A0C6K5WK0KW`) — production, created from `slack-manifest.yml` as-is.
+- **dev - smasnug ai v3** (`A0C6FBD1KL2`) — development; same manifest with `name`/`display_name` set to
+  `dev - smasnug ai v3` and the slash command renamed to `/smasnug-dev` (so both can be installed side by side; the
+  code matches `slash:/smasnug*` by prefix). Local `.env` uses this app's tokens and `BOT_DISPLAY_NAME=dev - smasnug ai v3`.
+
+Installing into Hack Club needs workspace-admin approval ("Request to Workspace Install").
