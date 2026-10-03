@@ -373,6 +373,13 @@ describe('runFrontTurn: behaviour guards', () => {
     expect(((h.model as any).doStreamCalls as any[]).length).toBe(2); // and the loop ends there
   });
 
+  it('drops an empty reply (no fallback for an unmentioned turn)', async () => {
+    h.model = mockModel([toolStep(['reply', { text: '  ' }]), textStep('')]);
+    await runFrontTurn(turn({ id: 54, isMention: false }), io(false).io);
+    expect(methods().filter((m) => m.startsWith('chat.'))).toHaveLength(0);
+    expect(prompts()[1]).toContain('the reply was empty');
+  });
+
   it('still allows a reply to a message that arrived after the first reply', async () => {
     h.activeRuns = 1;
     h.model = mockModel([toolStep(['reply', { text: 'Sure, the meetup is on Friday.' }]), toolStep(['reply', { text: 'And yes, bring a laptop.' }]), textStep('')]);

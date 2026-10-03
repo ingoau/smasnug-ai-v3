@@ -3,10 +3,21 @@
  * local infra this is a no-op (unit tests mock the DB; integration tests skip or fail on their own).
  */
 import postgres from 'postgres';
+import { Redis } from 'ioredis';
 import { applyTestEnv } from './test-db.js';
 
 export default async function setup(): Promise<void> {
   applyTestEnv();
+  // Fresh test Redis per run: sliding-window limits (e.g. searches/hour) would otherwise accumulate across runs.
+  const r = new Redis(process.env.REDIS_URL!, { lazyConnect: true, connectTimeout: 2000, maxRetriesPerRequest: 1 });
+  try {
+    await r.connect();
+    await r.flushdb();
+  } catch {
+    // no local Redis
+  } finally {
+    r.disconnect();
+  }
   const url = new URL(process.env.DATABASE_URL!);
   const dbName = decodeURIComponent(url.pathname.replace(/^\//, ''));
   const adminUrl = new URL(url);

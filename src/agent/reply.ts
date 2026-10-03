@@ -16,6 +16,7 @@ const MAX_MD = 11_500; // markdown limit is 12k chars per block / stream call
 const MAX_TEXT = 3_000; // `text` fallback
 /** A later reply in a turn is held back until this many chars arrived, so it can be checked for duplication first. */
 const HOLD_CHARS = 160;
+export const EMPTY_RESULT = 'Not posted: the reply was empty. To stay silent, just end your turn.';
 export const DUPLICATE_RESULT = "Not posted: nearly identical to a reply you already sent this turn. Don't repeat yourself; end your turn.";
 
 export interface ReplyTarget {
@@ -215,8 +216,9 @@ export class ReplyManager {
       return STOPPED_RESULT;
     }
     if (!e.streamTs) {
-      // Nothing visible yet: a blocked or repeated reply is dropped instead of posted.
-      const reason = e.dropped ?? this.t.blockReply?.() ?? (this.isDuplicate(text) ? DUPLICATE_RESULT : null);
+      // Nothing visible yet: an empty, blocked or repeated reply is dropped instead of posted.
+      const empty = !text.trim() && !files?.length ? EMPTY_RESULT : null;
+      const reason = empty ?? e.dropped ?? this.t.blockReply?.() ?? (this.isDuplicate(text) ? DUPLICATE_RESULT : null);
       if (reason) {
         e.dropped = reason;
         await appendEvent(this.t.threadId, 'reply_dropped', 'bot', { turnId: this.t.turnId, index: e.index, reason, text });
