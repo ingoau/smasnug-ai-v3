@@ -73,8 +73,8 @@ describe('helpers', () => {
   });
 
   it('resolves the thread root from a permalink or channel + thread_ts', () => {
-    expect(resolveThreadTarget({ permalink: havenSearchMatches()[0]!.permalink })).toEqual({ channel: HAVEN.channel, rootTs: HAVEN.rootTs, linkedTs: HAVEN.replyTs });
-    expect(resolveThreadTarget({ permalink: `https://x.slack.com/archives/${HAVEN.channel}/p1790100000000100` })).toEqual({ channel: HAVEN.channel, rootTs: HAVEN.rootTs, linkedTs: HAVEN.rootTs });
+    expect(resolveThreadTarget({ permalink: havenSearchMatches()[0]!.permalink })).toEqual({ channel: HAVEN.channel, rootTs: HAVEN.rootTs, linkedTs: HAVEN.replyTs, origin: 'https://fixture.slack.com' });
+    expect(resolveThreadTarget({ permalink: `https://x.slack.com/archives/${HAVEN.channel}/p1790100000000100` })).toEqual({ channel: HAVEN.channel, rootTs: HAVEN.rootTs, linkedTs: HAVEN.rootTs, origin: 'https://x.slack.com' });
     expect(resolveThreadTarget({ channel: `<#${HAVEN.channel}|x>`, thread_ts: 'p1790100000000100' })).toEqual({ channel: HAVEN.channel, rootTs: HAVEN.rootTs });
     expect(resolveThreadTarget({ permalink: 'https://example.com' })).toHaveProperty('error');
     expect(resolveThreadTarget({ channel: HAVEN.channel })).toHaveProperty('error');
@@ -175,6 +175,7 @@ describe('read_public_thread', () => {
     expect(repliesCalls[0]!.args).toMatchObject({ channel: HAVEN.channel, ts: HAVEN.rootTs });
     expect(out).toContain('<untrusted_content');
     expect(out).toContain(`Thread in <#${HAVEN.channel}|${HAVEN.channelName}>, root ${HAVEN.rootTs}, 3 replies.`);
+    expect(out).toContain(`Link to a message here: https://fixture.slack.com/archives/${HAVEN.channel}/p<ts digits>?thread_ts=${HAVEN.rootTs}`);
     const parentAt = out.indexOf('Parent:');
     expect(parentAt).toBeGreaterThan(0);
     expect(out.indexOf('[forwarded from ANU CSSA: ANU CSSA Game Jam 2026 is back!')).toBeGreaterThan(parentAt);

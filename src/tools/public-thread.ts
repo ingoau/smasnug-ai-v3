@@ -26,12 +26,12 @@ export const MISSING_SCOPE_MESSAGE =
 
 /** Where to read: thread root + the linked message (to keep it in view). */
 export function resolveThreadTarget(input: { permalink?: string; channel?: string; thread_ts?: string }):
-  | { channel: string; rootTs: string; linkedTs?: string }
+  | { channel: string; rootTs: string; linkedTs?: string; origin?: string }
   | { error: string } {
   if (input.permalink) {
     const p = parseSlackPermalink(input.permalink);
     if (!p) return { error: `Not a Slack message permalink: "${input.permalink.slice(0, 200)}". Expected https://<team>.slack.com/archives/C…/p…` };
-    return { channel: p.channel, rootTs: p.threadTs ?? p.ts, linkedTs: p.ts };
+    return { channel: p.channel, rootTs: p.threadTs ?? p.ts, linkedTs: p.ts, origin: new URL(input.permalink.trim().replace(/^<|>$/g, '').split('|')[0]!).origin };
   }
   const channel = parseChannelId(input.channel);
   const ts = normalizeTs(input.thread_ts);
@@ -116,6 +116,8 @@ registerTool({
           const fenv: FormatEnv = { names, imageIds: new Map(), self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.messageTruncateTokens * 4 };
           const mark = (m: RenderMsg) => formatMessage({ ...m, replyCount: undefined }, fenv) + (linkedTs && m.ts === linkedTs && m.ts !== rootTs ? '  ← linked message' : '');
           const lines = [`Thread in ${chLabel}, root ${rootTs}, ${total} ${total === 1 ? 'reply' : 'replies'}.`];
+          // So a specific message can be cited (the ts in brackets, without the dot).
+          if (target.origin) lines.push(`Link to a message here: ${target.origin}/archives/${channel}/p<ts digits>?thread_ts=${rootTs}`);
           lines.push(parent ? `Parent:\n${mark(parent)}` : '[parent message not available]');
           if (slice.length) lines.push('Replies:');
           if (earlier > 0) lines.push(`[${earlier} earlier ${earlier === 1 ? 'reply' : 'replies'} not shown]`);

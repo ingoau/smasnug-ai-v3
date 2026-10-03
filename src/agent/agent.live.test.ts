@@ -357,4 +357,70 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(o.reactionsAdded).toBe(1);
     expect(o.spawns).toBe(0);
   }, 90_000);
+  // ---- The Haven Canberra incident: a search hit with dates was a reply in a thread about ANOTHER game jam. ----
+
+  /** True when every line mentioning October dates also makes clear they're not Haven's. */
+  function octoberOnlyAsOtherJam(text: string): boolean {
+    return text
+      .split('\n')
+      .filter((l) => /\b(oct(ober)?|2nd)\b/i.test(l))
+      .every((l) => /cssa|anu comp|different|another|other (game )?jam|unrelated|not (ours|haven|the haven|oct)|isn['’]t|wasn['’]t|mix|confus|wrong|separate/i.test(l));
+  }
+
+  it('Haven Canberra: the subagent opens the thread behind a reply hit and does not report the other jam\'s dates', async () => {
+    const { spawnSubagent } = await import('./subagents.js');
+    const { processSubagentRun } = await import('./child.js');
+    const { addFakeHandler } = await import('../core/slack-fake.js');
+    const { havenFixtureHandler, HAVEN } = await import('../context/fixtures.js');
+    const replies: { token: string; ts: string }[] = [];
+    const off = addFakeHandler(havenFixtureHandler({ onRepliesCall: (token, args) => replies.push({ token, ts: String(args.ts) }) }));
+    try {
+      const th = await freshThread('HAVEN');
+      const owner = `${user}H${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
+      const [t] = await sql<any[]>`insert into turns (thread_id, author_id, status) values (${th.id}, ${owner}, 'running') returning id`;
+      const before = (await fakeCalls()).length;
+      const s = await spawnSubagent({
+        threadId: th.id,
+        turnId: Number(t.id),
+        ownerId: owner,
+        title: 'Haven Canberra status',
+        instructions:
+          "The user asked: \"what's the state of haven canberra?\". Haven Canberra is an event organised in this Hack Club Slack. Search Slack for its current state: dates, venue, what's confirmed. Report what you find with sources.",
+      });
+      await processSubagentRun(s.runId);
+      const [run] = await sql<any[]>`select status, result, error from runs where id = ${s.runId}`;
+      const calls = (await fakeCalls()).slice(before);
+      const tools = calls.filter((c) => c.method === 'search.messages' || c.method === 'conversations.replies').map((c) => `${c.method}(${(c as any).token}) ${c.args.query ?? c.args.ts ?? ''}`);
+      // eslint-disable-next-line no-console
+      console.log('haven calls:', tools, '\nhaven result:', run.result);
+      expect(run.status).toBe('complete');
+      expect(replies.some((r) => r.token === 'user' && r.ts === HAVEN.rootTs)).toBe(true); // read the thread
+      expect(run.result).toMatch(/nov/i);
+      expect(run.result).toMatch(/14/);
+      expect(octoberOnlyAsOtherJam(run.result)).toBe(true);
+    } finally {
+      off();
+    }
+  }, 180_000);
+
+  it('a correction on the same topic continues the existing subagent (message_subagent), no new spawn', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const history =
+      `[1790000000.000100] <@${user}> Tester: what's the state of haven canberra?\n` +
+      `[1790000040.000100] [bot] smasnug ai (you): haven canberra is fri 2 oct to sun 4 oct at the CSIT building at ANU, per #haven-canberra-bts`;
+    const { tid, turn } = await dmTurn('HVNFIX', history, "that's another game jam, not haven. find the actual dates");
+    const saId = `sa_hv${Math.random().toString(36).slice(2, 7)}`;
+    await sql`insert into subagents (id, thread_id, owner_id, title, status, summary, history)
+      values (${saId}, ${tid}, ${turn.authorId}, 'Haven Canberra status', 'idle', 'Haven Canberra: Oct 2-4 at ANU CSIT (from a thread reply in #haven-canberra-bts)',
+        ${sql.json([{ role: 'user', content: "Find the current state of Haven Canberra in Slack." }, { role: 'assistant', content: 'Haven Canberra runs Fri 2 Oct to Sun 4 Oct at ANU CSIT (from a reply in #haven-canberra-bts).\nSUMMARY: Haven Canberra: Oct 2-4 at ANU CSIT' }])})`;
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    const events = await sql<any[]>`select type, payload from thread_events where thread_id = ${tid} and type in ('resume', 'steer') order by id`;
+    // eslint-disable-next-line no-console
+    console.log('haven follow-up:', JSON.stringify(o), JSON.stringify(events.map((e) => [e.type, e.payload.subagentId, String(e.payload.text).slice(0, 200)])));
+    expect(o.spawns).toBe(0);
+    expect(events.some((e) => e.payload.subagentId === saId)).toBe(true);
+    expect(o.replies.length).toBeLessThanOrEqual(1);
+  }, 120_000);
 });
