@@ -4,6 +4,7 @@ import { log } from '../log.js';
 import { handleAppHomeOpened, handleInteractive, handleSlash } from './interactions.js';
 import { handleMessageEvent } from './intake.js';
 import { handleAgentSessionStopped } from './stop.js';
+import { handleAppContextChanged } from './view-context.js';
 
 export interface SlackEnvelopeJob {
   kind: 'event' | 'interactive' | 'slash';
@@ -23,6 +24,11 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
           return handleAppHomeOpened(event);
         case 'agent_session_stopped':
           return handleAgentSessionStopped(event);
+        case 'app_context_changed':
+          return handleAppContextChanged(body); // user is in body.authorizations
+        case 'agent_session_title_changed':
+          log.info({ channel: event.channel, threadTs: event.thread_ts, title: event.title }, 'agent session title changed');
+          return;
         case 'app_mention':
           return; // duplicates the `message` event, which is what triggers turns
         default:

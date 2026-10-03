@@ -323,6 +323,39 @@ describe.skipIf(!infra)('pipeline integration', () => {
     });
   });
 
+  describe('agent container context (app_context_changed)', () => {
+    const ctxEnvelope = (entities: unknown[], authorizations: unknown[] = [{ user_id: 'UBOT', is_bot: true }, { user_id: 'U7' }]) =>
+      job({ kind: 'event' as const, body: { event_id: `Ev${Math.random()}`, authorizations, event: { type: 'app_context_changed', context: { entities } } } });
+
+    it('stores the viewed channel per user and hands it to that user\'s next DM turn only', async () => {
+      await processSlackEvent(ctxEnvelope([{ type: 'slack#/types/channel_id', value: 'CSHIP' }, { type: 'slack#/types/channel_id', value: 'CMORE' }]));
+      expect(await redis.get('view:ctx:U7')).toBe('CSHIP');
+      // An event naming only the bot can't be attributed: ignored.
+      await processSlackEvent(ctxEnvelope([{ type: 'slack#/types/channel_id', value: 'CX' }], [{ user_id: 'UBOT' }]));
+      expect(await redis.get('view:ctx:UBOT')).toBeNull();
+
+      const dmThread = `D7:1700000000.000500`;
+      await makeThread(dmThread);
+      await scheduler.scheduleMessages(dmThread, 'U7', ['1.1'], true);
+      const seen: (string | null | undefined)[] = [];
+      run.mockImplementation(async (_turn, io) => void seen.push(io.viewingChannelId));
+      await processThreadRun(job({ threadId: dmThread }));
+      await makeThread();
+      await scheduler.scheduleMessages(THREAD, 'U7', ['1.3'], true);
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(seen).toEqual(['CSHIP', null]);
+
+      // Closing the container / no channel entity clears it.
+      await processSlackEvent(ctxEnvelope([]));
+      expect(await redis.get('view:ctx:U7')).toBeNull();
+    });
+
+    it('agent_session_title_changed is only logged', async () => {
+      await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'agent_session_title_changed', channel: 'D1', thread_ts: '1.1', title: 'x' } } }));
+      expect(await fakeCalls()).toHaveLength(0);
+    });
+  });
+
   describe('debounce', () => {
     it('only the latest job takes the batch; deletions can empty it', async () => {
       await makeThread();

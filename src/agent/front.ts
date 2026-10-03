@@ -33,6 +33,8 @@ export interface TurnIO {
    * then ends at its next step boundary, delivers no further replies and posts no fallback.
    */
   stopRequested?(): Promise<boolean>;
+  /** DM / agent-container turns: the channel the speaker is currently viewing next to the container, if known. */
+  viewingChannelId?: string | null;
 }
 
 const MAX_STEPS = 12;
@@ -135,7 +137,7 @@ function section(tag: string, body: string, attrs = ''): string {
   return body.trim() ? `<${tag}${attrs}>\n${body.trim()}\n</${tag}>` : '';
 }
 
-async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: string | undefined }): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean }> {
+async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: string | undefined }, viewingChannelId?: string | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean }> {
   const [memory, snapshot, ctx] = await Promise.all([
     renderSpeakerMemory(turn.authorId).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     renderSnapshot(turn.threadId),
@@ -149,7 +151,8 @@ async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: stri
     ),
   );
   parts.push(section('subagents', snapshot ? clipTokens(snapshot, BUDGET.snapshot) : 'None in this thread.'));
-  parts.push(section('speaker', `<@${turn.authorId}> ${speaker.name}\nTheir local time: ${formatLocalTime(new Date(), speaker.tz)}`));
+  const viewing = viewingChannelId ? `\nUser is currently viewing <#${viewingChannelId}> (e.g. "this channel").` : '';
+  parts.push(section('speaker', `<@${turn.authorId}> ${speaker.name}\nTheir local time: ${formatLocalTime(new Date(), speaker.tz)}${viewing}`));
   parts.push(section('channel_context', clipTokens(ctx.channelContext, BUDGET.channelContext, 'head', 'channel context truncated')));
   parts.push(section('thread_history', clipTokens(ctx.history, BUDGET.history, 'tail', 'older messages truncated; use read_thread for more')));
   let synthesisRunIds: number[] = [];
@@ -213,7 +216,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const meter = new WebSearchMeter();
   let searchOverLimit = false;
   const speaker = await speakerInfo(turn.authorId);
-  const [system, built] = await Promise.all([buildSystem(), buildTurnMessage(turn, speaker)]);
+  const [system, built] = await Promise.all([buildSystem(), buildTurnMessage(turn, speaker, io.viewingChannelId)]);
   const messages: ModelMessage[] = [{ role: 'user', content: built.text }];
   const ph: { current: 'tools' | 'final' } = { current: 'tools' };
   const setPhase = async (p: 'tools' | 'final') => {

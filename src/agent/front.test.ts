@@ -190,6 +190,19 @@ describe('runFrontTurn (mock model)', () => {
   });
 });
 
+describe('runFrontTurn: agent container context', () => {
+  it('tells the agent which channel the speaker is viewing', async () => {
+    h.model = mockModel([replyStep('ok'), textStep('')]);
+    await runFrontTurn(turn({ id: 30, threadId: 'D1:100.000001' }), { ...io().io, viewingChannelId: 'CSHIP' });
+    const first = JSON.stringify(((h.model as any).doStreamCalls as any[])[0].prompt);
+    expect(first).toContain('User is currently viewing <#CSHIP>');
+
+    h.model = mockModel([replyStep('ok'), textStep('')]);
+    await runFrontTurn(turn({ id: 31 }), io().io);
+    expect(JSON.stringify(((h.model as any).doStreamCalls as any[])[0].prompt)).not.toContain('currently viewing');
+  });
+});
+
 describe('runFrontTurn: native stop', () => {
   const slackError = (code: string) => Object.assign(new Error(code), { data: { ok: false, error: code } });
 
