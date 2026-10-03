@@ -29,8 +29,12 @@ export function cleanFactText(text: string) {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/** bigserial comes back as a string from postgres.js; facts use numeric ids everywhere. */
+const norm = <T extends { id: number | string }>(r: T) => ({ ...r, id: Number(r.id) });
+
 export async function listFacts(userId: string, limit = 500): Promise<Fact[]> {
-  return sql<Fact[]>`select * from user_memory where user_id = ${userId} order by last_used desc, id desc limit ${limit}`;
+  const rows = await sql<Fact[]>`select * from user_memory where user_id = ${userId} order by last_used desc, id desc limit ${limit}`;
+  return rows.map(norm);
 }
 
 export async function countFacts(userId: string): Promise<number> {
@@ -41,7 +45,7 @@ export async function countFacts(userId: string): Promise<number> {
 export async function addFact(userId: string, text: string, sourceThread: string | null): Promise<Fact> {
   const [row] = await sql<Fact[]>`
     insert into user_memory (user_id, text, source_thread) values (${userId}, ${text}, ${sourceThread}) returning *`;
-  return row!;
+  return norm(row!);
 }
 
 export async function updateFact(userId: string, id: number, text: string, sourceThread: string | null): Promise<boolean> {

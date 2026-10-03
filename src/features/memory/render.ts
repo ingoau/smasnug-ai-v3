@@ -53,7 +53,7 @@ export function formatSpeakerMemory(userId: string, facts: Pick<Fact, 'id' | 'te
 /** The current speaker's facts (cap ~20) as `[m_42] prefers short answers`, labelled private. Touches last_used. */
 export async function renderSpeakerMemory(userId: string): Promise<string> {
   const facts = await sql<Pick<Fact, 'id' | 'text'>[]>`
-    select id, text from user_memory where user_id = ${userId}
+    select id::float8 as id, text from user_memory where user_id = ${userId}
     order by last_used desc, id desc limit ${limits.memoryInjectCap}`;
   if (facts.length === 0) return '';
   await touchFacts(
