@@ -1,11 +1,24 @@
 // Module registration: importing this registers tools/actions. The worker wires processors and maintenance.
 import type { Job } from 'bullmq';
-import type { QueueName } from '../core/queues.js';
+import { QUEUE, type QueueName } from '../core/queues.js';
+import { processDebounce } from './fire.js';
+import { pruneSeenEvents, recoverOrphanedTurns } from './maintenance.js';
+import { processSlackEvent } from './slack-events.js';
+import { processThreadRun, shutdownThreadRuns } from './thread-run.js';
 
-export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {};
+export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
+  [QUEUE.slackEvents]: processSlackEvent,
+  [QUEUE.turnDebounce]: processDebounce,
+  [QUEUE.threadRun]: processThreadRun,
+};
 
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
-export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {};
+export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {
+  'pipeline:recover-turns': { everyMs: 30_000, run: recoverOrphanedTurns },
+  'pipeline:prune-seen-events': { everyMs: 60 * 60 * 1000, run: pruneSeenEvents },
+};
 
 /** Called on SIGTERM before the worker exits. */
-export async function onShutdown(): Promise<void> {}
+export async function onShutdown(): Promise<void> {
+  await shutdownThreadRuns(Number(process.env.SHUTDOWN_GRACE_MS ?? 15_000));
+}
