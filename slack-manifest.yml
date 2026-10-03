@@ -46,6 +46,7 @@ oauth_config:
       - emoji:read
     user:
       - search:read           # Slack search (user token, public channels only — enforced in code)
+      - channels:history      # read_public_thread only: open public-channel threads found via search (verified public in code)
 settings:
   event_subscriptions:
     bot_events:

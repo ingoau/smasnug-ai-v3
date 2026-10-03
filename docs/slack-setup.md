@@ -8,8 +8,11 @@ Use a separate app in a test workspace for development.
    Mode needs it). The `xapp-…` token is `SLACK_APP_TOKEN`.
 3. **Install App** → install to the workspace. Copy:
    - **Bot User OAuth Token** (`xoxb-…`) → `SLACK_BOT_TOKEN`
-   - **User OAuth Token** (`xoxp-…`, has `search:read`) → `SLACK_USER_TOKEN`. It searches as the installing user;
-     code restricts results to public channels.
+   - **User OAuth Token** (`xoxp-…`, has `search:read` and `channels:history`) → `SLACK_USER_TOKEN`. It searches as
+     the installing user; code restricts results to public channels. `channels:history` is used only by
+     `read_public_thread` to open public-channel threads found via search (also in channels the bot isn't in); the
+     channel is verified public via `conversations.info` first. Without that scope the tool tells the model it
+     can't open other threads yet.
 4. Fill in the rest of `.env`:
    - `ADMIN_USER_ID` — your Slack user id (profile → ⋯ → Copy member ID). The admin approves workspace facts,
      handles reports, can pause the bot from App Home and bypasses pause/suspension.

@@ -47,7 +47,7 @@ Tool
 Gate
 Front agent
 Children
-Slack search (user token, public channels only: each result's channel is verified public via cached `conversations.info`, fail closed; counts come from the filtered list)
+Slack search (user token, public channels only: each result's channel is verified public via cached `conversations.info`, fail closed; counts come from the filtered list). Hits show Slack's nearby messages (`previous`/`next`, same channel, `##` dropped) and mark thread replies; `read_public_thread` opens any public-channel thread (user token, `channels:history`, same public check)
 
 ✓
 ✓
@@ -59,7 +59,7 @@ Fetch URL (no local addresses)
 
 ✓
 ✓
-`read_image`, `read_thread`, `read_channel`
+`read_image`, `read_thread`, `read_channel`, `read_public_thread`
 
 ✓
 ✓
@@ -213,7 +213,7 @@ Every message is labelled with its author: `<@U123> Ingo: …`; bots as `[bot] G
 Messages over a few hundred tokens are truncated with `[truncated]`.
 - 
 Attachments appear as placeholders, e.g. `[file: budget.csv]`.
-For more, the front agent can call `read_thread(before_ts, limit)` and `read_channel(before_ts, limit)`, or delegate a summary of a long thread to a subagent. The bot token only reads channels the bot is in.
+For more, the front agent can call `read_thread(before_ts, limit)` and `read_channel(before_ts, limit)` (current thread/channel only), or delegate a summary of a long thread to a subagent. The bot token only reads channels the bot is in. Other threads (e.g. a search hit that is a thread reply) are read with `read_public_thread(permalink | channel + thread_ts, limit?)`: user token (`channels:history` user scope), the channel must be verified public (cached `conversations.info`, fail closed), parent first then up to 50 replies, `##` messages dropped, forwarded content inlined, no image ids, counted as a Slack search.
 ### Prompt layout
 Stable parts come first so the provider's prompt cache can reuse them: system prompt, tool definitions, workspace facts. Per-turn parts come last: speaker memories, subagent snapshot, speaker time zone and current time, thread history, new messages. Each section has a token budget; overflowing sections are summarised or left to the agent's read tools.
 ### Images
@@ -241,6 +241,7 @@ Connect to the checked IP to prevent DNS rebinding, and re-check every redirect.
 Cap at a few MB and ~10 seconds; convert HTML through Readability to markdown.
 - 
 Use a connection-level library such as `request-filtering-agent` rather than hand-written IP checks.
+`fetch_url` can't open Slack permalinks (they need auth); `read_public_thread` does that for public channels.
 Fetched pages and search results are treated as untrusted data.
 ## Sending on behalf of users
 `send_message(destination, text, files?)` can post to the thread's channel, another channel, or a DM. Anything sent outside the current thread is attributed to the requesting user and confirmed first.
