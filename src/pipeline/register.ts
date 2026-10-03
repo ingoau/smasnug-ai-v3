@@ -2,7 +2,7 @@
 import type { Job } from 'bullmq';
 import { QUEUE, type QueueName } from '../core/queues.js';
 import { processDebounce } from './fire.js';
-import { pruneSeenEvents, recoverOrphanedTurns } from './maintenance.js';
+import { recoverOrphanedTurns } from './maintenance.js';
 import { processSlackEvent } from './slack-events.js';
 import { processThreadRun, shutdownThreadRuns } from './thread-run.js';
 
@@ -15,7 +15,6 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {
   'pipeline:recover-turns': { everyMs: 30_000, run: recoverOrphanedTurns },
-  'pipeline:prune-seen-events': { everyMs: 60 * 60 * 1000, run: pruneSeenEvents },
 };
 
 /** Called on SIGTERM before the worker exits. */

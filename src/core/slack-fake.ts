@@ -5,10 +5,33 @@
 import { redis } from './redis.js';
 
 let counter = 0;
+
+/**
+ * Test/dev hook: handlers run before the built-in cases; the first one returning non-undefined wins. A handler may
+ * throw `fakeSlackError('invalid_name')` to simulate a Slack API error. Returns a function that removes the handler.
+ */
+export type FakeHandler = (method: string, args: Record<string, unknown>, token: string) => any;
+const handlers: FakeHandler[] = [];
+export function addFakeHandler(h: FakeHandler): () => void {
+  handlers.push(h);
+  return () => {
+    const i = handlers.indexOf(h);
+    if (i >= 0) handlers.splice(i, 1);
+  };
+}
+
+/** An error shaped like @slack/web-api's platform error (`slackErrorCode(err)` reads `data.error`). */
+export function fakeSlackError(code: string) {
+  return Object.assign(new Error(`An API error occurred: ${code}`), { code: 'slack_webapi_platform_error', data: { ok: false, error: code } });
+}
 const nextTs = () => `${Math.floor(Date.now() / 1000)}.${String(++counter).padStart(6, '0')}`;
 
 export async function fakeCall(method: string, args: Record<string, unknown>, token: string): Promise<any> {
   await redis.rpush('slack:fake:calls', JSON.stringify({ at: Date.now(), method, token, args }));
+  for (const h of handlers) {
+    const res = await h(method, args, token);
+    if (res !== undefined) return res;
+  }
   switch (method) {
     case 'auth.test':
       return { ok: true, user_id: 'UBOT', bot_id: 'BBOT', team_id: 'TFAKE' };

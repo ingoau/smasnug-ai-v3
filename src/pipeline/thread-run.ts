@@ -6,7 +6,7 @@
 import type { Job } from 'bullmq';
 import { runFrontTurn, type TurnIO } from '../agent/front.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
-import { slackCall } from '../core/slack.js';
+import { slackCall, slackErrorCode } from '../core/slack.js';
 import type { TurnRow } from '../core/types.js';
 import { log } from '../log.js';
 import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from './lock.js';
@@ -54,7 +54,9 @@ async function setStatus(channelId: string, threadTs: string, status: string) {
   try {
     await slackCall('assistant.threads.setStatus', { channel_id: channelId, thread_ts: threadTs, status });
   } catch (err) {
-    log.debug({ err, channelId, threadTs }, 'setStatus failed');
+    // Best-effort. Channel threads may answer `method_not_supported_for_channel_type`; that's expected.
+    if (slackErrorCode(err) === 'method_not_supported_for_channel_type') log.debug({ channelId }, 'setStatus unsupported here');
+    else log.warn({ err, channelId, threadTs }, 'setStatus failed');
   }
 }
 
