@@ -4,6 +4,9 @@ import { env } from '../config.js';
 import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
+import { getUserInfo } from '../context/users.js';
+import { EXTRAS } from '../tools/extras.js';
+import { WEB_SEARCH_TOOL, WebSearchMeter } from '../tools/web-search.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
@@ -12,12 +15,10 @@ import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/re
 import { MODELS, openrouter } from '../models.js';
 import { log } from '../log.js';
 import { freezeCard, postCard } from './cards.js';
-import { imageMessage } from './child.js';
 import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
-import type { QueuedImage } from './types.js';
 import { clipTokens, oneLine } from './util.js';
 
 export interface TurnIO {
@@ -66,20 +67,9 @@ async function buildSystem(): Promise<string> {
   return `${base}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
 }
 
-const userInfoCache = new Map<string, { at: number; name: string; tz: string | undefined }>();
 async function speakerInfo(userId: string): Promise<{ name: string; tz: string | undefined }> {
-  const hit = userInfoCache.get(userId);
-  if (hit && Date.now() - hit.at < 60 * 60 * 1000) return hit;
-  try {
-    const res = await slackCall<any>('users.info', { user: userId });
-    const u = res.user ?? {};
-    const v = { at: Date.now(), name: u.profile?.display_name || u.real_name || u.name || userId, tz: u.tz as string | undefined };
-    userInfoCache.set(userId, v);
-    return v;
-  } catch (err) {
-    log.warn({ err, userId }, 'users.info failed');
-    return { name: userId, tz: undefined };
-  }
+  const u = await getUserInfo(userId).catch(() => null);
+  return { name: u?.name ?? userId, tz: u?.tz };
 }
 
 export function formatLocalTime(now: Date, tz: string | undefined): string {
@@ -200,15 +190,17 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
   const state: FrontTurnState = { turn, threadId: turn.threadId, channelId, threadTs, replies, visible: new Set(), cardId: null };
-  const queuedImages: QueuedImage[] = [];
   const seenTs = new Set(turn.messageTs);
   const extras: Record<string, unknown> = {
     agentTurn: state,
-    defaultReactTs: latestTs(turn.messageTs),
-    queueUserImage: (img: QueuedImage) => queuedImages.push(img),
+    [EXTRAS.defaultReactTs]: latestTs(turn.messageTs),
+    // EXTRAS.queueUserImage deliberately unset: Luna accepts images in tool results.
   };
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, extras });
 
+  const toolNames = Object.keys(tools);
+  const meter = new WebSearchMeter();
+  let searchOverLimit = false;
   const speaker = await speakerInfo(turn.authorId);
   const [system, built] = await Promise.all([buildSystem(), buildTurnMessage(turn, speaker)]);
   const messages: ModelMessage[] = [{ role: 'user', content: built.text }];
@@ -228,19 +220,24 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       messages,
       tools,
       stopWhen: stepCountIs(MAX_STEPS),
+      includeRawChunks: true,
+      onStepFinish: async (stepResult) => {
+        meter.observeStep(stepResult);
+        if (await meter.settle({ speakerId: turn.authorId, threadId: turn.threadId }).catch(() => false)) searchOverLimit = true;
+      },
       prepareStep: async ({ messages: current }) => {
         const extra: ModelMessage[] = [];
         const inbox = (await io.drainInbox()).filter((m) => !seenTs.has(m.ts));
         if (inbox.length) {
           inbox.forEach((m) => seenTs.add(m.ts));
           const latest = latestTs(inbox.map((m) => m.ts));
-          if (latest && (!extras.defaultReactTs || Number(latest) > Number(extras.defaultReactTs))) extras.defaultReactTs = latest;
+          if (latest && (!extras[EXTRAS.defaultReactTs] || Number(latest) > Number(extras[EXTRAS.defaultReactTs]))) extras[EXTRAS.defaultReactTs] = latest;
           const rendered = await renderMessages(turn.threadId, inbox.map((m) => m.ts)).catch(() => inbox.map((m) => m.text).join('\n'));
           extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
           await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
         }
-        if (queuedImages.length) extra.push(imageMessage(queuedImages.splice(0)));
-        return extra.length ? { messages: [...current, ...extra] } : {};
+        const activeTools = searchOverLimit ? toolNames.filter((n) => n !== WEB_SEARCH_TOOL) : undefined;
+        return { ...(extra.length ? { messages: [...current, ...extra] } : {}), ...(activeTools ? { activeTools } : {}) };
       },
     });
 
@@ -248,6 +245,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     let stepTools: string[] = [];
     for await (const part of result.fullStream) {
       switch (part.type) {
+        case 'raw':
+          meter.observeChunk(part);
+          break;
         case 'text-delta':
           stepText += part.text;
           break;
@@ -258,6 +258,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           stepTools.push(part.toolName);
           break;
         case 'tool-result': {
+          // react reports skipped/failed reactions as text rather than errors.
+          if (part.toolName === 'react' && !/reacted/i.test(String(part.output))) break;
           const v = VISIBLE_TOOLS[part.toolName];
           if (v) state.visible.add(v);
           break;

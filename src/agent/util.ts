@@ -118,7 +118,12 @@ export function compactHistory(messages: ModelMessage[]): ModelMessage[] {
       };
     }
     if (m.role === 'assistant' && Array.isArray(m.content)) {
-      return { ...m, content: m.content.filter((p) => p.type !== 'reasoning' && p.type !== 'reasoning-file') };
+      return {
+        ...m,
+        content: m.content
+          .filter((p) => p.type !== 'reasoning' && p.type !== 'reasoning-file')
+          .map((p) => (p.type === 'file' ? { type: 'text' as const, text: '[file omitted]' } : p)),
+      };
     }
     if (m.role === 'user' && Array.isArray(m.content)) {
       return {

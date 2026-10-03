@@ -7,6 +7,7 @@ import { appendEvent } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { log } from '../log.js';
 import { uploadFiles, type OutgoingFile } from './files.js';
+import { stripCitationMarkers } from '../tools/web-search.js';
 import { extractPartialString } from './partial-json.js';
 import { chooseDelivery, type DeliveryMode } from './util.js';
 
@@ -59,6 +60,16 @@ export function markdownMessage(text: string) {
   return { text: text.slice(0, MAX_TEXT), blocks: [{ type: 'markdown', text: md }] };
 }
 
+/**
+ * The part of a partially streamed reply that is safe to show: citation markers stripped, and a trailing
+ * possibly-incomplete marker (`\uE200…`, or a word ending in `c`/`ci`/`cit`/`cite…`) held back until more arrives.
+ */
+export function streamSafePrefix(partial: string): string {
+  const s = stripCitationMarkers(partial);
+  const m = s.search(/\s?(\uE200[^\uE201]*|c(i(t(e[\w\uE202]*)?)?)?)$/);
+  return m >= 0 ? s.slice(0, m) : s;
+}
+
 export class ReplyManager {
   private entries = new Map<string, ReplyEntry>();
   private nextIndex = 0;
@@ -103,7 +114,7 @@ export class ReplyManager {
   private async flush(e: ReplyEntry, finalText?: string) {
     if (e.failed || e.stopped) return;
     if ((await e.mode) !== 'stream') return;
-    const value = finalText ?? extractPartialString(e.buf, 'text')?.value ?? '';
+    const value = finalText ?? streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '');
     if (value.length <= e.sent) return;
     if (e.sent + (value.length - e.sent) > MAX_MD) return; // too long to stream further; finish() handles overflow
     const piece = value.slice(e.sent);
@@ -137,8 +148,9 @@ export class ReplyManager {
   }
 
   /** Called from the tool's execute with the complete, validated input. */
-  async finish(toolCallId: string, text: string, files?: OutgoingFile[]): Promise<string> {
+  async finish(toolCallId: string, rawText: string, files?: OutgoingFile[]): Promise<string> {
     const e = this.start(toolCallId);
+    const text = stripCitationMarkers(rawText);
     if (e.timer) {
       clearTimeout(e.timer);
       e.timer = null;

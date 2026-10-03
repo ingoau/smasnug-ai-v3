@@ -65,6 +65,8 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     ({ redis } = await import('../core/redis.js'));
     ({ fakeCalls } = await import('../core/slack-fake.js'));
     await import('./register.js');
+    await import('../tools/index.js');
+    await import('../features/register.js');
     await redis.del('slack:fake:calls');
     await sql`insert into threads (id, channel_id, thread_ts, engaged) values (${threadId}, ${channel}, ${rootTs}, true) on conflict do nothing`;
   });
@@ -238,4 +240,24 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const calls = (await fakeCalls()).slice(before);
     expect(calls.filter((c) => ['chat.postMessage', 'chat.startStream'].includes(c.method))).toHaveLength(0);
   }, 60_000);
+
+  it('a subagent can use web search (server tool) and reports with sources', async () => {
+    const { spawnSubagent } = await import('./subagents.js');
+    const { processSubagentRun } = await import('./child.js');
+    const th = await freshThread('WEB');
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, status) values (${th.id}, ${user}, 'running') returning id`;
+    const s = await spawnSubagent({
+      threadId: th.id,
+      turnId: Number(t.id),
+      ownerId: user,
+      title: 'Node LTS version',
+      instructions: 'Use one web search to find the current Node.js LTS major version. Report the version and the source URL.',
+    });
+    await processSubagentRun(s.runId);
+    const [run] = await sql<any[]>`select status, result, output, error, tokens from runs where id = ${s.runId}`;
+    // eslint-disable-next-line no-console
+    console.log('web run:', run.status, run.output, run.tokens, String(run.result).slice(0, 300));
+    expect(run.status).toBe('complete');
+    expect(run.result).toMatch(/https?:\/\//);
+  }, 120_000);
 });

@@ -3,7 +3,7 @@
  * cancel flag checked exactly at step boundaries (never mid tool call). Progress goes to `runs.details` and the
  * card is re-rendered (coalesced). History is persisted (compacted) at run end.
  */
-import { streamText, stepCountIs, type ModelMessage, type UserContent } from 'ai';
+import { streamText, stepCountIs, type ModelMessage } from 'ai';
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
@@ -15,11 +15,11 @@ import { WORKER_ID } from '../worker/identity.js';
 import { scheduleCardRender } from './cards.js';
 import { childSystemPrompt } from './prompts/child.js';
 import { failRuns, finishRun, type RunRow, type SubagentRow } from './subagents.js';
-import type { QueuedImage } from './types.js';
+import { WEB_SEARCH_TOOL, WebSearchMeter } from '../tools/web-search.js';
 import { compactHistory, describeToolStep, oneLine, splitResult } from './util.js';
 
-
-const MAX_STEPS = 40;
+/** Step cap per run (each web-search step costs ~11–20k input tokens; the token cap applies too). */
+const MAX_STEPS = 25;
 
 /** Runs executing in this process, for shutdown. */
 const active = new Map<number, AbortController>();
@@ -28,15 +28,6 @@ class RunAbort extends Error {
   constructor(readonly kind: 'timeout' | 'shutdown' | 'gone') {
     super(kind);
   }
-}
-
-export function imageMessage(images: QueuedImage[]): ModelMessage {
-  const content: UserContent = [];
-  for (const img of images) {
-    content.push({ type: 'text', text: img.caption ? `[image loaded: ${img.caption}]` : '[image loaded]' });
-    content.push({ type: 'image', image: img.data, mediaType: img.mediaType });
-  }
-  return { role: 'user', content };
 }
 
 async function drainSubagentInbox(subagentId: string): Promise<string[]> {
@@ -81,7 +72,6 @@ export async function processSubagentRun(runId: number): Promise<void> {
   }, limits.heartbeatMs);
 
   const { channelId, threadTs } = parseThreadId(run.threadId);
-  const queuedImages: QueuedImage[] = [];
   const tools = toolsFor('child', {
     threadId: run.threadId,
     channelId,
@@ -90,8 +80,12 @@ export async function processSubagentRun(runId: number): Promise<void> {
     subagentId: sa.id,
     runId: run.id,
     abortSignal: controller.signal,
-    extras: { queueUserImage: (img: QueuedImage) => queuedImages.push(img) },
+    // queueUserImage deliberately unset: Luna/Sol accept images in tool results.
+    extras: {},
   });
+  const toolNames = Object.keys(tools);
+  const meter = new WebSearchMeter();
+  let searchOverLimit = false;
   const modelId = run.model ?? MODELS.child;
   const model = openrouter(modelId);
   const history: ModelMessage[] = Array.isArray(sa.history) ? sa.history : [];
@@ -128,7 +122,6 @@ export async function processSubagentRun(runId: number): Promise<void> {
       }
       const inbox = await drainSubagentInbox(sa.id);
       for (const text of inbox) messages.push({ role: 'user', content: `[Orchestrator update] ${text}` });
-      if (queuedImages.length) messages.push(imageMessage(queuedImages.splice(0)));
 
       const overBudget = tokens >= limits.runMaxTokens || step >= MAX_STEPS;
       if (overBudget) {
@@ -142,15 +135,26 @@ export async function processSubagentRun(runId: number): Promise<void> {
         instructions: childSystemPrompt(),
         messages,
         tools,
-        activeTools: overBudget ? [] : undefined,
+        activeTools: overBudget ? [] : searchOverLimit ? toolNames.filter((n) => n !== WEB_SEARCH_TOOL) : undefined,
+        includeRawChunks: true,
+        onStepFinish: async (stepResult) => {
+          meter.observeStep(stepResult);
+          if (await meter.settle({ speakerId: sa.ownerId, threadId: run.threadId }).catch(() => false)) searchOverLimit = true;
+        },
         stopWhen: stepCountIs(1),
         abortSignal: controller.signal,
         providerOptions: { openrouter: { usage: { include: true } } },
       });
       let stepText = '';
       let finishReason = '';
+      let lastSearchNoted = false;
       for await (const part of result.fullStream) {
-        if (part.type === 'text-delta') stepText += part.text;
+        if (part.type === 'raw') meter.observeChunk(part);
+        else if (part.type === 'text-delta') stepText += part.text;
+        else if (part.type === 'source' && !lastSearchNoted) {
+          lastSearchNoted = true;
+          await setDetails('Searching the web');
+        }
         else if (part.type === 'tool-call') await setDetails(describeToolStep(part.toolName, part.input));
         else if (part.type === 'finish-step') {
           finishReason = part.finishReason;

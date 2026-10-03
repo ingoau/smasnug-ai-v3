@@ -45,13 +45,18 @@ vi.mock('../context/thread.js', () => ({
 }));
 vi.mock('../models.js', () => ({
   MODELS: { gate: 'm', front: 'm', child: 'm', childHard: 'm' },
-  openrouter: () => h.model,
+  openrouter: Object.assign(() => h.model, {
+    tools: { webSearch: () => ({ type: 'provider', id: 'openrouter.web_search', name: 'web_search', args: {} }) },
+  }),
 }));
+vi.mock('../context/users.js', () => ({ getUserInfo: async (id: string) => ({ id, name: 'Tess', tz: 'Europe/Berlin', isBot: false }) }));
 
 const { MockLanguageModelV4 } = await import('ai/test');
 const { simulateReadableStream } = await import('ai');
 await import('./tools.js');
+await import('../tools/web-search.js');
 const { runFrontTurn } = await import('./front.js');
+const { streamSafePrefix } = await import('./reply.js');
 
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
 
@@ -121,7 +126,7 @@ describe('runFrontTurn (mock model)', () => {
     const streamed = h.slack.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => c.args.markdown_text).join('');
     expect(streamed).toBe(text);
     const start = h.slack.find((c) => c.method === 'chat.startStream')!;
-    expect(start.args).toMatchObject({ channel: 'C1', thread_ts: '100.000001', recipient_user_id: 'U1', recipient_team_id: 'T1' });
+    expect(start.args).toMatchObject({ channel: 'C1', thread_ts: '100.000001', recipient_user_id: 'U1' });
     expect(phases).toEqual(['final']);
     expect(h.events.find((e) => e.type === 'reply')?.payload).toMatchObject({ mode: 'streamed', text, index: 0 });
     expect(h.events.find((e) => e.type === 'discarded_text')?.payload.text).toBe('done');
@@ -169,5 +174,22 @@ describe('runFrontTurn (mock model)', () => {
     h.model = mockModel([[{ type: 'stream-start', warnings: [] }, { type: 'error', error: new Error('down') }]]);
     await expect(runFrontTurn(turn({ id: 9 }), io().io)).rejects.toThrow();
     expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
+  });
+
+  it('strips citation markers from streamed and posted replies', async () => {
+    const raw = 'Russell won the race. \uE200cite\uE202turn0search9\uE201 Next season starts in March.';
+    h.model = mockModel([replyStep(raw, 3), textStep('')], 15);
+    await runFrontTurn(turn({ id: 11 }), io().io);
+    const streamed = h.slack.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => c.args.markdown_text).join('');
+    expect(streamed).toBe('Russell won the race. Next season starts in March.');
+  });
+});
+
+describe('streamSafePrefix', () => {
+  it('holds back a possibly incomplete citation marker', () => {
+    expect(streamSafePrefix('Hello wor')).toBe('Hello wor');
+    expect(streamSafePrefix('Done. \uE200cite\uE202turn0')).toBe('Done.');
+    expect(streamSafePrefix('Done. cit')).toBe('Done.');
+    expect(streamSafePrefix('Done. citeturn0search2 More')).toBe('Done. More');
   });
 });
