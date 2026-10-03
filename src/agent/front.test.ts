@@ -254,6 +254,21 @@ describe('runFrontTurn: native stop', () => {
     expect(((h.model as any).doStreamCalls as any[]).length).toBe(1);
   });
 
+  it('stops appending to the stream as soon as stop is requested', async () => {
+    const text = 'A long streamed answer that keeps going and going while the user loses interest and presses stop.';
+    h.model = mockModel([replyStep(text, 3), textStep('')], 25);
+    let stop = false;
+    let appends = 0;
+    h.slackHook = (method) => {
+      if (method === 'chat.appendStream' && ++appends === 2) stop = true;
+    };
+    await runFrontTurn(turn({ id: 26 }), { ...io().io, stopRequested: async () => stop });
+    const chat = h.slack.map((c) => c.method).filter((m) => m.startsWith('chat.'));
+    expect(chat.filter((m) => m === 'chat.appendStream')).toHaveLength(2);
+    expect(chat.at(-1)).toBe('chat.stopStream');
+    expect(chat).not.toContain('chat.postMessage');
+  });
+
   it('a halted stream is not re-posted even before the stop flag is visible', async () => {
     const text = 'Another long streamed answer, halted by Slack before our worker saw the stop event.';
     h.model = mockModel([replyStep(text, 4), textStep('')], 30);

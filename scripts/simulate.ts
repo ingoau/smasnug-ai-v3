@@ -74,6 +74,26 @@ await enqueue(QUEUE.slackEvents, {
 });
 console.log(`→ message_changed    U4   "remind me what you can do, briefly"`);
 
+console.log('\n== Scenario 5: agent container — user views a channel, DMs, then presses the native stop button');
+await enqueue(QUEUE.slackEvents, {
+  kind: 'event',
+  body: { event_id: `EvSim${n}c`, authorizations: [{ user_id: 'U5' }], event: { type: 'app_context_changed', context: { entities: [{ type: 'slack#/types/channel_id', value: channel }] } } },
+});
+console.log(`→ app_context_changed U5   viewing ${channel}`);
+const dm2 = `${dm}X`;
+const dm2Ts = ts();
+await enqueue(QUEUE.slackEvents, {
+  kind: 'event',
+  body: { event_id: `EvSim${n}d`, event: { type: 'message', channel: dm2, channel_type: 'im', user: 'U5', text: 'write me a detailed, long guide to soldering for beginners', ts: dm2Ts } },
+});
+console.log(`→ message (DM)       U5   "write me a detailed, long guide to soldering for beginners"`);
+await sleep(3000);
+await enqueue(QUEUE.slackEvents, {
+  kind: 'event',
+  body: { event_id: `EvSim${n}s`, event: { type: 'agent_session_stopped', channel: dm2, thread_ts: dm2Ts, user: 'U5', event_ts: ts(), streaming_message_ts: [] } },
+});
+console.log(`→ agent_session_stopped U5`);
+
 console.log(`\n… waiting ${waitSec}s for debounce, gate and turns`);
 await sleep(waitSec * 1000);
 
@@ -81,14 +101,14 @@ const calls = await fakeCalls();
 console.log(`\n== Fake Slack calls (${calls.length})`);
 for (const c of calls) {
   const a = c.args ?? {};
-  console.log(`  ${c.method.padEnd(28)} ${JSON.stringify({ channel: a.channel ?? a.channel_id, thread_ts: a.thread_ts, text: a.text, status: a.status, markdown_text: a.markdown_text }).slice(0, 220)}`);
+  console.log(`  ${c.method.padEnd(28)} ${JSON.stringify({ channel: a.channel ?? a.channel_id, thread_ts: a.thread_ts, text: a.text, status: a.status, initiator: a.initiator_user_id, markdown_text: a.markdown_text }).slice(0, 220)}`);
 }
 
-const turns = await sql`select id::int, thread_id, author_id, kind, is_mention, message_ts, status from turns where thread_id like ${channel + ':%'} or thread_id like ${dm + ':%'} order by id`;
+const turns = await sql`select id::int, thread_id, author_id, kind, is_mention, message_ts, status from turns where thread_id like ${channel + ':%'} or thread_id like ${dm + '%'} order by id`;
 console.log(`\n== Turns (${turns.length})`);
 for (const t of turns) console.log(`  #${t.id} ${t.threadId} author=${t.authorId} mention=${t.isMention} msgs=${t.messageTs.length} status=${t.status}`);
 
-const events = await sql`select thread_id, type, actor, payload from thread_events where thread_id like ${channel + ':%'} or thread_id like ${dm + ':%'} order by id`;
+const events = await sql`select thread_id, type, actor, payload from thread_events where thread_id like ${channel + ':%'} or thread_id like ${dm + '%'} order by id`;
 console.log(`\n== Thread events (${events.length})`);
 for (const e of events) console.log(`  ${e.type.padEnd(16)} ${String(e.actor ?? '').padEnd(10)} ${JSON.stringify(e.payload).slice(0, 160)}`);
 

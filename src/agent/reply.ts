@@ -126,6 +126,12 @@ export class ReplyManager {
     if (value.length <= e.sent) return;
     if (e.sent + (value.length - e.sent) > MAX_MD) return; // too long to stream further; finish() handles overflow
     const piece = value.slice(e.sent);
+    if (await this.isStopped()) {
+      // Native stop: Slack halted (or will halt) the stream; send nothing more.
+      e.halted = Boolean(e.streamTs);
+      e.failed = true;
+      return;
+    }
     if (!e.streamTs) {
       // Don't open a stream for leading whitespace only.
       if (!piece.trim()) return;
