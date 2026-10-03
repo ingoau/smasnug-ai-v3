@@ -1,4 +1,4 @@
-/** Pipeline maintenance: recover turns orphaned by crashes, prune dedupe rows. */
+/** Pipeline maintenance: recover turns orphaned by crashes. (slack_events_seen pruning is in features/retention.) */
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { isLocked, threadLockKey } from './lock.js';
@@ -18,8 +18,4 @@ export async function recoverOrphanedTurns() {
     log.warn({ threadId }, 'recovering orphaned turns');
     await ensureThreadRun(threadId);
   }
-}
-
-export async function pruneSeenEvents() {
-  await sql`delete from slack_events_seen where received_at < now() - interval '1 day'`;
 }
