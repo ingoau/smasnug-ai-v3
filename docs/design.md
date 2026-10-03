@@ -90,7 +90,7 @@ The bot always runs on a mention or DM. In threads where it has been mentioned, 
 **Front agent.** On yes, the front agent runs and can still choose silence by not calling `reply`.
 **Never triggered by bots.** Messages from bots (`bot_id` or `subtype: bot_message`), including the bot's own and its on-behalf-of messages, never start a turn. Bot messages are still included in context, labelled as bots.
 **Disengagement.** If the bot hasn't been addressed for about 10 messages or a few hours, it stops considering follow-ups until mentioned again. "Stop" or "shut up" also disengages it.
-**Status indicator.** `assistant.threads.setStatus` is shown for mentions and DMs only. Unmentioned follow-ups show no typing indicator and no acknowledgement reaction.
+**Status indicator.** `agents.sessions.setStatus` (`processing` at turn start, `active` when the turn ends) is shown for mentions and DMs only; `processing` also shows Slack's native stop button, which behaves like saying "stop". Unmentioned follow-ups show no typing indicator and no acknowledgement reaction.
 ## Turns
 Every front-agent turn has exactly one speaker, and only one front agent runs per thread at a time. This keeps "current speaker" well defined for memory, tools and steering.
 **Debounce per (thread, author).** Messages from the same person within the window merge into one turn; messages from different people never merge. The window scales: about 1 second when the thread has no running subagents, 3 seconds when it does. It is re-evaluated as each message arrives.
