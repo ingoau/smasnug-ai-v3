@@ -18,6 +18,7 @@ import { freezeCard, postCard } from './cards.js';
 import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
+import { activityForTool } from './activity.js';
 import { activeToolsFor, delegatedAndAcknowledged, guardReact, isReplyOnlyStep, reactedAsResponse, replyBlockReason } from './turn-guards.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
@@ -27,8 +28,15 @@ export interface TurnIO {
   drainInbox(): Promise<StoredMessage[]>;
   /** 'final' once the model is producing its last step (no more tool calls) — new messages then wait for the next turn. */
   setPhase(phase: 'tools' | 'final'): Promise<void>;
-  /** True when this turn was triggered by a mention or DM (status indicator allowed). */
+  /** True when this turn was triggered by a mention or DM (status indicator from the start). */
   isMention: boolean;
+  /**
+   * Called as soon as the model starts a tool call that commits the turn to work (anything but reply / react /
+   * unreact / search_emojis), with a code-derived label such as "Searching the web…". The pipeline owns the status
+   * indicator: it shows it from the first call on (unmentioned turns stay status-free until then), coalesces
+   * updates and clears it when the turn ends. Fire-and-forget: must not block or throw.
+   */
+  setActivity?(text: string): void;
   /**
    * True once the user pressed Slack's native stop button for this thread while this turn was running. The turn
    * then ends at its next step boundary, delivers no further replies and posts no fallback.
@@ -241,6 +249,20 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     await io.setPhase(p).catch((err) => log.warn({ err }, 'setPhase failed'));
   };
 
+  // Status indicator: report each tool call once, as early as possible (input start, else the complete call).
+  const announced = new Set<string>();
+  const announce = (toolCallId: string, toolName: string) => {
+    if (!io.setActivity || announced.has(toolCallId)) return;
+    announced.add(toolCallId);
+    const text = activityForTool(toolName);
+    if (!text) return;
+    try {
+      io.setActivity(text);
+    } catch (err) {
+      log.warn({ err }, 'setActivity failed');
+    }
+  };
+
   let failed: unknown;
   try {
     if (await checkStop()) throw new TurnStopped();
@@ -298,9 +320,11 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           stepText += part.text;
           break;
         case 'tool-input-start':
+          announce(part.id, part.toolName);
           if (ph.current === 'final' && part.toolName !== 'reply' && part.toolName !== 'react') await setPhase('tools');
           break;
         case 'tool-call':
+          announce(part.toolCallId, part.toolName);
           stepTools.push(part.toolName);
           break;
         case 'tool-result': {

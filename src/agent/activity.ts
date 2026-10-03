@@ -1,0 +1,37 @@
+/**
+ * Code-derived activity labels for the status indicator (never model-facing). The front loop reports each tool
+ * call as it starts; tools that just respond (reply / react / unreact, and the emoji lookup that precedes a
+ * reaction) return null: they don't commit the turn to work, and a streamed reply is its own indicator.
+ *
+ * `web_search` is OpenRouter's server tool: the search runs inside the model call and the stream carries no
+ * tool-call part before the answer (verified live: the first chunk after the search is already the reply call, the
+ * `source` parts come after it). So it normally can't be announced; the label is here for providers that do emit
+ * a provider-executed tool call.
+ */
+const LABELS: Record<string, string> = {
+  web_search: 'Searching the web…',
+  slack_search: 'Searching Slack…',
+  fetch_url: 'Reading the page…',
+  read_thread: 'Reading the thread…',
+  read_channel: 'Reading the channel…',
+  read_image: 'Looking at the image…',
+  spawn_subagent: 'Starting a subagent…',
+  message_subagent: 'Updating a subagent…',
+  cancel_subagent: 'Stopping a subagent…',
+  remember: 'Saving a note…',
+  forget: 'Forgetting a note…',
+  propose_workspace_fact: 'Noting a workspace fact…',
+  send_message: 'Preparing a message…',
+  set_card_title: 'Writing up the results…',
+};
+
+/** Tools that only respond; they never show or change the indicator. */
+const RESPONDING = new Set(['reply', 'react', 'unreact', 'search_emojis']);
+
+export const DEFAULT_ACTIVITY = 'Working…';
+
+/** The status text for a tool call that just started, or null if it shouldn't show/change the indicator. */
+export function activityForTool(toolName: string): string | null {
+  if (RESPONDING.has(toolName)) return null;
+  return LABELS[toolName] ?? DEFAULT_ACTIVITY;
+}

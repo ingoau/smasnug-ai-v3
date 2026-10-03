@@ -154,20 +154,23 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const statusCalls = (await fakeCalls()).filter((c) => c.method.endsWith('.setStatus'));
       expect(statusCalls.map((c) => [c.method, c.args.status, c.args.initiator_user_id])).toEqual([
         ['agents.sessions.setStatus', 'processing', 'U1'],
+        ['assistant.threads.setStatus', 'is thinking…', undefined],
+        ['assistant.threads.setStatus', '', undefined],
         ['agents.sessions.setStatus', 'active', 'U1'],
       ]);
       const events = await sql`select type from thread_events where thread_id = ${THREAD} order by id`;
       expect(events.map((e) => e.type)).toEqual(['turn_started', 'turn_finished', 'turn_started', 'turn_finished']);
     });
 
-    it('session status: active even when the turn fails; falls back to assistant.threads.setStatus on unexpected errors', async () => {
+    it('session status: cleared even when the turn fails; agents.sessions errors are tolerated', async () => {
       const { addFakeHandler, fakeSlackError } = await import('../core/slack-fake.js');
       await makeThread();
       await scheduler.scheduleMessages(THREAD, 'U1', ['1.1'], true);
       run.mockRejectedValueOnce(new Error('boom'));
       await processThreadRun(job({ threadId: THREAD }));
       const statuses = async () => (await fakeCalls()).filter((c) => c.method.endsWith('.setStatus')).map((c) => `${c.method}:${c.args.status}`);
-      expect(await statuses()).toEqual(['agents.sessions.setStatus:processing', 'agents.sessions.setStatus:active']);
+      const normal = ['agents.sessions.setStatus:processing', 'assistant.threads.setStatus:is thinking…', 'assistant.threads.setStatus:', 'agents.sessions.setStatus:active'];
+      expect(await statuses()).toEqual(normal);
 
       await redis.del('slack:fake:calls');
       let code = 'unknown_method';
@@ -177,22 +180,100 @@ describe.skipIf(!infra)('pipeline integration', () => {
       try {
         await scheduler.scheduleMessages(THREAD, 'U1', ['1.2'], true);
         await processThreadRun(job({ threadId: THREAD }));
-        expect(await statuses()).toEqual([
-          'agents.sessions.setStatus:processing',
-          'assistant.threads.setStatus:is thinking…',
-          'agents.sessions.setStatus:active',
-          'assistant.threads.setStatus:',
-        ]);
-        // Expected errors (e.g. not in channel) don't fall back.
+        // The activity text (assistant.threads.setStatus) doubles as the fallback: same calls, the turn goes on.
+        expect(await statuses()).toEqual(normal);
+        expect((await turns()).map((t) => t.status)).toEqual(['error', 'done']);
+        // Expected errors (e.g. not in channel) are just skipped.
         await redis.del('slack:fake:calls');
         code = 'channel_not_found';
         await scheduler.scheduleMessages(THREAD, 'U1', ['1.3'], true);
         await processThreadRun(job({ threadId: THREAD }));
-        expect(await statuses()).toEqual(['agents.sessions.setStatus:processing', 'agents.sessions.setStatus:active']);
+        expect(await statuses()).toEqual(normal);
       } finally {
         remove();
       }
       expect((await turns()).map((t) => t.status)).toEqual(['error', 'done', 'done']);
+    });
+
+    describe('status activity', () => {
+      const statusCalls = async () =>
+        (await fakeCalls()).filter((c) => c.method.endsWith('.setStatus')).map((c) => (c.method === 'agents.sessions.setStatus' ? `session:${c.args.status}` : `text:${(c.args.loading_messages as string[] | undefined)?.[0] ?? ''}`));
+
+      it('unmentioned turn that replies directly: zero status calls', async () => {
+        await makeThread();
+        await scheduler.scheduleMessages(THREAD, 'U2', ['1.1'], false);
+        run.mockImplementationOnce(async () => {
+          await new Promise((r) => setTimeout(r, 20)); // reply/react only: setActivity is never called
+        });
+        await processThreadRun(job({ threadId: THREAD }));
+        expect(await statusCalls()).toEqual([]);
+      });
+
+      it('unmentioned turn with a lookup: status set on the lookup, cleared at the end (also on failure)', async () => {
+        await makeThread();
+        await scheduler.scheduleMessages(THREAD, 'U2', ['1.1'], false);
+        let duringTurn: string[] = [];
+        run.mockImplementationOnce(async (_turn, io) => {
+          expect(await statusCalls()).toEqual([]);
+          io.setActivity!('Searching Slack…');
+          await new Promise((r) => setTimeout(r, 50));
+          duringTurn = await statusCalls();
+        });
+        await processThreadRun(job({ threadId: THREAD }));
+        expect(duringTurn).toEqual(['session:processing', 'text:Searching Slack…']);
+        expect(await statusCalls()).toEqual(['session:processing', 'text:Searching Slack…', 'text:', 'session:active']);
+        const set = (await fakeCalls()).find((c) => c.method === 'assistant.threads.setStatus')!;
+        expect(set.args).toEqual({ channel_id: C, thread_ts: T, status: 'is searching Slack…', loading_messages: ['Searching Slack…'] });
+
+        await redis.del('slack:fake:calls');
+        await scheduler.scheduleMessages(THREAD, 'U2', ['1.2'], false);
+        run.mockImplementationOnce(async (_turn, io) => {
+          io.setActivity!('Reading the page…');
+          await new Promise((r) => setTimeout(r, 20));
+          throw new Error('boom');
+        });
+        await processThreadRun(job({ threadId: THREAD }));
+        expect(await statusCalls()).toEqual(['session:processing', 'text:Reading the page…', 'text:', 'session:active']);
+      });
+
+      it('mention turn: initial status, per-tool text updates (coalesced), cleared at the end', async () => {
+        await makeThread();
+        await scheduler.scheduleMessages(THREAD, 'U1', ['1.1'], true);
+        run.mockImplementationOnce(async (_turn, io) => {
+          expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…']);
+          io.setActivity!('Searching the web…'); // superseded within the coalescing window
+          io.setActivity!('Reading the page…');
+          await new Promise((r) => setTimeout(r, 1150));
+          io.setActivity!('Reading the page…'); // unchanged: skipped
+          await new Promise((r) => setTimeout(r, 50));
+          io.setActivity!('Starting a subagent…');
+          await new Promise((r) => setTimeout(r, 1100));
+        });
+        await processThreadRun(job({ threadId: THREAD }));
+        expect(await statusCalls()).toEqual([
+          'session:processing',
+          'text:Thinking…',
+          'text:Reading the page…',
+          'text:Starting a subagent…',
+          'text:',
+          'session:active',
+        ]);
+      });
+
+      it('after the native stop, activity no longer re-sets the status', async () => {
+        await makeThread();
+        await scheduler.scheduleMessages(THREAD, 'U2', ['1.1'], false);
+        run.mockImplementationOnce(async (_turn, io) => {
+          await processSlackEvent(
+            job({ kind: 'event' as const, body: { event_id: 'EvStop', event: { type: 'agent_session_stopped', channel: C, thread_ts: T, user: 'U2', event_ts: '1700000099.000002' } } }),
+          );
+          io.setActivity!('Searching Slack…');
+          await new Promise((r) => setTimeout(r, 50));
+        });
+        await processThreadRun(job({ threadId: THREAD }));
+        // Only the stop handler's `active`; the stopped turn never showed anything.
+        expect(await statusCalls()).toEqual(['session:active']);
+      });
     });
 
     it('messages pushed mid-turn are drained by the agent; leftovers become the next turn', async () => {

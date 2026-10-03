@@ -461,3 +461,39 @@ describe('runFrontTurn: behaviour guards', () => {
     expect(h.postedCards).toEqual([]);
   });
 });
+
+describe('runFrontTurn: status activity', () => {
+  function ioWithActivity(isMention: boolean) {
+    const activity: string[] = [];
+    return { activity, io: { ...io(isMention).io, setActivity: (t: string) => void activity.push(t) } };
+  }
+
+  it('reports work tools once each (from input start), never reply/react/search_emojis', async () => {
+    const input = JSON.stringify({ title: 'Research', instructions: 'Research it' });
+    const spawnStreamed = [
+      { type: 'stream-start', warnings: [] },
+      { type: 'tool-input-start', id: 's1', toolName: 'spawn_subagent' },
+      { type: 'tool-input-delta', id: 's1', delta: input },
+      { type: 'tool-input-end', id: 's1' },
+      { type: 'tool-call', toolCallId: 's1', toolName: 'spawn_subagent', input },
+      { type: 'finish', usage, finishReason: { unified: 'tool-calls', raw: 'tool_calls' } },
+    ];
+    h.model = mockModel([toolStep(['search_emojis', { query: 'x' }]), spawnStreamed, replyStep('On it.'), textStep('')]);
+    const { io: tio, activity } = ioWithActivity(false);
+    await runFrontTurn(turn({ id: 60, isMention: false }), tio);
+    expect(activity).toEqual(['Starting a subagent…']);
+  });
+
+  it('a turn that only replies or reacts reports no activity', async () => {
+    h.model = mockModel([replyStep('Sure thing.'), textStep('')]);
+    const a = ioWithActivity(false);
+    await runFrontTurn(turn({ id: 61, isMention: false }), a.io);
+    h.model = mockModel([toolStep(['react', { emoji: 'thumbsup' }]), textStep('')]);
+    const b = ioWithActivity(false);
+    await runFrontTurn(turn({ id: 62, isMention: false }), b.io);
+    h.model = mockModel([textStep('nothing to add')]);
+    const c = ioWithActivity(false);
+    await runFrontTurn(turn({ id: 63, isMention: false }), c.io);
+    expect([a.activity, b.activity, c.activity]).toEqual([[], [], []]);
+  });
+});

@@ -15,6 +15,8 @@ const Env = z.object({
   MODEL_SOL: z.string().default('openai/gpt-6-sol'),
   BOT_DISPLAY_NAME: z.string().default('smasnug ai'),
   LOG_LEVEL: z.string().default('info'),
+  /** Turn status text: see src/pipeline/session-status.ts (overlay = native processing + activity text). */
+  STATUS_ACTIVITY_MODE: z.enum(['overlay', 'text', 'off']).default('overlay'),
 });
 
 export const env = Env.parse(process.env);
