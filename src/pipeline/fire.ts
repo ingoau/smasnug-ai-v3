@@ -11,7 +11,8 @@ import { recordModelUsage } from '../features/guard.js';
 import { MODELS } from '../models.js';
 import { log } from '../log.js';
 import { markMessage } from '../core/timing.js';
-import { takeBatch, type DebounceJob } from './debounce.js';
+import { isLatestSeq, takeBatch, type DebounceJob } from './debounce.js';
+import { clearIntakeStatus } from './session-status.js';
 import { runGate, type GateResult } from './gate.js';
 import { batchIsMention, batchNeedsGate } from './rules.js';
 import { pushToRunningTurn, scheduleMessages } from './scheduler.js';
@@ -24,11 +25,19 @@ export async function processDebounce(job: Job<DebounceJob>) {
   const { threadId, authorId } = job.data;
   const firedAt = Date.now();
   const batch = await takeBatch(job.data);
-  if (!batch) return; // superseded by a newer message's job, or emptied by deletions
+  if (!batch) {
+    // Superseded by a newer message's job (nothing to do), or emptied by deletions / native stop: then no turn
+    // follows, so take back the status shown at intake.
+    if (await isLatestSeq(job.data)) await clearIntakeStatus(threadId, authorId);
+    return;
+  }
 
   const { channelId } = parseThreadId(threadId);
   const msgs = await loadMessages(channelId, batch.map((b) => b.ts));
-  if (msgs.length === 0) return; // everything was deleted meanwhile
+  if (msgs.length === 0) {
+    await clearIntakeStatus(threadId, authorId); // everything was deleted meanwhile
+    return;
+  }
   const liveTs = new Set(msgs.map((m) => m.ts));
   const items = batch.filter((b) => liveTs.has(b.ts));
   const ts = items.map((b) => b.ts);
@@ -42,7 +51,8 @@ export async function processDebounce(job: Job<DebounceJob>) {
     return;
   }
 
-  if (batchNeedsGate(reasons)) {
+  const needsGate = batchNeedsGate(reasons);
+  if (needsGate) {
     const thread = await getThread(threadId);
     if (!thread?.engaged) return; // disengaged while the window was open
     const bot = await getBotIdentity();
@@ -66,7 +76,8 @@ export async function processDebounce(job: Job<DebounceJob>) {
     await sql`update threads set last_addressed_at = now(), messages_since_addressed = 0 where id = ${threadId}`;
   }
 
-  const res = await scheduleMessages(threadId, authorId, ts, isMention);
+  // The inbox was just checked above; only re-check after a (slow) gate call.
+  const res = await scheduleMessages(threadId, authorId, ts, isMention, { allowInbox: needsGate });
   for (const t of ts) markMessage(channelId, t, { debounce_fired: firedAt, turn_created: Date.now() });
   if (res.kind === 'inbox') await appendEvent(threadId, 'inbox_push', authorId, { turnId: res.turnId, messageTs: ts });
 }

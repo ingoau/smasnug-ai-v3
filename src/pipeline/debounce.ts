@@ -45,11 +45,16 @@ export async function hasActiveRuns(threadId: string): Promise<boolean> {
 /** Add a message to the author's batch and (re)start the window. Returns the window used. */
 export async function addToBatch(threadId: string, authorId: string, ts: string, reason: BatchReason): Promise<number> {
   const seq = Number(await redis.eval(ADD, 2, batchKey(threadId, authorId), seqKey(threadId, authorId), ts, reason, KEY_TTL_MS));
-  const delay = debounceWindowMs(await hasActiveRuns(threadId), { idleMs: limits.debounceIdleMs, busyMs: limits.debounceBusyMs });
+  const delay = debounceWindowMs(await hasActiveRuns(threadId), { idleMs: limits.debounceIdleMs, busyMs: limits.debounceBusyMs, directMs: limits.debounceDirectMs }, reason);
   await enqueue(QUEUE.turnDebounce, { threadId, authorId, seq } satisfies DebounceJob, { delay, jobId: jobIdFor(threadId, authorId, seq) });
   // Best effort: drop the superseded job so the delayed set doesn't fill with no-ops.
   if (seq > 1) await queue(QUEUE.turnDebounce).remove(jobIdFor(threadId, authorId, seq - 1)).catch(() => {});
   return delay;
+}
+
+/** True if `job` is still the latest window for its (thread, author), i.e. not superseded by a newer message. */
+export async function isLatestSeq(job: DebounceJob): Promise<boolean> {
+  return (await redis.get(seqKey(job.threadId, job.authorId))) === String(job.seq);
 }
 
 /** Deletion during the window removes the message; an emptied batch makes the pending job a no-op (= cancelled). */

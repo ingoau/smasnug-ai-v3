@@ -49,6 +49,17 @@ describe('TurnStatus', () => {
     expect(calls).toEqual(['processing', 'text:Searching Slack…', 'text:', 'active']);
   });
 
+  it('adopt() takes over an indicator shown at intake: no calls, but finish() clears it', async () => {
+    const { status, calls } = make();
+    status.adopt();
+    status.setActivity('Thinking…'); // same text as already showing: skipped
+    await settle();
+    expect(calls).toEqual([]);
+    expect(status.isShown).toBe(true);
+    await status.finish();
+    expect(calls).toEqual(['text:', 'active']);
+  });
+
   it('start() shows the initial text (mention turns)', async () => {
     const { status, calls } = make();
     await status.start();

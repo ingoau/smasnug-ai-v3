@@ -199,6 +199,43 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const statusCalls = async () =>
         (await fakeCalls()).filter((c) => c.method.endsWith('.setStatus')).map((c) => (c.method === 'agents.sessions.setStatus' ? `session:${c.args.status}` : `text:${(c.args.loading_messages as string[] | undefined)?.[0] ?? ''}`));
 
+      const dmEnvelope = (ts: string, text = 'hello') => job({ kind: 'event' as const, body: { event: { type: 'message', channel: 'D1', channel_type: 'im', user: 'U1', text, ts } } });
+
+      it('DM: status shown at intake (before the debounce window), adopted by the turn, cleared once at the end', async () => {
+        const ts = nextTs();
+        const tid = `D1:${ts}`;
+        await processSlackEvent(dmEnvelope(ts));
+        await vi.waitFor(async () => expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…']));
+        await vi.waitFor(async () => expect(await redis.exists(`status:intake:${tid}`)).toBe(1));
+        await processDebounce(job({ threadId: tid, authorId: 'U1', seq: 1 }));
+        run.mockImplementationOnce(async () => {
+          await new Promise((r) => setTimeout(r, 20));
+        });
+        await processThreadRun(job({ threadId: tid }));
+        expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…', 'text:', 'session:active']);
+        expect(await redis.exists(`status:intake:${tid}`)).toBe(0);
+      });
+
+      it('DM deleted within the debounce window: the intake status is cleared', async () => {
+        const ts = nextTs();
+        const tid = `D1:${ts}`;
+        await processSlackEvent(dmEnvelope(ts));
+        await vi.waitFor(async () => expect(await redis.exists(`status:intake:${tid}`)).toBe(1));
+        await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'message', subtype: 'message_deleted', channel: 'D1', channel_type: 'im', deleted_ts: ts, previous_message: { user: 'U1', ts } } } }));
+        await processDebounce(job({ threadId: tid, authorId: 'U1', seq: 1 }));
+        expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…', 'text:', 'session:active']);
+        expect(await turns(tid)).toHaveLength(0);
+      });
+
+      it('no intake status while a turn holds the thread lock (that turn owns the indicator)', async () => {
+        const ts = nextTs();
+        const lock = (await acquireLock(threadLockKey(`D1:${ts}`), 5000))!;
+        await processSlackEvent(dmEnvelope(ts));
+        await new Promise((r) => setTimeout(r, 50));
+        expect(await statusCalls()).toEqual([]);
+        await lock.release();
+      });
+
       it('unmentioned turn that replies directly: zero status calls', async () => {
         await makeThread();
         await scheduler.scheduleMessages(THREAD, 'U2', ['1.1'], false);
@@ -240,7 +277,8 @@ describe.skipIf(!infra)('pipeline integration', () => {
         await makeThread();
         await scheduler.scheduleMessages(THREAD, 'U1', ['1.1'], true);
         run.mockImplementationOnce(async (_turn, io) => {
-          expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…']);
+          // Shown without blocking the turn: the model call starts right away.
+          await vi.waitFor(async () => expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…']));
           io.setActivity!('Searching the web…'); // superseded within the coalescing window
           io.setActivity!('Reading the page…');
           await new Promise((r) => setTimeout(r, 1150));

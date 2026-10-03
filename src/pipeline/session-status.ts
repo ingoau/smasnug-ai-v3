@@ -31,8 +31,11 @@
  * skipped); both methods are rate-limited in `src/core/slack.ts` METHOD_RPM.
  */
 import { env } from '../config.js';
+import { redis } from '../core/redis.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
+import { markMessage } from '../core/timing.js';
 import { log } from '../log.js';
+import { isLocked, threadLockKey } from './lock.js';
 
 export type SessionStatus = 'active' | 'processing' | 'suspended' | 'closed';
 export type ActivityMode = 'overlay' | 'text' | 'off';
@@ -146,6 +149,18 @@ export class TurnStatus {
     return this.shown;
   }
 
+  /**
+   * The indicator is already showing `text` (set at intake, see showIntakeStatus): take ownership without calling
+   * Slack again. finish() clears it as usual.
+   */
+  adopt(text = INITIAL_ACTIVITY): void {
+    if (this.shown || this.closed) return;
+    this.shown = true;
+    this.textShown = this.mode !== 'off';
+    this.lastText = text;
+    this.lastSentAt = Date.now();
+  }
+
   /** Show the indicator now (mention/DM turns). */
   async start(text = INITIAL_ACTIVITY): Promise<void> {
     this.pending = text;
@@ -224,4 +239,78 @@ export class TurnStatus {
       log.warn({ err, channelId: this.o.channelId }, 'status update failed');
     }
   }
+}
+
+// ---- Intake status: DMs and mentions show the indicator as soon as the message is accepted ----
+//
+// Ownership hand-off between processes (intake runs in a slack-events job, the turn in a thread-run job):
+// - intake fires the status calls (fire-and-forget) and, once they returned, records `status:intake:<thread>`;
+// - the turn adopts the indicator if that key is there (GETDEL), else shows it itself;
+// - every turn that cleared the indicator records `status:cleared:<thread>` and drops a stale intake key;
+// - if the intake calls only returned after a turn already cleared the status, intake clears it again;
+// - a debounce batch that ends without a turn (all messages deleted, native stop) clears it (clearIntakeStatus).
+// Skipped while a turn holds the thread lock: that turn owns the indicator and the next turn shows its own.
+
+const INTAKE_TTL_MS = 120_000;
+const intakeKey = (threadId: string) => `status:intake:${threadId}`;
+const clearedKey = (threadId: string) => `status:cleared:${threadId}`;
+
+function threadParts(threadId: string) {
+  const i = threadId.indexOf(':');
+  return { channelId: threadId.slice(0, i), threadTs: threadId.slice(i + 1) };
+}
+
+async function showNow(channelId: string, threadTs: string, userId: string, mode: ActivityMode) {
+  // Both in parallel: the first one to land makes the indicator visible.
+  await Promise.all([
+    mode !== 'text' ? setSessionStatus(channelId, threadTs, 'processing', userId, { fallback: mode === 'off' }) : null,
+    mode !== 'off' ? setActivityText(channelId, threadTs, INITIAL_ACTIVITY) : null,
+  ]);
+}
+
+async function clearNow(channelId: string, threadTs: string, userId: string | undefined, mode: ActivityMode) {
+  if (mode !== 'off') await setActivityText(channelId, threadTs, '');
+  await setSessionStatus(channelId, threadTs, 'active', userId, { fallback: false });
+}
+
+/** Fire-and-forget: show "Thinking…" for a DM / mention right at intake (before the debounce window). */
+export function showIntakeStatus(threadId: string, userId: string, messageTs: string, mode: ActivityMode = env.STATUS_ACTIVITY_MODE): void {
+  const { channelId, threadTs } = threadParts(threadId);
+  const at = Date.now();
+  void (async () => {
+    if (await isLocked(threadLockKey(threadId))) return;
+    await showNow(channelId, threadTs, userId, mode);
+    markMessage(channelId, messageTs, { status_intake: Date.now() });
+    await redis.set(intakeKey(threadId), String(at), 'PX', INTAKE_TTL_MS);
+    const cleared = Number(await redis.get(clearedKey(threadId)));
+    if (cleared > at) {
+      // A turn finished (cleared the status) while our calls were in flight: don't leave `processing` behind.
+      await redis.del(intakeKey(threadId));
+      await clearNow(channelId, threadTs, userId, mode);
+    }
+  })().catch((err) => log.warn({ err, threadId }, 'intake status failed'));
+}
+
+/** Turn start: true if the intake status is showing and this turn now owns it. */
+export async function adoptIntakeStatus(threadId: string): Promise<boolean> {
+  const v = await redis.getdel(intakeKey(threadId)).catch(() => null);
+  return v != null && Date.now() - Number(v) < INTAKE_TTL_MS;
+}
+
+/** A turn cleared the indicator: any intake status recorded before now is gone too. */
+export async function noteStatusCleared(threadId: string): Promise<void> {
+  await redis
+    .multi()
+    .set(clearedKey(threadId), String(Date.now()), 'PX', INTAKE_TTL_MS)
+    .del(intakeKey(threadId))
+    .exec()
+    .catch(() => {});
+}
+
+/** A debounce batch ended without a turn: clear the intake status if it is still showing. */
+export async function clearIntakeStatus(threadId: string, userId?: string, mode: ActivityMode = env.STATUS_ACTIVITY_MODE): Promise<void> {
+  const v = await redis.getdel(intakeKey(threadId)).catch(() => null);
+  if (v == null) return;
+  const { channelId, threadTs } = threadParts(threadId);
+  await clearNow(channelId, threadTs, userId, mode).catch((err) => log.warn({ err, threadId }, 'clearing intake status failed'));
 }

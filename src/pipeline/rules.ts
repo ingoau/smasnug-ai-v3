@@ -88,9 +88,16 @@ export function isStopMessage(text: string): boolean {
   );
 }
 
-/** Debounce window: longer while the thread has active subagents (people tend to steer in bursts). */
-export function debounceWindowMs(hasActiveRuns: boolean, opts: { idleMs: number; busyMs: number }): number {
-  return hasActiveRuns ? opts.busyMs : opts.idleMs;
+/**
+ * Debounce window: longer while the thread has active subagents (people tend to steer in bursts). Messages that run
+ * the front agent without the gate (DM, mention, two-party follow-up, stop) use the short `directMs` window when
+ * given: the reply should start fast, and a same-author follow-up that misses the window still reaches the running
+ * turn through its inbox. Gate-bound messages keep `idleMs` (merging saves a gate call and a turn).
+ */
+export function debounceWindowMs(hasActiveRuns: boolean, opts: { idleMs: number; busyMs: number; directMs?: number }, reason?: BatchReason): number {
+  if (hasActiveRuns) return opts.busyMs;
+  if (reason && reason !== 'gate' && opts.directMs != null) return opts.directMs;
+  return opts.idleMs;
 }
 
 /** Thread root for a message. DMs: each top-level message is its own thread. Channels: same rule. */

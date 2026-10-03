@@ -105,6 +105,11 @@ describe('debounceWindowMs', () => {
   it('scales with active runs', () => {
     expect(debounceWindowMs(false, { idleMs: 1000, busyMs: 3000 })).toBe(1000);
     expect(debounceWindowMs(true, { idleMs: 1000, busyMs: 3000 })).toBe(3000);
+    const opts = { idleMs: 1000, busyMs: 3000, directMs: 300 };
+    expect(debounceWindowMs(false, opts, 'dm')).toBe(300);
+    expect(debounceWindowMs(false, opts, 'mention')).toBe(300);
+    expect(debounceWindowMs(false, opts, 'gate')).toBe(1000);
+    expect(debounceWindowMs(true, opts, 'dm')).toBe(3000);
   });
 });
 

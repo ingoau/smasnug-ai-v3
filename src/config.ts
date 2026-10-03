@@ -24,6 +24,8 @@ export const env = Env.parse(process.env);
 /** Tunables from the design doc. Values marked TBD in the doc are best guesses. */
 export const limits = {
   debounceIdleMs: 1000,
+  /** DMs / mentions / two-party follow-ups (no gate): short window, see debounceWindowMs. */
+  debounceDirectMs: 300,
   debounceBusyMs: 3000,
   contextReplies: 29,
   contextChannelMessages: 5,

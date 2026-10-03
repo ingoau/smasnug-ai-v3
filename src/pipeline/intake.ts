@@ -12,6 +12,7 @@ import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { decide, isStopMessage, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
 import { removeMessageFromTurns } from './scheduler.js';
+import { showIntakeStatus } from './session-status.js';
 import { applyDelete, applyEdit, getThread, insertTombstone, isBotMessage, isTwoPartyThread, storeMessage, upsertThread, type SlackMessage, type ThreadRow } from './store.js';
 
 export const RATE_LIMITED_TEXT = "You're sending me a lot of messages — give me a bit and try again.";
@@ -106,6 +107,8 @@ async function handleNewMessage(ev: MessageEvent) {
     return;
   }
 
+  // DMs and mentions get the status indicator right away, before the debounce window (fire-and-forget).
+  if (decision.reason === 'dm' || decision.reason === 'mention') showIntakeStatus(threadId, authorId, ev.ts);
   await addToBatch(threadId, authorId, ev.ts, decision.reason);
   markMessage(channelId, ev.ts, { debounce_scheduled: Date.now() });
 }

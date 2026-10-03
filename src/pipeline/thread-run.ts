@@ -12,7 +12,7 @@ import { log } from '../log.js';
 import { loadMessageMarks, timingReport, TurnTiming } from '../core/timing.js';
 import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from './lock.js';
 import { claimNextPending, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
-import { TurnStatus } from './session-status.js';
+import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, TurnStatus } from './session-status.js';
 import { stopRequestedSince } from './stop.js';
 import { currentlyViewing } from './view-context.js';
 
@@ -75,9 +75,11 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
   // finally below.
   const indicator = new TurnStatus({ channelId, threadTs, userId: turn.authorId, stopped: stopRequested });
   onStatus?.(indicator);
+  // DMs / mentions usually already show the status from intake (adopted here); otherwise show it now. Never awaited:
+  // the model call must not wait for Slack.
   if (turn.isMention) {
-    await indicator.start();
-    timing.mark('status_done');
+    if (await adoptIntakeStatus(turn.threadId)) indicator.adopt();
+    else void indicator.start().then(() => timing.mark('status_done'));
   }
   const io: TurnIO = {
     timing,
@@ -104,6 +106,10 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     }
   } finally {
     await indicator.finish();
+    // This turn cleared the indicator (any intake status with it); a turn that never showed one still takes back an
+    // intake status left for messages that ended up in its inbox.
+    if (indicator.isShown) await noteStatusCleared(turn.threadId);
+    else await clearIntakeStatus(turn.threadId, turn.authorId);
     const followUp = await finishTurn(turn.id, status);
     await appendEvent(turn.threadId, 'turn_finished', 'system', {
       turnId: turn.id,
