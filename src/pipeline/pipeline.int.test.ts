@@ -256,6 +256,35 @@ describe.skipIf(!infra)('pipeline integration', () => {
     });
   });
 
+  describe('ingress + interactions', () => {
+    it('dedupes Events API retries on event_id', async () => {
+      const { handleEnvelope } = await import('../ingress/main.js');
+      const env = { ack: async () => {}, envelope_id: 'e1', type: 'events_api', body: { event_id: 'EvDUP1', event: { type: 'message' } } };
+      await handleEnvelope(env);
+      await handleEnvelope({ ...env, envelope_id: 'e2', retry_num: 1, retry_reason: 'timeout' });
+      await handleEnvelope({ ack: async () => {}, envelope_id: 'e3', type: 'slash_commands', body: { command: '/x', user_id: 'U1' } });
+      const jobs = await queue(QUEUE.slackEvents).getJobs(['waiting']);
+      expect(jobs.map((j) => j.data.kind).sort()).toEqual(['event', 'slash']);
+    });
+
+    it('dispatches block_actions, view submissions and slash commands to registered handlers', async () => {
+      const { registerAction } = await import('../core/actions.js');
+      const seen: { actionId: string; value?: string; userId: string; channelId?: string }[] = [];
+      registerAction('ptest:', async (ctx) => void seen.push({ actionId: ctx.actionId, value: ctx.value, userId: ctx.userId, channelId: ctx.channelId }));
+      registerAction('slash:/ptest', async (ctx) => void seen.push({ actionId: ctx.actionId, value: ctx.value, userId: ctx.userId, channelId: ctx.channelId }));
+      await processSlackEvent(
+        job({ kind: 'interactive' as const, body: { type: 'block_actions', user: { id: 'U1' }, channel: { id: C }, message: { ts: '1.1' }, actions: [{ action_id: 'ptest:go', value: '42' }] } }),
+      );
+      await processSlackEvent(job({ kind: 'interactive' as const, body: { type: 'view_submission', user: { id: 'U2' }, view: { callback_id: 'ptest:modal', private_metadata: 'pm' } } }));
+      await processSlackEvent(job({ kind: 'slash' as const, body: { command: '/ptest', user_id: 'U3', channel_id: C, text: 'hello' } }));
+      expect(seen).toEqual([
+        { actionId: 'ptest:go', value: '42', userId: 'U1', channelId: C },
+        { actionId: 'ptest:modal', value: 'pm', userId: 'U2', channelId: undefined },
+        { actionId: 'slash:/ptest', value: 'hello', userId: 'U3', channelId: C },
+      ]);
+    });
+  });
+
   describe('intake (slack-events)', () => {
     it('mention engages a thread, stores the message and starts a batch; app_mention is ignored', async () => {
       const ts = nextTs();

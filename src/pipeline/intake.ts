@@ -123,10 +123,20 @@ async function handleEdit(ev: MessageEvent) {
   // Deleting a thread parent that has replies turns it into a tombstone.
   if (msg.subtype === 'tombstone') return handleDelete(ev.channel, msg.ts, ev.previous_message ?? msg);
   let threadId = (await applyEdit(ev.channel, msg))?.threadId ?? null;
-  if (!threadId) {
-    // Edit processed before the original message (parallel workers): store the edited version for known threads.
+  if (!threadId && msg.edited) {
+    // Edit processed before the original message (parallel workers): store the edited version for threads the
+    // original will engage or already has. The original's own event still triggers the turn (and keeps this text).
     const candidate = threadIdOf(ev.channel, threadRootTs(msg));
-    if (await getThread(candidate)) {
+    let known = Boolean(await getThread(candidate));
+    if (!known && !isBotMessage(msg) && msg.user) {
+      const bot = await getBotIdentity();
+      const isDm = ev.channel_type === 'im';
+      if (isDm || mentionFacts(msg.text ?? '', bot.userId).mentionsBot) {
+        await upsertThread({ id: candidate, channelId: ev.channel, threadTs: threadRootTs(msg), isDm });
+        known = true;
+      }
+    }
+    if (known) {
       await storeMessage(ev.channel, candidate, msg);
       threadId = candidate;
     }
