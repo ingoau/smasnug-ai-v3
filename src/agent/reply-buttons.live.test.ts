@@ -76,12 +76,16 @@ describe.skipIf(!LIVE)('reply buttons (LIVE front agent)', () => {
   }, 90_000);
 
   async function expectWithinLimits({ rows, calls }: Awaited<ReturnType<typeof turnFor>>) {
-    const { MAX_BUTTONS, MAX_LABEL_CHARS } = await import('./reply-buttons.js');
+    const { MAX_BUTTONS, MAX_LABEL_CHARS, SLACK_BUTTON_TEXT_MAX } = await import('./reply-buttons.js');
     expect(calls.some((c) => ['chat.postMessage', 'chat.startStream'].includes(c.method))).toBe(true);
     for (const r of rows) {
       expect(r.labels.length).toBeGreaterThan(0);
       expect(r.labels.length).toBeLessThanOrEqual(MAX_BUTTONS);
-      for (const l of r.labels) expect([...l].length).toBeLessThanOrEqual(MAX_LABEL_CHARS);
+      for (const l of r.labels) {
+        expect([...l].length).toBeLessThanOrEqual(SLACK_BUTTON_TEXT_MAX);
+        // eslint-disable-next-line no-console
+        if ([...l].length > MAX_LABEL_CHARS) console.log(`label over the suggested ${MAX_LABEL_CHARS} chars (shown as written):`, l);
+      }
       expect(r.messageTs).toBeTruthy();
       // Rendered: an actions block with exactly these labels went out (post, stopStream blocks, or update).
       const rendered = calls.some((c) =>

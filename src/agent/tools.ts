@@ -18,8 +18,8 @@ const fileSchema = z.object({
 
 /**
  * Deliberately lenient (no min/max): a schema violation would fail the call after its text already streamed, and a
- * retry would show the reply twice. Limits are enforced in code (normalizeButtonLabels: ≤ MAX_BUTTONS labels,
- * clipped to MAX_LABEL_CHARS) and stated in the description.
+ * retry would show the reply twice. Labels are shown as written; code only applies Slack's hard limits and the
+ * documented MAX_BUTTONS (normalizeButtonLabels).
  */
 export const buttonsSchema = z
   .array(z.string())
@@ -169,12 +169,8 @@ registerTool({
         if (s.turn.kind !== 'synthesis' || !s.turn.cardId) {
           throw new Error('set_card_title is only available when reporting finished subagent results.');
         }
-        const t = title.trim().replace(/\s+/g, ' ');
-        await sql`update cards set title = ${t} where id = ${s.turn.cardId}`;
+        await sql`update cards set title = ${title} where id = ${s.turn.cardId}`;
         s.visible.add('card');
-        if (t.length > limits.cardTitleMaxChars) {
-          return `Title is over ${limits.cardTitleMaxChars} characters, so the card will show a generic title. Call again with a shorter one if you like.`;
-        }
         return 'Card title set.';
       },
     }),

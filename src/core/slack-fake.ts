@@ -36,10 +36,30 @@ function fakeLatencyMs(): number {
   return Math.max(0, base + (jitter ? Math.random() * jitter : 0));
 }
 
+/**
+ * Slack's streaming contract (docs.slack.dev chat.startStream/appendStream/stopStream): `markdown_text` and
+ * `chunks` never in one call, and a stream keeps the mode it was started with (else streaming_mode_mismatch).
+ */
+const streamModes = new Map<string, 'text' | 'chunks'>();
+function checkStreamMode(method: string, args: Record<string, unknown>) {
+  if (method !== 'chat.startStream' && method !== 'chat.appendStream' && method !== 'chat.stopStream') return;
+  const hasText = args.markdown_text !== undefined;
+  const hasChunks = args.chunks !== undefined;
+  if (hasText && hasChunks) throw fakeSlackError('cannot_provide_both_markdown_text_and_chunks');
+  if (method === 'chat.startStream') return; // the mode is recorded once the ts is known (below)
+  const mode = streamModes.get(String(args.ts));
+  if (mode && ((mode === 'chunks' && hasText) || (mode === 'text' && hasChunks))) throw fakeSlackError('streaming_mode_mismatch');
+}
+function recordStreamMode(args: Record<string, unknown>, ts: string) {
+  if (streamModes.size > 10_000) streamModes.clear();
+  streamModes.set(ts, args.chunks !== undefined ? 'chunks' : 'text');
+}
+
 export async function fakeCall(method: string, args: Record<string, unknown>, token: string): Promise<any> {
   const latency = fakeLatencyMs();
   await redis.rpush('slack:fake:calls', JSON.stringify({ at: Date.now(), method, token, args }));
   if (latency > 0) await new Promise((r) => setTimeout(r, latency));
+  checkStreamMode(method, args);
   for (const h of handlers) {
     const res = await h(method, args, token);
     if (res !== undefined) return res;
@@ -47,8 +67,12 @@ export async function fakeCall(method: string, args: Record<string, unknown>, to
   switch (method) {
     case 'auth.test':
       return { ok: true, user_id: 'UBOT', bot_id: 'BBOT', team_id: 'TFAKE' };
+    case 'chat.startStream': {
+      const ts = nextTs();
+      recordStreamMode(args, ts);
+      return { ok: true, channel: args.channel, ts, message_ts: ts };
+    }
     case 'chat.postMessage':
-    case 'chat.startStream':
     case 'chat.postEphemeral':
       return { ok: true, channel: args.channel, ts: nextTs(), message_ts: nextTs() };
     case 'chat.update':

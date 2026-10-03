@@ -6,6 +6,7 @@ import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { getState, setBlock } from './state.js';
 import { ephemeral, fromAppHome, isAdmin, postToModChannel, quote, requireAdmin } from './util.js';
+import { blocksText } from '../agent/slack-markdown.js';
 
 interface SentRow {
   id: number;
@@ -80,8 +81,8 @@ function destinationLabel(s: { destination: string | null; channelId: string }) 
 
 function currentMessageText(ctx: ActionContext): string | undefined {
   const blocks: any[] = ctx.body?.message?.blocks ?? [];
-  const md = blocks.find((b) => b?.type === 'markdown');
-  return typeof md?.text === 'string' ? md.text : undefined;
+  // The message part only (markdown / rich_text blocks), not the attribution context or the Report button.
+  return blocksText(blocks);
 }
 
 /** report:open — value = sent_messages.id */

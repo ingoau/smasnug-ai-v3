@@ -20,8 +20,6 @@
  * generateText: pass `include: { responseBody: true }` and call `meter.observeStep(step)` in onStepFinish — the
  * usage lives in the raw response body, which AI SDK v7 drops by default. (Without raw usage the meter falls back
  * to "≥1 search if the step has url sources".) The provider's providerMetadata.openrouter.usage does NOT carry it.
- * Also strip OpenAI-native citation markers from model text before posting it (`stripCitationMarkers`): with the
- * native engine, Luna sometimes leaves `citeturn0search2` tokens in its output.
  *
  * Note: the server tool can re-run on every step of a multi-step loop (observed live), so keep stopWhen tight.
  */
@@ -94,9 +92,4 @@ export class WebSearchMeter {
     if (n) log.debug({ searches: n, speaker: who.speakerId }, 'web searches charged');
     return over;
   }
-}
-
-/** Remove OpenAI-native citation markers (e.g. `citeturn0search2turn0news1`) that can leak into model text. */
-export function stripCitationMarkers(text: string): string {
-  return text.replace(/\s??cite(?:?turn\d+[a-z]+\d+)+?/g, '').replace(/[-]/g, '');
 }

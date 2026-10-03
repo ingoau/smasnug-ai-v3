@@ -4,6 +4,7 @@
 import { markdownToRich, type RichTextElement, type RichTextInline } from './rich-text.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { buttonsBlock, type ButtonsActionsBlock, type ButtonsState, type ContextBlock } from './reply-buttons.js';
+import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS, replyBlocks, type ReplyBlock } from './slack-markdown.js';
 
 // Shapes mirror @slack/types PlanBlock / TaskCardBlock (not a direct dependency).
 export interface RichTextBlock {
@@ -111,7 +112,6 @@ export function outputBudget(runCount: number): { maxChars: number; maxLines: nu
 export const MAX_PLAN_TASKS = 50;
 
 export const STOP_ALL_ACTION = 'card:stop_all';
-const TITLE_MAX = 40;
 
 export const isActive = (s: RunStatus) => s === 'queued' || s === 'running';
 
@@ -122,11 +122,10 @@ export function liveTitle(runs: Pick<CardRun, 'status'>[]): string {
   return active > 0 ? `Running ${plural(active)}` : `Ran ${plural(runs.length)}`;
 }
 
-/** Title for a frozen card: the agent's set_card_title value if present and short enough, else "Ran N subagents". */
-export function frozenTitle(title: string | null | undefined, runCount: number, maxChars = TITLE_MAX): string {
-  const t = title?.trim().replace(/\s+/g, ' ');
-  if (t && t.length <= maxChars) return t;
-  return `Ran ${plural(runCount)}`;
+/** Title for a frozen card: the agent's set_card_title value as written, else "Ran N subagents". */
+export function frozenTitle(title: string | null | undefined, runCount: number): string {
+  const t = title?.trim();
+  return t ? t : `Ran ${plural(runCount)}`;
 }
 
 function clip(s: string, max: number) {
@@ -202,12 +201,8 @@ function statusWord(run: CardRun) {
 
 export interface RenderedCard {
   text: string;
-  blocks: (MarkdownBlock | PlanBlock | ActionsBlock | ButtonsActionsBlock | ContextBlock)[];
+  blocks: (MarkdownBlock | ReplyBlock | PlanBlock | ActionsBlock | ButtonsActionsBlock | ContextBlock)[];
 }
-
-/** Same limits as reply.ts markdownMessage: 12k chars per markdown block, 3k for the `text` fallback. */
-const MAX_MD = 11_500;
-const MAX_TEXT = 3_000;
 
 export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   const sorted = [...runs].sort((a, b) => a.id - b.id);
@@ -217,13 +212,18 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   const plan: PlanBlock = { type: 'plan', block_id: `card_${card.id}_plan`, title, tasks: sorted.slice(-MAX_PLAN_TASKS).map((r) => taskFor(r, budget)) };
   const blocks: RenderedCard['blocks'] = [];
   const reply = card.replyText;
-  if (reply != null) blocks.push({ type: 'markdown', block_id: `card_${card.id}_reply`, text: reply.length > MAX_MD ? `${reply.slice(0, MAX_MD)}\n\n_[message truncated]_` : reply });
+  // The reply exactly as delivered (slack-markdown.ts: prose as markdown, code as rich_text), leaving room for the
+  // buttons and the plan.
+  if (reply != null) {
+    const parts = replyBlocks(reply, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - (card.buttons ? 1 : 0) });
+    parts.forEach((b, i) => blocks.push({ ...b, block_id: i === 0 ? `card_${card.id}_reply` : `card_${card.id}_reply_${i}` }));
+  }
   // The reply's buttons (or the note that replaced them) stay right under its text, above the plan.
   if (reply != null && card.buttons) blocks.push(buttonsBlock(card.buttons));
   blocks.push(plan);
   // Plain-text fallback: the reply's own text when the card lives in a reply, else a summary of the plan.
   const text = neutralizeBroadcasts(
-    reply != null ? reply.slice(0, MAX_TEXT) : [title, ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n'),
+    reply != null ? reply.slice(0, MAX_FALLBACK_TEXT) : [title, ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n'),
   );
   return { text, blocks };
 }

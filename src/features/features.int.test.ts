@@ -90,6 +90,18 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       expect(post?.args.username).toBeUndefined();
     });
 
+    it('thread send keeps code exactly as written (rich_text preformatted, not markdown)', async () => {
+      const n = (await fakeCalls()).length;
+      const text = 'Example:\n```html\n<h1>Hello, world!</h1>\n```';
+      await exec(send.sendMessageTool(toolCtx(uid())), { destination: 'thread', text });
+      const post = (await callsSince(n)).find((c) => c.method === 'chat.postMessage');
+      expect(post?.args.blocks).toEqual([
+        { type: 'markdown', text: 'Example:' },
+        { type: 'rich_text', elements: [{ type: 'rich_text_preformatted', language: 'html', elements: [{ type: 'text', text: '<h1>Hello, world!</h1>' }] }] },
+      ]);
+      expect(send.sentMessageBlocks({ text, requesterId: 'U1', sentId: 1 }).slice(0, 2)).toEqual(post?.args.blocks);
+    });
+
     it('confirms, refuses other users, sends attributed, refuses stale clicks', async () => {
       const requester = uid();
       const n = (await fakeCalls()).length;

@@ -1,7 +1,12 @@
 /**
  * Reply delivery. Code decides stream vs. post (`chooseDelivery`): streamed replies are forwarded live from the
  * reply tool's streamed arguments (tool input deltas → partial-JSON → chat.appendStream); otherwise the reply is
- * posted whole with a markdown block. Files are uploaded after the message (after stopStream when streaming).
+ * posted whole. The model's text is delivered as written (slack-markdown.ts): prose as `markdown` blocks, fenced
+ * code as `rich_text` preformatted blocks (Slack's markdown converter would rewrite HTML tags inside code).
+ * Streams run in `chunks` mode (a stream's mode is fixed at chat.startStream): prose goes out as `markdown_text`
+ * chunks; a code block is held until its fence closes and then sent as a `blocks` chunk. A streamed reply that
+ * carried blocks chunks is re-rendered with chat.update after stopStream, so its final layout is exactly the
+ * posted one whatever Slack does with streamed blocks. Files are uploaded after the message (after stopStream).
  * Quick-reply buttons (reply-buttons.ts) go into the same message: an actions block in the post, or `blocks` on
  * chat.stopStream ("rendered at the bottom of the finalized message"); if that fails, chat.update adds them, and as
  * a last resort they are posted as a small follow-up message.
@@ -11,11 +16,11 @@ import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import type { TurnTiming } from '../core/timing.js';
 import { uploadFiles, type OutgoingFile } from './files.js';
-import { stripCitationMarkers } from '../tools/web-search.js';
 import { extractPartialString } from './partial-json.js';
 import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type ButtonsActionsBlock } from './reply-buttons.js';
+import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 
 /** Coalescing interval for appends once the stream is open. */
@@ -24,8 +29,9 @@ const FLUSH_MS = 250;
 const FIRST_FLUSH_CHARS = 8;
 /** …or after this long, whichever comes first. */
 const FIRST_FLUSH_MS = 80;
-const MAX_MD = 11_500; // markdown limit is 12k chars per block / stream call
-const MAX_TEXT = 3_000; // `text` fallback
+const MAX_MD = 11_500; // markdown limit: 12k chars cumulative per message / per stream call
+/** Blocks a stream may carry (50 per message, one kept free for the buttons at stopStream). */
+const MAX_STREAM_BLOCKS = MAX_MESSAGE_BLOCKS - 1;
 /** A later reply in a turn is held back until this many chars arrived, so it can be checked for duplication first. */
 export const EMPTY_RESULT = 'Not posted: the reply was empty. To stay silent, call end_turn.';
 
@@ -47,16 +53,29 @@ export interface ReplyTarget {
 
 /** Stream errors meaning Slack is no longer streaming this message (e.g. the user pressed stop). */
 const HALTED_STREAM = /stream|not_in_streaming_state/;
+const isHalted = (code: string | undefined) => Boolean(code && code !== 'streaming_mode_mismatch' && HALTED_STREAM.test(code));
 const STOPPED_RESULT = 'Not delivered: the user pressed stop. Do not retry; call end_turn.';
 
 interface ReplyEntry {
   index: number;
   mode: Promise<DeliveryMode>;
   buf: string;
-  /** Chars of `text` already sent to the stream. */
-  sent: number;
-  /** The text sent to the stream so far. */
+  /** Stream progress over the (neutralised) reply text, see slack-markdown streamUnits. */
+  unitIdx: number;
+  /** Of the current markdown unit: raw chars and displayed chars already sent. */
+  mdRaw: number;
+  mdShown: number;
+  /** Markdown chars and blocks sent so far (Slack limits). */
+  mdTotal: number;
+  blockCount: number;
+  /** Blocks chunks sent (code / rich paragraphs): the message gets its final layout via chat.update. */
+  blocksChunks: number;
+  /** Offset in the reply text up to which everything is visible. */
+  rawSent: number;
+  /** The text visible in the stream so far (`text.slice(0, rawSent)`). */
   streamed: string;
+  /** The rest doesn't fit into the stream (Slack limits): it is posted as its own message. */
+  overflow: boolean;
   streamTs: string | null;
   stopped: boolean;
   chain: Promise<void>;
@@ -81,19 +100,9 @@ async function teamId(): Promise<string | undefined> {
   return teamIdCache;
 }
 
+/** A reply as a message payload (one block kept free for the quick-reply buttons). */
 export function markdownMessage(text: string) {
-  const md = text.length > MAX_MD ? `${text.slice(0, MAX_MD)}\n\n_[message truncated]_` : text;
-  return { text: text.slice(0, MAX_TEXT), blocks: [{ type: 'markdown', text: md }] };
-}
-
-/**
- * The part of a partially streamed reply that is safe to show: citation markers stripped, and a trailing
- * possibly-incomplete marker (`\uE200…`, or a word ending in `c`/`ci`/`cit`/`cite…`) held back until more arrives.
- */
-export function streamSafePrefix(partial: string): string {
-  const s = stripCitationMarkers(partial);
-  const m = s.search(/\s?(\uE200[^\uE201]*|c(i(t(e[\w\uE202]*)?)?)?)$/);
-  return m >= 0 ? s.slice(0, m) : s;
+  return replyMessage(text, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 });
 }
 
 export class ReplyManager {
@@ -125,7 +134,27 @@ export class ReplyManager {
       (n) => chooseDelivery({ turnKind: this.t.turnKind, runningRuns: n }),
       () => 'post' as const,
     );
-    e = { index: this.nextIndex++, mode, buf: '', sent: 0, streamed: '', streamTs: null, stopped: false, chain: Promise.resolve(), timer: null, failed: false, halted: false, dropped: null };
+    e = {
+      index: this.nextIndex++,
+      mode,
+      buf: '',
+      unitIdx: 0,
+      mdRaw: 0,
+      mdShown: 0,
+      mdTotal: 0,
+      blockCount: 0,
+      blocksChunks: 0,
+      rawSent: 0,
+      streamed: '',
+      overflow: false,
+      streamTs: null,
+      stopped: false,
+      chain: Promise.resolve(),
+      timer: null,
+      failed: false,
+      halted: false,
+      dropped: null,
+    };
     this.entries.set(toolCallId, e);
     return e;
   }
@@ -138,12 +167,12 @@ export class ReplyManager {
     // First reply of the turn, stream not open yet: open it as soon as a few words are there (then coalesce).
     const opening = !e.streamTs && this.deliveredTexts.length === 0;
     if (opening && e.timer) {
-      if (streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '').trim().length < FIRST_FLUSH_CHARS) return;
+      if ((extractPartialString(e.buf, 'text')?.value ?? '').trim().length < FIRST_FLUSH_CHARS) return;
       clearTimeout(e.timer);
       e.timer = null;
     }
     if (!e.timer) {
-      const ready = opening && streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '').trim().length >= FIRST_FLUSH_CHARS;
+      const ready = opening && (extractPartialString(e.buf, 'text')?.value ?? '').trim().length >= FIRST_FLUSH_CHARS;
       e.timer = setTimeout(
         () => {
           e.timer = null;
@@ -158,52 +187,92 @@ export class ReplyManager {
     return `reply:${this.t.turnId}:${e.index}${suffix}`;
   }
 
-  /** Send any newly decoded text from the partial arguments to the stream. */
+  /**
+   * Send what is newly streamable (see slack-markdown streamUnits) as chunks: markdown text as `markdown_text`
+   * chunks, finished code blocks / rich paragraphs as `blocks` chunks. `finalText`: the complete reply.
+   */
   private async flush(e: ReplyEntry, finalText?: string) {
-    if (e.failed || e.stopped || e.halted || e.dropped) return;
+    if (e.failed || e.stopped || e.halted || e.dropped || e.overflow) return;
     this.t.timing?.mark('first_flush');
     if ((await e.mode) !== 'stream') return;
     // Group pings (@channel/@here/@everyone, user groups) are neutralised: the bot never notifies a group.
-    const value = finalText ?? broadcastSafePrefix(streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? ''));
-    if (value.length <= e.sent) return;
-    if (e.sent + (value.length - e.sent) > MAX_MD) return; // too long to stream further; finish() handles overflow
-    const piece = value.slice(e.sent);
-    if (await this.isStopped()) {
-      // Native stop: Slack halted (or will halt) the stream; send nothing more.
-      e.halted = Boolean(e.streamTs);
-      e.failed = true;
-      return;
+    const base = finalText ?? broadcastSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '');
+    const units = streamUnits(base, finalText !== undefined);
+    const chunks: ({ type: 'markdown_text'; text: string } | { type: 'blocks'; blocks: unknown[] })[] = [];
+    const st = { unitIdx: e.unitIdx, mdRaw: e.mdRaw, mdShown: e.mdShown, mdTotal: e.mdTotal, blockCount: e.blockCount, blocksChunks: e.blocksChunks, rawSent: e.rawSent, overflow: false };
+    for (let i = st.unitIdx; i < units.length; i++) {
+      const u = units[i]!;
+      if (u.kind === 'md') {
+        const raw = base.slice(u.start, u.end);
+        const shown = mdDisplay(raw);
+        const piece = shown.slice(st.mdShown);
+        if (piece.trim()) {
+          const newBlock = st.mdShown === 0;
+          if (st.mdTotal + piece.length > MAX_MD || (newBlock && st.blockCount >= MAX_STREAM_BLOCKS)) {
+            st.overflow = true;
+            break;
+          }
+          chunks.push({ type: 'markdown_text', text: piece });
+          st.mdTotal += piece.length;
+          if (newBlock) st.blockCount++;
+          st.mdShown = shown.length;
+          st.mdRaw = raw.length;
+          st.rawSent = u.start + raw.length;
+        }
+        if (i === units.length - 1) break; // may still grow
+        st.unitIdx = i + 1;
+        st.mdRaw = 0;
+        st.mdShown = 0;
+        st.rawSent = u.end;
+        continue;
+      }
+      if (st.blockCount >= MAX_STREAM_BLOCKS) {
+        st.overflow = true;
+        break;
+      }
+      chunks.push({ type: 'blocks', blocks: [segmentBlock(u.seg)] });
+      st.blockCount++;
+      st.blocksChunks++;
+      st.unitIdx = i + 1;
+      st.rawSent = u.end;
     }
-    if (!e.streamTs) {
-      // Don't open a stream for leading whitespace only.
-      if (!piece.trim()) return;
-      const team = await teamId();
-      this.t.timing?.mark('stream_open_call');
-      const res = await slackCall<any>(
-        'chat.startStream',
-        {
-          channel: this.t.channelId,
-          thread_ts: this.t.threadTs,
-          markdown_text: piece,
-          recipient_user_id: this.t.recipientUserId,
-          ...(team ? { recipient_team_id: team } : {}),
-        },
-        { idempotencyKey: this.key(e) },
-      );
-      e.streamTs = res.ts ?? null;
-      this.t.timing?.mark('stream_started');
-      if (!e.streamTs) throw new Error('chat.startStream returned no ts');
-    } else {
-      await slackCall('chat.appendStream', { channel: this.t.channelId, ts: e.streamTs, markdown_text: piece });
+    if (chunks.length) {
+      if (await this.isStopped()) {
+        // Native stop: Slack halted (or will halt) the stream; send nothing more.
+        e.halted = Boolean(e.streamTs);
+        e.failed = true;
+        return;
+      }
+      if (!e.streamTs) {
+        const team = await teamId();
+        this.t.timing?.mark('stream_open_call');
+        // Opened in chunks mode, so markdown text and blocks can be mixed for the whole stream.
+        const res = await slackCall<any>(
+          'chat.startStream',
+          {
+            channel: this.t.channelId,
+            thread_ts: this.t.threadTs,
+            chunks,
+            recipient_user_id: this.t.recipientUserId,
+            ...(team ? { recipient_team_id: team } : {}),
+          },
+          { idempotencyKey: this.key(e) },
+        );
+        e.streamTs = res.ts ?? null;
+        this.t.timing?.mark('stream_started');
+        if (!e.streamTs) throw new Error('chat.startStream returned no ts');
+      } else {
+        await slackCall('chat.appendStream', { channel: this.t.channelId, ts: e.streamTs, chunks });
+      }
     }
-    e.sent = value.length;
-    e.streamed = value;
+    Object.assign(e, st);
+    e.streamed = base.slice(0, e.rawSent);
   }
 
   private onStreamError(e: ReplyEntry, err: unknown) {
     e.failed = true;
     const code = slackErrorCode(err);
-    if (e.streamTs && code && HALTED_STREAM.test(code)) {
+    if (e.streamTs && isHalted(code)) {
       e.halted = true;
       log.info({ code, index: e.index }, 'reply stream halted by Slack (stop button?)');
     } else {
@@ -218,7 +287,7 @@ export class ReplyManager {
   /** Called from the tool's execute with the complete, validated input. */
   async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly string[]): Promise<string> {
     const e = this.start(toolCallId);
-    const text = neutralizeBroadcasts(stripCitationMarkers(rawText));
+    const text = neutralizeBroadcasts(rawText);
     if (e.timer) {
       clearTimeout(e.timer);
       e.timer = null;
@@ -254,47 +323,50 @@ export class ReplyManager {
     let buttonsTs: string | null = null;
     let delivered: 'streamed' | 'posted' = 'posted';
     let last: { ts: string | null; text: string } = { ts: null, text };
-    if (mode === 'stream' && !e.failed && text.length <= MAX_MD) {
+    if (mode === 'stream' && !e.failed) {
       try {
         if (e.streamTs) {
           if (!text.startsWith(e.streamed)) {
             log.warn({ index: e.index }, 'streamed prefix diverged from final reply text');
           }
           await this.flush(e, text);
-          if (await this.stopStreamWithButtons(e, actions)) buttonsTs = e.streamTs;
           delivered = 'streamed';
-          last = { ts: e.streamTs, text };
+          if (e.overflow) {
+            // Too long for one message: close the stream and post the rest as its own message.
+            await this.stopStream(e);
+            last = { ts: e.streamTs, text: e.streamed };
+            const rest = text.slice(e.rawSent);
+            if (rest.trim()) {
+              last = { ts: await this.post(e, rest, ':rest', actions), text: rest };
+              buttonsTs = last.ts;
+            }
+          } else {
+            if (await this.stopStreamWithButtons(e, actions)) buttonsTs = e.streamTs;
+            if (e.blocksChunks > 0) await this.finalLayout(e, text, buttonsTs ? actions : undefined);
+            last = { ts: e.streamTs, text };
+          }
         } else {
-          // No deltas arrived (non-streaming provider path): post whole, same visual result.
+          // Nothing streamed yet (no deltas, or all of it held back): post whole, same visual result.
           last = { ts: await this.post(e, text, '', actions), text };
           buttonsTs = last.ts;
         }
       } catch (err) {
         log.warn({ err }, 'stream finish failed');
         if (e.streamTs) {
-          await this.stopStream(e).catch(() => {});
           delivered = 'streamed';
-          last = { ts: e.streamTs, text: e.streamed };
+          ({ last, buttonsTs } = await this.recoverStream(e, text, actions));
         } else {
           last = { ts: await this.post(e, text, '', actions), text };
           buttonsTs = last.ts;
         }
       }
+    } else if (e.streamTs) {
+      // Stream opened but failed: close it and complete the message.
+      delivered = 'streamed';
+      ({ last, buttonsTs } = await this.recoverStream(e, text, actions));
     } else {
-      if (e.streamTs) {
-        // Stream opened but can't be completed (too long / failed): close it and post the rest whole.
-        await this.stopStream(e).catch(() => {});
-        const rest = text.slice(e.sent);
-        last = { ts: e.streamTs, text: e.streamed };
-        if (rest.trim()) {
-          last = { ts: await this.post(e, rest, ':rest', actions), text: rest };
-          buttonsTs = last.ts;
-        }
-        delivered = 'streamed';
-      } else {
-        last = { ts: await this.post(e, text, '', actions), text };
-        buttonsTs = last.ts;
-      }
+      last = { ts: await this.post(e, text, '', actions), text };
+      buttonsTs = last.ts;
     }
     if (btnRow) await this.recordButtons(e, btnRow, buttonsTs && buttonsTs === last.ts ? buttonsTs : null, last);
     this.delivered++;
@@ -331,12 +403,45 @@ export class ReplyManager {
     return res?.ts ?? null;
   }
 
+  /**
+   * A stream that failed midway (not stopped by the user): close it, then replace its content with the whole reply
+   * (chat.update, one message). If that fails too, post the part that wasn't visible yet as its own message.
+   */
+  private async recoverStream(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock): Promise<{ last: { ts: string | null; text: string }; buttonsTs: string | null }> {
+    await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after failure failed'));
+    try {
+      const msg = markdownMessage(text);
+      await slackCall('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
+      return { last: { ts: e.streamTs, text }, buttonsTs: actions ? e.streamTs : null };
+    } catch (err) {
+      log.warn({ err, code: slackErrorCode(err), index: e.index }, 'completing a failed stream via chat.update failed; posting the rest');
+    }
+    const rest = text.slice(e.rawSent);
+    if (!rest.trim()) return { last: { ts: e.streamTs, text: e.streamed }, buttonsTs: null };
+    const ts = await this.post(e, rest, ':rest', actions);
+    return { last: { ts, text: rest }, buttonsTs: ts };
+  }
+
+  /**
+   * After a stream that carried blocks chunks: re-render the finished message with the posted layout (prose as
+   * markdown, code as rich_text, in order), so it ends up exactly like a posted reply. Never throws.
+   */
+  private async finalLayout(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock) {
+    try {
+      const msg = markdownMessage(text);
+      await slackCall('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
+    } catch (err) {
+      log.warn({ err, code: slackErrorCode(err), index: e.index }, 'final layout update of a streamed reply failed; keeping the streamed layout');
+    }
+  }
+
   private async stopStream(e: ReplyEntry, extra?: string, blocks?: unknown[], suffix = ':stop') {
     if (!e.streamTs || e.stopped) return;
     e.stopped = true;
     await slackCall(
       'chat.stopStream',
-      { channel: this.t.channelId, ts: e.streamTs, ...(extra ? { markdown_text: extra } : {}), ...(blocks?.length ? { blocks } : {}) },
+      // The stream runs in chunks mode: extra text must be a chunk too (mixing modes → streaming_mode_mismatch).
+      { channel: this.t.channelId, ts: e.streamTs, ...(extra ? { chunks: [{ type: 'markdown_text', text: extra }] } : {}), ...(blocks?.length ? { blocks } : {}) },
       { idempotencyKey: this.key(e, suffix) },
     );
     this.t.timing?.mark('stream_stopped');

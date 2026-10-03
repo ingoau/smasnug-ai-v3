@@ -23,12 +23,11 @@ describe('card titles', () => {
     expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'error' })])).toBe('Ran 2 subagents');
   });
 
-  it('frozen title falls back when missing or too long', () => {
+  it('frozen title is the model title, falling back only when missing', () => {
     expect(frozenTitle('Compared 3 hosting options', 3)).toBe('Compared 3 hosting options');
     expect(frozenTitle(null, 3)).toBe('Ran 3 subagents');
     expect(frozenTitle('   ', 1)).toBe('Ran 1 subagent');
-    expect(frozenTitle('x'.repeat(41), 2)).toBe('Ran 2 subagents');
-    expect(frozenTitle('x'.repeat(40), 2)).toBe('x'.repeat(40));
+    expect(frozenTitle('x'.repeat(41), 2)).toBe('x'.repeat(41)); // the model's title as written, even if long
   });
 });
 
@@ -77,7 +76,7 @@ describe('renderCard', () => {
   });
 
   it('frozen card never shows the button and orders runs by id', () => {
-    const r = renderCard({ id: 1, title: 'A title that is definitely far too long for a card', frozen: true }, [run(3, { status: 'running' }), run(2)]);
+    const r = renderCard({ id: 1, title: null, frozen: true }, [run(3, { status: 'running' }), run(2)]);
     expect(r.blocks).toHaveLength(1);
     expect((r.blocks[0] as any).title).toBe('Ran 2 subagents');
     expect((r.blocks[0] as any).tasks.map((t: any) => t.task_id)).toEqual(['run_2', 'run_3']);
@@ -93,9 +92,19 @@ describe('renderCard', () => {
     expect(frozen.blocks.map((b) => b.type)).toEqual(['markdown', 'plan']);
     expect((frozen.blocks[1] as any).title).toBe('Checked the docs');
     expect(frozen.text).toBe('On it — checking the docs.');
+    // Over Slack's 12k markdown budget: rendered as rich_text (nothing cut), fallback text 3k.
     const long = renderCard({ id: 4, title: null, frozen: false, replyText: 'x'.repeat(20_000) }, runs);
-    expect((long.blocks[0] as any).text.length).toBeLessThan(12_000);
+    expect(long.blocks.map((b) => b.type)).toEqual(['rich_text', 'plan']);
     expect(long.text.length).toBe(3_000);
+  });
+
+  it('a reply with code keeps it as rich_text preformatted above the plan, with stable block ids', () => {
+    const replyText = 'Here:\n```html\n<h1>Hello, world!</h1>\n```\nMore soon.';
+    const r = renderCard({ id: 5, title: null, frozen: false, replyText }, [run(1)]);
+    expect(r.blocks.map((b) => b.type)).toEqual(['markdown', 'rich_text', 'markdown', 'plan']);
+    expect(r.blocks.map((b) => (b as any).block_id)).toEqual(['card_5_reply', 'card_5_reply_1', 'card_5_reply_2', 'card_5_plan']);
+    expect((r.blocks[1] as any).elements[0]).toEqual({ type: 'rich_text_preformatted', language: 'html', elements: [{ type: 'text', text: '<h1>Hello, world!</h1>' }] });
+    expect(r.text).toBe(replyText);
   });
 });
 

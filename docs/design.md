@@ -150,7 +150,7 @@ Multiple `reply` calls per turn are allowed (for example, one before spawning, o
 - 
 If a turn ends with no reply, no card change and no spawn, fall back to posting a short message so the user isn't left with silence.
 - 
-Reply text is markdown, sent via the `markdown` block.
+Reply text is markdown, delivered exactly as the model wrote it (`src/agent/slack-markdown.ts`): prose as `markdown` blocks, fenced code as `rich_text` blocks with a `rich_text_preformatted` element (always with a `language`, else Slack drops the rich code component). Reason: Slack's markdown converter rewrites `<h1-6>`, `<code>` and `<img>` into markdown everywhere, even inside code (verified); in prose only those tags' `<` is written as `&lt;`, and a paragraph whose inline code contains one is rendered as `rich_text`. Streams run in `chunks` mode: prose as `markdown_text` chunks, each code block held until its fence closes and sent as a `blocks` chunk; a stream that carried blocks is re-rendered with `chat.update` after `stopStream` so its final layout equals the posted one. No other rewriting of model output (no citation-marker stripping); group pings are still neutralised.
 State
 Delivery
 No subagents running
@@ -162,7 +162,7 @@ Front agent streams its synthesis into a new message below the card
 The stream-or-post choice is made in code from `thread.tasks.some(running)`, never by the model.
 ### Quick-reply buttons
 - 
-`reply(text, files?, buttons?)`: `buttons` is an optional list of 1–5 short labels (≤ 30 chars, enforced in code: clipped, deduped, group pings neutralised, extra labels dropped; the schema stays lenient so a violation can't fail a reply whose text already streamed). The prompt asks for them only when the reply ends with a question with a few clear answers; each label is exactly what the user would reply.
+`reply(text, files?, buttons?)`: `buttons` is an optional list of 1–5 short labels (≤ 30 chars asked for in the description; shown as written: code only neutralises group pings, drops empty labels, cuts at Slack's 75-char button limit and keeps at most 5; the schema stays lenient so a violation can't fail a reply whose text already streamed). The prompt asks for them only when the reply ends with a question with a few clear answers; each label is exactly what the user would reply.
 - 
 Rendering: an `actions` block (`block_id` `reply_<id>_buttons`, `action_id` `reply:choice:<i>`, `value` = `reply_buttons.id`) right under the reply markdown. Posted replies include it directly. Streamed replies pass it as `blocks` to `chat.stopStream` (documented: "A list of blocks that will be rendered at the bottom of the finalized message"; separate 50-block limit). If that is refused, the stream is stopped plainly and the buttons are added with `chat.update`; if that fails too, they are posted as a small follow-up message (logged).
 - 

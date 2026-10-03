@@ -13,6 +13,7 @@ import { slackCall, slackErrorCode } from '../../core/slack.js';
 import { registerTool, type ToolContext } from '../../core/tools.js';
 import { redis } from '../../core/redis.js';
 import { uploadFiles } from '../../agent/files.js';
+import { replyBlocks } from '../../agent/slack-markdown.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
 import { peekLimit, takeLimit } from '../guard.js';
@@ -61,7 +62,7 @@ async function prepareSend(ctx: ToolContext, destination: string, rawText: strin
     const key = `${ctx.turnId ?? ctx.threadId}:${hash(text + JSON.stringify(files))}`;
     await slackCall(
       'chat.postMessage',
-      { channel: ctx.channelId, thread_ts: ctx.threadTs, text: truncate(text, 3000), blocks: [{ type: 'markdown', text }] },
+      { channel: ctx.channelId, thread_ts: ctx.threadTs, text: truncate(text, 3000), blocks: replyBlocks(text) },
       { idempotencyKey: `send-thread:${key}` },
     );
     if (files.length) await uploadFiles({ channelId: ctx.channelId, threadTs: ctx.threadTs, files, idempotencyKey: `send-thread-files:${key}` });
@@ -140,7 +141,8 @@ export function previewBlocks(o: {
     { type: 'section', text: { type: 'mrkdwn', text: `*Send this on your behalf to ${o.label}?* Only you can see this preview.` } },
     { type: 'divider' },
     { type: 'context', elements: header },
-    { type: 'markdown', text: o.text },
+    // The message as it will be sent (code blocks as rich_text so Slack's markdown converter can't alter them).
+    ...replyBlocks(o.text, { maxBlocks: 50 - 8 }),
   ];
   if (o.files.length)
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `Attachments: ${o.files.map((f) => f.filename).join(', ')}` }] });
@@ -160,7 +162,7 @@ export function previewBlocks(o: {
 
 export function sentMessageBlocks(o: { text: string; requesterId: string; sentId: number }): unknown[] {
   return [
-    { type: 'markdown', text: o.text },
+    ...replyBlocks(o.text, { maxBlocks: 50 - 2 }),
     { type: 'context', elements: [{ type: 'mrkdwn', text: `Sent by <@${o.requesterId}> via ${env.BOT_DISPLAY_NAME}` }] },
     {
       type: 'actions',

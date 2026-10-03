@@ -17,7 +17,7 @@ import { EXTRAS, type QueuedImage } from './extras.js';
 import { fetchPage, formatPage } from './fetch-url.js';
 import { loadThreadImage, IMAGE_CACHE_DIR } from './read-image.js';
 import { cleanEmojiName, semojiSearch } from './emoji.js';
-import { stripCitationMarkers, WebSearchMeter } from './web-search.js';
+import { WebSearchMeter } from './web-search.js';
 
 const channel = `C${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const threadId = threadIdOf(channel, FIX_THREAD_TS);
@@ -304,9 +304,5 @@ describe('web search helpers', () => {
     m.observeStep({});
     expect(await m.settle({ speakerId: 'U0INGO', threadId })).toBe(false);
     expect(m.total).toBe(4);
-  });
-  it('strips native citation markers', () => {
-    expect(stripCitationMarkers('Russell won. citeturn0search9turn0search1')).toBe('Russell won.');
-    expect(stripCitationMarkers('A citeturn0search2 B')).toBe('A B');
   });
 });

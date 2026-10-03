@@ -24,7 +24,7 @@ vi.mock('./reply-buttons-store.js', () => ({
 }));
 
 const { ReplyManager } = await import('./reply.js');
-const { MAX_BUTTONS, MAX_LABEL_CHARS, REPLY_CHOICE_ACTION, buttonsActions, buttonsBlock, normalizeButtonLabels } = await import('./reply-buttons.js');
+const { MAX_BUTTONS, MAX_LABEL_CHARS, SLACK_BUTTON_TEXT_MAX, REPLY_CHOICE_ACTION, buttonsActions, buttonsBlock, normalizeButtonLabels } = await import('./reply-buttons.js');
 const { renderCard } = await import('./card-render.js');
 const { buttonsSchema } = await import('./tools.js');
 const { formatMessage } = await import('../context/format.js');
@@ -48,13 +48,13 @@ beforeEach(() => {
 });
 
 describe('reply buttons: labels and schema', () => {
-  it(`keeps at most ${MAX_BUTTONS} short, unique, ping-free labels`, () => {
-    const labels = normalizeButtonLabels(['  Yes ', 'yes', '', 'No', '## hidden', '<> quiet', 'tell <!channel>', 'x'.repeat(50), 'six', 'seven']);
-    expect(labels.length).toBeLessThanOrEqual(MAX_BUTTONS);
-    expect(labels.slice(0, 4)).toEqual(['Yes', 'No', 'hidden', 'quiet']);
-    expect(labels[4]).not.toMatch(/<!channel>/);
-    expect(labels.every((l) => [...l].length <= MAX_LABEL_CHARS)).toBe(true);
-    expect(normalizeButtonLabels(['a'.repeat(MAX_LABEL_CHARS + 5)])[0]).toMatch(/…$/);
+  it(`shows labels as written: only ping neutralising, Slack's 75-char limit and at most ${MAX_BUTTONS}`, () => {
+    const labels = normalizeButtonLabels(['  Yes ', 'yes', '', '   ', '## hidden', 'tell <!channel>', 'x'.repeat(50), 'six', 'seven']);
+    expect(labels).toHaveLength(MAX_BUTTONS);
+    expect(labels.slice(0, 3)).toEqual(['  Yes ', 'yes', '## hidden']); // no trimming, dedupe or prefix stripping
+    expect(labels[3]).not.toMatch(/<!channel>/);
+    expect(labels[4]).toBe('x'.repeat(50)); // longer than the suggested 30 chars: untouched
+    expect(normalizeButtonLabels(['a'.repeat(SLACK_BUTTON_TEXT_MAX + 5)])[0]).toBe('a'.repeat(SLACK_BUTTON_TEXT_MAX));
     expect(normalizeButtonLabels(undefined)).toEqual([]);
     expect(normalizeButtonLabels([3 as any, null as any, 'ok'])).toEqual(['ok']);
   });

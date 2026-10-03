@@ -10,7 +10,10 @@ import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 
 export const REPLY_CHOICE_ACTION = 'reply:choice';
 export const MAX_BUTTONS = 5;
+/** Label length the tool asks for (guidance for the model; not enforced). */
 export const MAX_LABEL_CHARS = 30;
+/** Slack: a button's plain_text `text` is at most 75 characters. */
+export const SLACK_BUTTON_TEXT_MAX = 75;
 
 /** What a render needs to know about a reply's buttons. */
 export interface ButtonsState {
@@ -39,22 +42,16 @@ export interface ContextBlock {
 }
 
 /**
- * Model-written labels → what gets shown: whitespace collapsed, a leading `##` / `<>` (workspace guideline prefixes)
- * stripped, group pings neutralised, clipped to MAX_LABEL_CHARS, empties and case-insensitive duplicates dropped,
- * at most MAX_BUTTONS.
+ * Model-written labels → what gets shown: exactly as written, except group pings are neutralised (workspace
+ * guideline) and Slack's hard API limits: button text is 1-75 chars (empty labels dropped, longer ones cut at 75),
+ * and the tool documents at most MAX_BUTTONS buttons.
  */
 export function normalizeButtonLabels(labels: readonly unknown[] | null | undefined): string[] {
   const out: string[] = [];
-  const seen = new Set<string>();
   for (const raw of labels ?? []) {
-    if (typeof raw !== 'string') continue;
-    let l = raw.replace(/\s+/g, ' ').trim().replace(/^(?:##|<>|\s)+/, '').trim();
-    l = neutralizeBroadcasts(l);
-    if ([...l].length > MAX_LABEL_CHARS) l = `${[...l].slice(0, MAX_LABEL_CHARS - 1).join('').trimEnd()}…`;
-    const k = l.toLowerCase();
-    if (!l || seen.has(k)) continue;
-    seen.add(k);
-    out.push(l);
+    if (typeof raw !== 'string' || !raw.trim()) continue;
+    const l = neutralizeBroadcasts(raw);
+    out.push([...l].length > SLACK_BUTTON_TEXT_MAX ? [...l].slice(0, SLACK_BUTTON_TEXT_MAX).join('') : l);
     if (out.length >= MAX_BUTTONS) break;
   }
   return out;

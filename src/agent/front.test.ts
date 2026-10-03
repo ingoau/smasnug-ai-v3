@@ -70,7 +70,7 @@ await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
 const { runFrontTurn } = await import('./front.js');
-const { streamSafePrefix } = await import('./reply.js');
+const { streamArgsText } = await import('./slack-markdown.js');
 
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
 
@@ -149,7 +149,7 @@ describe('runFrontTurn (mock model)', () => {
     expect(methods[0]).toBe('chat.startStream');
     expect(methods).toContain('chat.appendStream');
     expect(methods.at(-1)).toBe('chat.stopStream');
-    const streamed = h.slack.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => c.args.markdown_text).join('');
+    const streamed = h.slack.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => streamArgsText(c.args)).join('');
     expect(streamed).toBe(text);
     const start = h.slack.find((c) => c.method === 'chat.startStream')!;
     expect(start.args).toMatchObject({ channel: 'C1', thread_ts: '100.000001', recipient_user_id: 'U1' });
@@ -195,7 +195,7 @@ describe('runFrontTurn (mock model)', () => {
     h.model = mockModel([failing], 120);
     await expect(runFrontTurn(turn(), io().io)).resolves.toBeUndefined();
     const stop = h.slack.find((c) => c.method === 'chat.stopStream');
-    expect(stop?.args.markdown_text).toContain('Something broke');
+    expect(streamArgsText(stop!.args)).toContain('Something broke');
 
     h.slack = [];
     h.model = mockModel([[{ type: 'stream-start', warnings: [] }, { type: 'error', error: new Error('down') }]]);
@@ -203,12 +203,12 @@ describe('runFrontTurn (mock model)', () => {
     expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
   });
 
-  it('strips citation markers from streamed and posted replies', async () => {
-    const raw = 'Russell won the race. \uE200cite\uE202turn0search9\uE201 Next season starts in March.';
+  it('streams the model\'s text untouched (no rewriting of model output)', async () => {
+    const raw = 'Russell won the race. \uE200cite\uE202turn0search9\uE201 Next season starts in March. cit';
     h.model = mockModel([replyStep(raw, 3), textStep('')], 15);
     await runFrontTurn(turn({ id: 11 }), io().io);
-    const streamed = h.slack.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => c.args.markdown_text).join('');
-    expect(streamed).toBe('Russell won the race. Next season starts in March.');
+    const streamed = h.slack.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => streamArgsText(c.args)).join('');
+    expect(streamed).toBe(raw);
   });
 });
 
@@ -300,15 +300,6 @@ describe('runFrontTurn: native stop', () => {
     };
     await runFrontTurn(turn({ id: 25 }), { ...io().io, stopRequested: async () => false });
     expect(h.slack.map((c) => c.method)).not.toContain('chat.postMessage');
-  });
-});
-
-describe('streamSafePrefix', () => {
-  it('holds back a possibly incomplete citation marker', () => {
-    expect(streamSafePrefix('Hello wor')).toBe('Hello wor');
-    expect(streamSafePrefix('Done. \uE200cite\uE202turn0')).toBe('Done.');
-    expect(streamSafePrefix('Done. cit')).toBe('Done.');
-    expect(streamSafePrefix('Done. citeturn0search2 More')).toBe('Done. More');
   });
 });
 

@@ -4,6 +4,7 @@
  *   LIVE=1 pnpm vitest run src/agent/agent.live.test.ts
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { streamArgsText } from './slack-markdown.js';
 
 const LIVE = process.env.LIVE === '1';
 if (LIVE) {
@@ -158,7 +159,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const start = calls.find((c) => c.method === 'chat.startStream')!;
     expect(start.args.thread_ts).toBe(rootTs);
     expect(start.args.recipient_user_id).toBe(user);
-    const streamed = calls.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => c.args.markdown_text).join('');
+    const streamed = calls.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => streamArgsText(c.args)).join('');
     expect(streamed.length).toBeGreaterThan(20);
 
     const frozen = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
@@ -233,7 +234,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const calls = (await fakeCalls()).slice(before);
     const posts = calls.filter((c) => ['chat.postMessage', 'chat.startStream'].includes(c.method));
     // eslint-disable-next-line no-console
-    console.log('stop posts:', posts.map((c) => c.args.text ?? c.args.markdown_text));
+    console.log('stop posts:', posts.map((c) => c.args.text ?? streamArgsText(c.args)));
     expect(posts.length).toBeLessThanOrEqual(1);
     void saId;
   }, 90_000);
@@ -253,11 +254,32 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${th.id}, ${user}, true, ${[pingTs]}, 'running') returning *`;
     await runFrontTurn({ ...t, id: Number(t.id) }, io(true));
     const posts = (await fakeCalls()).slice(before).filter((c) => ['chat.postMessage', 'chat.startStream', 'chat.appendStream'].includes(c.method));
-    const text = posts.map((c) => c.args.markdown_text ?? c.args.text ?? '').join('');
+    const text = posts.map((c) => c.args.text ?? streamArgsText(c.args)).join('');
     // eslint-disable-next-line no-console
     console.log('ping reply:', text);
     expect(text.length).toBeGreaterThan(0);
     expect(text.toLowerCase()).not.toMatch(/<!doctype|<html|```/);
+  }, 60_000);
+
+  it('example HTML reaches Slack exactly as written: code as rich_text preformatted, never in markdown', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const th = await freshThread('HTML');
+    threadText.set(th.id, { history: '', newMessages: `[${th.ts}] <@${user}> Tester: @Smasnug give me a tiny example html page with an h1 that says Hello, world! just the code block` });
+    const before = (await fakeCalls()).length;
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${th.id}, ${user}, true, ${[th.ts]}, 'running') returning *`;
+    await runFrontTurn({ ...t, id: Number(t.id) }, io(true));
+    const calls = (await fakeCalls()).slice(before).filter((c) => c.args?.channel === th.id.split(':')[0]);
+    const out = calls.filter((c) => ['chat.postMessage', 'chat.startStream', 'chat.appendStream', 'chat.update'].includes(c.method));
+    const blocks = out.flatMap((c) => [...(c.args.blocks ?? []), ...(c.args.chunks ?? []).flatMap((k: any) => k.blocks ?? [])]);
+    const code = blocks.flatMap((b: any) => (b.type === 'rich_text' ? b.elements : [])).filter((e: any) => e.type === 'rich_text_preformatted');
+    // eslint-disable-next-line no-console
+    console.log('html reply code:', JSON.stringify(code.map((e: any) => ({ language: e.language, text: e.elements.map((x: any) => x.text).join('') }))));
+    expect(code.length).toBeGreaterThan(0);
+    expect(code.every((e: any) => typeof e.language === 'string' && e.language.length > 0)).toBe(true);
+    expect(code.some((e: any) => /<h1>\s*Hello, world!\s*<\/h1>/i.test(e.elements.map((x: any) => x.text).join('')))).toBe(true);
+    // No affected tag ever goes out inside markdown (Slack would rewrite it).
+    const md = [...out.map((c) => streamArgsText(c.args)), ...blocks.filter((b: any) => b.type === 'markdown').map((b: any) => b.text)].join('\n');
+    expect(md).not.toMatch(/<\/?(h[1-6]|code|img)\b/i);
   }, 60_000);
 
   it('unmentioned chatter between people stays silent (no fallback)', async () => {
@@ -273,7 +295,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const calls = (await fakeCalls()).slice(before).filter((c) => c.args.channel === th.id.split(':')[0]);
     const posts = calls.filter((c) => ['chat.postMessage', 'chat.startStream'].includes(c.method));
     // eslint-disable-next-line no-console
-    if (posts.length) console.log('chatter posts:', posts.map((c) => c.args.text ?? c.args.markdown_text));
+    if (posts.length) console.log('chatter posts:', posts.map((c) => c.args.text ?? streamArgsText(c.args)));
     expect(posts).toHaveLength(0);
   }, 60_000);
 
