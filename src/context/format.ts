@@ -5,6 +5,8 @@
  *   [1727950000.123456] <@U123> Ingo: hello <@U456|Bob> [file: budget.csv] [image img_3: screenshot.png, from Ingo]
  *   [1727950001.000200] [bot] Gorkie: …
  *   [1727950002.000300] [bot] Smasnug (you): … [reactions: :+1: ×2 (Ingo, Sam), :eyes: (you)]
+ *   [1727950003.000400] [bot] Smasnug (you): which board? [buttons: ESP32 | Pico; Ingo pressed "Pico"]
+ *   [1727950004.000500] <@U123> Ingo: Pico (button)
  * The bracketed number is the message ts (used by react / read_thread before_ts / read_channel before_ts).
  */
 import type { MessageReaction, SlackFileRef } from '../core/types.js';
@@ -21,6 +23,10 @@ export interface RenderMsg {
   /** Channel messages only: number of thread replies. */
   replyCount?: number;
   reactions?: MessageReaction[];
+  /** Quick-reply buttons the bot offered under this message (and who pressed which). */
+  buttons?: { labels: string[]; pressedBy?: string | null; pressedLabel?: string | null };
+  /** This "message" is a quick-reply button press (its text is the label). */
+  viaButton?: boolean;
 }
 
 export interface FormatEnv {
@@ -120,11 +126,21 @@ export function reactionsLabel(reactions: MessageReaction[] | undefined, env: Fo
   return `[reactions: ${parts.join(', ')}]`;
 }
 
+/** `[buttons: Yes | No]`, or `[buttons: Yes | No; Ingo pressed "Yes"]` once pressed. */
+export function buttonsLabel(b: RenderMsg['buttons'], env: FormatEnv): string {
+  if (!b?.labels.length) return '';
+  const who = b.pressedBy ? env.names.get(b.pressedBy) || `<@${b.pressedBy}>` : '';
+  return `[buttons: ${b.labels.join(' | ')}${b.pressedBy && b.pressedLabel != null ? `; ${who} pressed "${b.pressedLabel}"` : ''}]`;
+}
+
 export function formatMessage(m: RenderMsg, env: FormatEnv): string {
   const text = truncateText(renderSlackText(m.text ?? '', env.names).trim(), env.maxChars);
   const from = authorName(m, env);
   const files = (m.files ?? []).map((f) => fileLabel(f, from, env));
   const parts = [text, ...files].filter(Boolean);
+  if (m.viaButton) parts.push('(button)');
+  const buttons = buttonsLabel(m.buttons, env);
+  if (buttons) parts.push(buttons);
   if (m.edited) parts.push('(edited)');
   if (m.replyCount) parts.push(`[thread: ${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}]`);
   const reactions = reactionsLabel(m.reactions, env);
@@ -171,6 +187,7 @@ export function userIdsIn(msgs: RenderMsg[]): string[] {
     if (m.userId && !m.botId) ids.add(m.userId);
     for (const match of (m.text ?? '').matchAll(/<@([UW][A-Z0-9]+)/g)) ids.add(match[1]!);
     for (const r of (m.reactions ?? []).slice(0, MAX_REACTIONS)) for (const u of r.users.slice(0, MAX_REACTION_NAMES + 1)) ids.add(u);
+    if (m.buttons?.pressedBy) ids.add(m.buttons.pressedBy);
   }
   return [...ids];
 }

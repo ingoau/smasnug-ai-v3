@@ -3,6 +3,7 @@
  */
 import { markdownToRich, type RichTextElement, type RichTextInline } from './rich-text.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
+import { buttonsBlock, type ButtonsActionsBlock, type ButtonsState, type ContextBlock } from './reply-buttons.js';
 
 // Shapes mirror @slack/types PlanBlock / TaskCardBlock (not a direct dependency).
 export interface RichTextBlock {
@@ -55,6 +56,8 @@ export interface CardState {
   frozen: boolean;
   /** The card lives in this reply message: its text is re-rendered above the plan. null/undefined = standalone. */
   replyText?: string | null;
+  /** Quick-reply buttons of that reply (kept on every re-render: the buttons, or the "pressed" note). */
+  buttons?: ButtonsState | null;
 }
 
 export interface CardRun {
@@ -199,7 +202,7 @@ function statusWord(run: CardRun) {
 
 export interface RenderedCard {
   text: string;
-  blocks: (MarkdownBlock | PlanBlock | ActionsBlock)[];
+  blocks: (MarkdownBlock | PlanBlock | ActionsBlock | ButtonsActionsBlock | ContextBlock)[];
 }
 
 /** Same limits as reply.ts markdownMessage: 12k chars per markdown block, 3k for the `text` fallback. */
@@ -215,6 +218,8 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   const blocks: RenderedCard['blocks'] = [];
   const reply = card.replyText;
   if (reply != null) blocks.push({ type: 'markdown', block_id: `card_${card.id}_reply`, text: reply.length > MAX_MD ? `${reply.slice(0, MAX_MD)}\n\n_[message truncated]_` : reply });
+  // The reply's buttons (or the note that replaced them) stay right under its text, above the plan.
+  if (reply != null && card.buttons) blocks.push(buttonsBlock(card.buttons));
   blocks.push(plan);
   // Plain-text fallback: the reply's own text when the card lives in a reply, else a summary of the plan.
   const text = neutralizeBroadcasts(

@@ -13,6 +13,9 @@ import { redis } from '../core/redis.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import { renderCard, type CardRun, type CardState, type RunStatus } from './card-render.js';
+import { buttonsBlock, buttonsFallbackText } from './reply-buttons.js';
+import { buttonsForMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
+import { markdownMessage } from './reply.js';
 
 export interface CardRow {
   id: number;
@@ -25,6 +28,8 @@ export interface CardRow {
   synthesized: boolean;
   /** Set when the card lives in the turn's reply message (message_ts is then the reply's ts). */
   replyText: string | null;
+  /** Loaded alongside (not a column): the quick-reply buttons of the reply the card lives in. */
+  buttons?: ReplyButtonsRow | null;
 }
 
 export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: CardRun[] } | undefined> {
@@ -62,7 +67,8 @@ export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: C
     startedAt: r.startedAt,
     finishedAt: r.finishedAt,
   }));
-  return { card: { ...card, id: Number(card.id) }, runs };
+  const buttons = card.replyText != null ? await buttonsForMessage(card.channelId, card.messageTs) : undefined;
+  return { card: { ...card, id: Number(card.id), buttons: buttons ?? null }, runs };
 }
 
 /** Get or create this turn's card row (not yet posted). */
@@ -93,7 +99,8 @@ export async function postCard(cardId: number, reply?: ReplyRef | null): Promise
   if (!loaded || loaded.card.messageTs || loaded.runs.length === 0) return;
   const { card, runs } = loaded;
   if (reply) {
-    const msg = renderCard({ ...toState(card), replyText: reply.text }, runs);
+    const buttons = await buttonsForMessage(card.channelId, reply.ts).catch(() => undefined);
+    const msg = renderCard({ ...toState(card), replyText: reply.text, buttons: buttons ? toButtonsState(buttons) : null }, runs);
     try {
       await slackCall('chat.update', { channel: card.channelId, ts: reply.ts, text: msg.text, blocks: msg.blocks });
       await sql`update cards set message_ts = ${reply.ts}, reply_text = ${reply.text} where id = ${cardId} and message_ts is null`;
@@ -175,5 +182,22 @@ export async function freezeCard(cardId: number): Promise<void> {
 }
 
 function toState(card: CardRow): CardState {
-  return { id: card.id, title: card.title, frozen: card.frozen, replyText: card.replyText ?? null };
+  return { id: card.id, title: card.title, frozen: card.frozen, replyText: card.replyText ?? null, buttons: card.buttons ? toButtonsState(card.buttons) : null };
+}
+
+/**
+ * Re-render a reply message that carries quick-reply buttons from DB state (after a press): through the plan card
+ * when one lives in that message (keeps the plan), else as [reply markdown, buttons / pressed note].
+ */
+export async function rerenderButtonsMessage(row: ReplyButtonsRow): Promise<void> {
+  if (!row.messageTs) return;
+  const [card] = await sql<{ id: number }[]>`
+    select id from cards where channel_id = ${row.channelId} and message_ts = ${row.messageTs} and reply_text is not null order by id desc limit 1`;
+  if (card) {
+    await renderCardNow(Number(card.id));
+    return;
+  }
+  const state = toButtonsState(row);
+  const msg = row.replyText != null ? markdownMessage(row.replyText) : { text: buttonsFallbackText(state), blocks: [] };
+  await slackCall('chat.update', { channel: row.channelId, ts: row.messageTs, text: msg.text, blocks: [...msg.blocks, buttonsBlock(state)] });
 }

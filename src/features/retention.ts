@@ -47,6 +47,7 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
   );
   await run('turns', sql`delete from turns where created_at < ${older(long)} and status not in ('pending', 'running') returning id`);
   await run('cards', sql`delete from cards where created_at < ${older(long)} returning id`);
+  await run('reply_buttons', sql`delete from reply_buttons where created_at < ${older(long)} returning id`);
   await run('messages', sql`delete from messages where created_at < ${older(long)} returning ts`);
   // Copies of messages deleted in Slack: drop the content right away.
   await run('messages_deleted_content', sql`update messages set text = '', files = '[]' where deleted and (text <> '' or files <> '[]') returning ts`);

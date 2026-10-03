@@ -38,6 +38,9 @@ export async function setupTestInfra(opts: { name?: string; redisDb?: number; re
   const redisUrl = new URL(process.env.REDIS_URL ?? 'redis://localhost:6380');
   const explicitRedis = process.env.TEST_REDIS_URL ? Number(new URL(process.env.TEST_REDIS_URL).pathname.replace(/^\//, '') || 0) : NaN;
   redisUrl.pathname = `/${Number.isFinite(explicitRedis) ? (explicitRedis + (opts.redisOffset ?? 1)) % 16 : (opts.redisDb ?? TEST_REDIS_DB)}`;
+  // E.g. TEST_REDIS_URL=…/15 + offset 1 wraps around to db 0 = the dev Redis, which resetTestState flushes.
+  const { isDevRedis } = await import('../testing/test-db.js');
+  if (isDevRedis(redisUrl.toString())) throw new Error(`integration test Redis ${redisUrl} is the dev Redis db; pick another TEST_REDIS_URL`);
   process.env.REDIS_URL = redisUrl.toString();
   const r = new Redis(process.env.REDIS_URL, { lazyConnect: true, connectTimeout: 2000, maxRetriesPerRequest: 1 });
   try {

@@ -1,6 +1,9 @@
 // Module registration: importing this registers tools/actions. The worker wires processors and maintenance.
 import type { Job } from 'bullmq';
 import { QUEUE, type QueueName } from '../core/queues.js';
+import { registerAction } from '../core/actions.js';
+import { REPLY_CHOICE_ACTION } from '../agent/reply-buttons.js';
+import { handleReplyChoice } from './reply-choice.js';
 import { processDebounce } from './fire.js';
 import { enableLocalDebounce } from './debounce.js';
 import { recoverOrphanedTurns } from './maintenance.js';
@@ -12,6 +15,9 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
   [QUEUE.turnDebounce]: processDebounce,
   [QUEUE.threadRun]: processThreadRun,
 };
+
+/** Quick-reply buttons under bot replies: a press acts as the presser replying with the label. */
+registerAction(REPLY_CHOICE_ACTION, handleReplyChoice);
 
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {

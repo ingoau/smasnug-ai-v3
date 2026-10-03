@@ -82,7 +82,27 @@ async function loadThreadMessages(thread: ThreadRow): Promise<RenderMsg[]> {
   // The root by ts too: a group-ping message the bot answered in a new top-level thread is stored under that thread.
   const rows = await sql<StoredMessage[]>`select * from messages
     where (thread_id = ${thread.id} or (channel_id = ${thread.channelId} and ts = ${thread.threadTs})) and not deleted`;
-  return rows.map(fromStored);
+  return withButtons(thread.id, rows.map(fromStored));
+}
+
+/**
+ * Quick-reply buttons (table reply_buttons, written by the agent's reply tool / the press handler): the bot message
+ * that offered them gets `buttons` (labels + who pressed what), the press itself (a stored synthetic message) is
+ * marked `viaButton`.
+ */
+export async function withButtons(threadId: string, msgs: RenderMsg[]): Promise<RenderMsg[]> {
+  if (!msgs.length) return msgs;
+  const rows = await sql<{ messageTs: string | null; labels: string[]; pressedBy: string | null; pressedLabel: string | null; pressedMessageTs: string | null }[]>`
+    select message_ts, labels, pressed_by, pressed_label, pressed_message_ts from reply_buttons
+    where thread_id = ${threadId} and message_ts is not null order by id`;
+  if (!rows.length) return msgs;
+  const offered = new Map(rows.map((r) => [r.messageTs!, r]));
+  const presses = new Set(rows.map((r) => r.pressedMessageTs).filter(Boolean));
+  return msgs.map((m) => {
+    const b = offered.get(m.ts);
+    const out = b ? { ...m, buttons: { labels: Array.isArray(b.labels) ? b.labels : [], pressedBy: b.pressedBy, pressedLabel: b.pressedLabel } } : m;
+    return presses.has(m.ts) && !m.botId ? { ...out, viaButton: true } : out;
+  });
 }
 
 /** Top-level channel messages near the parent (stored by backfill or by the pipeline). */
@@ -123,7 +143,7 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
   const all = await span('ctx_load_thread', () => loadThreadMessages(thread));
   const newSet = new Set(opts.newMessageTs);
   // New messages may live outside the thread rows (e.g. a top-level DM message) — load them by ts too.
-  const newMsgs = opts.newMessageTs.length ? await span('ctx_load_new', () => loadByTs(thread.channelId, opts.newMessageTs)) : [];
+  const newMsgs = opts.newMessageTs.length ? await span('ctx_load_new', () => loadByTs(thread.channelId, opts.newMessageTs).then((m) => withButtons(threadId, m))) : [];
   const newest = newMsgs.reduce<string | undefined>((acc, m) => (!acc || compareTs(m.ts, acc) > 0 ? m.ts : acc), undefined);
   // History = everything before the turn's newest message, minus the new messages themselves. Anything newer
   // arrives via the inbox (renderMessages), so it would be duplicated here.
@@ -150,7 +170,7 @@ async function loadByTs(channelId: string, ts: string[]): Promise<RenderMsg[]> {
 export async function renderMessages(threadId: string, ts: string[]): Promise<string> {
   const { channelId } = parseThreadId(threadId);
   await ensureThread(threadId);
-  const msgs = await loadByTs(channelId, ts);
+  const msgs = await withButtons(threadId, await loadByTs(channelId, ts));
   const fenv = await formatEnvFor(threadId, msgs);
   return formatMessages(msgs, fenv);
 }

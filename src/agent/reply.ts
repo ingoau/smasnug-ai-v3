@@ -2,6 +2,9 @@
  * Reply delivery. Code decides stream vs. post (`chooseDelivery`): streamed replies are forwarded live from the
  * reply tool's streamed arguments (tool input deltas → partial-JSON → chat.appendStream); otherwise the reply is
  * posted whole with a markdown block. Files are uploaded after the message (after stopStream when streaming).
+ * Quick-reply buttons (reply-buttons.ts) go into the same message: an actions block in the post, or `blocks` on
+ * chat.stopStream ("rendered at the bottom of the finalized message"); if that fails, chat.update adds them, and as
+ * a last resort they are posted as a small follow-up message.
  */
 import { appendEvent } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
@@ -12,6 +15,8 @@ import { stripCitationMarkers } from '../tools/web-search.js';
 import { extractPartialString } from './partial-json.js';
 import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chooseDelivery, isNearDuplicate, type DeliveryMode } from './util.js';
+import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type ButtonsActionsBlock } from './reply-buttons.js';
+import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 
 /** Coalescing interval for appends once the stream is open. */
 const FLUSH_MS = 250;
@@ -227,7 +232,7 @@ export class ReplyManager {
   }
 
   /** Called from the tool's execute with the complete, validated input. */
-  async finish(toolCallId: string, rawText: string, files?: OutgoingFile[]): Promise<string> {
+  async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly string[]): Promise<string> {
     const e = this.start(toolCallId);
     const text = neutralizeBroadcasts(stripCitationMarkers(rawText));
     if (e.timer) {
@@ -252,6 +257,18 @@ export class ReplyManager {
       }
     }
     const mode = await e.mode;
+    // Quick-reply buttons: the row id goes into the button values, so it exists before the message does.
+    const labels = normalizeButtonLabels(buttons);
+    let btnRow: ReplyButtonsRow | null = null;
+    if (labels.length) {
+      btnRow = await createReplyButtons({ threadId: this.t.threadId, channelId: this.t.channelId, turnId: this.t.turnId, key: this.key(e), labels }).catch((err) => {
+        log.warn({ err }, 'creating reply buttons failed; replying without them');
+        return null;
+      });
+    }
+    const actions = btnRow ? buttonsActions(btnRow) : undefined;
+    /** The message that ended up carrying the buttons (set when they went out with it). */
+    let buttonsTs: string | null = null;
     let delivered: 'streamed' | 'posted' = 'posted';
     let last: { ts: string | null; text: string } = { ts: null, text };
     if (mode === 'stream' && !e.failed && text.length <= MAX_MD) {
@@ -261,12 +278,13 @@ export class ReplyManager {
             log.warn({ index: e.index }, 'streamed prefix diverged from final reply text');
           }
           await this.flush(e, text);
-          await this.stopStream(e);
+          if (await this.stopStreamWithButtons(e, actions)) buttonsTs = e.streamTs;
           delivered = 'streamed';
           last = { ts: e.streamTs, text };
         } else {
           // No deltas arrived (non-streaming provider path): post whole, same visual result.
-          last = { ts: await this.post(e, text), text };
+          last = { ts: await this.post(e, text, '', actions), text };
+          buttonsTs = last.ts;
         }
       } catch (err) {
         log.warn({ err }, 'stream finish failed');
@@ -274,7 +292,10 @@ export class ReplyManager {
           await this.stopStream(e).catch(() => {});
           delivered = 'streamed';
           last = { ts: e.streamTs, text: e.streamed };
-        } else last = { ts: await this.post(e, text), text };
+        } else {
+          last = { ts: await this.post(e, text, '', actions), text };
+          buttonsTs = last.ts;
+        }
       }
     } else {
       if (e.streamTs) {
@@ -282,12 +303,17 @@ export class ReplyManager {
         await this.stopStream(e).catch(() => {});
         const rest = text.slice(e.sent);
         last = { ts: e.streamTs, text: e.streamed };
-        if (rest.trim()) last = { ts: await this.post(e, rest, ':rest'), text: rest };
+        if (rest.trim()) {
+          last = { ts: await this.post(e, rest, ':rest', actions), text: rest };
+          buttonsTs = last.ts;
+        }
         delivered = 'streamed';
       } else {
-        last = { ts: await this.post(e, text), text };
+        last = { ts: await this.post(e, text, '', actions), text };
+        buttonsTs = last.ts;
       }
     }
+    if (btnRow) await this.recordButtons(e, btnRow, buttonsTs && buttonsTs === last.ts ? buttonsTs : null, last);
     this.delivered++;
     if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs };
     this.deliveredTexts.push(text);
@@ -306,30 +332,85 @@ export class ReplyManager {
       mode: delivered,
       text,
       files: files?.map((f) => f.filename),
+      ...(btnRow ? { buttons: btnRow.labels } : {}),
     });
-    return `Replied (${delivered}).`;
+    return `Replied (${delivered})${btnRow ? ` with buttons: ${btnRow.labels.join(' | ')}` : ''}.`;
   }
 
-  private async post(e: ReplyEntry, text: string, suffix = ''): Promise<string | null> {
+  private async post(e: ReplyEntry, text: string, suffix = '', actions?: ButtonsActionsBlock): Promise<string | null> {
     const msg = markdownMessage(text);
     const res = await slackCall<any>(
       'chat.postMessage',
-      { channel: this.t.channelId, thread_ts: this.t.threadTs, ...msg, unfurl_links: false },
+      { channel: this.t.channelId, thread_ts: this.t.threadTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks, unfurl_links: false },
       { idempotencyKey: this.key(e, suffix) },
     );
     this.t.timing?.mark('reply_posted');
     return res?.ts ?? null;
   }
 
-  private async stopStream(e: ReplyEntry, extra?: string) {
+  private async stopStream(e: ReplyEntry, extra?: string, blocks?: unknown[], suffix = ':stop') {
     if (!e.streamTs || e.stopped) return;
     e.stopped = true;
     await slackCall(
       'chat.stopStream',
-      { channel: this.t.channelId, ts: e.streamTs, ...(extra ? { markdown_text: extra } : {}) },
-      { idempotencyKey: this.key(e, ':stop') },
+      { channel: this.t.channelId, ts: e.streamTs, ...(extra ? { markdown_text: extra } : {}), ...(blocks?.length ? { blocks } : {}) },
+      { idempotencyKey: this.key(e, suffix) },
     );
     this.t.timing?.mark('stream_stopped');
+  }
+
+  /**
+   * Finalise a stream, with the buttons as `blocks` (chat.stopStream renders them at the bottom of the finalized
+   * message). If Slack refuses that, stop it without them (recordButtons then attaches them another way).
+   * Returns true when the buttons went out with the stop.
+   */
+  private async stopStreamWithButtons(e: ReplyEntry, actions?: ButtonsActionsBlock): Promise<boolean> {
+    if (!actions) {
+      await this.stopStream(e);
+      return false;
+    }
+    try {
+      await this.stopStream(e, undefined, [actions]);
+      return true;
+    } catch (err) {
+      log.warn({ err, code: slackErrorCode(err), index: e.index }, 'chat.stopStream with buttons failed; stopping without them');
+      e.stopped = false;
+      await this.stopStream(e, undefined, undefined, ':stop-plain');
+      return false;
+    }
+  }
+
+  /**
+   * Remember which message carries the buttons. When they didn't go out with the reply (stopStream refused them,
+   * or a fallback path), add them to the delivered message with chat.update; failing that, post them as a small
+   * follow-up message. Never throws.
+   */
+  private async recordButtons(e: ReplyEntry, row: ReplyButtonsRow, sentWith: string | null, last: { ts: string | null; text: string }) {
+    try {
+      if (sentWith) {
+        await setButtonsMessage(row.id, sentWith, last.text);
+        return;
+      }
+      const actions = buttonsActions(row);
+      if (last.ts) {
+        try {
+          const msg = markdownMessage(last.text);
+          await slackCall('chat.update', { channel: this.t.channelId, ts: last.ts, text: msg.text, blocks: [...msg.blocks, actions] });
+          await setButtonsMessage(row.id, last.ts, last.text);
+          return;
+        } catch (err) {
+          log.warn({ err, code: slackErrorCode(err), ts: last.ts }, 'adding reply buttons via chat.update failed; posting them as a follow-up');
+        }
+      }
+      const res = await slackCall<any>(
+        'chat.postMessage',
+        { channel: this.t.channelId, thread_ts: this.t.threadTs, text: buttonsFallbackText(toButtonsState(row)), blocks: [actions] },
+        { idempotencyKey: this.key(e, ':buttons') },
+      );
+      if (res?.ts) await setButtonsMessage(row.id, res.ts, null);
+    } catch (err) {
+      log.warn({ err, buttonsId: row.id }, 'delivering reply buttons failed');
+    }
   }
 
   /** On a model/API failure (or stop): close any open stream, with a short note if given. Returns true if one was open. */

@@ -28,6 +28,11 @@ function dbKey(url: string): string {
   return `${u.hostname}:${u.port || 5432}${u.pathname}`;
 }
 
+/** True if `url` is the dev Redis db from `.env` (tests must never flush it). */
+export function isDevRedis(url: string): boolean {
+  return redisKey(url) === redisKey(devTargets().redis);
+}
+
 function redisKey(url: string): string {
   const u = new URL(url);
   return `${u.hostname}:${u.port || 6379}/${u.pathname.replace(/^\//, '') || '0'}`;

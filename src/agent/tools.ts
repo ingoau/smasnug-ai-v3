@@ -8,6 +8,7 @@ import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { registerTool } from '../core/tools.js';
 import { cancelSubagent, messageSubagent, spawnSubagent } from './subagents.js';
+import { MAX_BUTTONS, MAX_LABEL_CHARS } from './reply-buttons.js';
 import { retractReaction } from './turn-guards.js';
 import { turnState } from './turn-state.js';
 
@@ -15,6 +16,18 @@ const fileSchema = z.object({
   filename: z.string().describe('File name with extension, e.g. "report.md" or "data.csv"'),
   content: z.string().describe('Full text content of the file'),
 });
+
+/**
+ * Deliberately lenient (no min/max): a schema violation would fail the call after its text already streamed, and a
+ * retry would show the reply twice. Limits are enforced in code (normalizeButtonLabels: ≤ MAX_BUTTONS labels,
+ * clipped to MAX_LABEL_CHARS) and stated in the description.
+ */
+export const buttonsSchema = z
+  .array(z.string())
+  .optional()
+  .describe(
+    `Optional quick-reply buttons under the message, only when you ask the speaker a question with a few clear options. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars each), each exactly what the user would reply; a press posts that label as their message. Omit for normal answers.`,
+  );
 
 registerTool({
   name: 'reply',
@@ -26,6 +39,7 @@ registerTool({
       inputSchema: z.object({
         text: z.string().describe('Message text in Slack-flavoured markdown. Keep it concise.'),
         files: z.array(fileSchema).max(5).optional().describe('Optional text files to attach below the message'),
+        buttons: buttonsSchema,
       }),
       onInputStart: ({ toolCallId }) => {
         turnState(ctx).replies.start(toolCallId);
@@ -33,9 +47,9 @@ registerTool({
       onInputDelta: ({ toolCallId, inputTextDelta }) => {
         turnState(ctx).replies.delta(toolCallId, inputTextDelta);
       },
-      execute: async ({ text, files }, { toolCallId }) => {
+      execute: async ({ text, files, buttons }, { toolCallId }) => {
         const s = turnState(ctx);
-        const res = await s.replies.finish(toolCallId, text, files);
+        const res = await s.replies.finish(toolCallId, text, files, buttons);
         if (res.startsWith('Replied')) {
           s.visible.add('reply');
           await retractReaction(s);
