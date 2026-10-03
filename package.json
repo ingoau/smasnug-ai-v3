@@ -9,6 +9,9 @@
   "scripts": {
     "dev:ingress": "tsx watch --env-file=.env src/ingress/main.ts",
     "dev:worker": "tsx watch --env-file=.env src/worker/main.ts",
+    "build": "tsc -p tsconfig.build.json && cp -r src/db/migrations dist/db/",
+    "start:ingress": "node dist/ingress/main.js",
+    "start:worker": "node dist/worker/main.js",
     "migrate": "tsx --env-file=.env src/db/migrate.ts",
     "bench": "tsx scripts/bench.ts",
     "simulate": "SLACK_FAKE=1 tsx --env-file=.env scripts/simulate.ts",
@@ -41,5 +44,7 @@
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
-  }
+  },
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@10.33.3"
 }
