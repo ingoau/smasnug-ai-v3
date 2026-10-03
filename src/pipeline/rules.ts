@@ -98,5 +98,16 @@ export function threadRootTs(ev: { ts: string; thread_ts?: string }): string {
   return ev.thread_ts ?? ev.ts;
 }
 
+/** Order Slack timestamps ("1700000000.000100") exactly, without float rounding. */
+export function compareTs(a: string, b: string): number {
+  const [ai = '0', af = ''] = a.split('.');
+  const [bi = '0', bf = ''] = b.split('.');
+  if (ai.length !== bi.length) return ai.length - bi.length;
+  if (ai !== bi) return ai < bi ? -1 : 1;
+  const fa = af.padEnd(6, '0');
+  const fb = bf.padEnd(6, '0');
+  return fa === fb ? 0 : fa < fb ? -1 : 1;
+}
+
 /** Message subtypes that represent a new human/bot post (others: joins, topic changes … are ignored). */
 export const NEW_MESSAGE_SUBTYPES = new Set<string | undefined>([undefined, 'file_share', 'thread_broadcast', 'bot_message', 'me_message']);
