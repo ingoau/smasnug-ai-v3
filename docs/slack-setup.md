@@ -45,7 +45,7 @@ scopes.
 
 - **smasnug ai v3** (`A0C6K5WK0KW`) — production, created from `slack-manifest.yml` as-is.
 - **dev - smasnug ai v3** (`A0C6FBD1KL2`) — development; same manifest with `name`/`display_name` set to
-  `dev - smasnug ai v3` and the slash command renamed to `/smasnug-dev` (so both can be installed side by side; the
-  code matches `slash:/smasnug*` by prefix). Local `.env` uses this app's tokens and `BOT_DISPLAY_NAME=dev - smasnug ai v3`.
+  `dev - smasnug ai v3` / `dev - smasnug ai` and the slash command renamed to `/smasnug-dev` (so both can be installed side by side; the
+  code matches `slash:/smasnug*` by prefix). Local `.env` uses this app's tokens and `BOT_DISPLAY_NAME=dev - smasnug ai`.
 
 Installing into Hack Club needs workspace-admin approval ("Request to Workspace Install").

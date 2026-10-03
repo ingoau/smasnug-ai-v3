@@ -2,26 +2,19 @@
 # "From a manifest", paste this file. See docs/slack-setup.md for tokens and .env.
 display_information:
   name: smasnug ai v3
-  description: Workspace assistant — answers, researches in the background, sends messages on your behalf.
+  description: agentic ai b2b saas
   background_color: "#2c2d30"
-  long_description: >-
-    smasnug ai v3 is a workspace Slack agent. Mention it in a thread or DM it: it replies, reacts, delegates longer
-    research to background subagents shown in plan cards, and can send messages on your behalf after you confirm a
-    preview. It remembers a few facts about you to personalise answers; the App Home tab lists them and lets you
-    delete them at any time. Channel creators can turn it off in their channel with /smasnug off.
 features:
   app_home:
     home_tab_enabled: true
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
   bot_user:
-    display_name: smasnug ai v3
+    display_name: smasnug ai
     always_online: true
   # Agents & AI Apps: the agent container (split view next to any channel) with a native stop button.
   agent_view:
-    agent_description: >-
-      smasnug ai v3 is the Hack Club workspace assistant. Ask it anything, have it dig through channels and the web in the
-      background, summarise threads, or draft and send messages on your behalf after you confirm.
+    agent_description: agentic ai b2b saas
     suggested_prompts:
       - title: Catch me up
         message: Summarise what's been happening in the channel I'm looking at.
