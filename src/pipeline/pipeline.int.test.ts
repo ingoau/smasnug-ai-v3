@@ -526,4 +526,44 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(await debounce.takeBatch({ threadId: `D1:${ts}`, authorId: 'U1', seq: 1 })).toEqual([{ ts, reason: 'dm' }]);
     });
   });
+
+  describe('reactions (reaction_added / reaction_removed)', () => {
+    const reactionEnvelope = (type: 'reaction_added' | 'reaction_removed', user: string, reaction: string, ts: string, channel = C) =>
+      job({ kind: 'event' as const, body: { event_id: `Ev${Math.random()}`, event: { type, user, reaction, item: { type: 'message', channel, ts }, item_user: 'U1', event_ts: nextTs() } } });
+
+    it('keeps stored reactions current, logs events, never starts a turn, ignores unknown messages', async () => {
+      await makeThread();
+      const ts = nextTs();
+      await storeMsg('U1', ts, 'shipped it');
+      await processSlackEvent(reactionEnvelope('reaction_added', 'U2', 'tada', ts));
+      await processSlackEvent(reactionEnvelope('reaction_added', 'U3', 'tada', ts));
+      await processSlackEvent(reactionEnvelope('reaction_added', 'U3', 'tada', ts)); // redelivery
+      await processSlackEvent(reactionEnvelope('reaction_added', 'UBOT', 'eyes', ts));
+      await processSlackEvent(reactionEnvelope('reaction_removed', 'U2', 'tada', ts));
+      const [row] = await sql<any[]>`select reactions from messages where channel_id = ${C} and ts = ${ts}`;
+      expect(row.reactions).toEqual([
+        { name: 'tada', users: ['U3'], count: 1 },
+        { name: 'eyes', users: ['UBOT'], count: 1 },
+      ]);
+      const events = await sql<any[]>`select type, actor, payload from thread_events where thread_id = ${THREAD} and type like 'reaction%' order by id`;
+      expect(events.map((e) => `${e.type}:${e.actor}:${e.payload.emoji}`)).toEqual([
+        'reaction_added:U2:tada',
+        'reaction_added:U3:tada',
+        'reaction_added:U3:tada',
+        'reaction_added:UBOT:eyes',
+        'reaction_removed:U2:tada',
+      ]);
+      // Concurrent events on one message don't lose updates.
+      await Promise.all(['U4', 'U5', 'U6', 'U7'].map((u) => processSlackEvent(reactionEnvelope('reaction_added', u, 'fire', ts))));
+      const [row2] = await sql<any[]>`select reactions from messages where channel_id = ${C} and ts = ${ts}`;
+      expect(row2.reactions.find((r: any) => r.name === 'fire')).toMatchObject({ count: 4 });
+
+      // Reactions on messages we don't store, and on non-messages, are ignored.
+      await processSlackEvent(reactionEnvelope('reaction_added', 'U2', 'eyes', '1700000999.000001', 'C0OTHER'));
+      await processSlackEvent(job({ kind: 'event' as const, body: { event_id: 'EvFile', event: { type: 'reaction_added', user: 'U2', reaction: 'x', item: { type: 'file', file: 'F1' } } } }));
+      expect(await turns()).toHaveLength(0);
+      expect(await threadRunJobs()).toHaveLength(0);
+      expect(run).not.toHaveBeenCalled();
+    });
+  });
 });

@@ -29,6 +29,7 @@ vi.mock('../db/index.js', () => {
 });
 vi.mock('../core/redis.js', () => ({ redis: {}, bullConnection: () => ({}) }));
 vi.mock('../core/slack.js', () => ({
+  getBotIdentity: async () => ({ userId: 'UBOT', botId: 'BBOT' }),
   slackErrorCode: (err: any) => err?.data?.error,
   slackCall: async (method: string, args: any) => {
     h.slack.push({ method, args });

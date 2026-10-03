@@ -1,13 +1,14 @@
-/** search_emojis (semoji) and react (reactions.add) — front agent only. */
+/** search_emojis (semoji), react (reactions.add) and unreact (reactions.remove) — front agent only. */
 import { createHash } from 'node:crypto';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { env } from '../config.js';
 import { appendEvent } from '../core/events.js';
 import { redis } from '../core/redis.js';
-import { slackCall, slackErrorCode } from '../core/slack.js';
+import { getBotIdentity, slackCall, slackErrorCode } from '../core/slack.js';
 import { registerTool, type ToolContext } from '../core/tools.js';
 import { log } from '../log.js';
+import { updateStoredReaction } from '../context/reactions-store.js';
 import { EXTRAS, getExtra } from './extras.js';
 import { normalizeTs } from './util.js';
 
@@ -91,6 +92,7 @@ export async function react(ctx: ToolContext, emojiRaw: string, messageTs?: stri
     const key = `${ctx.threadId}:${ctx.turnId ?? ctx.runId ?? 'na'}:${ts}:${emoji}`;
     await slackCall('reactions.add', { channel: ctx.channelId, timestamp: ts, name: emoji }, { idempotencyKey: key });
     await appendEvent(ctx.threadId, 'reaction', 'bot', { emoji, ts, turnId: ctx.turnId ?? null });
+    await syncOwnReaction(ctx.channelId, ts, 'added', emoji);
     return `Reacted :${emoji}: to ${ts}.`;
   };
   try {
@@ -113,6 +115,50 @@ export async function react(ctx: ToolContext, emojiRaw: string, messageTs?: stri
     return 'Reaction skipped.';
   }
 }
+
+/** Mirror the bot's own reaction change into `messages.reactions` (the Slack event would do it too, later). */
+export async function syncOwnReaction(channelId: string, ts: string, op: 'added' | 'removed', name: string): Promise<void> {
+  try {
+    const bot = await getBotIdentity();
+    if (bot.userId) await updateStoredReaction({ channelId, ts, op, name, user: bot.userId });
+  } catch (err) {
+    log.debug({ err }, 'syncOwnReaction failed');
+  }
+}
+
+export async function unreact(ctx: ToolContext, emojiRaw: string, messageTs?: string): Promise<string> {
+  const name = cleanEmojiName(emojiRaw);
+  if (!name) return 'No emoji given.';
+  const ts = normalizeTs(messageTs) ?? getExtra(ctx.extras, EXTRAS.defaultReactTs);
+  if (!ts) return 'No message to remove a reaction from (give message_ts).';
+  try {
+    const key = `unreact:${ctx.threadId}:${ctx.turnId ?? ctx.runId ?? 'na'}:${ts}:${name}`;
+    await slackCall('reactions.remove', { channel: ctx.channelId, timestamp: ts, name }, { idempotencyKey: key });
+  } catch (err) {
+    const code = slackErrorCode(err);
+    if (code === 'no_reaction') return 'No such reaction from you.';
+    log.debug({ err, code, name, ts }, 'unreact failed');
+    return 'Could not remove the reaction.';
+  }
+  await appendEvent(ctx.threadId, 'reaction_removed', 'bot', { emoji: name, ts, turnId: ctx.turnId ?? null });
+  await syncOwnReaction(ctx.channelId, ts, 'removed', name);
+  return `Removed :${name}: from ${ts}.`;
+}
+
+registerTool({
+  name: 'unreact',
+  roles: ['front'],
+  build: (ctx) =>
+    tool({
+      description:
+        "Remove one of YOUR OWN reactions that is no longer right (e.g. a placeholder like hourglass once the work is done). Rarely needed. Defaults to the message you are responding to; pass message_ts to target another message.",
+      inputSchema: z.object({
+        emoji: z.string().describe('Emoji name of your reaction, e.g. "hourglass"'),
+        message_ts: z.string().optional().describe('ts of the message; default: the triggering message'),
+      }),
+      execute: async ({ emoji, message_ts }) => unreact(ctx, emoji, message_ts),
+    }),
+});
 
 registerTool({
   name: 'react',

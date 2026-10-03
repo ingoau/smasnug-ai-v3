@@ -1,6 +1,7 @@
 /** Pure normalisation of Slack API messages and stored rows into RenderMsg. */
 import type { SlackFileRef, StoredMessage } from '../core/types.js';
 import type { RenderMsg } from './format.js';
+import { reactionsFromSlack } from './reactions.js';
 
 export const HIDDEN_SUBTYPES = new Set(['tombstone', 'message_deleted', 'channel_join', 'channel_leave', 'group_join', 'group_leave']);
 
@@ -28,6 +29,7 @@ export function fromSlack(raw: any): RenderMsg | null {
     edited: !!raw.edited,
     deleted: false,
     replyCount: raw.reply_count || undefined,
+    reactions: reactionsFromSlack(raw.reactions),
   };
 }
 
@@ -47,6 +49,7 @@ export function fromStored(m: StoredMessage | (StoredMessage & Record<string, an
     files,
     edited: !!m.editedAt,
     deleted: !!m.deleted,
+    reactions: Array.isArray(m.reactions) ? m.reactions : [],
   };
 }
 

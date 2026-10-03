@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { compareTs, formatMessage, formatMessages, formatThread, isImageFile, renderSlackText, selectThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
+import { compareTs, formatMessage, formatMessages, formatThread, isImageFile, reactionsLabel, renderSlackText, selectThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
+import { applyReaction, reactionsFromSlack } from './reactions.js';
 import { fixtureReplies, FIX_THREAD_TS } from './fixtures.js';
 import { fromSlack } from './normalize.js';
 
@@ -66,7 +67,7 @@ describe('thread selection', () => {
     expect(sel.omitted).toBe(38 - 29);
     const out = formatThread(sel, env({ imageIds: new Map([['F0SHOT', 1], ['F0HEIC', 2]]) }));
     const lines = out.split('\n');
-    expect(lines[0]).toMatch(/^\[1790000000\.000100\] <@U0INGO> Ingo: Anyone know how to fix the Hack Club \(https:\/\/hackclub\.com\) site build\? cc <@U0BOB\|Bob Builder> & @here \[image img_1: screenshot\.png, from Ingo\] \[file: budget\.csv\]$/);
+    expect(lines[0]).toMatch(/^\[1790000000\.000100\] <@U0INGO> Ingo: Anyone know how to fix the Hack Club \(https:\/\/hackclub\.com\) site build\? cc <@U0BOB\|Bob Builder> & @here \[image img_1: screenshot\.png, from Ingo\] \[file: budget\.csv\] \[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
     expect(lines[1]).toBe('[9 earlier replies not shown]');
     expect(out).toContain('[bot] CI Bot: Build #42 failed :x:');
     expect(out).toContain('here is the error log [image img_2: IMG_0042.HEIC, from alice]');
@@ -82,7 +83,7 @@ describe('thread selection', () => {
   });
 
   it('collects user ids from authors and mentions', () => {
-    expect(userIdsIn(msgs).sort()).toEqual(['U0ALICE', 'U0BOB', 'U0INGO']);
+    expect(userIdsIn(msgs).sort()).toEqual(['U0ALICE', 'U0BOB', 'U0INGO', 'UBOT']);
   });
 });
 
@@ -99,5 +100,49 @@ describe('helpers', () => {
   it('formatMessages sorts and drops deleted', () => {
     const out = formatMessages([msg({ ts: '2.000000', text: 'b' }), msg({ ts: '1.000000', text: 'a' }), msg({ ts: '3.000000', text: 'gone', deleted: true })], env());
     expect(out).toBe('[1.000000] <@U0INGO> Ingo: a\n[2.000000] <@U0INGO> Ingo: b');
+  });
+});
+
+describe('reactions', () => {
+  it('renders compact reaction labels: counts, capped names, (you) first', () => {
+    expect(reactionsLabel([], env())).toBe('');
+    expect(reactionsLabel([{ name: 'eyes', users: ['UBOT'], count: 1 }], env())).toBe('[reactions: :eyes: (you)]');
+    expect(reactionsLabel([{ name: '+1', users: ['U0INGO', 'U0BOB', 'U0ALICE', 'UBOT', 'U0X'], count: 7 }], env())).toBe(
+      '[reactions: :+1: ×7 (you, Ingo, Bob Builder +4)]',
+    );
+    const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map((name) => ({ name, users: ['U0NONAME'], count: 1 }));
+    expect(reactionsLabel(many, env())).toBe('[reactions: :a: (<@U0NONAME>), :b: (<@U0NONAME>), :c: (<@U0NONAME>), :d: (<@U0NONAME>), :e: (<@U0NONAME>), :f: (<@U0NONAME>), +2 more]');
+  });
+
+  it('appends reactions to the message line', () => {
+    const m = msg({ text: 'shipped!', reactions: [{ name: 'tada', users: ['U0BOB', 'U0ALICE'], count: 2 }] });
+    expect(formatMessage(m, env())).toBe('[1790000000.000100] <@U0INGO> Ingo: shipped! [reactions: :tada: ×2 (Bob Builder, alice)]');
+  });
+
+  it('normalises Slack reactions (fixtures) and applies add/remove idempotently', () => {
+    const parent = fromSlack(fixtureReplies(3).messages[0])!;
+    expect(parent.reactions).toEqual([
+      { name: '+1', users: ['U0BOB', 'U0ALICE'], count: 2 },
+      { name: 'eyes', users: ['UBOT'], count: 1 },
+    ]);
+    expect(reactionsFromSlack(undefined)).toEqual([]);
+    expect(reactionsFromSlack([{ name: 'x', users: ['U1'], count: 5 }, { name: 'bad' }])).toEqual([{ name: 'x', users: ['U1'], count: 5 }]);
+
+    let r = applyReaction([], 'added', 'eyes', 'U1');
+    expect(r).toEqual([{ name: 'eyes', users: ['U1'], count: 1 }]);
+    r = applyReaction(r, 'added', 'eyes', 'U1'); // duplicate event
+    expect(r).toEqual([{ name: 'eyes', users: ['U1'], count: 1 }]);
+    r = applyReaction(r, 'added', 'eyes', 'U2');
+    r = applyReaction(r, 'added', '+1', 'U2');
+    expect(r).toEqual([
+      { name: 'eyes', users: ['U1', 'U2'], count: 2 },
+      { name: '+1', users: ['U2'], count: 1 },
+    ]);
+    r = applyReaction(r, 'removed', 'eyes', 'U1');
+    r = applyReaction(r, 'removed', '+1', 'U2');
+    r = applyReaction(r, 'removed', '+1', 'U2'); // already gone
+    expect(r).toEqual([{ name: 'eyes', users: ['U2'], count: 1 }]);
+    // Backfilled counts beyond the listed users are kept.
+    expect(applyReaction([{ name: 'x', users: ['U1'], count: 5 }], 'added', 'x', 'U2')).toEqual([{ name: 'x', users: ['U1', 'U2'], count: 6 }]);
   });
 });

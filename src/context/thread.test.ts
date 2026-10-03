@@ -55,6 +55,14 @@ describe('renderThreadContext', () => {
     expect(again.history).toContain('[image img_1: screenshot.png');
     expect(again.history).toContain('[image img_2: IMG_0042.HEIC');
     expect(again.history).toContain('[9 earlier replies not shown]');
+
+    // Backfill stored the parent's reactions; they render with names and "(you)" for the bot.
+    const [parentRow] = await sql<any[]>`select reactions from messages where channel_id = ${channel} and ts = ${FIX_THREAD_TS}`;
+    expect(parentRow.reactions).toEqual([
+      { name: '+1', users: ['U0BOB', 'U0ALICE'], count: 2 },
+      { name: 'eyes', users: ['UBOT'], count: 1 },
+    ]);
+    expect(again.history.split('\n')[0]).toMatch(/\[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
   });
 
   it('renderMessages renders inbox messages in the same format', async () => {

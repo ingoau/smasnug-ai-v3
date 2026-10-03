@@ -43,6 +43,10 @@ export function fixtureReplies(replyCount = 40, threadTs = FIX_THREAD_TS) {
     files: [file('F0SHOT', 'screenshot.png', 'image/png'), file('F0CSV', 'budget.csv', 'text/csv')],
     upload: false,
     display_as_bot: false,
+    reactions: [
+      { name: '+1', users: ['U0BOB', 'U0ALICE'], count: 2 },
+      { name: 'eyes', users: ['UBOT'], count: 1 },
+    ],
   };
   const replies: any[] = [];
   for (let i = 1; i <= replyCount; i++) {

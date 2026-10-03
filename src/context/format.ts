@@ -4,10 +4,10 @@
  * Line format (one message; text may span lines):
  *   [1727950000.123456] <@U123> Ingo: hello <@U456|Bob> [file: budget.csv] [image img_3: screenshot.png, from Ingo]
  *   [1727950001.000200] [bot] Gorkie: …
- *   [1727950002.000300] [bot] Smasnug (you): …
+ *   [1727950002.000300] [bot] Smasnug (you): … [reactions: :+1: ×2 (Ingo, Sam), :eyes: (you)]
  * The bracketed number is the message ts (used by react / read_thread before_ts / read_channel before_ts).
  */
-import type { SlackFileRef } from '../core/types.js';
+import type { MessageReaction, SlackFileRef } from '../core/types.js';
 
 export interface RenderMsg {
   ts: string;
@@ -20,6 +20,7 @@ export interface RenderMsg {
   deleted?: boolean;
   /** Channel messages only: number of thread replies. */
   replyCount?: number;
+  reactions?: MessageReaction[];
 }
 
 export interface FormatEnv {
@@ -97,6 +98,27 @@ export function fileLabel(f: SlackFileRef, from: string, env: FormatEnv): string
   return `[file: ${name}]`;
 }
 
+/** Reactions shown per message, and names shown per reaction. */
+const MAX_REACTIONS = 6;
+const MAX_REACTION_NAMES = 3;
+
+/** `[reactions: :+1: ×2 (Ingo, Sam), :eyes: (you)]`, or '' when there are none. */
+export function reactionsLabel(reactions: MessageReaction[] | undefined, env: FormatEnv): string {
+  const list = (reactions ?? []).filter((r) => r.count > 0);
+  if (!list.length) return '';
+  const selfId = env.self?.userId;
+  const parts = list.slice(0, MAX_REACTIONS).map((r) => {
+    // The bot first ("you"), then others in order.
+    const users = selfId && r.users.includes(selfId) ? [selfId, ...r.users.filter((u) => u !== selfId)] : r.users;
+    const names = users.slice(0, MAX_REACTION_NAMES).map((u) => (u === selfId ? 'you' : env.names.get(u) || `<@${u}>`));
+    const more = r.count - names.length;
+    const who = names.length ? ` (${names.join(', ')}${more > 0 ? ` +${more}` : ''})` : '';
+    return `:${r.name}:${r.count > 1 ? ` ×${r.count}` : ''}${who}`;
+  });
+  if (list.length > MAX_REACTIONS) parts.push(`+${list.length - MAX_REACTIONS} more`);
+  return `[reactions: ${parts.join(', ')}]`;
+}
+
 export function formatMessage(m: RenderMsg, env: FormatEnv): string {
   const text = truncateText(renderSlackText(m.text ?? '', env.names).trim(), env.maxChars);
   const from = authorName(m, env);
@@ -104,6 +126,8 @@ export function formatMessage(m: RenderMsg, env: FormatEnv): string {
   const parts = [text, ...files].filter(Boolean);
   if (m.edited) parts.push('(edited)');
   if (m.replyCount) parts.push(`[thread: ${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}]`);
+  const reactions = reactionsLabel(m.reactions, env);
+  if (reactions) parts.push(reactions);
   return `[${m.ts}] ${authorLabel(m, env)}: ${parts.join(' ')}`;
 }
 
@@ -145,6 +169,7 @@ export function userIdsIn(msgs: RenderMsg[]): string[] {
   for (const m of msgs) {
     if (m.userId && !m.botId) ids.add(m.userId);
     for (const match of (m.text ?? '').matchAll(/<@([UW][A-Z0-9]+)/g)) ids.add(match[1]!);
+    for (const r of (m.reactions ?? []).slice(0, MAX_REACTIONS)) for (const u of r.users.slice(0, MAX_REACTION_NAMES + 1)) ids.add(u);
   }
   return [...ids];
 }

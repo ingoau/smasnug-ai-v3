@@ -8,6 +8,7 @@ import type { Tool } from 'ai';
 import { appendEvent } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { log } from '../log.js';
+import { syncOwnReaction } from '../tools/emoji.js';
 import { WEB_SEARCH_TOOL } from '../tools/web-search.js';
 import type { FrontTurnState } from './turn-state.js';
 
@@ -30,6 +31,7 @@ export async function retractReaction(s: FrontTurnState): Promise<void> {
   try {
     await slackCall('reactions.remove', { channel: s.channelId, timestamp: r.ts, name: r.emoji }, { idempotencyKey: `unreact:${s.turn.id}:${r.ts}:${r.emoji}` });
     await appendEvent(s.threadId, 'reaction_removed', 'bot', { emoji: r.emoji, ts: r.ts, turnId: s.turn.id });
+    await syncOwnReaction(s.channelId, r.ts, 'removed', r.emoji);
   } catch (err) {
     log.debug({ err, reaction: r }, 'reactions.remove failed');
   }

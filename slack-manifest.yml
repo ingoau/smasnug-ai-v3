@@ -57,6 +57,8 @@ settings:
       - app_context_changed          # what the user is viewing while the agent container is open
       - agent_session_stopped        # native stop button
       - agent_session_title_changed
+      - reaction_added               # reactions shown in context (messages.reactions); never start a turn
+      - reaction_removed
   interactivity:
     is_enabled: true
   org_deploy_enabled: false

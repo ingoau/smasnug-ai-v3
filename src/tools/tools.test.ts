@@ -86,7 +86,7 @@ describe('registry', () => {
     const front = Object.keys(toolsFor('front', baseCtx())).sort();
     const child = Object.keys(toolsFor('child', baseCtx())).sort();
     const gate = Object.keys(toolsFor('gate', baseCtx()));
-    for (const n of ['fetch_url', 'web_search', 'slack_search', 'read_thread', 'read_channel', 'read_image', 'search_emojis', 'react']) expect(front).toContain(n);
+    for (const n of ['fetch_url', 'web_search', 'slack_search', 'read_thread', 'read_channel', 'read_image', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
     expect(child).toEqual(['fetch_url', 'read_channel', 'read_image', 'read_thread', 'slack_search', 'web_search']);
     expect(gate).toEqual([]);
     const ws = toolsFor('front', baseCtx()).web_search as any;
@@ -226,6 +226,33 @@ describe('react', () => {
   it('cleans emoji names', () => {
     expect(cleanEmojiName(':Thumbs Up:')).toBe('thumbs_up');
     expect(cleanEmojiName('wave::skin-tone-3')).toBe('wave::skin-tone-3');
+  });
+});
+
+describe('unreact', () => {
+  it('removes the bot\'s own reaction, updates stored reactions, logs an event; no_reaction is reported', async () => {
+    const ts = `${Number(FIX_THREAD_TS.split('.')[0]) + 1}.000100`;
+    await renderThreadContext(threadId, { newMessageTs: [] }); // backfill so the message is stored
+    const t = toolsFor('front', baseCtx({ turnId: 9, extras: { [EXTRAS.defaultReactTs]: ts } }));
+    expect(await exec(t.react as any, { emoji: 'hourglass' })).toBe(`Reacted :hourglass: to ${ts}.`);
+    let [row] = await sql<any[]>`select reactions from messages where channel_id = ${channel} and ts = ${ts}`;
+    expect(row.reactions).toContainEqual({ name: 'hourglass', users: ['UBOT'], count: 1 });
+
+    const before = calls.filter((c) => c.method === 'reactions.remove').length;
+    expect(await exec(t.unreact as any, { emoji: ':hourglass:' })).toBe(`Removed :hourglass: from ${ts}.`);
+    const removes = calls.filter((c) => c.method === 'reactions.remove').slice(before);
+    expect(removes.map((c) => c.args)).toEqual([{ channel, timestamp: ts, name: 'hourglass' }]);
+    [row] = await sql<any[]>`select reactions from messages where channel_id = ${channel} and ts = ${ts}`;
+    expect(row.reactions.find((r: any) => r.name === 'hourglass')).toBeUndefined();
+    const ev = await sql`select payload from thread_events where thread_id = ${threadId} and type = 'reaction_removed'`;
+    expect(ev.some((e) => e.payload.emoji === 'hourglass' && e.payload.ts === ts)).toBe(true);
+
+    const off = addFakeHandler((method) => {
+      if (method === 'reactions.remove') throw fakeSlackError('no_reaction');
+      return undefined;
+    });
+    expect(await exec(toolsFor('front', baseCtx({ turnId: 10 })).unreact as any, { emoji: 'tada', message_ts: ts })).toBe('No such reaction from you.');
+    off();
   });
 });
 

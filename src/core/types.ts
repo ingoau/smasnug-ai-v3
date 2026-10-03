@@ -22,6 +22,15 @@ export interface StoredMessage {
   files: SlackFileRef[];
   editedAt: Date | null;
   deleted: boolean;
+  /** Reactions on the message (kept current from reaction events). */
+  reactions?: MessageReaction[];
+}
+
+/** One emoji's reactions on a message. `count` can exceed users.length (Slack truncates the user list). */
+export interface MessageReaction {
+  name: string;
+  users: string[];
+  count: number;
 }
 
 export interface SlackFileRef {

@@ -49,3 +49,7 @@ scopes.
   code matches `slash:/smasnug*` by prefix). Local `.env` uses this app's tokens and `BOT_DISPLAY_NAME=dev - smasnug ai`.
 
 Installing into Hack Club needs workspace-admin approval ("Request to Workspace Install").
+- **Reactions**: the app subscribes to `reaction_added` / `reaction_removed` (scope `reactions:read`). For messages the
+  bot stores (threads it takes part in, plus channel context), reactions are kept in `messages.reactions` and shown
+  to the front agent at the end of each line (`[reactions: :+1: ×2 (Ingo, Sam), :eyes: (you)]`). Reactions never
+  start a turn. The bot can add (`react`) and remove its own (`unreact`) reactions (`reactions:write`).
