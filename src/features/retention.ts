@@ -1,7 +1,8 @@
 /**
  * Daily retention. Keep only what's needed: thread data, runs, subagent histories and usage go after ~30 days;
  * short-lived coordination rows after ~2 days. Per-user memory is the exception (expires by last_used).
- * sent_messages / reports are kept so reports keep their original sender.
+ * sent_messages / reports are kept so reports keep their original sender. Bot reports (report_user) go 30 days
+ * after review; pending ones are kept until reviewed.
  */
 import { readdir, stat, unlink, rmdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -50,6 +51,10 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
   // Copies of messages deleted in Slack: drop the content right away.
   await run('messages_deleted_content', sql`update messages set text = '', files = '[]' where deleted and (text <> '' or files <> '[]') returning ts`);
   await run('usage', sql`delete from usage where created_at < ${older(long)} returning id`);
+  await run(
+    'bot_reports',
+    sql`delete from bot_reports where status <> 'pending' and coalesce(reviewed_at, created_at) < ${older(long)} returning id`,
+  );
 
   await run('pending_sends', sql`delete from pending_sends where created_at < ${older(short)} returning id`);
   await run('idempotency_keys', sql`delete from idempotency_keys where created_at < ${older(short)} returning key`);

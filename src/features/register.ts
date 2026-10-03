@@ -2,6 +2,7 @@
 import type { Job } from 'bullmq';
 import { registerAction, registerAppHome } from '../core/actions.js';
 import type { QueueName } from '../core/queues.js';
+import { handleBotReportModAction, registerReportUserTool } from './bot-reports.js';
 import { handleAdminAction, handleMemoryAction, publishHome } from './home.js';
 import { handleSlash } from './killswitch.js';
 import { runMemoryExtraction } from './memory/extract.js';
@@ -11,14 +12,19 @@ import { runRetention } from './retention.js';
 import { expirePendingSends, handleSendCancel, handleSendConfirm, registerSendTool } from './send/send.js';
 import { handleFactAction } from './workspace.js';
 
-// Tools (front agent only): remember, forget, propose_workspace_fact, send_message
+// Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user
 registerMemoryTools();
 registerSendTool();
+registerReportUserTool();
 
 // Interactions
 registerAction('send:confirm', handleSendConfirm);
 registerAction('send:cancel', handleSendCancel);
 registerAction('report:open', handleReport);
+// Bot-report moderation actions: registered before the generic 'mod:' prefix (first matching prefix wins).
+registerAction('mod:suspend', (ctx) => handleBotReportModAction(ctx, publishHome));
+registerAction('mod:review_bot_report', (ctx) => handleBotReportModAction(ctx, publishHome));
+registerAction('mod:dismiss_bot_report', (ctx) => handleBotReportModAction(ctx, publishHome));
 registerAction('mod:', (ctx) => handleModAction(ctx, publishHome));
 registerAction('fact:', (ctx) => handleFactAction(ctx, publishHome));
 registerAction('mem:', handleMemoryAction);

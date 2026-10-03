@@ -4,6 +4,7 @@ import type { ActionContext } from '../core/actions.js';
 import { slackCall } from '../core/slack.js';
 import { log } from '../log.js';
 import { deleteAllFacts, deleteFact, factLabel, listFacts, parseFactId } from './memory/store.js';
+import { pendingBotReportsCount } from './bot-reports.js';
 import { confirmDialog, pendingReportsCount } from './reports.js';
 import { getState, listBlocks, setPaused } from './state.js';
 import { isAdmin, mrkdwnEscape, requireAdmin, truncate } from './util.js';
@@ -59,9 +60,10 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
 }
 
 async function adminBlocks(): Promise<unknown[]> {
-  const [state, reports, pending, approved, blocked] = await Promise.all([
+  const [state, reports, botReports, pending, approved, blocked] = await Promise.all([
     getState(),
     pendingReportsCount(),
+    pendingBotReportsCount(),
     listWorkspaceFacts('pending'),
     listWorkspaceFacts('approved'),
     listBlocks(),
@@ -81,7 +83,7 @@ async function adminBlocks(): Promise<unknown[]> {
   );
   out.push(
     section(
-      `*Unreviewed reports:* ${reports}` +
+      `*Unreviewed reports:* ${reports}\n*Pending bot reports:* ${botReports}` +
         (state.disabledChannels.size ? `\n*Disabled channels:* ${[...state.disabledChannels].map((c) => `<#${c}>`).join(', ')}` : ''),
     ),
   );
