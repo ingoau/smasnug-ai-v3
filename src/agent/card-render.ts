@@ -24,11 +24,13 @@ export interface TaskCardBlock {
 }
 export interface PlanBlock {
   type: 'plan';
+  block_id?: string;
   title: string;
   tasks: TaskCardBlock[];
 }
 export interface MarkdownBlock {
   type: 'markdown';
+  block_id?: string;
   text: string;
 }
 export interface ActionsBlock {
@@ -187,10 +189,11 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   const sorted = [...runs].sort((a, b) => a.id - b.id);
   const title = card.frozen ? frozenTitle(card.title, sorted.length) : liveTitle(sorted);
   const budget = outputBudget(sorted.length);
-  const plan: PlanBlock = { type: 'plan', title, tasks: sorted.slice(-MAX_PLAN_TASKS).map((r) => taskFor(r, budget)) };
+  // Stable block ids so Slack treats each chat.update as the same blocks (keeps the plan expanded if the viewer opened it).
+  const plan: PlanBlock = { type: 'plan', block_id: `card_${card.id}_plan`, title, tasks: sorted.slice(-MAX_PLAN_TASKS).map((r) => taskFor(r, budget)) };
   const blocks: RenderedCard['blocks'] = [];
   const reply = card.replyText;
-  if (reply != null) blocks.push({ type: 'markdown', text: reply.length > MAX_MD ? `${reply.slice(0, MAX_MD)}\n\n_[message truncated]_` : reply });
+  if (reply != null) blocks.push({ type: 'markdown', block_id: `card_${card.id}_reply`, text: reply.length > MAX_MD ? `${reply.slice(0, MAX_MD)}\n\n_[message truncated]_` : reply });
   blocks.push(plan);
   // Plain-text fallback: the reply's own text when the card lives in a reply, else a summary of the plan.
   const text = reply != null ? reply.slice(0, MAX_TEXT) : [title, ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n');
