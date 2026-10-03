@@ -11,7 +11,7 @@ import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { decide, isStopMessage, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
 import { removeMessageFromTurns } from './scheduler.js';
-import { applyDelete, applyEdit, getThread, isBotMessage, isTwoPartyThread, storeMessage, upsertThread, type SlackMessage, type ThreadRow } from './store.js';
+import { applyDelete, applyEdit, getThread, insertTombstone, isBotMessage, isTwoPartyThread, storeMessage, upsertThread, type SlackMessage, type ThreadRow } from './store.js';
 
 export const RATE_LIMITED_TEXT = "You're sending me a lot of messages — give me a bit and try again.";
 
@@ -60,7 +60,8 @@ async function handleNewMessage(ev: MessageEvent) {
   // Threads the bot was never part of: not stored (the context module backfills what it needs).
   if (!thread) return;
 
-  await storeMessage(channelId, threadId, ev);
+  const { deleted } = await storeMessage(channelId, threadId, ev);
+  if (deleted) return; // deleted before we got to process it
   await appendEvent(threadId, 'message', ev.user ?? (ev.bot_id ? `bot:${ev.bot_id}` : null), {
     ts: ev.ts,
     ...(ev.subtype ? { subtype: ev.subtype } : {}),
@@ -121,8 +122,16 @@ async function handleEdit(ev: MessageEvent) {
   if (!msg?.ts) return;
   // Deleting a thread parent that has replies turns it into a tombstone.
   if (msg.subtype === 'tombstone') return handleDelete(ev.channel, msg.ts, ev.previous_message ?? msg);
-  const row = await applyEdit(ev.channel, msg);
-  if (row?.threadId && msg.edited) await appendEvent(row.threadId, 'message_edited', msg.user ?? null, { ts: msg.ts });
+  let threadId = (await applyEdit(ev.channel, msg))?.threadId ?? null;
+  if (!threadId) {
+    // Edit processed before the original message (parallel workers): store the edited version for known threads.
+    const candidate = threadIdOf(ev.channel, threadRootTs(msg));
+    if (await getThread(candidate)) {
+      await storeMessage(ev.channel, candidate, msg);
+      threadId = candidate;
+    }
+  }
+  if (threadId && msg.edited) await appendEvent(threadId, 'message_edited', msg.user ?? null, { ts: msg.ts });
   // During a debounce window the batch only holds the ts; the turn reads the edited text from the DB.
 }
 
@@ -135,6 +144,7 @@ async function handleDelete(channelId: string, ts: string | undefined, prev?: Sl
     if (await getThread(candidate)) threadId = candidate;
   }
   if (!threadId) return;
+  if (!row) await insertTombstone(channelId, ts, threadId, prev?.user ?? null);
   await appendEvent(threadId, 'message_deleted', row?.userId ?? prev?.user ?? null, { ts });
   const authorId = row?.userId ?? prev?.user;
   if (authorId) await removeFromBatch(threadId, authorId, ts);

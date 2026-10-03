@@ -331,6 +331,22 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(types).toEqual(['message', 'message_edited', 'message_deleted']);
     });
 
+    it('out-of-order processing: edit or delete before the original message', async () => {
+      const root = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> hi', ts: root }));
+      const a = nextTs();
+      await processSlackEvent(messageEnvelope({ subtype: 'message_changed', message: { user: 'U1', text: 'v2', ts: a, thread_ts: root, edited: { ts: '1700000009.000000' } } }));
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'v1', ts: a, thread_ts: root }));
+      expect((await sql`select text from messages where ts = ${a}`)[0]!.text).toBe('v2');
+
+      const b = nextTs();
+      await processSlackEvent(messageEnvelope({ subtype: 'message_deleted', deleted_ts: b, previous_message: { user: 'U1', ts: b, thread_ts: root } }));
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'secret', ts: b, thread_ts: root }));
+      expect((await sql`select text, deleted from messages where ts = ${b}`)[0]).toEqual({ text: '', deleted: true });
+      const batch = await debounce.takeBatch({ threadId: `${C}:${root}`, authorId: 'U1', seq: 2 });
+      expect(batch?.map((x) => x.ts)).toEqual([root, a]);
+    });
+
     it('DMs: each top-level message is its own thread and always runs', async () => {
       const ts = nextTs();
       await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'message', channel: 'D1', channel_type: 'im', user: 'U1', text: 'hello', ts } } }));

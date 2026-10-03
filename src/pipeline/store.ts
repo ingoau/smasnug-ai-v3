@@ -53,17 +53,38 @@ export async function upsertThread(t: { id: string; channelId: string; threadTs:
   return row!;
 }
 
-export async function storeMessage(channelId: string, threadId: string | null, m: SlackMessage): Promise<void> {
+/**
+ * Insert or refresh a stored message. Slack events can be processed out of order (parallel workers), so a newer
+ * edit already stored is kept, and a row already marked deleted stays deleted (retention). Returns `deleted`.
+ */
+export async function storeMessage(channelId: string, threadId: string | null, m: SlackMessage): Promise<{ deleted: boolean }> {
   const files = fileRefs(m);
-  await sql`
+  const [row] = await sql<{ deleted: boolean }[]>`
     insert into messages (channel_id, ts, thread_id, user_id, bot_id, username, text, files, edited_at)
     values (${channelId}, ${m.ts}, ${threadId}, ${m.user ?? null}, ${m.bot_id ?? null},
             ${m.username ?? m.bot_profile?.name ?? null}, ${m.text ?? ''}, ${sql.json(files as any)},
             ${m.edited ? slackTsDate(m.edited.ts) : null})
     on conflict (channel_id, ts) do update set
       thread_id = coalesce(messages.thread_id, excluded.thread_id),
-      text = case when messages.deleted then '' else excluded.text end,
-      files = case when messages.deleted then '[]'::jsonb else excluded.files end`;
+      user_id = coalesce(messages.user_id, excluded.user_id),
+      bot_id = coalesce(messages.bot_id, excluded.bot_id),
+      username = coalesce(messages.username, excluded.username),
+      text = case when messages.deleted then ''
+                  when messages.edited_at is not null and (excluded.edited_at is null or excluded.edited_at < messages.edited_at) then messages.text
+                  else excluded.text end,
+      files = case when messages.deleted then '[]'::jsonb
+                   when messages.edited_at is not null and (excluded.edited_at is null or excluded.edited_at < messages.edited_at) then messages.files
+                   else excluded.files end,
+      edited_at = greatest(messages.edited_at, excluded.edited_at)
+    returning deleted`;
+  return { deleted: Boolean(row?.deleted) };
+}
+
+/** Deletion seen before the message itself (out-of-order processing): remember it so the late insert stays empty. */
+export async function insertTombstone(channelId: string, ts: string, threadId: string, userId: string | null) {
+  await sql`
+    insert into messages (channel_id, ts, thread_id, user_id, deleted) values (${channelId}, ${ts}, ${threadId}, ${userId}, true)
+    on conflict (channel_id, ts) do update set text = '', files = '[]'::jsonb, deleted = true`;
 }
 
 /** Apply an edit to a stored copy. Returns the stored row (if we had one). */

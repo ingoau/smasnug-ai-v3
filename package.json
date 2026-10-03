@@ -10,6 +10,7 @@
     "dev:ingress": "tsx watch --env-file=.env src/ingress/main.ts",
     "dev:worker": "tsx watch --env-file=.env src/worker/main.ts",
     "migrate": "tsx --env-file=.env src/db/migrate.ts",
+    "simulate": "SLACK_FAKE=1 tsx --env-file=.env scripts/simulate.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "db:up": "docker compose up -d"
