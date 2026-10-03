@@ -12,7 +12,7 @@
  * GPT-6 Luna via OpenRouter reads images in tool results. If the agent sets `extras.queueUserImage` (see
  * extras.ts), the image is handed to it instead and the tool returns "image loaded" text.
  */
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { tool } from 'ai';
 import { z } from 'zod';
@@ -76,6 +76,30 @@ async function writeCache(fileId: string, img: { mediaType: string; width: numbe
   await mkdir(IMAGE_CACHE_DIR, { recursive: true });
   await writeFile(p.bin, img.data);
   await writeFile(p.meta, JSON.stringify({ mediaType: img.mediaType, width: img.width, height: img.height }));
+}
+
+/** Delete cached images older than `maxAgeMs` (registered as a maintenance task). */
+export async function pruneImageCache(maxAgeMs: number): Promise<number> {
+  let removed = 0;
+  let names: string[];
+  try {
+    names = await readdir(IMAGE_CACHE_DIR);
+  } catch {
+    return 0;
+  }
+  const cutoff = Date.now() - maxAgeMs;
+  for (const name of names) {
+    const p = path.join(IMAGE_CACHE_DIR, name);
+    try {
+      if ((await stat(p)).mtimeMs < cutoff) {
+        await rm(p, { force: true });
+        removed++;
+      }
+    } catch {
+      /* raced with another worker */
+    }
+  }
+  return removed;
 }
 
 /** Resolve + download + process (+ disk cache keyed by Slack file id). Returns an error string for the model. */

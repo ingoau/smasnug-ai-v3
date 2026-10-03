@@ -9,11 +9,14 @@ import './slack-search.js';
 import './read-history.js';
 import './read-image.js';
 import './emoji.js';
+import { pruneImageCache } from './read-image.js';
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {};
 
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
-export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {};
+export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {
+  'tools:image-cache-prune': { everyMs: 6 * 60 * 60 * 1000, run: async () => void (await pruneImageCache(7 * 24 * 60 * 60 * 1000)) },
+};
 
 /** Called on SIGTERM before the worker exits. */
 export async function onShutdown(): Promise<void> {}

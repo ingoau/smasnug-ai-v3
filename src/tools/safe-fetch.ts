@@ -50,12 +50,11 @@ export interface SafeFetchResult {
   truncated: boolean;
 }
 
-/** Extra denies on top of "everything that isn't unicast" (belt and braces; these are already non-unicast). */
-const DENY = ['127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', '169.254.0.0/16', '100.64.0.0/10', '0.0.0.0/8', '::1/128', 'fc00::/7', 'fe80::/10', '::ffff:0:0/96'];
-
+// The agents deny every address ipaddr.js doesn't classify as 'unicast' — that covers loopback, private, link-local,
+// CGNAT, unspecified, ULA, IPv4-mapped etc. (A mixed v4/v6 denyIPAddressList only produces warnings, so none is set.)
 const defaultAgents = {
-  http: new RequestFilteringHttpAgent({ denyIPAddressList: DENY }),
-  https: new RequestFilteringHttpsAgent({ denyIPAddressList: DENY }),
+  http: new RequestFilteringHttpAgent(),
+  https: new RequestFilteringHttpsAgent(),
 };
 
 function agentsFor(allow?: string[]) {

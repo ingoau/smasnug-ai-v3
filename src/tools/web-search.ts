@@ -17,7 +17,9 @@
  *     prepareStep: () => overLimit ? { activeTools: allToolNames.filter((n) => n !== WEB_SEARCH_TOOL) } : {},
  *   });
  *
- * (generateText: `onStepFinish` + `meter.observeStep(step)` is enough — the response body has the usage.)
+ * generateText: pass `include: { responseBody: true }` and call `meter.observeStep(step)` in onStepFinish — the
+ * usage lives in the raw response body, which AI SDK v7 drops by default. (Without raw usage the meter falls back
+ * to "≥1 search if the step has url sources".) The provider's providerMetadata.openrouter.usage does NOT carry it.
  * Also strip OpenAI-native citation markers from model text before posting it (`stripCitationMarkers`): with the
  * native engine, Luna sometimes leaves `citeturn0search2` tokens in its output.
  *
