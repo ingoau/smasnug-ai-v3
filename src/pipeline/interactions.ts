@@ -9,7 +9,9 @@ async function dispatch(ctx: ActionContext) {
     log.warn({ actionId: ctx.actionId }, 'no handler for interaction');
     return;
   }
-  const entry = await guardEntry(ctx.userId, ctx.channelId);
+  // Channel disable only gates conversation turns (or `/smasnug on` couldn't re-enable a channel); clicks don't
+  // spend the messages/hour budget.
+  const entry = await guardEntry(ctx.userId, undefined, { countMessage: false, allowSuspended: ctx.actionId.startsWith('mem:') });
   if (!entry.ok) return;
   try {
     await handler(ctx);
@@ -92,7 +94,7 @@ export async function handleAppHomeOpened(event: any) {
   if (event?.tab !== 'home' || !event.user) return;
   const handler = getAppHomeHandler();
   if (!handler) return;
-  const entry = await guardEntry(event.user);
+  const entry = await guardEntry(event.user, undefined, { countMessage: false, allowSuspended: true });
   if (!entry.ok && entry.reason !== 'rate_limited') return; // viewing Home shouldn't be rate-limited away
   try {
     await handler(event.user);
