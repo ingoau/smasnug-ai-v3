@@ -1,5 +1,7 @@
 # Slack app manifest for smasnug-ai. Create the app at https://api.slack.com/apps → "Create New App" →
 # "From a manifest", paste this file. See docs/slack-setup.md for tokens and .env.
+# The dev app (A0C6FBD1KL2) is this file with name "dev - smasnug ai v3", bot display name "dev - smasnug ai" and
+# the slash command /smasnug-dev.
 display_information:
   name: smasnug ai v3
   description: agentic ai b2b saas
@@ -9,12 +11,14 @@ features:
     home_tab_enabled: true
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
+    agent_tasks_enabled: true
   bot_user:
     display_name: smasnug ai
     always_online: true
   # Agents & AI Apps: the agent container (split view next to any channel) with a native stop button.
   agent_view:
     agent_description: agentic ai b2b saas
+    suggested_prompts: []
   slash_commands:
     - command: /smasnug
       description: Turn the bot on or off in this channel
@@ -47,6 +51,7 @@ oauth_config:
     user:
       - search:read           # Slack search (user token, public channels only — enforced in code)
       - channels:history      # read_public_thread only: open public-channel threads found via search (verified public in code)
+  pkce_enabled: false
 settings:
   event_subscriptions:
     bot_events:
@@ -65,3 +70,5 @@ settings:
   org_deploy_enabled: false
   socket_mode_enabled: true
   token_rotation_enabled: false
+  app_level_token_rotation_enabled: false
+  is_mcp_enabled: false
