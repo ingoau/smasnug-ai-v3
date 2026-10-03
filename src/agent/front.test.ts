@@ -228,7 +228,7 @@ describe('runFrontTurn: native stop', () => {
 
   it('ends at the next step boundary after stop, with no fallback', async () => {
     h.activeRuns = 1; // post mode
-    h.model = mockModel([replyStep('first'), replyStep('second'), textStep('')]);
+    h.model = mockModel([replyStep('first'), toolStep(['search_emojis', { query: 'x' }]), textStep('')]);
     const { io: tio } = io();
     let stop = false;
     // Baseline: without a stop, all three steps run.
@@ -237,7 +237,7 @@ describe('runFrontTurn: native stop', () => {
 
     h.slack = [];
     h.events = [];
-    h.model = mockModel([replyStep('first'), replyStep('second'), textStep('')]);
+    h.model = mockModel([replyStep('first'), toolStep(['search_emojis', { query: 'x' }]), textStep('')]);
     stop = false;
     h.slackHook = (method) => {
       if (method === 'chat.postMessage') stop = true; // user presses stop right after the first reply lands
@@ -314,8 +314,15 @@ describe('runFrontTurn: behaviour guards', () => {
   const toolNames = (i: number) => (((h.model as any).doStreamCalls as any[])[i].tools ?? []).map((t: any) => t.name);
   const methods = () => h.slack.map((c) => c.method);
 
+  it('a react-only step ends the turn', async () => {
+    h.model = mockModel([toolStep(['react', { emoji: 'thumbsup' }]), toolStep(['reply', { text: 'You are welcome!' }]), textStep('')]);
+    await runFrontTurn(turn({ id: 53 }), io().io);
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(1);
+    expect(methods().filter((m) => m.startsWith('reactions.') || m.startsWith('chat.'))).toEqual(['reactions.add']);
+  });
+
   it('caps reactions at one per turn', async () => {
-    h.model = mockModel([toolStep(['react', { emoji: 'eyes' }]), toolStep(['react', { emoji: 'tada' }]), textStep('')]);
+    h.model = mockModel([toolStep(['react', { emoji: 'eyes' }], ['search_emojis', { query: 'x' }]), toolStep(['react', { emoji: 'tada' }], ['search_emojis', { query: 'y' }]), textStep('')]);
     await runFrontTurn(turn({ id: 40 }), io().io);
     expect(h.slack.filter((c) => c.method === 'reactions.add').map((c) => c.args.name)).toEqual(['eyes']);
     expect(prompts()[2]).toContain('Already reacted this turn.');
@@ -333,7 +340,7 @@ describe('runFrontTurn: behaviour guards', () => {
 
   it('removes the reaction when the turn replies after all', async () => {
     h.activeRuns = 1;
-    h.model = mockModel([toolStep(['react', { emoji: 'eyes' }]), toolStep(['reply', { text: 'Actually, here is the answer.' }]), textStep('')]);
+    h.model = mockModel([toolStep(['react', { emoji: 'eyes' }], ['search_emojis', { query: 'x' }]), toolStep(['reply', { text: 'Actually, here is the answer.' }]), textStep('')]);
     await runFrontTurn(turn({ id: 42 }), io().io);
     expect(methods().filter((m) => m.startsWith('reactions.') || m === 'chat.postMessage')).toEqual(['reactions.add', 'chat.postMessage', 'reactions.remove']);
     expect(h.slack.find((c) => c.method === 'reactions.remove')!.args).toMatchObject({ channel: 'C1', timestamp: '100.000002', name: 'eyes' });
@@ -343,13 +350,34 @@ describe('runFrontTurn: behaviour guards', () => {
     h.activeRuns = 1;
     h.model = mockModel([
       toolStep(['reply', { text: "I'm checking the official Raspberry Pi specs now." }]),
+      toolStep(['search_emojis', { query: 'raspberry' }]),
       toolStep(['reply', { text: "**I'm checking the official Raspberry Pi specs now** — one sec" }]),
       textStep(''),
     ]);
     await runFrontTurn(turn({ id: 43 }), io().io);
     expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(1);
     expect(h.events.find((e) => e.type === 'reply_dropped')).toBeTruthy();
-    expect(prompts()[2]).toContain('nearly identical');
+    expect(prompts()[3]).toContain('nearly identical');
+  });
+
+  it('drops a second reply right after a reply-only step (the wrap-up repeats itself)', async () => {
+    h.model = mockModel([
+      toolStep(['reply', { text: 'I can help with coding questions, project ideas and research.' }]),
+      toolStep(['reply', { text: 'I can help with coding, debugging, brainstorming and looking things up. What are you building?' }]),
+      textStep(''),
+    ]);
+    await runFrontTurn(turn({ id: 51 }), io().io);
+    expect(h.slack.filter((c) => ['chat.startStream', 'chat.postMessage'].includes(c.method))).toHaveLength(1);
+    expect(h.events.find((e) => e.type === 'reply_dropped')?.payload.reason).toContain('nothing new has happened since');
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(2); // and the loop ends there
+  });
+
+  it('still allows a reply to a message that arrived after the first reply', async () => {
+    h.activeRuns = 1;
+    h.model = mockModel([toolStep(['reply', { text: 'Sure, the meetup is on Friday.' }]), toolStep(['reply', { text: 'And yes, bring a laptop.' }]), textStep('')]);
+    const msg = { ts: '100.000009', text: 'should I bring a laptop?', channelId: 'C1' } as any;
+    await runFrontTurn(turn({ id: 52 }), io(true, [[], [msg]]).io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['Sure, the meetup is on Friday.', 'And yes, bring a laptop.']);
   });
 
   it('holds back a streamed second reply and drops it when it repeats the first', async () => {

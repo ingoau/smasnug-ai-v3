@@ -20,13 +20,22 @@ export default async function setup(): Promise<void> {
   } finally {
     await admin.end({ timeout: 1 }).catch(() => {});
   }
+  // Test workers inherit this process's env: only set placeholders for the duration of the migration.
+  const saved = { OPENROUTER_KEY: process.env.OPENROUTER_KEY, LOG_LEVEL: process.env.LOG_LEVEL };
   process.env.OPENROUTER_KEY ||= 'test';
   process.env.LOG_LEVEL ||= 'warn';
-  const { migrate } = await import('../db/migrate.js');
-  const { sql } = await import('../db/index.js');
   try {
-    await migrate();
+    const { migrate } = await import('../db/migrate.js');
+    const { sql } = await import('../db/index.js');
+    try {
+      await migrate();
+    } finally {
+      await sql.end({ timeout: 2 }).catch(() => {});
+    }
   } finally {
-    await sql.end({ timeout: 2 }).catch(() => {});
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   }
 }

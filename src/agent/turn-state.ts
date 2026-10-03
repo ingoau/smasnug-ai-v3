@@ -23,6 +23,8 @@ export interface FrontTurnState {
   reactions: number;
   /** The reaction this turn added, removed again if the turn later replies. */
   reaction: { ts: string; emoji: string } | null;
+  /** The current step follows a step that only replied/reacted, with no new messages since: a reply now repeats. */
+  afterReplyOnlyStep: boolean;
 }
 
 export function turnState(ctx: ToolContext): FrontTurnState {

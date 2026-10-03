@@ -260,4 +260,81 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(run.status).toBe('complete');
     expect(run.result).toMatch(/https?:\/\//);
   }, 120_000);
+
+  // ---- Behaviour (the real-Slack incident replayed): decisive delegation, rare reactions. ----
+
+  async function dmTurn(tag: string, history: string, text: string) {
+    const ts = `${Math.floor(Date.now() / 1000)}.${String(Math.floor(Math.random() * 1e6)).padStart(6, '0')}`;
+    const tid = `D_${tag}${Math.random().toString(36).slice(2, 6).toUpperCase()}:${ts}`;
+    await sql`insert into threads (id, channel_id, thread_ts, engaged) values (${tid}, ${tid.split(':')[0]!}, ${ts}, true)`;
+    const msgTs = `${Number(ts) + 30}.000100`;
+    threadText.set(tid, { history, newMessages: `[${msgTs}] <@${user}> Tester: ${text}` });
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${tid}, ${user}, true, ${[msgTs]}, 'running') returning *`;
+    return { tid, turn: { ...t, id: Number(t.id) } };
+  }
+
+  async function outcome(tid: string, before: number) {
+    const calls = (await fakeCalls()).slice(before).filter((c) => (c.args.channel ?? '') === tid.split(':')[0]);
+    const events = await sql<any[]>`select type, payload from thread_events where thread_id = ${tid} order by id`;
+    const replies = events.filter((e) => e.type === 'reply' && !e.payload.fallback && !e.payload.stopped);
+    const cards = await sql<any[]>`select title from cards where thread_id = ${tid}`;
+    return {
+      replies: replies.map((e) => String(e.payload.text)),
+      reactionsAdded: calls.filter((c) => c.method === 'reactions.add').length,
+      reactionsLeft: calls.filter((c) => c.method === 'reactions.add').length - calls.filter((c) => c.method === 'reactions.remove').length,
+      spawns: events.filter((e) => e.type === 'spawn').length,
+      cancels: events.filter((e) => e.type === 'cancel').length,
+      dropped: events.filter((e) => e.type === 'reply_dropped').map((e) => e.payload.reason),
+      cardTitles: cards.map((c) => c.title),
+    };
+  }
+
+  it('the Pico research request delegates once: one spawn, at most one ack, no reaction, no cancel', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn(
+      'PICO',
+      '',
+      'can you research what the latest Raspberry Pi Pico model is and how it compares to the original Pico? take your time',
+    );
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    // eslint-disable-next-line no-console
+    console.log('pico:', JSON.stringify(o));
+    expect(o.spawns).toBe(1);
+    expect(o.replies.length).toBeLessThanOrEqual(1);
+    expect(o.reactionsAdded).toBe(0);
+    expect(o.cancels).toBe(0);
+    expect(o.cardTitles.every((t) => t == null)).toBe(true); // set_card_title not offered / not used
+  }, 120_000);
+
+  it('"hi! what can you do?" gets one reply and no reaction', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn('HI', '', 'hi! what can you do?');
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    // eslint-disable-next-line no-console
+    console.log('hi:', JSON.stringify(o));
+    expect(o.replies).toHaveLength(1);
+    expect(o.reactionsAdded).toBe(0);
+    expect(o.spawns).toBe(0);
+  }, 90_000);
+
+  it('"thanks!" after an answer gets a reaction only, no reply', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn(
+      'THX',
+      `[1790000000.000100] <@${user}> Tester: what's the default GPIO voltage on a Raspberry Pi Pico?\n[1790000005.000100] [bot] smasnug ai (you): The Pico's GPIO runs at 3.3V — don't feed 5V into the pins directly.`,
+      'thanks!',
+    );
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    // eslint-disable-next-line no-console
+    console.log('thanks:', JSON.stringify(o));
+    expect(o.replies).toHaveLength(0);
+    expect(o.reactionsAdded).toBe(1);
+    expect(o.spawns).toBe(0);
+  }, 90_000);
 });

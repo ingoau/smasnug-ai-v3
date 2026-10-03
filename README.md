@@ -32,4 +32,8 @@ pnpm test                                             # unit
 LIVE=1 INTEGRATION=1 pnpm vitest run --no-file-parallelism   # + Postgres/Redis integration and live OpenRouter
 ```
 
+Tests never use the dev database or Redis from `.env`: they run against `TEST_DATABASE_URL` / `TEST_REDIS_URL`
+(default: the `smasnug_test` database and Redis db 9 on the same servers), with `SLACK_FAKE=1` forced. The test
+database is created and migrated automatically (`src/testing/`).
+
 Not built yet (by design): the code sandbox for subagents, and observability (tracing/evals).

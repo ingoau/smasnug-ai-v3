@@ -13,6 +13,7 @@ import type { FrontTurnState } from './turn-state.js';
 
 export const REACT_AFTER_REPLY = 'Not reacted: you already replied this turn. Reactions only replace replies, never accompany them.';
 export const REACT_CAP = 'Already reacted this turn.';
+export const REPLY_REPEATED = "Not posted: you already replied and nothing new has happened since. End your turn.";
 export const REPLY_AFTER_DELEGATION =
   'Not posted: you already replied in this turn and the plan card shows the delegated work. End your turn now; the results come back in a separate turn where you write the answer.';
 
@@ -52,6 +53,7 @@ export function guardReact(tools: Record<string, Tool>, s: FrontTurnState): void
         s.visible.add('react');
         // A reply may have been delivered while the reaction was being added.
         if (s.replies.delivered > 0) await retractReaction(s);
+        else return `${out} The reaction is your whole response; end your turn.`;
       } else if (/already reacted/i.test(out)) {
         s.visible.add('react');
       } else {
@@ -64,13 +66,25 @@ export function guardReact(tools: Record<string, Tool>, s: FrontTurnState): void
 
 /** Why a new reply must not be delivered in this turn, if anything. */
 export function replyBlockReason(s: FrontTurnState): string | null {
-  return s.turn.kind === 'user' && s.delegated && s.replies.delivered >= 1 ? REPLY_AFTER_DELEGATION : null;
+  if (s.replies.delivered < 1) return null;
+  if (s.afterReplyOnlyStep) return REPLY_REPEATED;
+  return s.turn.kind === 'user' && s.delegated ? REPLY_AFTER_DELEGATION : null;
+}
+
+/** True for a step whose tool calls were only reply/react, with at least one reply. */
+export function isReplyOnlyStep(toolNames: string[] | undefined): boolean {
+  return !!toolNames?.length && toolNames.includes('reply') && toolNames.every((n) => n === 'reply' || n === 'react');
 }
 
 /** Stop condition: a user turn that delegated and acknowledged is done once a step only acknowledged / delegated. */
 export function delegatedAndAcknowledged(s: FrontTurnState, lastStepToolNames: string[] | undefined): boolean {
   if (s.turn.kind !== 'user' || !s.delegated || s.replies.delivered < 1 || !lastStepToolNames?.length) return false;
   return lastStepToolNames.every((n) => ACK_TOOLS.has(n));
+}
+
+/** Stop condition: a step that only reacted (successfully) was the whole response. */
+export function reactedAsResponse(s: FrontTurnState, lastStepToolNames: string[] | undefined): boolean {
+  return !!s.reaction && !!lastStepToolNames?.length && lastStepToolNames.every((n) => n === 'react');
 }
 
 /** Active tools for the next step. `undefined` = all. */

@@ -39,6 +39,7 @@ registerTool({
         if (res.startsWith('Replied')) {
           s.visible.add('reply');
           await retractReaction(s);
+          return `${res} Don't send another reply unless you have something new; end your turn when done.`;
         } else if (s.replies.anyVisible) s.visible.add('reply'); // e.g. a stream the user stopped halfway
         return res;
       },

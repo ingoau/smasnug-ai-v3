@@ -12,7 +12,12 @@ Models on OpenRouter: `openai/gpt-6-luna` (gate: reasoning off; front: low; chil
 (children, hard tasks). `OPENROUTER_KEY` in `.env` works — live-test against it (keep test calls small).
 
 Local infra: `docker compose up -d` (Postgres on 5433, Redis on 6380), `pnpm migrate`.
-Checks: `pnpm typecheck`, `pnpm test`.
+Checks: `pnpm typecheck`, `pnpm test`. Full suite: `LIVE=1 INTEGRATION=1 pnpm vitest run --no-file-parallelism`.
+
+Tests never touch the dev database/Redis: vitest (`vitest.config.ts` → `src/testing/`) swaps DATABASE_URL/REDIS_URL
+for `TEST_DATABASE_URL` / `TEST_REDIS_URL` (default: database `smasnug_test`, Redis db 9 on the `.env` servers),
+forces `SLACK_FAKE=1`, and creates + migrates the test database once per run. It refuses to run if the test target
+equals the dev one. The pipeline integration test uses its own `smasnug_pipeline_test` + Redis db 12.
 
 ## Processes
 - **ingress** (`src/ingress`): Socket Mode, acks within 3s, dedupes, enqueues raw envelopes onto `slack-events`.

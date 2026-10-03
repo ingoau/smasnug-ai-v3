@@ -18,7 +18,7 @@ import { freezeCard, postCard } from './cards.js';
 import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
-import { activeToolsFor, delegatedAndAcknowledged, guardReact, replyBlockReason } from './turn-guards.js';
+import { activeToolsFor, delegatedAndAcknowledged, guardReact, isReplyOnlyStep, reactedAsResponse, replyBlockReason } from './turn-guards.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 
@@ -215,6 +215,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     delegated: false,
     reactions: 0,
     reaction: null,
+    afterReplyOnlyStep: false,
   };
   const seenTs = new Set(turn.messageTs);
   const extras: Record<string, unknown> = {
@@ -251,15 +252,26 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       instructions: system,
       messages,
       tools,
-      // Native stop: end at the next step boundary. A turn that delegated and acknowledged is done.
-      stopWhen: [stepCountIs(MAX_STEPS), () => checkStop(), ({ steps }) => delegatedAndAcknowledged(state, steps.at(-1)?.toolCalls.map((c) => c.toolName))],
+      // Native stop: end at the next step boundary. A turn that delegated and acknowledged, or whose step only
+      // reacted, is done.
+      stopWhen: [
+        stepCountIs(MAX_STEPS),
+        () => checkStop(),
+        ({ steps }) => {
+          const names = steps.at(-1)?.toolCalls.map((c) => c.toolName);
+          // Two reply-only steps in a row: the second was a repeat (dropped); don't let the model keep trying.
+          const repeated = steps.length >= 2 && isReplyOnlyStep(names) && isReplyOnlyStep(steps.at(-2)?.toolCalls.map((c) => c.toolName));
+          return repeated || delegatedAndAcknowledged(state, names) || reactedAsResponse(state, names);
+        },
+      ],
       includeRawChunks: true,
       onStepFinish: async (stepResult) => {
         meter.observeStep(stepResult);
         if (await meter.settle({ speakerId: turn.authorId, threadId: turn.threadId }).catch(() => false)) searchOverLimit = true;
       },
-      prepareStep: async ({ messages: current }) => {
+      prepareStep: async ({ messages: current, steps }) => {
         const extra: ModelMessage[] = [];
+        state.afterReplyOnlyStep = isReplyOnlyStep(steps.at(-1)?.toolCalls.map((c) => c.toolName));
         const inbox = (await io.drainInbox()).filter((m) => !seenTs.has(m.ts));
         if (inbox.length) {
           inbox.forEach((m) => seenTs.add(m.ts));
@@ -268,6 +280,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           const rendered = await renderMessages(turn.threadId, inbox.map((m) => m.ts)).catch(() => inbox.map((m) => m.text).join('\n'));
           extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
           await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
+          state.afterReplyOnlyStep = false; // new messages may need their own reply
         }
         const activeTools = activeToolsFor(state, toolNames, { searchOverLimit });
         return { ...(extra.length ? { messages: [...current, ...extra] } : {}), ...(activeTools ? { activeTools } : {}) };
