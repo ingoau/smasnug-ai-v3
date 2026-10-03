@@ -1,7 +1,6 @@
-# smasnug-ai
+# smasnug ai v3
 
-Workspace Slack agent: a fast front agent that replies, reacts and delegates longer work to background subagents
-shown in native Slack plan cards. Design: [docs/design.md](docs/design.md). Repo guide: [CLAUDE.md](CLAUDE.md).
+a vibe coded slack agent focused on user experience and low latency, using delegation to subagents.
 
 ## Run locally
 
@@ -30,15 +29,6 @@ docker run --env-file .env ghcr.io/ingoau/smasnug-ai-v3 node dist/ingress/main.j
 docker run --env-file .env ghcr.io/ingoau/smasnug-ai-v3                             # worker (default), scale out
 ```
 
-## Without Slack
-
-`SLACK_FAKE=1` replaces every Slack call with a recorded fake, so the whole system runs against real models:
-
-```bash
-pnpm simulate                 # injects mentions, follow-ups, DMs; prints Slack calls, turns, events
-npx tsx --env-file=.env scripts/roster.ts   # which tools each role gets
-```
-
 ## Tests
 
 ```bash
@@ -51,7 +41,3 @@ Tests never use the dev database or Redis from `.env`: they run against `TEST_DA
 database is created and migrated automatically (`src/testing/`).
 
 Not built yet (by design): the code sandbox for subagents, and observability (tracing/evals).
-
-## License
-
-[AGPL-3.0](LICENSE).
