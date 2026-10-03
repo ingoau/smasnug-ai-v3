@@ -50,7 +50,7 @@ export function webSearchRequestsFromUsage(usage: any): number | undefined {
 }
 
 /**
- * Counts server-side web searches per step and charges them to the speaker via `takeLimit('search')`.
+ * Counts server-side web searches per step and charges them to the speaker via `takeLimit('websearch')`.
  * Feed it raw chunks (streamText with includeRawChunks) and/or finished steps; call `settle` after each step.
  */
 export class WebSearchMeter {
@@ -88,7 +88,7 @@ export class WebSearchMeter {
     this.pending = 0;
     this.total += n;
     for (let i = 0; i < n; i++) {
-      const msg = await takeLimit('search', who.speakerId, who.threadId);
+      const msg = await takeLimit('websearch', who.speakerId, who.threadId);
       if (msg) over = true;
     }
     if (n) log.debug({ searches: n, speaker: who.speakerId }, 'web searches charged');

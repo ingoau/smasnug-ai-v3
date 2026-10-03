@@ -42,19 +42,20 @@ export async function checkEntry(userId: string, channelId?: string, opts: { cou
   return { ok: true };
 }
 
-export type LimitKind = 'search' | 'fetch' | 'send' | 'subagent';
+export type LimitKind = 'search' | 'websearch' | 'fetch' | 'send' | 'subagent';
 
 const HOUR_MS = 60 * 60 * 1000;
 
 const HOURLY: Record<Exclude<LimitKind, 'subagent'>, { max: number; noun: string }> = {
-  search: { max: limits.userSearchesPerHour, noun: 'searches' },
+  search: { max: limits.userSlackSearchesPerHour, noun: 'Slack searches' },
+  websearch: { max: limits.userWebSearchesPerHour, noun: 'web searches' },
   fetch: { max: limits.userFetchesPerHour, noun: 'page fetches' },
   send: { max: limits.userSendsPerHour, noun: 'messages sent on their behalf' },
 };
 
 /**
  * Per-user / per-thread limits. Returns an error string for the model if over limit, else null (and counts usage).
- * - search / fetch / send: per-user sliding hour window in Redis (shared across workers) + a `usage` row.
+ * - search (Slack) / websearch / fetch / send: per-user sliding hour window in Redis (shared across workers) + a `usage` row.
  * - send: also refused when the user is send-blocked or suspended.
  * - subagent: concurrent active runs per user and per thread, counted in the DB (call before creating the run).
  */

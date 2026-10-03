@@ -19,7 +19,7 @@ import { WEB_SEARCH_TOOL, WebSearchMeter } from '../tools/web-search.js';
 import { addSource, compactHistory, describeToolStep, oneLine, splitResult, urlsInText, type RunSource } from './util.js';
 
 /** Step cap per run (each web-search step costs ~11–20k input tokens; the token cap applies too). */
-const MAX_STEPS = 25;
+const MAX_STEPS = 50;
 
 /** Runs executing in this process, for shutdown. */
 const active = new Map<number, AbortController>();
