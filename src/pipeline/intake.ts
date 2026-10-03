@@ -14,7 +14,7 @@ import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
-import { decide, isStopMessage, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
+import { decide, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { showIntakeStatus } from './session-status.js';
 import { applyDelete, applyEdit, getThread, insertTombstone, isBotMessage, isTwoPartyThread, storeMessage, upsertThread, type SlackMessage, type ThreadRow } from './store.js';
@@ -86,7 +86,6 @@ async function handleNewMessage(ev: MessageEvent) {
 
   const authorId = ev.user;
   if (isBangStop(text, bot.userId, { isDm })) return handleBangStop(channelId, threadRootTs(ev), authorId, ev.ts);
-  const isStop = isStopMessage(text);
   let disengageDue = false;
   if (isDm || mentionsBot) {
     await markAddressed(threadId, true);
@@ -96,18 +95,13 @@ async function handleNewMessage(ev: MessageEvent) {
   const twoParty = thread.engaged && !isDm && !mentionsBot && !mentionsOthers ? await isTwoPartyThread(thread, authorId) : false;
 
   const quietPrefix = hasQuietPrefix(text);
-  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, isStop, quietPrefix });
+  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, quietPrefix });
   log.debug({ threadId, ts: ev.ts, decision }, 'message decision');
   if (decision.action === 'ignore') {
     if (decision.reason === 'disengaged') await disengage(threadId, 'idle', null);
     return;
   }
-  if (decision.disengage) {
-    await disengage(threadId, 'stop', authorId);
-    await sql`update threads set last_addressed_at = now(), messages_since_addressed = 0 where id = ${threadId}`;
-  } else if (decision.reason === 'direct') {
-    await markAddressed(threadId, true);
-  }
+  if (decision.reason === 'direct') await markAddressed(threadId, true);
 
   markMessage(channelId, ev.ts, { i_decided: Date.now() });
   const entry = await guardEntry(authorId, channelId);

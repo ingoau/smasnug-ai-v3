@@ -155,12 +155,13 @@ describe.skipIf(!infra)('workspace AI-bot guidelines (intake)', () => {
 
       expect((await turns()).map((t) => t.status)).toEqual(['cancelled']);
       expect(await debounce.takeBatch({ threadId: THREAD, authorId: 'U1', seq: await batchSeq(THREAD, 'U1') })).toBeNull();
-      expect((await sql`select engaged from threads where id = ${THREAD}`)[0]!.engaged).toBe(false);
+      expect((await sql`select engaged from threads where id = ${THREAD}`)[0]!.engaged).toBe(true); // stop doesn't unsubscribe
       expect(Number(await redis.get(stopKey(THREAD)))).toBeGreaterThan(Date.now() - 5000);
       const calls = await fakeCalls();
       expect(calls.filter((c) => c.method === 'chat.postMessage').map((c) => c.args)).toEqual([{ channel: C, thread_ts: T, text: 'Stopped.' }]);
       expect(calls.filter((c) => c.method === 'agents.sessions.setStatus').map((c) => c.args.status)).toEqual(['active']);
-      expect(await events()).toEqual(expect.arrayContaining(['disengaged', 'session_stopped']));
+      expect(await events()).toContain('session_stopped');
+      expect(await events()).not.toContain('disengaged');
       // No turn, no batch from the !stop message itself.
       expect((await debounceJobs()).filter((j) => j.seq > 1)).toEqual([]);
       await processThreadRun(job({ threadId: THREAD }));

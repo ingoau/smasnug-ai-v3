@@ -378,7 +378,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
         body: { event_id: `Ev${Math.random()}`, event: { type: 'agent_session_stopped', channel: C, thread_ts: T, user, event_ts: eventTs, streaming_message_ts: ['1700000000.000900'] } },
       });
 
-    it('cancels runs, drops the user\'s pending turns, disengages, sets active and confirms once', async () => {
+    it('stops the current response only: drops the user\'s pending turns, keeps runs and engagement, sets active, confirms once', async () => {
       const { stopKey } = await import('./stop.js');
       await makeThread();
       await scheduler.scheduleMessages(THREAD, 'U1', ['1.1'], true);
@@ -397,10 +397,10 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(await debounce.takeBatch({ threadId: THREAD, authorId: 'U1', seq: 1 })).toBeNull();
       const runs = await sql`select subagent_id, status, cancel_requested from runs order by id`;
       expect(runs.map((r) => [r.subagentId, r.status, r.cancelRequested])).toEqual([
-        ['sa_q', 'cancelled', true],
-        ['sa_r', 'running', true],
+        ['sa_q', 'queued', false],
+        ['sa_r', 'running', false],
       ]);
-      expect((await sql`select engaged from threads where id = ${THREAD}`)[0]!.engaged).toBe(false);
+      expect((await sql`select engaged from threads where id = ${THREAD}`)[0]!.engaged).toBe(true);
       expect(Number(await redis.get(stopKey(THREAD)))).toBeGreaterThan(Date.now() - 5000);
       const calls = await fakeCalls();
       expect(calls.filter((c) => c.method === 'agents.sessions.setStatus').map((c) => c.args)).toEqual([
@@ -408,7 +408,8 @@ describe.skipIf(!infra)('pipeline integration', () => {
       ]);
       expect(calls.filter((c) => c.method === 'chat.postMessage').map((c) => c.args)).toEqual([{ channel: C, thread_ts: T, text: 'Stopped.' }]);
       const types = (await sql`select type from thread_events where thread_id = ${THREAD} order by id`).map((e) => e.type);
-      expect(types).toEqual(expect.arrayContaining(['stop_all', 'disengaged', 'session_stopped']));
+      expect(types).toContain('session_stopped');
+      expect(types).not.toContain('disengaged');
 
       // A redelivered event (same event_ts) doesn't post a second confirmation.
       await processSlackEvent(stopEnvelope());
@@ -596,14 +597,14 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(evs[0]!.payload).toEqual({ reason: 'idle' });
     });
 
-    it('"stop" disengages but is still delivered', async () => {
+    it('"shut up" is an ordinary message: it goes through the gate and does not disengage by itself', async () => {
       const root = nextTs();
       const tid = `${C}:${root}`;
       await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> research X', ts: root }));
       const stop = nextTs();
       await processSlackEvent(messageEnvelope({ user: 'U2', text: 'shut up', ts: stop, thread_ts: root }));
-      expect((await sql`select engaged from threads where id = ${tid}`)[0]!.engaged).toBe(false);
-      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U2', seq: 1 })).toEqual([{ ts: stop, reason: 'stop' }]);
+      expect((await sql`select engaged from threads where id = ${tid}`)[0]!.engaged).toBe(true);
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U2', seq: 1 })).toEqual([{ ts: stop, reason: 'gate' }]);
     });
 
     it('edits update the stored copy; deletions clear it and remove it from the batch', async () => {

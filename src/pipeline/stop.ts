@@ -1,21 +1,18 @@
 /**
- * Native stop button (Agents & AI Apps `agent_session_stopped`). Behaves like the user saying "stop":
+ * Native stop button (Agents & AI Apps `agent_session_stopped`) and `@bot !stop`: stop the current response.
  * - the running front turn in the thread ends at its next step boundary (Redis flag checked via TurnIO.stopRequested),
- * - every active subagent run in the thread is cancelled (same path as "Stop all"),
  * - the user's not-yet-started turns (pending turns, inbox rows, open debounce batch) are dropped,
- * - the thread disengages,
- * then the session goes back to `active` and the bot confirms with "Stopped.".
+ * then the session goes back to `active` and the bot confirms with "Stopped.". The thread stays engaged and
+ * background subagents keep running (the agent can cancel them or leave the thread with its tools when asked).
  * Slack has already halted the streams listed in `streaming_message_ts`; the reply manager tolerates that.
  */
 import { appendEvent, threadIdOf } from '../core/events.js';
 import { redis } from '../core/redis.js';
 import { slackCall } from '../core/slack.js';
 import { sql } from '../db/index.js';
-import { cancelThreadRuns } from '../agent/subagents.js';
 import { log } from '../log.js';
 import { clearBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
-import { disengage } from './intake.js';
 import { dropPendingUserTurns } from './scheduler.js';
 import { setSessionStatus } from './session-status.js';
 import { getThread } from './store.js';
@@ -60,23 +57,15 @@ export async function handleAgentSessionStopped(ev: AgentSessionStoppedEvent): P
   await clearBatch(threadId, user);
   const thread = await getThread(threadId);
   let droppedTurns: number[] = [];
-  let cancelledCards: number[] = [];
   if (thread) {
     droppedTurns = await dropPendingUserTurns(threadId, user);
-    cancelledCards = await cancelThreadRuns(threadId, user).catch((err) => {
-      log.error({ err, threadId }, 'cancelThreadRuns failed');
-      return [];
-    });
-    await disengage(threadId, 'stop', user);
-    await sql`update threads set last_addressed_at = now(), messages_since_addressed = 0 where id = ${threadId}`;
     await appendEvent(threadId, 'session_stopped', user, {
       eventTs: ev.event_ts,
       streamingMessageTs: ev.streaming_message_ts ?? [],
       droppedTurns,
-      cancelledCards,
     });
   }
-  log.info({ threadId, user, droppedTurns, cancelledCards }, 'agent session stopped');
+  log.info({ threadId, user, droppedTurns }, 'agent session stopped');
 
   await setSessionStatus(channel, threadTs, 'active', user);
   if (!entry.ok) return;

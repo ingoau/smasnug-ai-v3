@@ -4,11 +4,11 @@
  */
 
 /** Why a message joins a debounce batch. Anything but 'gate' runs the front agent without the relevance gate. */
-export type BatchReason = 'dm' | 'mention' | 'direct' | 'stop' | 'gate';
+export type BatchReason = 'dm' | 'mention' | 'direct' | 'gate';
 
 export type Decision =
   | { action: 'ignore'; reason: 'bot' | 'not_engaged' | 'mentions_other' | 'disengaged' | 'unsupported' | 'quiet' }
-  | { action: 'batch'; reason: BatchReason; disengage?: boolean };
+  | { action: 'batch'; reason: BatchReason };
 
 export interface MessageFacts {
   isBot: boolean;
@@ -21,7 +21,6 @@ export interface MessageFacts {
   disengageDue: boolean;
   /** Only the original poster and the bot have spoken in the thread, and this author is the original poster. */
   twoParty: boolean;
-  isStop: boolean;
   /** Text starts with `<>` (guidelines rule 4): never answered unless the bot is @mentioned. */
   quietPrefix?: boolean;
 }
@@ -30,10 +29,8 @@ export function decide(f: MessageFacts): Decision {
   if (f.isBot) return { action: 'ignore', reason: 'bot' };
   if (f.quietPrefix && !f.mentionsBot) return { action: 'ignore', reason: 'quiet' };
   if (f.isDm) return { action: 'batch', reason: 'dm' };
-  if (f.mentionsBot) return f.isStop ? { action: 'batch', reason: 'stop', disengage: true } : { action: 'batch', reason: 'mention' };
+  if (f.mentionsBot) return { action: 'batch', reason: 'mention' };
   if (!f.engaged) return { action: 'ignore', reason: 'not_engaged' };
-  // "Stop" is delivered to the agent (so it can cancel subagents and stay quiet) and disengages the thread.
-  if (f.isStop && !f.mentionsOthers) return { action: 'batch', reason: 'stop', disengage: true };
   if (f.disengageDue) return { action: 'ignore', reason: 'disengaged' };
   if (f.mentionsOthers) return { action: 'ignore', reason: 'mentions_other' };
   if (f.twoParty) return { action: 'batch', reason: 'direct' };
@@ -47,7 +44,7 @@ export function batchNeedsGate(reasons: BatchReason[]): boolean {
 
 /** Mention/DM turns get the status indicator. */
 export function batchIsMention(reasons: BatchReason[]): boolean {
-  return reasons.some((r) => r === 'dm' || r === 'mention' || r === 'stop');
+  return reasons.some((r) => r === 'dm' || r === 'mention');
 }
 
 export interface EngagementState {
@@ -77,19 +74,6 @@ export function mentionFacts(text: string, botUserId: string) {
   return { mentionsBot, mentionsOthers };
 }
 
-/** "stop", "shut up", "be quiet" … addressed at the bot: short message, optionally prefixed by mentions. */
-export function isStopMessage(text: string): boolean {
-  const stripped = text
-    .replace(USER_MENTION, ' ')
-    .replace(/[^\p{L}\p{N}\s']/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-  if (!stripped || stripped.length > 40) return false;
-  return /^(?:(?:ok|okay|pls|please|hey|yo|bot|smasnug)\s+)*(?:stop(?:\s+(?:it|now|talking|replying|responding))?|shut\s*up|be\s+quiet|quiet|hush|stfu|go\s+away|enough|silence|leave\s+(?:us|me)\s+alone)(?:\s+(?:please|pls|now|bot|thanks|thx))*$/.test(
-    stripped,
-  );
-}
 
 /**
  * Debounce window: longer while the thread has active subagents (people tend to steer in bursts). Messages that run

@@ -4,7 +4,6 @@ import {
   batchNeedsGate,
   debounceWindowMs,
   decide,
-  isStopMessage,
   mentionFacts,
   shouldDisengage,
   threadRootTs,
@@ -19,7 +18,6 @@ const base: MessageFacts = {
   engaged: true,
   disengageDue: false,
   twoParty: false,
-  isStop: false,
 };
 
 describe('decide', () => {
@@ -30,19 +28,11 @@ describe('decide', () => {
     expect(decide({ ...base, isDm: true, engaged: false })).toEqual({ action: 'batch', reason: 'dm' });
     expect(decide({ ...base, mentionsBot: true, engaged: false, mentionsOthers: true })).toEqual({ action: 'batch', reason: 'mention' });
   });
-  it('mention + stop disengages but is still delivered', () => {
-    expect(decide({ ...base, mentionsBot: true, isStop: true })).toEqual({ action: 'batch', reason: 'stop', disengage: true });
-  });
   it('ignores follow-ups in threads that are not engaged', () => {
     expect(decide({ ...base, engaged: false })).toEqual({ action: 'ignore', reason: 'not_engaged' });
-    expect(decide({ ...base, engaged: false, isStop: true })).toEqual({ action: 'ignore', reason: 'not_engaged' });
   });
   it('skips messages that mention someone else and not the bot', () => {
     expect(decide({ ...base, mentionsOthers: true, twoParty: true })).toEqual({ action: 'ignore', reason: 'mentions_other' });
-  });
-  it('stop in an engaged thread disengages and is delivered, unless aimed at someone else', () => {
-    expect(decide({ ...base, isStop: true })).toEqual({ action: 'batch', reason: 'stop', disengage: true });
-    expect(decide({ ...base, isStop: true, mentionsOthers: true })).toEqual({ action: 'ignore', reason: 'mentions_other' });
   });
   it('ignores once disengagement is due', () => {
     expect(decide({ ...base, disengageDue: true, twoParty: true })).toEqual({ action: 'ignore', reason: 'disengaged' });
@@ -91,15 +81,6 @@ describe('mentionFacts', () => {
   });
 });
 
-describe('isStopMessage', () => {
-  it.each(['stop', 'Stop!', '<@UBOT> shut up', 'please be quiet', 'ok stop it', 'STFU', 'go away bot', 'enough.', 'quiet please'])(
-    'stop: %s',
-    (t) => expect(isStopMessage(t)).toBe(true),
-  );
-  it.each(['stop by the shop later?', "don't stop believing", 'how do I stop a docker container', 'quietly fixed it', ''])('not stop: %s', (t) =>
-    expect(isStopMessage(t)).toBe(false),
-  );
-});
 
 describe('debounceWindowMs', () => {
   it('scales with active runs', () => {

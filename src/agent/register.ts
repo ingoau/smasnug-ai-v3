@@ -9,6 +9,7 @@ import { STOP_ALL_ACTION } from './card-render.js';
 import { processSubagentRun, shutdownRuns } from './child.js';
 import { expireIdleSubagents, sweepStaleRuns } from './maintenance.js';
 import { cancelCardRuns } from './subagents.js';
+import './leave-thread.js';
 import './tools.js';
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {

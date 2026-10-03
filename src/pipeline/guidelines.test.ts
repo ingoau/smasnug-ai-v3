@@ -126,14 +126,12 @@ describe('decide: <> prefix', () => {
     engaged: true,
     disengageDue: false,
     twoParty: true,
-    isStop: false,
     ...over,
   });
   it('ignores <> messages unless the bot is mentioned, also in DMs', () => {
     expect(decide(facts({ quietPrefix: true }))).toEqual({ action: 'ignore', reason: 'quiet' });
     expect(decide(facts({ quietPrefix: true, isDm: true }))).toEqual({ action: 'ignore', reason: 'quiet' });
     expect(decide(facts({ quietPrefix: true, twoParty: false }))).toEqual({ action: 'ignore', reason: 'quiet' });
-    expect(decide(facts({ quietPrefix: true, isStop: true }))).toEqual({ action: 'ignore', reason: 'quiet' });
     expect(decide(facts({ quietPrefix: true, mentionsBot: true }))).toEqual({ action: 'batch', reason: 'mention' });
     expect(decide(facts({ quietPrefix: true, isDm: true, mentionsBot: true }))).toEqual({ action: 'batch', reason: 'dm' });
   });
