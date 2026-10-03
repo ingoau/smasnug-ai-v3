@@ -113,6 +113,7 @@ const SCENARIOS: Scenario[] = [
     text: 'search slack for messages mentioning the hackathon venue and tell me what people said',
     check: (e) => (replied(e) ? null : 'no reply'),
   },
+  { name: 'ship', text: "what's the #ship channel for?", check: (e) => (replied(e) ? null : 'no reply') },
   {
     name: 'research',
     text: 'can you research the best beginner microcontroller boards right now and compare prices across a few shops? take your time',
@@ -160,10 +161,24 @@ async function waitForTurn(threadId: string, timeoutMs = 120_000): Promise<any |
 async function collect(scenario: Scenario | { name: string; check?: Scenario['check'] }, threadId: string, user: string): Promise<Result> {
   const p = await waitForTurn(threadId);
   const evs = await sql<{ type: string; payload: any }[]>`select type, payload from thread_events where thread_id = ${threadId} order by id`;
-  // Don't let research subagents burn tokens in the background.
+  // Subagent runs: how long they waited in the queue (parallelism check); then cancel them so they don't burn tokens.
+  let runLag: number | undefined;
+  if (evs.some((e) => e.type === 'spawn')) {
+    const until = Date.now() + 10_000;
+    while (Date.now() < until) {
+      const rows = await sql<{ lag: number | null }[]>`select (extract(epoch from started_at - created_at) * 1000)::int as lag from runs where thread_id = ${threadId}`;
+      if (rows.length && rows.every((r) => r.lag != null)) {
+        runLag = Math.max(...rows.map((r) => r.lag!));
+        break;
+      }
+      await sleep(50);
+    }
+  }
   await cancelThreadRuns(threadId, user).catch(() => {});
   if (!p) return { scenario: scenario.name, threadId, rel: {}, spans: {}, counters: {}, headline: { firstStatusMs: null, firstTextMs: null, turnEndMs: null }, problem: 'timeout' };
-  return { scenario: scenario.name, threadId, rel: snake(p.rel), spans: snake(p.spans), counters: snake(p.counters), notes: p.notes ?? {}, headline: p.headline, problem: scenario.check?.(evs) ?? null };
+  const counters = snake(p.counters);
+  if (runLag != null) counters.subagent_queue_ms = runLag;
+  return { scenario: scenario.name, threadId, rel: snake(p.rel), spans: snake(p.spans), counters, notes: p.notes ?? {}, headline: p.headline, problem: scenario.check?.(evs) ?? null };
 }
 
 const results: Result[] = [];
@@ -195,12 +210,18 @@ if (PARALLEL > 0) {
       const sameDm = i < 3;
       const mention = !sameDm && i % 3 === 2;
       const user = sameDm ? 'UPARA0' : `UPARA${i}`;
-      const text = SCENARIOS[i % 2]!.text;
-      if (mention) jobs.push({ name: `par-mention`, channel: 'CPARALLEL', user, dm: false, text: `<@UBOT> ${text}` });
+      const research = !sameDm && i % 4 === 3;
+      const text = research ? SCENARIOS.find((s) => s.name === 'research')!.text : SCENARIOS[i % 2]!.text;
+      if (research) jobs.push({ name: 'par-research', channel: `D${user}`, user, dm: true, text });
+      else if (mention) jobs.push({ name: `par-mention`, channel: 'CPARALLEL', user, dm: false, text: `<@UBOT> ${text}` });
       else jobs.push({ name: sameDm ? 'par-same-dm' : 'par-own-dm', channel: `D${user}`, user, dm: true, text });
     }
     const started = await Promise.all(jobs.map((j) => inject({ channel: j.channel, user: j.user, text: j.text, dm: j.dm })));
-    const rs = await Promise.all(started.map((s, i) => collect({ name: jobs[i]!.name, check: (e) => (replied(e) ? null : 'no reply') }, s.threadId, jobs[i]!.user)));
+    const rs = await Promise.all(
+      started.map((s, i) =>
+        collect({ name: jobs[i]!.name, check: jobs[i]!.name === 'par-research' ? SCENARIOS.find((x) => x.name === 'research')!.check : (e) => (replied(e) ? null : 'no reply') }, s.threadId, jobs[i]!.user),
+      ),
+    );
     for (const r of rs) results.push({ ...r, scenario: `${r.scenario}` });
     const all = rs.map((r) => r.headline.firstTextMs ?? NaN);
     console.log(`  parallel run ${run + 1}: first text per thread ${rs.map((r) => fmt(r.headline.firstTextMs)).join(' ')}  (max ${fmt(Math.max(...all))})`);

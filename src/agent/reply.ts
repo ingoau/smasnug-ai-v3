@@ -15,9 +15,9 @@ import { chooseDelivery, isNearDuplicate, type DeliveryMode } from './util.js';
 /** Coalescing interval for appends once the stream is open. */
 const FLUSH_MS = 250;
 /** Before the stream is open: open it as soon as this many characters of text are there… */
-const FIRST_FLUSH_CHARS = 12;
+const FIRST_FLUSH_CHARS = 8;
 /** …or after this long, whichever comes first. */
-const FIRST_FLUSH_MS = 100;
+const FIRST_FLUSH_MS = 80;
 const MAX_MD = 11_500; // markdown limit is 12k chars per block / stream call
 const MAX_TEXT = 3_000; // `text` fallback
 /** A later reply in a turn is held back until this many chars arrived, so it can be checked for duplication first. */
@@ -132,6 +132,7 @@ export class ReplyManager {
     const e = this.start(toolCallId);
     this.t.timing?.mark('first_reply_delta');
     e.buf += d;
+    if (this.t.timing && !('first_reply_text' in this.t.timing.marks) && (extractPartialString(e.buf, 'text')?.value ?? '').trim()) this.t.timing.mark('first_reply_text');
     // First reply of the turn, stream not open yet: open it as soon as a few words are there (then coalesce).
     const opening = !e.streamTs && this.deliveredTexts.length === 0;
     if (opening && e.timer) {
@@ -158,6 +159,7 @@ export class ReplyManager {
   /** Send any newly decoded text from the partial arguments to the stream. */
   private async flush(e: ReplyEntry, finalText?: string) {
     if (e.failed || e.stopped || e.halted || e.dropped) return;
+    this.t.timing?.mark('first_flush');
     if ((await e.mode) !== 'stream') return;
     const value = finalText ?? streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '');
     if (value.length <= e.sent) return;
@@ -181,6 +183,7 @@ export class ReplyManager {
       // Don't open a stream for leading whitespace only.
       if (!piece.trim()) return;
       const team = await teamId();
+      this.t.timing?.mark('stream_open_call');
       const res = await slackCall<any>(
         'chat.startStream',
         {
