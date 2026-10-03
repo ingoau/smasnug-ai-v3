@@ -113,13 +113,13 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
       // The card lives in the turn's reply: chat.update of that message, no separate card post.
       expect(cardMsg!.method).toBe('chat.update');
       expect(cardMsg!.args.ts).toBe(card.messageTs);
-      expect(cardMsg!.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'plan', 'actions']);
+      expect(cardMsg!.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'plan']);
       expect(calls.some((c) => c.method === 'chat.postMessage' && hasPlan(c) && c.args.channel === channel)).toBe(false);
     } else {
       expect(cardMsg!.method).toBe('chat.postMessage');
       expect(cardMsg!.args.thread_ts).toBe(rootTs);
     }
-    expect(cardMsg!.args.blocks.find((b: any) => b.type === 'actions')?.elements?.[0]?.action_id).toBe('card:stop_all');
+    expect(cardMsg!.args.blocks.some((b: any) => b.type === 'actions')).toBe(false);
     const events1 = await sql<any[]>`select type from thread_events where thread_id = ${threadId}`;
     expect(events1.map((e) => e.type)).toContain('spawn');
 

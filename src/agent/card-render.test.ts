@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { frozenTitle, liveTitle, outputBudget, renderCard, STOP_ALL_ACTION, taskFor, type CardRun } from './card-render.js';
+import { frozenTitle, liveTitle, outputBudget, renderCard, taskFor, type CardRun } from './card-render.js';
 import { markdownToRich } from './rich-text.js';
 
 const run = (id: number, over: Partial<CardRun> = {}): CardRun => ({
@@ -59,15 +59,13 @@ describe('renderCard', () => {
     expect(x.status).toBe('error');
     expect(textOf(x.output)).toBe('Cancelled');
     expect(resumed.title).toBe('↻ Task 6');
-    // Stop all while anything runs
-    const actions = blocks[1] as any;
-    expect(actions.type).toBe('actions');
-    expect(actions.elements[0]).toMatchObject({ action_id: STOP_ALL_ACTION, value: '9' });
+    // No buttons: just the plan
+    expect(blocks.map((b) => b.type)).toEqual(['plan']);
     expect(text).toContain('Running 3 subagents');
     expect(text.length).toBeGreaterThan(0);
   });
 
-  it('removes the button when nothing is active and freezes with the final title', () => {
+  it('freezes with the final title when nothing is active', () => {
     const runs = [run(1, { status: 'complete', output: 'ok' }), run(2, { status: 'cancelled' })];
     const live = renderCard({ id: 1, title: null, frozen: false }, runs);
     expect(live.blocks).toHaveLength(1);
@@ -85,10 +83,10 @@ describe('renderCard', () => {
     expect((r.blocks[0] as any).tasks.map((t: any) => t.task_id)).toEqual(['run_2', 'run_3']);
   });
 
-  it('lives in the reply message: [reply markdown, plan, actions], text = reply text; frozen keeps the text', () => {
+  it('lives in the reply message: [reply markdown, plan], text = reply text; frozen keeps the text', () => {
     const runs = [run(1, { status: 'running', details: 'Reading docs' })];
     const live = renderCard({ id: 4, title: null, frozen: false, replyText: 'On it — checking the docs.' }, runs);
-    expect(live.blocks.map((b) => b.type)).toEqual(['markdown', 'plan', 'actions']);
+    expect(live.blocks.map((b) => b.type)).toEqual(['markdown', 'plan']);
     expect((live.blocks[0] as any).text).toBe('On it — checking the docs.');
     expect(live.text).toBe('On it — checking the docs.');
     const frozen = renderCard({ id: 4, title: 'Checked the docs', frozen: true, replyText: 'On it — checking the docs.' }, [run(1, { status: 'complete', output: 'ok' })]);

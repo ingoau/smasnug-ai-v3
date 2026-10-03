@@ -378,9 +378,10 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
 
   describe.skipIf(process.env.LIVE !== '1')('live extraction end-to-end (LIVE=1)', () => {
     it('extracts facts for participants of an idle thread, only from their own messages', async () => {
-      const t = `CLIVE${rand()}:1700000001.000100`;
+      const ch = `CLIVE${rand()}`;
+      const t = `${ch}:1700000001.000100`;
       const alice = uid(), sam = uid();
-      await sql`insert into threads (id, channel_id, thread_ts, last_activity_at) values (${t}, 'CLIVE', '1700000001.000100', now() - interval '1 hour')`;
+      await sql`insert into threads (id, channel_id, thread_ts, last_activity_at) values (${t}, ${ch}, '1700000001.000100', now() - interval '1 hour')`;
       const msgs: [string, string | null, string | null, string][] = [
         ['1700000001.000100', alice, null, "<@UBOT> I'm building a solar-powered weather station for Blueprint and I mostly code in Rust. Keep answers short please."],
         ['1700000001.000200', null, 'BBOT', 'Nice! An ESP32-C3 with a BME280 works well; esp-hal has good Rust support.'],
@@ -388,7 +389,7 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
         ['1700000001.000400', alice, null, 'Thanks! Also my timezone is CET if that matters for scheduling.'],
       ];
       for (const [ts, user, bot, text] of msgs)
-        await sql`insert into messages (channel_id, ts, thread_id, user_id, bot_id, text) values ('CLIVE', ${ts}, ${t}, ${user}, ${bot}, ${text})`;
+        await sql`insert into messages (channel_id, ts, thread_id, user_id, bot_id, text) values (${ch}, ${ts}, ${t}, ${user}, ${bot}, ${text})`;
       await sql`insert into turns (thread_id, author_id, kind, status, created_at) values (${t}, ${alice}, 'user', 'done', now() - interval '1 hour')`;
 
       const { runMemoryExtraction } = await import('./memory/extract.js');

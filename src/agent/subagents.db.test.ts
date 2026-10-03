@@ -159,7 +159,7 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     await cards.postCard(a.cardId, { ts: '1790001000.000100', text: 'On it — checking.', streamed: false });
     let calls = (await fakeCalls()).slice(before);
     const upd = calls.find((c) => c.method === 'chat.update' && c.args.ts === '1790001000.000100')!;
-    expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'plan', 'actions']);
+    expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'plan']);
     expect(upd.args.text).toBe('On it — checking.');
     expect(calls.some((c) => c.method === 'chat.postMessage')).toBe(false);
     const [cardA] = await sql<any[]>`select message_ts, reply_text from cards where id = ${a.cardId}`;

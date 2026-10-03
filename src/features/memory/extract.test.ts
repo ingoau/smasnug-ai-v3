@@ -153,7 +153,9 @@ describe.skipIf(!LIVE)('live extraction (LIVE=1)', () => {
     console.log(JSON.stringify({ ops, accepted, rejected: rejected.map((r) => [r.reason, r.op.text]) }, null, 2));
     const texts = accepted.map((a) => (a.text ?? '').toLowerCase()).join(' | ');
     expect(accepted.length).toBeGreaterThan(0);
-    expect(texts).not.toMatch(/python|exam|stress|asthma/);
+    // Sam's claims about Alice and sensitive details must not be stored. Alice's own "not Python" may be.
+    expect(texts).not.toMatch(/exam|stress|asthma/);
+    expect(texts).not.toMatch(/(loves|likes|into|enjoys|prefers) python/);
     expect(accepted.every((a) => a.user_id === 'UALICE')).toBe(true);
   }, 60_000);
 });

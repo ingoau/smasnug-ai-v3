@@ -185,7 +185,6 @@ const MAX_TEXT = 3_000;
 
 export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   const sorted = [...runs].sort((a, b) => a.id - b.id);
-  const anyActive = sorted.some((r) => isActive(r.status));
   const title = card.frozen ? frozenTitle(card.title, sorted.length) : liveTitle(sorted);
   const budget = outputBudget(sorted.length);
   const plan: PlanBlock = { type: 'plan', title, tasks: sorted.slice(-MAX_PLAN_TASKS).map((r) => taskFor(r, budget)) };
@@ -193,21 +192,6 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   const reply = card.replyText;
   if (reply != null) blocks.push({ type: 'markdown', text: reply.length > MAX_MD ? `${reply.slice(0, MAX_MD)}\n\n_[message truncated]_` : reply });
   blocks.push(plan);
-  if (anyActive && !card.frozen) {
-    blocks.push({
-      type: 'actions',
-      block_id: `card_${card.id}_actions`,
-      elements: [
-        {
-          type: 'button',
-          action_id: STOP_ALL_ACTION,
-          value: String(card.id),
-          text: { type: 'plain_text', text: 'Stop all' },
-          style: 'danger',
-        },
-      ],
-    });
-  }
   // Plain-text fallback: the reply's own text when the card lives in a reply, else a summary of the plan.
   const text = reply != null ? reply.slice(0, MAX_TEXT) : [title, ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n');
   return { text, blocks };

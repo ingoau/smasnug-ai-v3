@@ -39,7 +39,7 @@ equals the dev one. The pipeline integration test uses its own `smasnug_pipeline
 |---|---|---|
 | pipeline | `src/ingress/**`, `src/worker/**`, `src/pipeline/**` | event intake, message storage, rules, gate, disengagement, debounce, thread lock + turn scheduling, inbox push, status indicator, interaction dispatch, process lifecycle |
 | tools | `src/tools/**`, `src/context/**` | fetch_url, web search, slack search, read_thread/read_channel/read_image, search_emojis, react, thread context rendering, images |
-| agent | `src/agent/**` | front agent loop, reply tool + streaming, subagents/runs/inbox, plan cards, set_card_title, Stop all, sweeper, expiry, compaction, synthesis |
+| agent | `src/agent/**` | front agent loop, reply tool + streaming, subagents/runs/inbox, plan cards, set_card_title, sweeper, expiry, compaction, synthesis |
 | features | `src/features/**`, `slack-manifest.yml` | memory + extraction + memory tools, workspace facts, App Home, send_message + confirmation + attribution, reports/suspension/moderation, limits/guard, kill switches, retention |
 
 Cross-module contracts are stub files with final signatures — implement yours, call others', don't change a

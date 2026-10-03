@@ -151,7 +151,7 @@ Front agent streams its synthesis into a new message below the card
 The stream-or-post choice is made in code from `thread.tasks.some(running)`, never by the model.
 ### Plan cards
 - 
-A card is attached to the reply of the turn that started runs, and shows only the runs started in that turn. One task row per run. Implementation: after the turn, the turn's last reply message is updated (`chat.update`) to [reply markdown, plan, Stop all]; every re-render rewrites the reply text plus the current plan. If that update fails (e.g. Slack refuses `chat.update` on a streamed message — unverified), the card is posted as its own message and a `card_attach_failed` event + warning (with the Slack error code) is logged. A turn without a reply posts the card alone.
+A card is attached to the reply of the turn that started runs, and shows only the runs started in that turn. One task row per run. Implementation: after the turn, the turn's last reply message is updated (`chat.update`) to [reply markdown, plan]; every re-render rewrites the reply text plus the current plan. If that update fails (e.g. Slack refuses `chat.update` on a streamed message — unverified), the card is posted as its own message and a `card_attach_failed` event + warning (with the Slack error code) is logged. A turn without a reply posts the card alone.
 - 
 Steering a running subagent does not create a card. The steer appears on the original card's row as `↪ also checking #ship`.
 - 
@@ -181,7 +181,7 @@ Cancelled
 `error`
 `details: "Cancelled"`
 **Titles.** Live cards use a deterministic title ("Running 2 subagents"). On finish, the front agent calls `set_card_title` before writing its synthesis, and the card freezes with that title. If the call is skipped or the title is over ~40 characters, fall back to "Ran N subagents". Frozen cards stay visible as a record, with buttons removed.
-**Cancel.** One "Stop all" button in an actions block under the plan while anything runs. Individual subagents are cancelled by asking in text.
+**Cancel.** No buttons on the card. Subagents are cancelled by asking in text ("stop", "cancel the X one") or with Slack's native stop button while a turn is processing. (Cards posted before this change kept a "Stop all" button; its `card:stop_all` handler stays registered so those still work.)
 ### Reactions and emoji
 - 
 `react(emoji)` takes any emoji name. The model is prompted on when to react, and that steers should get a visible acknowledgement nearby (a reaction or short reply), since the original card may be far up the thread.
