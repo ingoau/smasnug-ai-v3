@@ -9,7 +9,7 @@ const Env = z.object({
   SLACK_USER_TOKEN: z.string().optional(),
   MOD_CHANNEL_ID: z.string().optional(),
   ADMIN_USER_ID: z.string().optional(),
-  SEMOJI_URL: z.string().optional(),
+  SEMOJI_URL: z.string().default('https://emojis.raygen.dev'),
   SEMOJI_KEY: z.string().optional(),
   MODEL_LUNA: z.string().default('openai/gpt-6-luna'),
   MODEL_SOL: z.string().default('openai/gpt-6-sol'),
