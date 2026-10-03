@@ -4,7 +4,6 @@
  * the turn that started it.
  */
 import type { ModelMessage } from 'ai';
-import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { appendEvent, shortId } from '../core/events.js';
 import { enqueue, QUEUE } from '../core/queues.js';
@@ -60,12 +59,8 @@ export async function activeRunsInThread(threadId: string): Promise<number> {
   return r?.n ?? 0;
 }
 
+/** Per-user and per-thread concurrent-subagent limits (features guard counts active runs; call before creating the run). */
 async function checkStartLimits(ownerId: string, threadId: string) {
-  if ((await activeRunsInThread(threadId)) >= limits.threadConcurrentSubagents) {
-    throw new ToolError(
-      `This thread already has ${limits.threadConcurrentSubagents} subagents running (the maximum). Wait for one to finish, steer an existing one with message_subagent, or cancel one.`,
-    );
-  }
   const limited = await takeLimit('subagent', ownerId, threadId);
   if (limited) throw new ToolError(limited);
 }

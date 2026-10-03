@@ -154,9 +154,9 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     const ids: string[] = [];
     const active = (await sql<{ n: number }[]>`select count(*)::int as n from runs where thread_id = ${threadId} and status in ('queued','running')`)[0]!.n;
     for (let i = active; i < limits.threadConcurrentSubagents; i++) {
-      ids.push((await sub.spawnSubagent({ threadId, turnId: turn, ownerId: 'U_D', title: `T${i}`, instructions: 'x' })).subagentId);
+      ids.push((await sub.spawnSubagent({ threadId, turnId: turn, ownerId: `U_D${i}`, title: `T${i}`, instructions: 'x' })).subagentId);
     }
-    await expect(sub.spawnSubagent({ threadId, turnId: turn, ownerId: 'U_D', title: 'one too many', instructions: 'x' })).rejects.toThrow(/maximum/);
+    await expect(sub.spawnSubagent({ threadId, turnId: turn, ownerId: 'U_E', title: 'one too many', instructions: 'x' })).rejects.toThrow(/thread/);
     for (const id of ids) await sub.cancelSubagent({ threadId, subagentId: id, actor: 'U_D' });
   });
 });

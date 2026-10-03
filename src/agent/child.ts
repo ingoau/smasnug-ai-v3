@@ -3,7 +3,6 @@
  * cancel flag checked exactly at step boundaries (never mid tool call). Progress goes to `runs.details` and the
  * card is re-rendered (coalesced). History is persisted (compacted) at run end.
  */
-import os from 'node:os';
 import { streamText, stepCountIs, type ModelMessage, type UserContent } from 'ai';
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
@@ -12,13 +11,13 @@ import { toolsFor } from '../core/tools.js';
 import { recordModelUsage } from '../features/guard.js';
 import { MODELS, openrouter } from '../models.js';
 import { log } from '../log.js';
+import { WORKER_ID } from '../worker/identity.js';
 import { scheduleCardRender } from './cards.js';
 import { childSystemPrompt } from './prompts/child.js';
 import { failRuns, finishRun, type RunRow, type SubagentRow } from './subagents.js';
 import type { QueuedImage } from './types.js';
 import { compactHistory, describeToolStep, oneLine, splitResult } from './util.js';
 
-export const WORKER_ID = `${os.hostname()}:${process.pid}:${Math.random().toString(36).slice(2, 6)}`;
 
 const MAX_STEPS = 40;
 
