@@ -244,7 +244,7 @@ describe.skipIf(!INTEGRATION)('report_user (bot reports)', () => {
     await dispatch(action({ userId: 'UADMIN', actionId: 'mod:suspend', value: speaker, channelId: 'CMOD', messageTs: '1.3' }));
     state.invalidateState();
     expect(await guard.checkEntry(speaker, undefined, { countMessage: false })).toEqual({ ok: false, reason: 'suspended' });
-    expect((await sql<any[]>`select status from bot_reports where id = ${ids[2]}`)[0].status).toBe('reviewed');
+    expect((await sql<any[]>`select status from bot_reports where id = ${ids[2]!}`)[0].status).toBe('reviewed');
     expect(await br.pendingBotReportsCount()).toBe(before - 3);
 
     // The admin can't be suspended; block_send still routes to the existing handler.

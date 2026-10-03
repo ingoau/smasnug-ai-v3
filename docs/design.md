@@ -246,6 +246,8 @@ Fetched pages and search results are treated as untrusted data.
 **Auto-suspension.** A user reported by more than a threshold number of distinct reporters is suspended until reviewed. Suspension is checked at every entry point, not only sends.
 - 
 **Reviewer.** Ingo handles all reports.
+- 
+**Bot reports (`report_user`).** The front agent can quietly report the current speaker (no user id parameter, so it can't be steered into reporting someone else) for clear misuse: harassment or threats (incl. via `send_message`), scams, collecting personal info about others, impersonation, sexual content, deliberate abuse of the bot, or a genuine self-harm concern. Parameters: `category` (enum), `reason` (short, factual, ≤500 chars), optional `message_ts` (must be the speaker's own message; defaults to the turn's latest message). The mod channel gets the category, reason, a snapshot of the message (truncated, pings neutralised), permalinks to the message and thread, and admin-only buttons: Suspend user, Block from send tool, Mark reviewed, Dismiss. Nothing is shown in the user's thread and the bot never tells the user. Stored in `bot_reports` (pending → reviewed/dismissed); at most one per (user, thread) per hour and five per user per day, one per (thread, turn). Bot reports never count towards auto-suspension. Pending ones are kept until reviewed, handled ones go 30 days after review. App Home shows the pending count to the admin.
 ## Memory
 Two kinds: per-user memory, written mostly by a background pass, and a small workspace knowledge base that you approve. Thread memory is the event log itself.
 ### Per-user memory
