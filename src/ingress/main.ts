@@ -59,6 +59,7 @@ async function main() {
     } catch (err) {
       log.warn({ err, envelope: e.envelope_id }, 'ack failed');
     }
+    log.info({ type: e.type, event: e.body?.event?.type ?? e.body?.type, subtype: e.body?.event?.subtype, channelType: e.body?.event?.channel_type }, 'envelope received');
     inflight++;
     try {
       await handleEnvelope(e);
