@@ -8,6 +8,9 @@ import { env } from '../config.js';
 import { sql } from '../db/index.js';
 import { redis } from './redis.js';
 import { log } from '../log.js';
+import { fakeCall } from './slack-fake.js';
+
+const FAKE = process.env.SLACK_FAKE === '1';
 
 const clients = {
   bot: new WebClient(env.SLACK_BOT_TOKEN, { rejectRateLimitedCalls: true, retryConfig: { retries: 0 } }),
@@ -98,6 +101,7 @@ export async function slackCall<T extends WebAPICallResult = WebAPICallResult & 
 }
 
 async function rawCall<T>(method: string, args: Record<string, unknown>, token: TokenKind): Promise<T> {
+  if (FAKE) return (await fakeCall(method, args, token)) as T;
   const channel = typeof args.channel === 'string' ? args.channel : undefined;
   for (let attempt = 0; ; attempt++) {
     await pauseFor(method);
