@@ -35,6 +35,7 @@ const METHOD_RPM: Record<string, number> = {
   'chat.stopStream': 100,
   'reactions.add': 100,
   'assistant.threads.setStatus': 300,
+  'agents.sessions.setStatus': 300,
   'search.messages': 20,
   'conversations.replies': 50,
   'conversations.history': 50,

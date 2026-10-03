@@ -6,17 +6,18 @@
 import type { Job } from 'bullmq';
 import { runFrontTurn, type TurnIO } from '../agent/front.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
-import { slackCall, slackErrorCode } from '../core/slack.js';
+import { slackCall } from '../core/slack.js';
 import type { TurnRow } from '../core/types.js';
 import { log } from '../log.js';
 import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from './lock.js';
 import { claimNextPending, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
+import { setSessionStatus } from './session-status.js';
 
-export const STATUS_TEXT = 'is thinking…';
+export { STATUS_TEXT } from './session-status.js';
 export const ERROR_TEXT = 'Something broke, try again.';
 
 /** In-process bookkeeping for graceful shutdown only (correctness never depends on it). */
-const inFlight = new Map<number, { threadId: string; lock: HeldLock }>();
+const inFlight = new Map<number, { threadId: string; lock: HeldLock; turn: TurnRow }>();
 let shuttingDown = false;
 
 export async function processThreadRun(job: Job<{ threadId: string }>) {
@@ -37,7 +38,7 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
     while (!shuttingDown && lock.held) {
       const turn = await claimNextPending(threadId);
       if (!turn) break;
-      inFlight.set(turn.id, { threadId, lock });
+      inFlight.set(turn.id, { threadId, lock, turn });
       try {
         await runTurn(turn);
       } finally {
@@ -50,21 +51,12 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
   if (await hasPendingTurns(threadId)) await ensureThreadRun(threadId);
 }
 
-async function setStatus(channelId: string, threadTs: string, status: string) {
-  try {
-    await slackCall('assistant.threads.setStatus', { channel_id: channelId, thread_ts: threadTs, status });
-  } catch (err) {
-    // Best-effort. Channel threads may answer `method_not_supported_for_channel_type`; that's expected.
-    if (slackErrorCode(err) === 'method_not_supported_for_channel_type') log.debug({ channelId }, 'setStatus unsupported here');
-    else log.warn({ err, channelId, threadTs }, 'setStatus failed');
-  }
-}
-
 export async function runTurn(turn: TurnRow) {
   const { channelId, threadTs } = parseThreadId(turn.threadId);
   const started = Date.now();
   await appendEvent(turn.threadId, 'turn_started', turn.authorId, { turnId: turn.id, kind: turn.kind, messageTs: turn.messageTs, isMention: turn.isMention });
-  if (turn.isMention) await setStatus(channelId, threadTs, STATUS_TEXT);
+  // Status is turn-scoped and only for mention/DM turns (design doc): `processing` now, `active` in the finally below.
+  if (turn.isMention) await setSessionStatus(channelId, threadTs, 'processing', turn.authorId);
   const io: TurnIO = {
     drainInbox: () => drainInbox(turn.id, turn.threadId),
     setPhase: (phase) => setPhase(turn.id, phase),
@@ -84,7 +76,7 @@ export async function runTurn(turn: TurnRow) {
       log.error({ err: postErr, turnId: turn.id }, 'failed to post error message');
     }
   } finally {
-    if (turn.isMention) await setStatus(channelId, threadTs, '');
+    if (turn.isMention) await setSessionStatus(channelId, threadTs, 'active', turn.authorId);
     const followUp = await finishTurn(turn.id, status);
     await appendEvent(turn.threadId, 'turn_finished', 'system', {
       turnId: turn.id,
@@ -104,8 +96,13 @@ export async function shutdownThreadRuns(graceMs: number) {
   shuttingDown = true;
   const deadline = Date.now() + graceMs;
   while (inFlight.size > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
-  for (const [turnId, { threadId, lock }] of inFlight) {
+  for (const [turnId, { threadId, lock, turn }] of inFlight) {
     log.warn({ turnId, threadId }, 'shutdown: abandoning in-flight turn');
+    if (turn.isMention) {
+      // Otherwise the session would stay `processing` (with a stop button) for up to an hour.
+      const { channelId, threadTs } = parseThreadId(threadId);
+      await setSessionStatus(channelId, threadTs, 'active', turn.authorId);
+    }
     await finishTurn(turnId, 'error').catch(() => {});
     await appendEvent(threadId, 'turn_finished', 'system', { turnId, status: 'error', reason: 'shutdown' }).catch(() => {});
     await lock.release().catch(() => {});
