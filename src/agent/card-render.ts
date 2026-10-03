@@ -70,6 +70,25 @@ export interface CardRun {
   error: string | null;
   /** URLs the run used (fetch_url targets, web-search sources). */
   sources?: { url: string; title?: string }[];
+  /** When the run started / finished (for the duration shown in the task title). */
+  startedAt?: Date | null;
+  finishedAt?: Date | null;
+}
+
+/** Compact duration: "8s", "1m 05s", "1h 02m". */
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
+}
+
+/** How long the run has been going (running) or took (finished); null if it never started. */
+export function runDuration(run: Pick<CardRun, 'status' | 'startedAt' | 'finishedAt'>, now = Date.now()): string | null {
+  if (!run.startedAt || run.status === 'queued') return null;
+  const end = run.status === 'running' ? now : (run.finishedAt?.getTime() ?? now);
+  return formatDuration(end - run.startedAt.getTime());
 }
 
 /**
@@ -136,7 +155,8 @@ function resultOutput(run: CardRun, budget: ReturnType<typeof outputBudget>): Ri
 }
 
 export function taskFor(run: CardRun, budget = outputBudget(1)): TaskCardBlock {
-  const title = clip(`${run.isResume ? '↻ ' : ''}${run.subagentTitle}`, 120);
+  const duration = runDuration(run);
+  const title = `${clip(`${run.isResume ? '↻ ' : ''}${run.subagentTitle}`, 110)}${duration ? ` · ${duration}` : ''}`;
   const base = { type: 'task_card' as const, task_id: `run_${run.id}`, title };
   const steer = run.steerNotes.map((n) => `↪ ${clip(n, 80)}`);
   const sources = (run.sources ?? []).slice(0, budget.sources).map((s) => ({ type: 'url' as const, url: s.url, text: sourceLabel(s) }));

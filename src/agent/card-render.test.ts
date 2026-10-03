@@ -182,3 +182,20 @@ describe('task card output', () => {
     expect(t0.sources).toHaveLength(1);
   });
 });
+
+describe('run durations in task titles', () => {
+  it('formats compact durations', async () => {
+    const { formatDuration } = await import('./card-render.js');
+    expect(formatDuration(8_400)).toBe('8s');
+    expect(formatDuration(65_000)).toBe('1m 05s');
+    expect(formatDuration(3_720_000)).toBe('1h 02m');
+  });
+  it('shows elapsed while running, the total when finished, nothing when queued', async () => {
+    const { taskFor } = await import('./card-render.js');
+    const base = { id: 1, subagentTitle: 'Compare printers', isResume: false, details: 'Searching', steerNotes: [], output: 'ok', error: null };
+    const started = new Date(Date.now() - 45_000);
+    expect(taskFor({ ...base, status: 'running', startedAt: started }).title).toBe('Compare printers · 45s');
+    expect(taskFor({ ...base, status: 'complete', startedAt: new Date(0), finishedAt: new Date(92_000) }).title).toBe('Compare printers · 1m 32s');
+    expect(taskFor({ ...base, status: 'queued', startedAt: null }).title).toBe('Compare printers');
+  });
+});

@@ -13,6 +13,7 @@ Models on OpenRouter: `openai/gpt-6-luna` (gate: reasoning off; front: low; chil
 
 Local infra: `docker compose up -d` (Postgres on 5433, Redis on 6380), `pnpm migrate`.
 Checks: `pnpm typecheck`, `pnpm test`. Full suite: `LIVE=1 INTEGRATION=1 pnpm vitest run --no-file-parallelism`.
+Latency: every turn logs a `turn_timing` event; `pnpm bench` measures the real pipeline (see `docs/perf.md`).
 
 Tests never touch the dev database/Redis: vitest (`vitest.config.ts` → `src/testing/`) swaps DATABASE_URL/REDIS_URL
 for `TEST_DATABASE_URL` / `TEST_REDIS_URL` (default: database `smasnug_test`, Redis db 9 on the `.env` servers),

@@ -42,8 +42,11 @@ export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: C
       result: string | null;
       error: string | null;
       sources: { url: string; title?: string }[];
+      startedAt: Date | null;
+      finishedAt: Date | null;
     }[]
-  >`select r.id, s.title, r.status, r.is_resume, r.details, r.steer_notes, r.output, r.result, r.error, r.sources
+  >`select r.id, s.title, r.status, r.is_resume, r.details, r.steer_notes, r.output, r.result, r.error, r.sources,
+      r.started_at, r.finished_at
     from runs r join subagents s on s.id = r.subagent_id where r.card_id = ${cardId} order by r.id`;
   const runs: CardRun[] = rows.map((r) => ({
     id: Number(r.id),
@@ -56,6 +59,8 @@ export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: C
     result: r.result,
     error: r.error,
     sources: Array.isArray(r.sources) ? r.sources : [],
+    startedAt: r.startedAt,
+    finishedAt: r.finishedAt,
   }));
   return { card: { ...card, id: Number(card.id) }, runs };
 }
