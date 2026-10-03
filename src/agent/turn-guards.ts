@@ -19,7 +19,7 @@ export const REPLY_AFTER_DELEGATION =
   'Not posted: you already replied in this turn and the plan card shows the delegated work. End your turn now; the results come back in a separate turn where you write the answer.';
 
 /** Tools a turn may no longer use once it has delegated: the subagent does the looking up. */
-export const LOOKUP_TOOLS = new Set([WEB_SEARCH_TOOL, 'fetch_url', 'read_thread', 'read_channel', 'slack_search', 'read_image']);
+export const LOOKUP_TOOLS = new Set([WEB_SEARCH_TOOL, 'fetch_url', 'read_thread', 'read_public_thread', 'read_channel', 'slack_search', 'read_image']);
 /** Tool calls that make up an acknowledgement step after delegating. */
 const ACK_TOOLS = new Set(['reply', 'react', 'spawn_subagent', 'message_subagent']);
 

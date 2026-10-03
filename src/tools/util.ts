@@ -36,3 +36,57 @@ export function normalizeTs(ts: string | undefined | null): string | undefined {
   if (/^\d{9,11}\.\d{1,6}$/.test(t)) return t;
   return undefined;
 }
+
+export interface SlackPermalink {
+  channel: string;
+  /** The linked message. */
+  ts: string;
+  /** Thread root when the link points at a thread reply (`?thread_ts=`); absent for top-level messages. */
+  threadTs?: string;
+}
+
+/**
+ * Parse a Slack message permalink (`https://x.slack.com/archives/C123/p1790000000000100?thread_ts=1790000000.000100`).
+ * Returns undefined for anything that isn't one.
+ */
+export function parseSlackPermalink(url: string | undefined | null): SlackPermalink | undefined {
+  if (!url) return undefined;
+  let u: URL;
+  try {
+    u = new URL(url.trim().replace(/^<|>$/g, '').split('|')[0]!);
+  } catch {
+    return undefined;
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return undefined;
+  const m = /\/archives\/([CGD][A-Z0-9]+)\/(p\d{16})\/?$/.exec(u.pathname);
+  if (!m) return undefined;
+  const ts = normalizeTs(m[2]);
+  if (!ts) return undefined;
+  const threadTs = normalizeTs(u.searchParams.get('thread_ts'));
+  return { channel: m[1]!, ts, ...(threadTs && threadTs !== ts ? { threadTs } : {}) };
+}
+
+/** A channel id from what the model passes: 'C123', '<#C123|name>', '<#C123>'. */
+export function parseChannelId(s: string | undefined | null): string | undefined {
+  const m = /^\s*(?:<#)?([CGD][A-Z0-9]{2,})(?:\|[^>]*)?>?\s*$/.exec(s ?? '');
+  return m?.[1];
+}
+
+/**
+ * Message text including forwarded/shared content: Slack puts a forwarded message (and link unfurls) in
+ * `attachments`, so a share with a comment would otherwise show only the comment.
+ */
+export function textWithAttachments(raw: any): string {
+  const text: string = raw?.text ?? '';
+  const atts: any[] = Array.isArray(raw?.attachments) ? raw.attachments : [];
+  const extra = atts
+    .map((a) => {
+      const body = String(a?.text || a?.fallback || a?.title || '').trim();
+      if (!body || text.includes(body)) return '';
+      const who = a?.author_name || a?.author_subname || '';
+      const where = a?.channel_name ? ` in #${a.channel_name}` : '';
+      return `[${a?.is_share || a?.is_msg_unfurl ? 'forwarded' : 'attached'}${who ? ` from ${who}` : ''}${where}: ${body}]`;
+    })
+    .filter(Boolean);
+  return [text, ...extra].filter(Boolean).join('\n');
+}

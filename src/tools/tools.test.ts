@@ -86,8 +86,8 @@ describe('registry', () => {
     const front = Object.keys(toolsFor('front', baseCtx())).sort();
     const child = Object.keys(toolsFor('child', baseCtx())).sort();
     const gate = Object.keys(toolsFor('gate', baseCtx()));
-    for (const n of ['fetch_url', 'web_search', 'slack_search', 'read_thread', 'read_channel', 'read_image', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
-    expect(child).toEqual(['fetch_url', 'read_channel', 'read_image', 'read_thread', 'slack_search', 'web_search']);
+    for (const n of ['fetch_url', 'web_search', 'slack_search', 'read_thread', 'read_public_thread', 'read_channel', 'read_image', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
+    expect(child).toEqual(['fetch_url', 'read_channel', 'read_image', 'read_public_thread', 'read_thread', 'slack_search', 'web_search']);
     expect(gate).toEqual([]);
     const ws = toolsFor('front', baseCtx()).web_search as any;
     expect(ws.type).toBe('provider');

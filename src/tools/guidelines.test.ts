@@ -73,7 +73,8 @@ const match = (id: string, ch: any, text = `result in ${ch.id}`) => ({
   ts: `17900000${id}.000100`,
   text,
   permalink: `https://fixture.slack.com/archives/${ch.id}/p17900000${id}000100`,
-  previous: { user: 'U0X', text: 'context from elsewhere', ts: '1.1' },
+  previous: { user: 'U0X', text: `context near ${ch.id}`, ts: '1.1' },
+  next: { user: 'U0X', text: '## hidden neighbour', ts: '1.2' },
 });
 const MATCHES = [
   match('01', { id: 'C0PUBA', name: 'ship', is_channel: true, is_private: false }),
@@ -141,12 +142,14 @@ describe('slack_search privacy', () => {
     expect(infoCalls).toEqual(['C0FLAKY']);
   });
 
-  it('the tool output never mentions private results, totals or context fields', async () => {
+  it('the tool output never mentions private results or totals; context only from public matches', async () => {
     const out: string = await exec(toolsFor('child', ctx()).slack_search, { query: 'guidelines' });
     expect(out).toContain('(2 shown, public channels only)');
     expect(out).toContain('|ship>');
     expect(out).toContain('|lounge>');
-    for (const leak of ['secret staff', 'staff', 'flagged', 'old private', 'dm text', 'mpim', 'mystery', 'unknown channel', 'flaky', 'C0NEWPRIV', '2345', 'context from elsewhere', 'hidden search hit']) {
+    expect(out).toContain('context near C0PUBA');
+    expect(out).toContain('context near C0PUBB');
+    for (const leak of ['secret staff', 'staff', 'flagged', 'old private', 'dm text', 'mpim', 'mystery', 'unknown channel', 'flaky', 'C0NEWPRIV', 'C0PRIVFLAG', 'G0OLDPRIV', 'D0DM', 'C0MPIMX', 'C0UNKNOWN', 'C0FLAKY', '2345', 'hidden search hit', 'hidden neighbour']) {
       expect(out).not.toContain(leak);
     }
     const front: string = await exec(toolsFor('front', ctx()).slack_search, { query: 'guidelines' });

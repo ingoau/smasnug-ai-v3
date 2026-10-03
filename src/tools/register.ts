@@ -7,6 +7,7 @@ import './fetch-url.js';
 import './web-search.js';
 import './slack-search.js';
 import './read-history.js';
+import './public-thread.js';
 import './read-image.js';
 import './emoji.js';
 import { pruneImageCache } from './read-image.js';

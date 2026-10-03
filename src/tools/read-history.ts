@@ -23,7 +23,8 @@ registerTool({
   roles: ['front', 'child'],
   build: (ctx) =>
     tool({
-      description: 'Read messages of the current Slack thread, e.g. earlier replies not shown in context. Returns up to `limit` messages before `before_ts` (oldest first).',
+      description:
+        'Read messages of the CURRENT Slack thread (this conversation only), e.g. earlier replies not shown in context. Returns up to `limit` messages before `before_ts` (oldest first). To read any other thread (e.g. a search hit), use read_public_thread.',
       inputSchema,
       execute: async ({ before_ts, limit }) => {
         const before = normalizeTs(before_ts);

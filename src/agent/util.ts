@@ -151,6 +151,8 @@ export function describeToolStep(toolName: string, input: unknown): string {
       return q('url') ? `Reading ${q('url')}` : 'Reading a page';
     case 'read_thread':
       return 'Reading the thread';
+    case 'read_public_thread':
+      return 'Reading a Slack thread';
     case 'read_channel':
       return 'Reading the channel';
     case 'read_image':

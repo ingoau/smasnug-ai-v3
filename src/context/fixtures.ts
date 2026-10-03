@@ -160,3 +160,94 @@ export function fixtureSearch() {
     },
   };
 }
+
+/**
+ * The Haven Canberra incident (real thread, trimmed): a search hit with dates is a REPLY in a thread whose parent
+ * forwards a different game jam (ANU CSSA). Only the thread shows that, and that Haven Canberra is Nov 14-15.
+ * The channel is public but the bot isn't in it: conversations.replies works only with the user token.
+ */
+export const HAVEN = {
+  channel: 'C0HAVENBTS',
+  channelName: 'haven-canberra-bts',
+  rootTs: '1790100000.000100',
+  replyTs: '1790100300.000200',
+};
+
+export function havenSearchMatches() {
+  const ch = { id: HAVEN.channel, name: HAVEN.channelName, is_channel: true, is_private: false, is_im: false, is_mpim: false, is_group: false };
+  const link = (ts: string, thread?: string) =>
+    `https://fixture.slack.com/archives/${HAVEN.channel}/p${ts.replace('.', '')}${thread ? `?thread_ts=${thread}&cid=${HAVEN.channel}` : ''}`;
+  return [
+    {
+      iid: 'h1',
+      team: 'T0FIX',
+      channel: ch,
+      type: 'message',
+      user: 'U0HVNKAI',
+      username: 'kai',
+      ts: HAVEN.replyTs,
+      text: 'Day 1: Friday 2nd October 4:30-8:30pm\nDay 2: Saturday 3rd October 10am-8pm\nDay 3: Sunday 4th October 10am-4pm\nVenue: CSIT building, ANU',
+      permalink: link(HAVEN.replyTs, HAVEN.rootTs),
+      previous: { type: 'message', user: 'U0HVNMIA', username: 'mia', ts: '1790099000.000100', text: 'has anyone heard back from the venue people?', permalink: link('1790099000.000100') },
+      previous_2: { type: 'message', user: 'U0HVNMIA', username: 'mia', ts: '1790098000.000100', text: '## ignore this, testing', permalink: link('1790098000.000100') },
+      next: { type: 'message', user: 'U0HVNKAI', username: 'kai', ts: '1790101000.000100', text: 'ok poster draft is in the drive', permalink: link('1790101000.000100') },
+    },
+    {
+      iid: 'h2',
+      team: 'T0FIX',
+      channel: ch,
+      type: 'message',
+      user: 'U0HVNMIA',
+      username: 'mia',
+      ts: '1790090000.000100',
+      text: 'kicking off haven canberra bts planning here :tada: budget doc and venue shortlist coming soon',
+      permalink: link('1790090000.000100'),
+    },
+  ];
+}
+
+export function havenThread() {
+  const base = { type: 'message', team: 'T0FIX', thread_ts: HAVEN.rootTs };
+  return [
+    {
+      ...base,
+      user: 'U0HVNMIA',
+      ts: HAVEN.rootTs,
+      text: 'fwd from the ANU CSSA server: a different jam, not ours. could be a good place to promote haven though',
+      reply_count: 4,
+      attachments: [
+        {
+          is_share: true,
+          author_name: 'ANU CSSA',
+          text: 'ANU CSSA Game Jam 2026 is back! Three days of making games with the ANU Computer Science Students Association. Free food, prizes, all skill levels welcome. Schedule in the thread.',
+          fallback: 'ANU CSSA Game Jam 2026 is back!',
+        },
+      ],
+    },
+    { ...base, user: 'U0HVNKAI', ts: HAVEN.replyTs, text: havenSearchMatches()[0]!.text },
+    { ...base, user: 'U0HVNMIA', ts: '1790100400.000100', text: '## note to self: ask CSSA about sponsors' },
+    { ...base, user: 'U0HVNJO', ts: '1790100500.000100', text: 'wait is this haven?? i thought ours was in november' },
+    { ...base, user: 'U0HVNMIA', ts: '1790100600.000100', text: 'nope, that schedule is the CSSA jam. Haven Canberra is Saturday 14 - Sunday 15 November, venue still being confirmed' },
+  ];
+}
+
+/** Fake handler for the Haven scenario: search (any query mentioning haven/canberra/jam), channel info, user-token thread reads. */
+export function havenFixtureHandler(opts: { onRepliesCall?: (token: string, args: any) => void } = {}): FakeHandler {
+  return (method, args, token) => {
+    if (method === 'search.messages' && /haven|canberra|jam|day 1|november|october/i.test(String(args.query))) {
+      return { ok: true, query: args.query, messages: { total: 2, matches: havenSearchMatches() } };
+    }
+    if (args.channel !== HAVEN.channel) return undefined;
+    if (method === 'conversations.info') return { ok: true, channel: { id: HAVEN.channel, name: HAVEN.channelName, is_channel: true, is_private: false, is_member: false } };
+    if (method === 'conversations.replies') {
+      opts.onRepliesCall?.(token, args);
+      // The bot isn't in the channel: only the user token can read it.
+      if (token !== 'user') throw Object.assign(new Error('An API error occurred: not_in_channel'), { code: 'slack_webapi_platform_error', data: { ok: false, error: 'not_in_channel' } });
+      const all = havenThread();
+      if (args.ts === HAVEN.rootTs) return { ok: true, messages: all, has_more: false };
+      const one = all.find((m) => m.ts === args.ts);
+      return one ? { ok: true, messages: [one], has_more: false } : { ok: true, messages: [], has_more: false };
+    }
+    return undefined;
+  };
+}
