@@ -5,10 +5,9 @@
 import type { Job } from 'bullmq';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { getBotIdentity } from '../core/slack.js';
-import { limits } from '../config.js';
+import { env, limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { recordModelUsage } from '../features/guard.js';
-import { MODELS } from '../models.js';
 import { log } from '../log.js';
 import { markMessage } from '../core/timing.js';
 import { isLatestSeq, takeBatch, type DebounceJob } from './debounce.js';
@@ -64,13 +63,15 @@ export async function processDebounce(job: Job<DebounceJob>) {
       decision: result.respond ? 'yes' : 'no',
       raw: result.raw,
       latencyMs: result.latencyMs,
-      model: MODELS.gate,
+      model: result.model,
+      ...(result.probability !== undefined ? { probability: result.probability, threshold: env.GATE_THRESHOLD } : {}),
+      ...(result.fallback ? { fallback: result.fallback } : {}),
       ...(result.error ? { error: result.error.slice(0, 300) } : {}),
     });
-    await recordModelUsage({ userId: authorId, threadId, model: MODELS.gate, inputTokens: result.inputTokens, outputTokens: result.outputTokens }).catch((err) =>
+    await recordModelUsage({ userId: authorId, threadId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens }).catch((err) =>
       log.warn({ err }, 'recordModelUsage failed'),
     );
-    log.info({ threadId, authorId, respond: result.respond, latencyMs: result.latencyMs }, 'gate decision');
+    log.info({ threadId, authorId, respond: result.respond, model: result.model, probability: result.probability, fallback: result.fallback, latencyMs: result.latencyMs }, 'gate decision');
     if (!result.respond) return;
     // Addressed: reset the disengagement counters.
     await sql`update threads set last_addressed_at = now(), messages_since_addressed = 0 where id = ${threadId}`;

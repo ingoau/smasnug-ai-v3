@@ -505,11 +505,11 @@ describe.skipIf(!infra)('pipeline integration', () => {
     it('fire: gated batch runs the gate and schedules on yes, drops on no', async () => {
       await makeThread();
       await storeMsg('U2', '1.5', 'what about NZ?');
-      const gate = vi.spyOn(gateImpl, 'run').mockResolvedValueOnce({ respond: false, raw: 'no', latencyMs: 5 });
+      const gate = vi.spyOn(gateImpl, 'run').mockResolvedValueOnce({ respond: false, raw: 'no', latencyMs: 5, model: 'test' });
       await debounce.addToBatch(THREAD, 'U2', '1.5', 'gate');
       await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 1 }));
       expect(await turns()).toHaveLength(0);
-      gate.mockResolvedValueOnce({ respond: true, raw: 'yes', latencyMs: 5 });
+      gate.mockResolvedValueOnce({ respond: true, raw: 'yes', latencyMs: 5, model: 'test' });
       await debounce.addToBatch(THREAD, 'U2', '1.5', 'gate');
       await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 2 }));
       expect(await turns()).toMatchObject([{ authorId: 'U2', messageTs: ['1.5'], isMention: false }]);

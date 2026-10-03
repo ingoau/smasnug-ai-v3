@@ -14,6 +14,10 @@ const Env = z.object({
   /** Exa search API key for `web_search` (src/tools/web-search.ts). Unset → the tool says web search isn't configured. */
   EXA_API_KEY: z.string().optional(),
   MODEL_LUNA: z.string().default('openai/gpt-6-luna'),
+  /** Relevance gate: a decisions model on OpenRouter's Decisions API, or 'luna' to use the chat model. */
+  GATE_MODEL: z.string().default('typesafe/jev-1.13'),
+  /** Respond when the gate model's probability is at least this. */
+  GATE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
   BOT_DISPLAY_NAME: z.string().default('smasnug ai'),
   LOG_LEVEL: z.string().default('info'),
   /** Turn status text: see src/pipeline/session-status.ts (overlay = native processing + activity text). */

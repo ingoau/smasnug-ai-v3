@@ -85,7 +85,7 @@ The bot always runs on a mention or DM. In threads where it has been mentioned, 
 - 
 **Deterministic rules.** A mention or DM always runs the front agent. A message that @mentions someone else and not the bot is skipped. A thread containing only the original user and the bot goes straight to the front agent.
 - 
-**Relevance gate.** Everything else goes to a small, fast model with the last few messages and the new one. It answers one question: is this addressed to the bot, or would the bot clearly add something? Decisions are logged for tuning.
+**Relevance gate.** Everything else goes to a small, fast model with the last few messages and the new one. It answers one question: is this addressed to the bot, or would the bot clearly add something? Decisions are logged for tuning. Implementation: TypeSafe's Jev (`typesafe/jev-1.13`) through OpenRouter's Decisions API answers one typed yes/no question with a probability (respond at ≥ 0.8, `GATE_THRESHOLD`); ~0.45s vs ~1.2s for a chat model, 95% agreement with the earlier Luna gate on 39 logged decisions. Any Decisions API error or a 1.5s timeout falls back to the Luna chat-model gate; every `gate_decision` event logs the model, probability and any fallback.
 - 
 **Front agent.** On yes, the front agent runs and can still choose silence by not calling `reply`.
 **Never triggered by bots.** Messages from bots (`bot_id` or `subtype: bot_message`), including the bot's own and its on-behalf-of messages, never start a turn. Bot messages are still included in context, labelled as bots.
