@@ -109,12 +109,16 @@ export async function applyDelete(channelId: string, ts: string): Promise<{ thre
 
 /** True when only the thread's original poster (= authorId) and bots have spoken, as far as we have stored. */
 export async function isTwoPartyThread(thread: ThreadRow, authorId: string): Promise<boolean> {
-  const rows = await sql<{ userId: string | null; ts: string }[]>`
-    select user_id, ts from messages
-    where thread_id = ${thread.id} and bot_id is null and user_id is not null`;
-  const root = rows.find((r) => r.ts === thread.threadTs);
-  // Without the root we don't know who started the thread (mid-thread mention, not backfilled yet).
-  if (!root || root.userId !== authorId) return false;
+  const all = await sql<{ userId: string | null; ts: string; botId: string | null }[]>`
+    select user_id, ts, bot_id from messages
+    where (thread_id = ${thread.id} or (channel_id = ${thread.channelId} and ts = ${thread.threadTs})) and user_id is not null
+    order by ts::numeric`;
+  const root = all.find((r) => r.ts === thread.threadTs);
+  const rows = all.filter((r) => !r.botId);
+  // Without the root we don't know who started the thread (mid-thread mention, not backfilled yet). A bot-rooted
+  // thread (e.g. the bot's own message after a group-ping redirect) was started by its first human message.
+  const opener = root?.botId ? rows[0] : root;
+  if (!opener || opener.userId !== authorId) return false;
   return rows.every((r) => r.userId === authorId);
 }
 

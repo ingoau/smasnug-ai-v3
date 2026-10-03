@@ -10,6 +10,7 @@ import type { TurnTiming } from '../core/timing.js';
 import { uploadFiles, type OutgoingFile } from './files.js';
 import { stripCitationMarkers } from '../tools/web-search.js';
 import { extractPartialString } from './partial-json.js';
+import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chooseDelivery, isNearDuplicate, type DeliveryMode } from './util.js';
 
 /** Coalescing interval for appends once the stream is open. */
@@ -161,7 +162,8 @@ export class ReplyManager {
     if (e.failed || e.stopped || e.halted || e.dropped) return;
     this.t.timing?.mark('first_flush');
     if ((await e.mode) !== 'stream') return;
-    const value = finalText ?? streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '');
+    // Group pings (@channel/@here/@everyone, user groups) are neutralised: the bot never notifies a group.
+    const value = finalText ?? broadcastSafePrefix(streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? ''));
     if (value.length <= e.sent) return;
     if (!e.streamTs && finalText === undefined && this.deliveredTexts.length) {
       // A later reply in this turn: don't start streaming until it can be compared with the earlier ones.
@@ -227,7 +229,7 @@ export class ReplyManager {
   /** Called from the tool's execute with the complete, validated input. */
   async finish(toolCallId: string, rawText: string, files?: OutgoingFile[]): Promise<string> {
     const e = this.start(toolCallId);
-    const text = stripCitationMarkers(rawText);
+    const text = neutralizeBroadcasts(stripCitationMarkers(rawText));
     if (e.timer) {
       clearTimeout(e.timer);
       e.timer = null;

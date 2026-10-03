@@ -78,8 +78,10 @@ export async function backfillThread(thread: ThreadRow, opts: { rootIsNew?: bool
   thread.backfilled = true;
 }
 
-async function loadThreadMessages(threadId: string): Promise<RenderMsg[]> {
-  const rows = await sql<StoredMessage[]>`select * from messages where thread_id = ${threadId} and not deleted`;
+async function loadThreadMessages(thread: ThreadRow): Promise<RenderMsg[]> {
+  // The root by ts too: a group-ping message the bot answered in a new top-level thread is stored under that thread.
+  const rows = await sql<StoredMessage[]>`select * from messages
+    where (thread_id = ${thread.id} or (channel_id = ${thread.channelId} and ts = ${thread.threadTs})) and not deleted`;
   return rows.map(fromStored);
 }
 
@@ -118,7 +120,7 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
   const thread = await span('ctx_ensure_thread', () => ensureThread(threadId));
   await span('ctx_backfill', () => backfillThread(thread, { rootIsNew: opts.newMessageTs.includes(thread.threadTs) }));
 
-  const all = await span('ctx_load_thread', () => loadThreadMessages(threadId));
+  const all = await span('ctx_load_thread', () => loadThreadMessages(thread));
   const newSet = new Set(opts.newMessageTs);
   // New messages may live outside the thread rows (e.g. a top-level DM message) — load them by ts too.
   const newMsgs = opts.newMessageTs.length ? await span('ctx_load_new', () => loadByTs(thread.channelId, opts.newMessageTs)) : [];

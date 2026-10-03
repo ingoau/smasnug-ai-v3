@@ -47,7 +47,7 @@ Tool
 Gate
 Front agent
 Children
-Slack search (user token, public channels only)
+Slack search (user token, public channels only: each result's channel is verified public via cached `conversations.info`, fail closed; counts come from the filtered list)
 
 ✓
 ✓
@@ -90,6 +90,17 @@ The bot always runs on a mention or DM. In threads where it has been mentioned, 
 **Front agent.** On yes, the front agent runs and can still choose silence by not calling `reply`.
 **Never triggered by bots.** Messages from bots (`bot_id` or `subtype: bot_message`), including the bot's own and its on-behalf-of messages, never start a turn. Bot messages are still included in context, labelled as bots.
 **Disengagement.** If the bot hasn't been addressed for about 10 messages or a few hours, it stops considering follow-ups until mentioned again. "Stop" or "shut up" also disengages it.
+**Workspace AI-bot guidelines** (enforced in code: pure checks in `src/pipeline/guidelines.ts`, side effects in `src/pipeline/guideline-actions.ts`; they apply in channels, threads and DMs and run before the rules above):
+- 
+`##` **prefix: ignored completely.** A message whose trimmed text starts with `##` (mention or not) is never stored, adds no thread events, never triggers a turn, the gate or a debounce batch, and doesn't count toward limits or disengagement. It is also hidden from everything the bot reads: thread/channel backfill, `read_thread`/`read_channel` and `slack_search` results. Editing a message to start with `##` is treated like deleting it (stored copy blanked, dropped from batches and pending turns). Editing the `##` away never triggers a turn; a copy that was blanked stays blank, a never-stored one may be stored as plain context.
+- 
+`@bot !stop` **= the native stop button.** A message mentioning the bot whose remaining text is `!stop` (case-insensitive) runs the `agent_session_stopped` handler for its thread (stop the running turn at the next step, cancel the thread's runs, drop the user's pending turns/inbox/batch, disengage, set the session `active`, post "Stopped."); it never starts a turn itself. In DMs the mention is optional. At a channel's top level it applies to that message's own (empty) thread, so it's harmless.
+- 
+**Group ping on a top-level trigger → answer elsewhere.** When the message that triggers the bot is a top-level channel message that pings a user group (`<!subteam^…>`) or `@channel`/`@here`/`@everyone`, the bot doesn't reply under it. It posts a new top-level message ("<@user> asked me something in <this message>, replying here so the group thread stays clean", idempotent on the source ts, no group ping), stores the user's message as part of that new thread, and runs the turn there (replies, cards and status included). Follow-ups in the new thread work normally (the asker counts as the thread's original poster for the two-party rule); the group-ping thread is never engaged. Thread replies and DMs with group pings are answered in place.
+- 
+`<>` **prefix: don't reply unless mentioned.** A message whose trimmed raw text starts with a literal `<>` (Slack delivers it as `&lt;&gt;`) never triggers a turn or the gate unless it @mentions the bot, in which case it's a normal mention. It is still stored and visible as context. DMs included.
+- 
+**The bot never pings groups.** `reply` text (also while streaming) and card fallback text have `<!channel>`, `<!here>`, `<!everyone>`, `<!subteam^…>` and plain `@here`/`@channel`/`@everyone` neutralised; `send_message` already did this.
 **Status indicator.** `agents.sessions.setStatus` `processing` (Slack's "Working…" plus the native stop button, which behaves like saying "stop") and `active` when the turn ends, always (also on errors). Mentions and DMs show it as soon as the message is accepted at intake ("Thinking…"), before the debounce window; the turn takes it over, and it is cleared if no turn follows. Status calls never delay the model call. Unmentioned follow-ups show it only once the turn commits to work — its first tool call other than `reply`/`react`/`unreact`/`search_emojis`; a turn that stays silent or goes straight to `reply` never shows a status (the streamed reply is its own indicator) and gets no acknowledgement reaction. The activity text is code-derived from the tool being started ("Searching Slack…", "Reading the page…", "Starting a subagent…"), coalesced to at most one update per second, and sent through the legacy `assistant.threads.setStatus` (the only free-text status; it still works through Slack's compatibility bridge) on top of the session status. Server-side web search has no client tool call and isn't announced. A turn the user stopped never sets `processing` again.
 ## Turns
 Every front-agent turn has exactly one speaker, and only one front agent runs per thread at a time. This keeps "current speaker" well defined for memory, tools and steering.

@@ -9,11 +9,19 @@ import { Redis } from 'ioredis';
 
 export const TEST_REDIS_DB = 12;
 
-export async function setupTestInfra(): Promise<boolean> {
+/**
+ * `name` / `redisDb`: each integration test file gets its own database (`smasnug_<name>_test`) and Redis db, so
+ * files can run in parallel. With an explicit TEST_DATABASE_URL / TEST_REDIS_URL (e.g. a second checkout running
+ * tests concurrently) they are derived from those instead: database `<test db>_<name>`, Redis db `<test db> +
+ * redisOffset`, so concurrent checkouts don't collide either.
+ */
+export async function setupTestInfra(opts: { name?: string; redisDb?: number; redisOffset?: number } = {}): Promise<boolean> {
+  const name = opts.name ?? 'pipeline';
   if (existsSync('.env')) process.loadEnvFile('.env');
   process.env.OPENROUTER_KEY ||= 'test';
   const base = new URL(process.env.DATABASE_URL ?? 'postgres://smasnug:smasnug@localhost:5433/smasnug');
-  const dbName = 'smasnug_pipeline_test'; // fixed: shared by every checkout, used only by these tests
+  const explicitDb = process.env.TEST_DATABASE_URL ? decodeURIComponent(new URL(process.env.TEST_DATABASE_URL).pathname.replace(/^\//, '')) : '';
+  const dbName = explicitDb ? `${explicitDb}_${name}` : `smasnug_${name}_test`;
   const admin = postgres({ host: base.hostname, port: Number(base.port || 5432), user: base.username, password: base.password, database: 'postgres', max: 1, onnotice: () => {}, connect_timeout: 2 });
   try {
     const exists = await admin`select 1 from pg_database where datname = ${dbName}`;
@@ -28,7 +36,8 @@ export async function setupTestInfra(): Promise<boolean> {
   process.env.DATABASE_URL = testUrl.toString();
 
   const redisUrl = new URL(process.env.REDIS_URL ?? 'redis://localhost:6380');
-  redisUrl.pathname = `/${TEST_REDIS_DB}`;
+  const explicitRedis = process.env.TEST_REDIS_URL ? Number(new URL(process.env.TEST_REDIS_URL).pathname.replace(/^\//, '') || 0) : NaN;
+  redisUrl.pathname = `/${Number.isFinite(explicitRedis) ? (explicitRedis + (opts.redisOffset ?? 1)) % 16 : (opts.redisDb ?? TEST_REDIS_DB)}`;
   process.env.REDIS_URL = redisUrl.toString();
   const r = new Redis(process.env.REDIS_URL, { lazyConnect: true, connectTimeout: 2000, maxRetriesPerRequest: 1 });
   try {

@@ -2,16 +2,16 @@
 import { sql } from '../db/index.js';
 import { slackCall } from '../core/slack.js';
 import { compareTs } from './format.js';
-import { fromSlack, HIDDEN_SUBTYPES } from './normalize.js';
+import { fromSlack } from './normalize.js';
 
 export { fromSlack, fromStored } from './normalize.js';
 
 /** Store messages we pulled from Slack. Never overwrites rows the pipeline already wrote (they may be newer). */
 export async function storeMessages(channelId: string, threadId: string | null, raws: any[]) {
   const rows = raws
-    .filter((r) => r?.ts && !(r.subtype && HIDDEN_SUBTYPES.has(r.subtype)))
-    .map((r) => {
-      const m = fromSlack(r)!;
+    .map((r) => ({ r, m: fromSlack(r) })) // null: joins/leaves, tombstones, `##` messages — never stored
+    .filter((x): x is { r: any; m: NonNullable<ReturnType<typeof fromSlack>> } => x.m !== null)
+    .map(({ r, m }) => {
       return {
         channel_id: channelId,
         ts: m.ts,

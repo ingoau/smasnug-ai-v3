@@ -1,23 +1,81 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { registerTool } from '../core/tools.js';
-import { slackCall } from '../core/slack.js';
+import { slackCall, slackErrorCode } from '../core/slack.js';
+import { redis } from '../core/redis.js';
 import { takeLimit } from '../features/guard.js';
 import { renderSlackText } from '../context/format.js';
 import { getUserNames } from '../context/users.js';
+import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
 import { errMsg, truncateChars, untrusted } from './util.js';
 
 const MAX_RESULTS = 10;
 const TEXT_CHARS = 500;
+const VISIBILITY_TTL_S = 60 * 60;
 
-/** Public channels only: no private channels, IMs, MPIMs (or anything not positively marked as a channel). */
+/**
+ * First filter on a search match's own channel flags. Fails closed: only a `C…` channel that isn't flagged
+ * private / IM / MPIM / group passes, and `is_private` must be `false` or absent. Passing is necessary, not
+ * sufficient: the channel must also be verified public via conversations.info (`publicChannelIds`), because newer
+ * private channels have `C…` ids too and search matches don't always carry `is_private`.
+ */
 export function isPublicChannelMatch(m: any): boolean {
   const c = m?.channel;
-  if (!c?.id) return false;
-  if (c.is_private || c.is_im || c.is_mpim || c.is_group) return false;
-  if (typeof c.id === 'string' && (c.id.startsWith('D') || c.id.startsWith('G'))) return false;
-  return c.is_channel === true || (typeof c.id === 'string' && c.id.startsWith('C'));
+  if (!c || typeof c.id !== 'string' || !c.id.startsWith('C')) return false;
+  if (c.is_private !== undefined && c.is_private !== false) return false;
+  if (c.is_im || c.is_mpim || c.is_group) return false;
+  return true;
+}
+
+/** conversations.info verdict: public only when Slack positively says so (not private, not an IM/MPIM/group). */
+export function isPublicChannelInfo(ch: any): boolean {
+  if (!ch || typeof ch.id !== 'string') return false;
+  return ch.is_private === false && !ch.is_im && !ch.is_mpim && !ch.is_group && ch.is_channel !== false;
+}
+
+const visibilityKey = (id: string) => `slack:chanvis:${id}`;
+
+/**
+ * The subset of `ids` that are verified public channels: conversations.info (bot token), cached in Redis for an
+ * hour. Any error or ambiguity means "not public"; failed lookups aren't cached, so they are retried next time.
+ */
+export async function publicChannelIds(ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  await Promise.all(
+    [...new Set(ids)].map(async (id) => {
+      try {
+        const cached = await redis.get(visibilityKey(id));
+        if (cached) {
+          if (cached === 'public') out.add(id);
+          return;
+        }
+        let verdict: 'public' | 'private';
+        try {
+          const res = await slackCall<any>('conversations.info', { channel: id });
+          verdict = res?.ok !== false && res?.channel?.id === id && isPublicChannelInfo(res.channel) ? 'public' : 'private';
+        } catch (err) {
+          const code = slackErrorCode(err);
+          // Invisible to the bot (a private channel it isn't in) is a definite answer; other errors aren't cached.
+          if (code !== 'channel_not_found' && code !== 'method_not_supported_for_channel_type') throw err;
+          verdict = 'private';
+        }
+        await redis.set(visibilityKey(id), verdict, 'EX', VISIBILITY_TTL_S);
+        if (verdict === 'public') out.add(id);
+      } catch (err) {
+        log.warn({ err, channel: id }, 'channel visibility lookup failed; excluding its search results');
+      }
+    }),
+  );
+  return out;
+}
+
+/** Matches safe to show: verified public channels only, `##` messages dropped (guidelines). Order kept. */
+export async function filterPublicMatches(matches: any[]): Promise<any[]> {
+  const candidates = matches.filter((m) => isPublicChannelMatch(m) && !isHiddenMessage(m.text));
+  if (!candidates.length) return [];
+  const pub = await publicChannelIds(candidates.map((m) => m.channel.id));
+  return candidates.filter((m) => pub.has(m.channel.id));
 }
 
 export function formatSearchMatches(matches: any[], names: Map<string, string>): string {
@@ -60,7 +118,9 @@ registerTool({
             { token: 'user' },
           );
           const all: any[] = res.messages?.matches ?? [];
-          const pub = all.filter(isPublicChannelMatch).slice(0, MAX_RESULTS);
+          // Only the filtered list is ever described: never `messages.total`/pagination or a match's
+          // `previous`/`next` context, which can come from private channels.
+          const pub = (await filterPublicMatches(all)).slice(0, MAX_RESULTS);
           if (!pub.length) return `No public-channel results for "${query}".`;
           const ids = [...new Set(pub.flatMap((m) => [m.user, ...[...(m.text ?? '').matchAll(/<@([UW][A-Z0-9]+)/g)].map((x) => x[1])]).filter(Boolean))] as string[];
           const names = await getUserNames(ids);

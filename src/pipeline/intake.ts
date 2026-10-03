@@ -10,6 +10,8 @@ import { log } from '../log.js';
 import { markMessage } from '../core/timing.js';
 import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
+import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
+import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
 import { decide, isStopMessage, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { showIntakeStatus } from './session-status.js';
@@ -32,6 +34,7 @@ export async function handleMessageEvent(ev: MessageEvent) {
   if (ev.subtype === 'message_changed') return handleEdit(ev);
   if (ev.subtype === 'message_deleted') return handleDelete(ev.channel, ev.deleted_ts, ev.previous_message);
   if (ev.hidden || !NEW_MESSAGE_SUBTYPES.has(ev.subtype)) return;
+  if (isHiddenMessage(ev.text)) return; // `##` (guidelines): not stored, no events, never triggers anything
   return handleNewMessage(ev);
 }
 
@@ -54,6 +57,10 @@ async function handleNewMessage(ev: MessageEvent) {
   const threadId = threadIdOf(channelId, threadRootTs(ev));
   const text = ev.text ?? '';
   const { mentionsBot, mentionsOthers } = isBot ? { mentionsBot: false, mentionsOthers: false } : mentionFacts(text, bot.userId);
+  if (!isBot && ev.user && shouldRedirectGroupPing({ isDm, threadTs: ev.thread_ts, ts: ev.ts, mentionsBot, text }) && !isBangStop(text, bot.userId)) {
+    await redirectGroupPing({ ...ev, user: ev.user }, bot);
+    return;
+  }
 
   let thread = await getThread(threadId);
   if (!thread && !isBot && (isDm || mentionsBot)) {
@@ -73,6 +80,7 @@ async function handleNewMessage(ev: MessageEvent) {
   if (isBot || !ev.user) return; // bots never start a turn
 
   const authorId = ev.user;
+  if (isBangStop(text, bot.userId, { isDm })) return handleBangStop(channelId, threadRootTs(ev), authorId, ev.ts);
   const isStop = isStopMessage(text);
   let disengageDue = false;
   if (isDm || mentionsBot) {
@@ -82,7 +90,8 @@ async function handleNewMessage(ev: MessageEvent) {
   }
   const twoParty = thread.engaged && !isDm && !mentionsBot && !mentionsOthers ? await isTwoPartyThread(thread, authorId) : false;
 
-  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, isStop });
+  const quietPrefix = hasQuietPrefix(text);
+  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, isStop, quietPrefix });
   log.debug({ threadId, ts: ev.ts, decision }, 'message decision');
   if (decision.action === 'ignore') {
     if (decision.reason === 'disengaged') await disengage(threadId, 'idle', null);
@@ -127,6 +136,13 @@ async function handleEdit(ev: MessageEvent) {
   if (!msg?.ts) return;
   // Deleting a thread parent that has replies turns it into a tombstone.
   if (msg.subtype === 'tombstone') return handleDelete(ev.channel, msg.ts, ev.previous_message ?? msg);
+  if (isHiddenMessage(msg.text)) {
+    // Edited to start with `##` (guidelines): treat like a deletion. Never visible before → just make sure nothing is stored.
+    const wasVisible = ev.previous_message ? !isHiddenMessage(ev.previous_message.text) : true;
+    if (wasVisible && msg.edited) return handleDelete(ev.channel, msg.ts, ev.previous_message ?? msg);
+    await applyDelete(ev.channel, msg.ts);
+    return;
+  }
   let threadId = (await applyEdit(ev.channel, msg))?.threadId ?? null;
   if (!threadId && msg.edited) {
     // Edit processed before the original message (parallel workers): store the edited version for threads the
@@ -136,7 +152,9 @@ async function handleEdit(ev: MessageEvent) {
     if (!known && !isBotMessage(msg) && msg.user) {
       const bot = await getBotIdentity();
       const isDm = ev.channel_type === 'im';
-      if (isDm || mentionFacts(msg.text ?? '', bot.userId).mentionsBot) {
+      const mentionsBot = mentionFacts(msg.text ?? '', bot.userId).mentionsBot;
+      // A group-ping trigger is answered in a new thread (guidelines), never under the original message.
+      if ((isDm || mentionsBot) && !shouldRedirectGroupPing({ isDm, threadTs: msg.thread_ts, ts: msg.ts, mentionsBot, text: msg.text })) {
         await upsertThread({ id: candidate, channelId: ev.channel, threadTs: threadRootTs(msg), isDm });
         known = true;
       }

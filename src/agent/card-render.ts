@@ -2,6 +2,7 @@
  * Plan card rendering: a pure function of DB state → Slack message (blocks + text). No I/O here.
  */
 import { markdownToRich, type RichTextElement, type RichTextInline } from './rich-text.js';
+import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 
 // Shapes mirror @slack/types PlanBlock / TaskCardBlock (not a direct dependency).
 export interface RichTextBlock {
@@ -216,6 +217,8 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   if (reply != null) blocks.push({ type: 'markdown', block_id: `card_${card.id}_reply`, text: reply.length > MAX_MD ? `${reply.slice(0, MAX_MD)}\n\n_[message truncated]_` : reply });
   blocks.push(plan);
   // Plain-text fallback: the reply's own text when the card lives in a reply, else a summary of the plan.
-  const text = reply != null ? reply.slice(0, MAX_TEXT) : [title, ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n');
+  const text = neutralizeBroadcasts(
+    reply != null ? reply.slice(0, MAX_TEXT) : [title, ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n'),
+  );
   return { text, blocks };
 }

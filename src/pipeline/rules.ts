@@ -7,7 +7,7 @@
 export type BatchReason = 'dm' | 'mention' | 'direct' | 'stop' | 'gate';
 
 export type Decision =
-  | { action: 'ignore'; reason: 'bot' | 'not_engaged' | 'mentions_other' | 'disengaged' | 'unsupported' }
+  | { action: 'ignore'; reason: 'bot' | 'not_engaged' | 'mentions_other' | 'disengaged' | 'unsupported' | 'quiet' }
   | { action: 'batch'; reason: BatchReason; disengage?: boolean };
 
 export interface MessageFacts {
@@ -22,10 +22,13 @@ export interface MessageFacts {
   /** Only the original poster and the bot have spoken in the thread, and this author is the original poster. */
   twoParty: boolean;
   isStop: boolean;
+  /** Text starts with `<>` (guidelines rule 4): never answered unless the bot is @mentioned. */
+  quietPrefix?: boolean;
 }
 
 export function decide(f: MessageFacts): Decision {
   if (f.isBot) return { action: 'ignore', reason: 'bot' };
+  if (f.quietPrefix && !f.mentionsBot) return { action: 'ignore', reason: 'quiet' };
   if (f.isDm) return { action: 'batch', reason: 'dm' };
   if (f.mentionsBot) return f.isStop ? { action: 'batch', reason: 'stop', disengage: true } : { action: 'batch', reason: 'mention' };
   if (!f.engaged) return { action: 'ignore', reason: 'not_engaged' };
