@@ -15,18 +15,9 @@ features:
   # Agents & AI Apps: the agent container (split view next to any channel) with a native stop button.
   agent_view:
     agent_description: agentic ai b2b saas
-    suggested_prompts:
-      - title: Catch me up
-        message: Summarise what's been happening in the channel I'm looking at.
-      - title: Where should I hang out?
-        message: Which channels should I join to get help with my project and to show off what I've built?
-      - title: Project ideas
-        message: Give me a few beginner-friendly project ideas I could build and ship this weekend.
-      - title: What can you do?
-        message: What can you help me with, briefly?
   slash_commands:
     - command: /smasnug
-      description: Turn smasnug ai v3 off or on in this channel, or show its status
+      description: Turn the bot on or off in this channel
       usage_hint: "off | on | status"
       should_escape: false
 oauth_config:
@@ -34,7 +25,7 @@ oauth_config:
     bot:
       - chat:write            # post, stream, update; agents.sessions.setStatus (status + stop button)
       - assistant:write       # Agents & AI Apps: app_context_changed, suggested prompts, session titles
-      - chat:write.customize  # "smasnug ai v3 on behalf of <user>" username + avatar
+      - chat:write.customize  # "smasnug ai on behalf of <user>" username + avatar
       - chat:write.public     # send to public channels the bot hasn't joined
       - channels:history
       - groups:history
