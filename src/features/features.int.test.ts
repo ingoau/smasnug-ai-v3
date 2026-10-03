@@ -392,6 +392,8 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
         await sql`insert into messages (channel_id, ts, thread_id, user_id, bot_id, text) values (${ch}, ${ts}, ${t}, ${user}, ${bot}, ${text})`;
       await sql`insert into turns (thread_id, author_id, kind, status, created_at) values (${t}, ${alice}, 'user', 'done', now() - interval '1 hour')`;
 
+      // The test DB persists between runs: other idle threads would compete for the per-run batch, so mark them done.
+      await sql`update threads set memory_extracted_at = now() where id <> ${t}`;
       const { runMemoryExtraction } = await import('./memory/extract.js');
       await runMemoryExtraction();
       const facts = await sql<any[]>`select user_id, text from user_memory where user_id in (${alice}, ${sam})`;
