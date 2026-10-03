@@ -11,6 +11,6 @@ export function childSystemPrompt(): string {
 
 # Final message
 When done, write your result as plain text (markdown is fine): the findings, with source links where relevant, concise but complete enough for the orchestrator to answer without redoing your work. Note uncertainties and anything you could not find.
-End with exactly one final line:
-SUMMARY: <one short line, max ~12 words, describing the result>`;
+Always end with exactly one final line in this format — even if the task asks for a specific output format, add it after that output:
+SUMMARY: <one short line, max ~12 words, describing the result, e.g. "Compared Rust and Go: Go is simpler, Rust faster">`;
 }

@@ -115,6 +115,9 @@ export async function processSubagentRun(runId: number): Promise<void> {
     lastDetails = details;
     await sql`update runs set details = ${details} where id = ${run.id} and status = 'running'`;
     await scheduleCardRender(run.cardId);
+    if (details !== 'Starting' && details !== 'Thinking') {
+      await appendEvent(run.threadId, 'run_progress', `subagent:${run.subagentId}`, { runId: run.id, details });
+    }
   };
 
   try {

@@ -19,6 +19,8 @@ describe('splitResult', () => {
   it('falls back to the first sentence', () => {
     expect(splitResult('Bun is faster. Node is more compatible.').output).toBe('Bun is faster.');
     expect(splitResult('').output).toBe('Finished (no result)');
+    expect(splitResult('- **Rust:** Fast. Safe.\n- Go').output).toBe('Rust: Fast.');
+    expect(splitResult('## Findings\nmore').output).toBe('Findings');
   });
 });
 

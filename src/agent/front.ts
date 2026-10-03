@@ -198,7 +198,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     recipientUserId: turn.authorId,
     activeRuns: () => activeRunsInThread(turn.threadId),
   });
-  const state: FrontTurnState = { turn: { ...turn, id: turnId }, threadId: turn.threadId, channelId, threadTs, replies, visible: new Set(), cardId: null };
+  turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
+  const state: FrontTurnState = { turn, threadId: turn.threadId, channelId, threadTs, replies, visible: new Set(), cardId: null };
   const queuedImages: QueuedImage[] = [];
   const seenTs = new Set(turn.messageTs);
   const extras: Record<string, unknown> = {

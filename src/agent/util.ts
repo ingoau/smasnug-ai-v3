@@ -59,7 +59,11 @@ export function splitResult(text: string): { result: string; output: string } {
   }
   if (!trimmed) return { result: '', output: 'Finished (no result)' };
   const firstLine = trimmed.split('\n').find((l) => l.trim().length > 0) ?? trimmed;
-  const sentence = firstLine.replace(/^#+\s*/, '').match(/^(.+?[.!?])(\s|$)/)?.[1] ?? firstLine;
+  const plain = firstLine
+    .replace(/^\s*(#+|[-*•]|\d+[.)])\s*/, '')
+    .replace(/\*\*|__|`/g, '')
+    .trim();
+  const sentence = plain.match(/^(.+?[.!?])(\s|$)/)?.[1] ?? plain;
   return { result: trimmed, output: oneLine(sentence, 120) };
 }
 
