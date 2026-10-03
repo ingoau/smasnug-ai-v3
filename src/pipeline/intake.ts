@@ -147,7 +147,9 @@ async function handleEdit(ev: MessageEvent) {
     if (!known && !isBotMessage(msg) && msg.user) {
       const bot = await getBotIdentity();
       const isDm = ev.channel_type === 'im';
-      if (isDm || mentionFacts(msg.text ?? '', bot.userId).mentionsBot) {
+      const mentionsBot = mentionFacts(msg.text ?? '', bot.userId).mentionsBot;
+      // A group-ping trigger is answered in a new thread (guidelines), never under the original message.
+      if ((isDm || mentionsBot) && !shouldRedirectGroupPing({ isDm, threadTs: msg.thread_ts, ts: msg.ts, mentionsBot, text: msg.text })) {
         await upsertThread({ id: candidate, channelId: ev.channel, threadTs: threadRootTs(msg), isDm });
         known = true;
       }
