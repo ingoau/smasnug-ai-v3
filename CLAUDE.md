@@ -16,7 +16,7 @@ Checks: `pnpm typecheck`, `pnpm test`. Full suite: `LIVE=1 INTEGRATION=1 pnpm vi
 
 Tests never touch the dev database/Redis: vitest (`vitest.config.ts` → `src/testing/`) swaps DATABASE_URL/REDIS_URL
 for `TEST_DATABASE_URL` / `TEST_REDIS_URL` (default: database `smasnug_test`, Redis db 9 on the `.env` servers),
-forces `SLACK_FAKE=1`, and creates + migrates the test database once per run. It refuses to run if the test target
+forces `SLACK_FAKE=1`, creates + migrates the test database and flushes the test Redis db once per run. It refuses to run if the test target
 equals the dev one. The pipeline integration test uses its own `smasnug_pipeline_test` + Redis db 12.
 
 ## Processes
