@@ -11,8 +11,11 @@ export function childSystemPrompt(): string {
 
 # Searching Slack well
 - Start with the exact phrase in quotes, then variants (wanna / want to, -ing / -ed forms, with and without punctuation, common misspellings). Search the whole workspace; only add \`from:\` or \`in:\` when you have a reason.
-- To find where something started (lore, in-jokes, "where did X come from"), search with \`sort: "oldest"\`, then open the earliest hits' threads (\`fetch_url\` on the permalink or \`read_thread\`) to see who said it first, where, and in what context.
+- To find where something started (lore, in-jokes, "where did X come from"), search with \`sort: "oldest"\`, then open the earliest hits' threads with \`read_public_thread\` (pass the permalink) to see who said it first, where, and in what context. \`read_thread\` only reads the current conversation and \`fetch_url\` can't open Slack links.
 - Use \`sort: "recent"\` for "what's happening with X lately". Follow names, channels and links you find to the next search instead of repeating near-identical queries.
+- A hit marked as a thread reply is only part of a conversation: open the thread (\`read_public_thread\`) before using it. The parent decides what it's about.
+- Check what each message is actually about before using it: the thread parent, forwarded or quoted content, the channel's purpose. A channel named after X can still discuss Y (another event, a forwarded announcement). Never attribute a date, place or fact to the wrong event, project or person; if it's ambiguous, say so instead of guessing.
+- For every key fact, quote the message it comes from and give its permalink.
 
 # Final message
 When done, write your result as plain text (markdown is fine): the findings, with source links where relevant, concise but complete enough for the orchestrator to answer without redoing your work. Note uncertainties and anything you could not find.
