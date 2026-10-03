@@ -42,7 +42,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
   let redis: typeof import('../core/redis.js').redis;
   let fakeCalls: typeof import('../core/slack-fake.js').fakeCalls;
 
-  const user = 'U_TEST';
+  const user = `U_TEST${Date.now().toString(36).toUpperCase()}`;
   const channel = 'C_AGENT_TEST';
   const rootTs = `${Math.floor(Date.now() / 1000)}.${String(Math.floor(Math.random() * 1e6)).padStart(6, '0')}`;
   const threadId = `${channel}:${rootTs}`;

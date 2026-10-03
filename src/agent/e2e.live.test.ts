@@ -44,7 +44,7 @@ describe.skipIf(!LIVE)('agent e2e through the pipeline (LIVE)', () => {
     const channel = 'C_E2E';
     const root = `${Math.floor(Date.now() / 1000)}.${String(Math.floor(Math.random() * 1e6)).padStart(6, '0')}`;
     const threadId = `${channel}:${root}`;
-    const user = 'U_E2E';
+    const user = `U_E2E${Date.now().toString(36).toUpperCase()}`;
     await sql`insert into threads (id, channel_id, thread_ts, engaged, last_addressed_at) values (${threadId}, ${channel}, ${root}, true, now())`;
     await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${channel}, ${root}, ${threadId}, ${user},
       ${'<@UBOT> please hand this to a background subagent: list 3 fun facts about octopuses. Delegate it, don\'t answer yourself.'})`;
