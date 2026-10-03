@@ -1,11 +1,11 @@
 # Slack app manifest for smasnug-ai. Create the app at https://api.slack.com/apps → "Create New App" →
 # "From a manifest", paste this file. See docs/slack-setup.md for tokens and .env.
 display_information:
-  name: Smasnug
+  name: smasnug ai v3
   description: Workspace assistant — answers, researches in the background, sends messages on your behalf.
   background_color: "#2c2d30"
   long_description: >-
-    Smasnug is a workspace Slack agent. Mention it in a thread or DM it: it replies, reacts, delegates longer
+    smasnug ai v3 is a workspace Slack agent. Mention it in a thread or DM it: it replies, reacts, delegates longer
     research to background subagents shown in plan cards, and can send messages on your behalf after you confirm a
     preview. It remembers a few facts about you to personalise answers; the App Home tab lists them and lets you
     delete them at any time. Channel creators can turn it off in their channel with /smasnug off.
@@ -15,12 +15,12 @@ features:
     messages_tab_enabled: true
     messages_tab_read_only_enabled: false
   bot_user:
-    display_name: Smasnug
+    display_name: smasnug ai v3
     always_online: true
   # Agents & AI Apps: the agent container (split view next to any channel) with a native stop button.
   agent_view:
     agent_description: >-
-      Smasnug is the Hack Club workspace assistant. Ask it anything, have it dig through channels and the web in the
+      smasnug ai v3 is the Hack Club workspace assistant. Ask it anything, have it dig through channels and the web in the
       background, summarise threads, or draft and send messages on your behalf after you confirm.
     suggested_prompts:
       - title: Catch me up
@@ -33,7 +33,7 @@ features:
         message: What can you help me with, briefly?
   slash_commands:
     - command: /smasnug
-      description: Turn Smasnug off or on in this channel, or show its status
+      description: Turn smasnug ai v3 off or on in this channel, or show its status
       usage_hint: "off | on | status"
       should_escape: false
 oauth_config:
@@ -41,7 +41,7 @@ oauth_config:
     bot:
       - chat:write            # post, stream, update; agents.sessions.setStatus (status + stop button)
       - assistant:write       # Agents & AI Apps: app_context_changed, suggested prompts, session titles
-      - chat:write.customize  # "Smasnug on behalf of <user>" username + avatar
+      - chat:write.customize  # "smasnug ai v3 on behalf of <user>" username + avatar
       - chat:write.public     # send to public channels the bot hasn't joined
       - channels:history
       - groups:history

@@ -13,7 +13,7 @@ const Env = z.object({
   SEMOJI_KEY: z.string().optional(),
   MODEL_LUNA: z.string().default('openai/gpt-6-luna'),
   MODEL_SOL: z.string().default('openai/gpt-6-sol'),
-  BOT_DISPLAY_NAME: z.string().default('Smasnug'),
+  BOT_DISPLAY_NAME: z.string().default('smasnug ai v3'),
   LOG_LEVEL: z.string().default('info'),
 });
 

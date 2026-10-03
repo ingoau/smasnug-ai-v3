@@ -119,14 +119,15 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       const calls = await callsSince(m);
       const post = calls.find((c) => c.method === 'chat.postMessage');
       expect(post?.args.channel).toBe('CGENERAL');
-      expect(post?.args.username).toBe(`Smasnug on behalf of User ${requester}`);
+      const { env } = await import('../config.js');
+      expect(post?.args.username).toBe(`${env.BOT_DISPLAY_NAME} on behalf of User ${requester}`);
       expect(post?.args.icon_url).toBe('https://example.com/a.png');
       const [sent] = await sql<any[]>`select * from sent_messages where requester_id = ${requester}`;
       expect(sent).toMatchObject({ channelId: 'CGENERAL', destination: 'CGENERAL', pendingSendId: pending.id });
       expect(sent.permalink).toContain('fake.slack.com');
       const report = post?.args.blocks.find((b: any) => b.type === 'actions').elements[0];
       expect(report).toMatchObject({ action_id: 'report:open', value: String(sent.id) });
-      expect(JSON.stringify(post?.args.blocks)).toContain(`Sent by <@${requester}> via Smasnug`);
+      expect(JSON.stringify(post?.args.blocks)).toContain(`Sent by <@${requester}> via ${env.BOT_DISPLAY_NAME}`);
       expect(uploadFiles).toHaveBeenCalledWith(expect.objectContaining({ channelId: 'CGENERAL', threadTs: post?.args && sent.ts }));
       expect((await lastResponse(m))).toMatchObject({ replace_original: true });
       expect((await lastResponse(m))?.text).toMatch(/^Sent ✓/);

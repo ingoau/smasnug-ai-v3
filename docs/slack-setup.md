@@ -14,8 +14,8 @@ Use a separate app in a test workspace for development.
    - `ADMIN_USER_ID` — your Slack user id (profile → ⋯ → Copy member ID). The admin approves workspace facts,
      handles reports, can pause the bot from App Home and bypasses pause/suspension.
    - `MOD_CHANNEL_ID` — a private channel for reports and workspace-fact approvals. Invite the bot to it
-     (`/invite @Smasnug`).
-   - `BOT_DISPLAY_NAME` — used in "Smasnug on behalf of …" attribution; keep it in sync with the bot's name.
+     (`/invite @smasnug ai v3`).
+   - `BOT_DISPLAY_NAME` — used in "smasnug ai v3 on behalf of …" attribution; keep it in sync with the bot's name.
 5. Invite the bot to the channels where it should take part. Public channels can also receive on-behalf
    messages without an invite (`chat:write.public`); private channels need an invite.
 
@@ -26,7 +26,7 @@ scopes.
 
 - Socket Mode means no public URL: interactivity and the slash command arrive over the socket. No request URLs are
   needed in the manifest.
-- **Agents & AI Apps** is on (`features.agent_view` + `assistant:write`). Users get Smasnug in the agent container:
+- **Agents & AI Apps** is on (`features.agent_view` + `assistant:write`). Users get smasnug ai v3 in the agent container:
   a split view that stays open next to whatever channel they are looking at, with the suggested prompts from the
   manifest. While the container is open Slack sends `app_context_changed` with the channel the user is viewing; the
   bot remembers it for a few minutes and tells the front agent on that user's next DM turn ("User is currently
