@@ -2,13 +2,18 @@
 import type { SlackFileRef, StoredMessage } from '../core/types.js';
 import type { RenderMsg } from './format.js';
 import { reactionsFromSlack } from './reactions.js';
+import { isHiddenMessage } from '../pipeline/guidelines.js';
 
 export const HIDDEN_SUBTYPES = new Set(['tombstone', 'message_deleted', 'channel_join', 'channel_leave', 'group_join', 'group_leave']);
 
-/** Slack API message → RenderMsg. Returns null for messages that should never be shown (joins, tombstones). */
+/**
+ * Slack API message → RenderMsg. Returns null for messages that should never be shown (joins, tombstones, and `##`
+ * messages, which the workspace guidelines hide from bots entirely).
+ */
 export function fromSlack(raw: any): RenderMsg | null {
   if (!raw?.ts) return null;
   if (raw.subtype && HIDDEN_SUBTYPES.has(raw.subtype)) return null;
+  if (isHiddenMessage(raw.text)) return null;
   let text: string = raw.text ?? '';
   if (!text && Array.isArray(raw.attachments)) {
     text = raw.attachments
