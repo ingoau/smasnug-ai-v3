@@ -121,6 +121,30 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     expect(requested.filter((r) => r.cardId === Number(resumed.cardId))).toHaveLength(1);
   });
 
+  it('a run that completes after cancellation was requested is recorded as cancelled (result kept), synthesis silent', async () => {
+    const turn = await newTurn('U_F');
+    const s = await sub.spawnSubagent({ threadId, turnId: turn, ownerId: 'U_F', title: 'Pico research', instructions: 'Compare Pico models' });
+    await sql`update runs set status = 'running' where id = ${s.runId}`;
+    const msg = await sub.cancelSubagent({ threadId, subagentId: s.subagentId, actor: 'U_F' });
+    expect(msg).toMatch(/next step/);
+    expect(requested.filter((r) => r.cardId === s.cardId)).toHaveLength(0);
+    // The loop finishes its last step without having seen the cancel.
+    const r = { id: s.runId, subagentId: s.subagentId, threadId, cardId: s.cardId };
+    expect(await sub.finishRun(r, { status: 'complete', result: 'Pico 2 is newest', output: 'Pico 2' })).toBe('ok');
+    const [run] = await sql<any[]>`select status, result from runs where id = ${s.runId}`;
+    expect(run).toEqual({ status: 'cancelled', result: 'Pico 2 is newest' });
+    const [sa] = await sql<any[]>`select status from subagents where id = ${s.subagentId}`;
+    expect(sa.status).toBe('cancelled');
+    const [ev] = await sql<any[]>`select payload from thread_events where thread_id = ${threadId} and type = 'run_finished' order by id desc limit 1`;
+    expect(ev.payload).toMatchObject({ status: 'cancelled', finishedAfterCancel: true });
+    expect(requested.filter((x) => x.cardId === s.cardId)).toHaveLength(1);
+    const { renderCardResults } = await import('./front.js');
+    const res = await renderCardResults(s.cardId);
+    expect(res.allCancelled).toBe(true);
+    expect(res.text).toContain('Cancelled before finishing.');
+    expect(res.text).not.toContain('Pico 2 is newest');
+  });
+
   it('sweeper fails stale runs and expiry retires idle subagents', async () => {
     const turn = await newTurn('U_C');
     const s = await sub.spawnSubagent({ threadId, turnId: turn, ownerId: 'U_C', title: 'Stale', instructions: 'x' });

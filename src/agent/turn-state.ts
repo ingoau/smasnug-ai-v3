@@ -15,6 +15,14 @@ export interface FrontTurnState {
   visible: Set<VisibleAction>;
   /** This turn's card (created on first spawn/resume). */
   cardId: number | null;
+  /** Subagents spawned in this turn. */
+  spawned: Set<string>;
+  /** True once this turn delegated work (spawn or resume): no more own lookups, at most one acknowledgement. */
+  delegated: boolean;
+  /** Reactions attempted this turn (capped at 1; reactions replace replies, never accompany them). */
+  reactions: number;
+  /** The reaction this turn added, removed again if the turn later replies. */
+  reaction: { ts: string; emoji: string } | null;
 }
 
 export function turnState(ctx: ToolContext): FrontTurnState {

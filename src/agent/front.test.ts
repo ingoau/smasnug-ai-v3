@@ -16,10 +16,13 @@ const h = vi.hoisted(() => ({
   model: undefined as any,
   /** Optional per-call hook; may throw to simulate a Slack error. */
   slackHook: undefined as undefined | ((method: string, args: any) => void),
+  /** Optional rows for sql queries (keyed by matching the query text). */
+  sqlHook: undefined as undefined | ((query: string) => any[] | undefined),
+  postedCards: [] as number[],
 }));
 
 vi.mock('../db/index.js', () => {
-  const sql: any = async () => [];
+  const sql: any = async (strings: TemplateStringsArray) => h.sqlHook?.(Array.isArray(strings) ? strings.join('?') : '') ?? [];
   sql.json = (v: unknown) => v;
   sql.begin = async (fn: any) => fn(sql);
   return { sql };
@@ -41,8 +44,13 @@ vi.mock('../core/events.js', async (orig) => ({
     h.events.push({ type, payload });
   },
 }));
-vi.mock('./subagents.js', () => ({ activeRunsInThread: async () => h.activeRuns }));
-vi.mock('./cards.js', () => ({ postCard: async () => {}, freezeCard: async () => {}, scheduleCardRender: async () => {} }));
+vi.mock('./subagents.js', () => ({
+  activeRunsInThread: async () => h.activeRuns,
+  spawnSubagent: async () => ({ subagentId: 'sa_1', runId: 1, cardId: 5 }),
+  cancelSubagent: async (o: any) => `Subagent ${o.subagentId} cancelled.`,
+  messageSubagent: async () => ({ mode: 'steered', runId: 1, cardId: 5, note: 'n' }),
+}));
+vi.mock('./cards.js', () => ({ postCard: async (id: number) => void h.postedCards.push(id), freezeCard: async () => {}, scheduleCardRender: async () => {} }));
 vi.mock('../context/thread.js', () => ({
   renderThreadContext: async () => ({ history: '<@U1> Tess: earlier', channelContext: '', newMessages: '<@U1> Tess: hi bot' }),
   renderMessages: async (_t: string, ts: string[]) => `<@U1> Tess: INBOX ${ts.join(',')}`,
@@ -59,6 +67,7 @@ const { MockLanguageModelV4 } = await import('ai/test');
 const { simulateReadableStream } = await import('ai');
 await import('./tools.js');
 await import('../tools/web-search.js');
+await import('../tools/emoji.js');
 const { runFrontTurn } = await import('./front.js');
 const { streamSafePrefix } = await import('./reply.js');
 
@@ -74,6 +83,15 @@ function replyStep(text: string, chunkSize = 7) {
     ...deltas,
     { type: 'tool-input-end', id: 'c1' },
     { type: 'tool-call', toolCallId: 'c1', toolName: 'reply', input: json },
+    { type: 'finish', usage, finishReason: { unified: 'tool-calls', raw: 'tool_calls' } },
+  ];
+}
+let callSeq = 0;
+/** One model step with complete tool calls (no input streaming). */
+function toolStep(...calls: [string, Record<string, unknown>][]) {
+  return [
+    { type: 'stream-start', warnings: [] },
+    ...calls.map(([toolName, input]) => ({ type: 'tool-call', toolCallId: `call${++callSeq}`, toolName, input: JSON.stringify(input) })),
     { type: 'finish', usage, finishReason: { unified: 'tool-calls', raw: 'tool_calls' } },
   ];
 }
@@ -116,6 +134,8 @@ beforeEach(() => {
   h.events = [];
   h.activeRuns = 0;
   h.slackHook = undefined;
+  h.sqlHook = undefined;
+  h.postedCards = [];
 });
 
 describe('runFrontTurn (mock model)', () => {
@@ -286,5 +306,122 @@ describe('streamSafePrefix', () => {
     expect(streamSafePrefix('Done. \uE200cite\uE202turn0')).toBe('Done.');
     expect(streamSafePrefix('Done. cit')).toBe('Done.');
     expect(streamSafePrefix('Done. citeturn0search2 More')).toBe('Done. More');
+  });
+});
+
+describe('runFrontTurn: behaviour guards', () => {
+  const prompts = () => ((h.model as any).doStreamCalls as any[]).map((c) => JSON.stringify(c.prompt));
+  const toolNames = (i: number) => (((h.model as any).doStreamCalls as any[])[i].tools ?? []).map((t: any) => t.name);
+  const methods = () => h.slack.map((c) => c.method);
+
+  it('caps reactions at one per turn', async () => {
+    h.model = mockModel([toolStep(['react', { emoji: 'eyes' }]), toolStep(['react', { emoji: 'tada' }]), textStep('')]);
+    await runFrontTurn(turn({ id: 40 }), io().io);
+    expect(h.slack.filter((c) => c.method === 'reactions.add').map((c) => c.args.name)).toEqual(['eyes']);
+    expect(prompts()[2]).toContain('Already reacted this turn.');
+    // The reaction counts as the visible response: no fallback.
+    expect(methods()).not.toContain('chat.postMessage');
+  });
+
+  it('refuses a reaction once the turn replied', async () => {
+    h.activeRuns = 1;
+    h.model = mockModel([toolStep(['reply', { text: 'Hey! I can answer questions and research things.' }]), toolStep(['react', { emoji: 'wave' }]), textStep('')]);
+    await runFrontTurn(turn({ id: 41 }), io().io);
+    expect(methods()).not.toContain('reactions.add');
+    expect(prompts()[2]).toContain('you already replied this turn');
+  });
+
+  it('removes the reaction when the turn replies after all', async () => {
+    h.activeRuns = 1;
+    h.model = mockModel([toolStep(['react', { emoji: 'eyes' }]), toolStep(['reply', { text: 'Actually, here is the answer.' }]), textStep('')]);
+    await runFrontTurn(turn({ id: 42 }), io().io);
+    expect(methods().filter((m) => m.startsWith('reactions.') || m === 'chat.postMessage')).toEqual(['reactions.add', 'chat.postMessage', 'reactions.remove']);
+    expect(h.slack.find((c) => c.method === 'reactions.remove')!.args).toMatchObject({ channel: 'C1', timestamp: '100.000002', name: 'eyes' });
+  });
+
+  it('drops a near-duplicate second reply', async () => {
+    h.activeRuns = 1;
+    h.model = mockModel([
+      toolStep(['reply', { text: "I'm checking the official Raspberry Pi specs now." }]),
+      toolStep(['reply', { text: "**I'm checking the official Raspberry Pi specs now** — one sec" }]),
+      textStep(''),
+    ]);
+    await runFrontTurn(turn({ id: 43 }), io().io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(1);
+    expect(h.events.find((e) => e.type === 'reply_dropped')).toBeTruthy();
+    expect(prompts()[2]).toContain('nearly identical');
+  });
+
+  it('holds back a streamed second reply and drops it when it repeats the first', async () => {
+    const long = 'The newest board is the Pico 2 W. ' + 'It has the RP2350, more SRAM and better security features than the original. '.repeat(3);
+    h.model = mockModel([replyStep(long, 9), toolStep(["reply", { text: long }]), textStep("")], 25);
+    await runFrontTurn(turn({ id: 44 }), io().io);
+    expect(h.slack.filter((c) => c.method === 'chat.startStream')).toHaveLength(1);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+  });
+
+  it('only offers set_card_title on synthesis turns', async () => {
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 45, isMention: false }), io(false).io);
+    expect(toolNames(0)).toContain('reply');
+    expect(toolNames(0)).not.toContain('set_card_title');
+
+    h.sqlHook = (q) => (q.includes('from runs r join subagents') ? [{ id: 1, subagentId: 'sa_1', title: 'T', ownerId: 'U1', status: 'complete', instructions: 'x', result: 'r', error: null, isResume: false }] : undefined);
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 46, kind: 'synthesis', cardId: 5, messageTs: [] }), io(false).io);
+    expect(toolNames(0)).toContain('set_card_title');
+  });
+
+  it('a synthesis whose runs were all cancelled stays silent without calling the model', async () => {
+    h.sqlHook = (q) => (q.includes('from runs r join subagents') ? [{ id: 1, subagentId: 'sa_1', title: 'T', ownerId: 'U1', status: 'cancelled', instructions: 'x', result: 'late result', error: null, isResume: false }] : undefined);
+    h.model = mockModel([toolStep(['reply', { text: 'should not happen' }])]);
+    await runFrontTurn(turn({ id: 47, kind: 'synthesis', cardId: 5, messageTs: [] }), io(false).io);
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(0);
+    expect(methods().filter((m) => m.startsWith('chat.'))).toHaveLength(0);
+    expect(h.events.some((e) => e.type === 'synthesis_silent')).toBe(true);
+  });
+
+  it('after spawning and acknowledging, the turn ends', async () => {
+    h.model = mockModel([
+      toolStep(['reply', { text: 'On it — digging into this.' }]),
+      toolStep(['spawn_subagent', { title: 'Research', instructions: 'Research it' }]),
+      toolStep(['reply', { text: 'Still on it!' }]),
+      textStep(''),
+    ]);
+    await runFrontTurn(turn({ id: 48 }), io().io);
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(2);
+    expect(h.postedCards).toEqual([5]);
+  });
+
+  it('after delegating: no own lookups and no second reply', async () => {
+    h.model = mockModel([
+      toolStep(['reply', { text: 'On it — digging into this.' }], ['spawn_subagent', { title: 'Research', instructions: 'Research it' }], ['search_emojis', { query: 'hourglass' }]),
+      toolStep(['reply', { text: 'Here is the full answer with a table: ...' }]),
+      textStep(''),
+    ]);
+    await runFrontTurn(turn({ id: 49 }), io().io);
+    expect(toolNames(0)).toContain('web_search');
+    expect(toolNames(1)).not.toContain('web_search');
+    expect(toolNames(1)).toContain('reply');
+    const visible = h.slack.filter((c) => ['chat.startStream', 'chat.postMessage'].includes(c.method));
+    expect(visible).toHaveLength(1);
+    expect(h.events.find((e) => e.type === 'reply_dropped')?.payload.reason).toContain('End your turn now');
+    // The dropped reply was an acknowledgement-only step, so the loop ended there.
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(2);
+  });
+
+  it('cancelling its own fresh subagent: card not posted, the agent may answer itself', async () => {
+    h.activeRuns = 1;
+    h.model = mockModel([
+      toolStep(['spawn_subagent', { title: 'Research', instructions: 'Research it' }]),
+      toolStep(['cancel_subagent', { id: 'sa_1' }]),
+      toolStep(['reply', { text: 'The answer is 42.' }]),
+      textStep(''),
+    ]);
+    await runFrontTurn(turn({ id: 50 }), io().io);
+    expect(prompts()[2]).toContain('answer the speaker yourself');
+    expect(toolNames(2)).toContain('web_search');
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['The answer is 42.']);
+    expect(h.postedCards).toEqual([]);
   });
 });

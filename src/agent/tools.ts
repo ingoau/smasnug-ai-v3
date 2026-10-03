@@ -8,6 +8,7 @@ import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { registerTool } from '../core/tools.js';
 import { cancelSubagent, messageSubagent, spawnSubagent } from './subagents.js';
+import { retractReaction } from './turn-guards.js';
 import { turnState } from './turn-state.js';
 
 const fileSchema = z.object({
@@ -21,7 +22,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        'Post a message in the current Slack thread (markdown). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction is enough). Multiple calls per turn are allowed but rarely needed.',
+        'Post a message in the current Slack thread (markdown). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction instead). Usually one reply per turn; never send two replies that say the same thing.',
       inputSchema: z.object({
         text: z.string().describe('Message text in Slack-flavoured markdown. Keep it concise.'),
         files: z.array(fileSchema).max(5).optional().describe('Optional text files to attach below the message'),
@@ -35,7 +36,10 @@ registerTool({
       execute: async ({ text, files }, { toolCallId }) => {
         const s = turnState(ctx);
         const res = await s.replies.finish(toolCallId, text, files);
-        s.visible.add('reply');
+        if (res.startsWith('Replied')) {
+          s.visible.add('reply');
+          await retractReaction(s);
+        } else if (s.replies.anyVisible) s.visible.add('reply'); // e.g. a stream the user stopped halfway
         return res;
       },
     }),
@@ -66,8 +70,14 @@ registerTool({
           seedFrom: seed_from,
         });
         s.cardId = r.cardId;
+        s.spawned.add(r.subagentId);
+        s.delegated = true;
         s.visible.add('spawn');
-        return { subagent_id: r.subagentId, status: 'queued', note: 'Plan card will be posted below your reply.' };
+        return {
+          subagent_id: r.subagentId,
+          status: 'queued',
+          note: 'Plan card will be posted below your reply. Do not research this yourself or answer it now; at most one short acknowledgement (if you have not replied yet), then end your turn. You get the results in a later turn.',
+        };
       },
     }),
 });
@@ -89,11 +99,12 @@ registerTool({
         const r = await messageSubagent({ threadId: s.threadId, turnId: s.turn.id, speakerId: s.turn.authorId, subagentId: id, text, note });
         if (r.mode === 'resumed') {
           s.cardId = r.cardId;
+          s.delegated = true;
           s.visible.add('resume');
           return { status: 'resumed', note: 'A follow-up run started; it appears on this turn\'s plan card.' };
         }
         s.visible.add('steer');
-        return { status: 'steered', note: 'Delivered; it will see this at its next step. Acknowledge the user visibly (reaction or short reply).' };
+        return { status: 'steered', note: 'Delivered; it will see this at its next step. Acknowledge the user visibly with either a reaction or a very short reply (not both).' };
       },
     }),
 });
@@ -110,6 +121,12 @@ registerTool({
         const s = turnState(ctx);
         const msg = await cancelSubagent({ threadId: s.threadId, subagentId: id, actor: s.turn.authorId });
         s.visible.add('cancel');
+        if (s.spawned.delete(id)) {
+          // Cancelling a subagent this very turn started: its card stays unposted and its synthesis stays silent
+          // (a run that still finishes is recorded as cancelled), so nobody would get an answer from it.
+          s.delegated = s.spawned.size > 0 || s.visible.has('resume');
+          return `${msg} You started it in this turn, so no results will come from it: answer the speaker yourself now, or spawn again.`;
+        }
         return msg;
       },
     }),

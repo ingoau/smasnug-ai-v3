@@ -6,7 +6,7 @@ import { appendEvent, parseThreadId } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { getUserInfo } from '../context/users.js';
 import { EXTRAS } from '../tools/extras.js';
-import { WEB_SEARCH_TOOL, WebSearchMeter } from '../tools/web-search.js';
+import { WebSearchMeter } from '../tools/web-search.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
@@ -18,6 +18,7 @@ import { freezeCard, postCard } from './cards.js';
 import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
+import { activeToolsFor, delegatedAndAcknowledged, guardReact, replyBlockReason } from './turn-guards.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 
@@ -54,10 +55,8 @@ export const BUDGET = {
 const FALLBACK_TEXT = "Sorry, I couldn't come up with a reply to that. Could you try rephrasing?";
 const ERROR_NOTE = '_Something broke, try again._';
 
-/** Tool names (from any module) whose successful result is visible to users. */
+/** Tool names (from any module) whose successful result is visible to users. reply/react record their own. */
 const VISIBLE_TOOLS: Record<string, VisibleAction> = {
-  reply: 'reply',
-  react: 'react',
   send_message: 'send',
   spawn_subagent: 'spawn',
   message_subagent: 'steer',
@@ -130,7 +129,7 @@ export async function renderCardResults(cardId: number): Promise<{ text: string;
           : `Failed: ${r.error ?? 'unknown error'}`;
     return `${head}\n${task}\n${body}`;
   });
-  return { text: parts.join('\n\n'), runIds: runs.map((r) => Number(r.id)), allCancelled: runs.every((r) => r.status === 'cancelled') };
+  return { text: parts.join('\n\n'), runIds: runs.map((r) => Number(r.id)), allCancelled: runs.length > 0 && runs.every((r) => r.status === 'cancelled') };
 }
 
 function section(tag: string, body: string, attrs = ''): string {
@@ -201,9 +200,22 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     recipientUserId: turn.authorId,
     activeRuns: () => activeRunsInThread(turn.threadId),
     stopRequested: checkStop,
+    blockReply: () => replyBlockReason(state),
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
-  const state: FrontTurnState = { turn, threadId: turn.threadId, channelId, threadTs, replies, visible: new Set(), cardId: null };
+  const state: FrontTurnState = {
+    turn,
+    threadId: turn.threadId,
+    channelId,
+    threadTs,
+    replies,
+    visible: new Set(),
+    cardId: null,
+    spawned: new Set(),
+    delegated: false,
+    reactions: 0,
+    reaction: null,
+  };
   const seenTs = new Set(turn.messageTs);
   const extras: Record<string, unknown> = {
     agentTurn: state,
@@ -211,6 +223,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     // EXTRAS.queueUserImage deliberately unset: Luna accepts images in tool results.
   };
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, extras });
+  // Naming a card only makes sense when writing up its results.
+  if (turn.kind !== 'synthesis') delete tools.set_card_title;
+  guardReact(tools, state);
 
   const toolNames = Object.keys(tools);
   const meter = new WebSearchMeter();
@@ -228,14 +243,16 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   let failed: unknown;
   try {
     if (await checkStop()) throw new TurnStopped();
+    // Everything on the card was cancelled (user stop, or the turn cancelled its own subagent): nothing to report.
+    if (turn.kind === 'synthesis' && built.allCancelled) throw new SkipModel();
     const result = streamText({
       model: openrouter(MODELS.front),
       providerOptions: { openrouter: { reasoning: { effort: 'low' }, usage: { include: true } } },
       instructions: system,
       messages,
       tools,
-      // Native stop: end at the next step boundary.
-      stopWhen: [stepCountIs(MAX_STEPS), () => checkStop()],
+      // Native stop: end at the next step boundary. A turn that delegated and acknowledged is done.
+      stopWhen: [stepCountIs(MAX_STEPS), () => checkStop(), ({ steps }) => delegatedAndAcknowledged(state, steps.at(-1)?.toolCalls.map((c) => c.toolName))],
       includeRawChunks: true,
       onStepFinish: async (stepResult) => {
         meter.observeStep(stepResult);
@@ -252,7 +269,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
           await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
         }
-        const activeTools = searchOverLimit ? toolNames.filter((n) => n !== WEB_SEARCH_TOOL) : undefined;
+        const activeTools = activeToolsFor(state, toolNames, { searchOverLimit });
         return { ...(extra.length ? { messages: [...current, ...extra] } : {}), ...(activeTools ? { activeTools } : {}) };
       },
     });
@@ -274,8 +291,6 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           stepTools.push(part.toolName);
           break;
         case 'tool-result': {
-          // react reports skipped/failed reactions as text rather than errors.
-          if (part.toolName === 'react' && !/reacted/i.test(String(part.output))) break;
           const v = VISIBLE_TOOLS[part.toolName];
           if (v) state.visible.add(v);
           break;
@@ -307,10 +322,12 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       }
     }
   } catch (err) {
-    if (!(err instanceof TurnStopped)) failed = err;
+    if (err instanceof SkipModel) await appendEvent(turn.threadId, 'synthesis_silent', 'system', { turnId, cardId: turn.cardId }).catch(() => {});
+    else if (!(err instanceof TurnStopped)) failed = err;
   } finally {
-    // The card goes in right after this turn's replies (or alone if there was no reply).
-    if (state.cardId) await postCard(state.cardId).catch((err) => log.error({ err }, 'postCard failed'));
+    // The card goes in right after this turn's replies (or alone if there was no reply). Not when the turn cancelled
+    // every subagent it started (then it is no longer delegating anything).
+    if (state.cardId && state.delegated) await postCard(state.cardId).catch((err) => log.error({ err }, 'postCard failed'));
     if (turn.kind === 'synthesis' && turn.cardId) {
       await sql`update runs set reported = true where id = any(${built.synthesisRunIds}::bigint[])`.catch(() => {});
       await freezeCard(turn.cardId).catch((err) => log.error({ err }, 'freezeCard failed'));
@@ -345,6 +362,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 }
 
 class TurnStopped extends Error {}
+class SkipModel extends Error {}
 
 function needsFallback(turn: TurnRow, io: TurnIO, allCancelled: boolean): boolean {
   // A synthesis where everything was cancelled (user said stop) may stay silent.

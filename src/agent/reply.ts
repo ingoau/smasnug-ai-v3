@@ -9,11 +9,14 @@ import { log } from '../log.js';
 import { uploadFiles, type OutgoingFile } from './files.js';
 import { stripCitationMarkers } from '../tools/web-search.js';
 import { extractPartialString } from './partial-json.js';
-import { chooseDelivery, type DeliveryMode } from './util.js';
+import { chooseDelivery, isNearDuplicate, type DeliveryMode } from './util.js';
 
 const FLUSH_MS = 300;
 const MAX_MD = 11_500; // markdown limit is 12k chars per block / stream call
 const MAX_TEXT = 3_000; // `text` fallback
+/** A later reply in a turn is held back until this many chars arrived, so it can be checked for duplication first. */
+const HOLD_CHARS = 160;
+export const DUPLICATE_RESULT = "Not posted: nearly identical to a reply you already sent this turn. Don't repeat yourself; end your turn.";
 
 export interface ReplyTarget {
   threadId: string;
@@ -27,6 +30,8 @@ export interface ReplyTarget {
   activeRuns: () => Promise<number>;
   /** True once the user pressed the native stop button: nothing more gets delivered. */
   stopRequested?: () => Promise<boolean>;
+  /** Returns a model-facing reason when a new reply must not be delivered (checked when it starts and before posting). */
+  blockReply?: () => string | null;
 }
 
 /** Stream errors meaning Slack is no longer streaming this message (e.g. the user pressed stop). */
@@ -48,6 +53,8 @@ interface ReplyEntry {
   failed: boolean;
   /** Slack stopped the stream itself (native stop button): never post the rest. */
   halted: boolean;
+  /** Not delivered (duplicate / blocked): the model-facing reason. */
+  dropped: string | null;
 }
 
 let teamIdCache: string | undefined;
@@ -83,12 +90,19 @@ export class ReplyManager {
   private nextIndex = 0;
   /** Number of replies successfully delivered this turn. */
   delivered = 0;
+  /** Texts of the replies delivered this turn (for duplicate detection). */
+  private deliveredTexts: string[] = [];
 
   constructor(private readonly t: ReplyTarget) {}
 
   /** True if any reply has started becoming visible (a stream started or a message posted). */
   get anyVisible() {
     return this.delivered > 0 || [...this.entries.values()].some((e) => e.streamTs);
+  }
+
+  /** True once a reply has been attempted this turn (in progress or delivered, not dropped). */
+  get attempted() {
+    return [...this.entries.values()].some((e) => !e.dropped);
   }
 
   start(toolCallId: string): ReplyEntry {
@@ -98,7 +112,7 @@ export class ReplyManager {
       (n) => chooseDelivery({ turnKind: this.t.turnKind, runningRuns: n }),
       () => 'post' as const,
     );
-    e = { index: this.nextIndex++, mode, buf: '', sent: 0, streamed: '', streamTs: null, stopped: false, chain: Promise.resolve(), timer: null, failed: false, halted: false };
+    e = { index: this.nextIndex++, mode, buf: '', sent: 0, streamed: '', streamTs: null, stopped: false, chain: Promise.resolve(), timer: null, failed: false, halted: false, dropped: this.t.blockReply?.() ?? null };
     this.entries.set(toolCallId, e);
     return e;
   }
@@ -120,10 +134,18 @@ export class ReplyManager {
 
   /** Send any newly decoded text from the partial arguments to the stream. */
   private async flush(e: ReplyEntry, finalText?: string) {
-    if (e.failed || e.stopped || e.halted) return;
+    if (e.failed || e.stopped || e.halted || e.dropped) return;
     if ((await e.mode) !== 'stream') return;
     const value = finalText ?? streamSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '');
     if (value.length <= e.sent) return;
+    if (!e.streamTs && finalText === undefined && this.deliveredTexts.length) {
+      // A later reply in this turn: don't start streaming until it can be compared with the earlier ones.
+      if (value.length < HOLD_CHARS) return;
+      if (this.isDuplicate(value)) {
+        e.dropped = DUPLICATE_RESULT;
+        return;
+      }
+    }
     if (e.sent + (value.length - e.sent) > MAX_MD) return; // too long to stream further; finish() handles overflow
     const piece = value.slice(e.sent);
     if (await this.isStopped()) {
@@ -167,6 +189,10 @@ export class ReplyManager {
     }
   }
 
+  private isDuplicate(text: string): boolean {
+    return this.deliveredTexts.some((prev) => isNearDuplicate(text, prev));
+  }
+
   private async isStopped(): Promise<boolean> {
     return this.t.stopRequested ? this.t.stopRequested().catch(() => false) : false;
   }
@@ -185,6 +211,15 @@ export class ReplyManager {
       if (e.streamTs) await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after stop failed'));
       await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, stopped: true, streamed: e.streamed });
       return STOPPED_RESULT;
+    }
+    if (!e.streamTs) {
+      // Nothing visible yet: a blocked or repeated reply is dropped instead of posted.
+      const reason = e.dropped ?? this.t.blockReply?.() ?? (this.isDuplicate(text) ? DUPLICATE_RESULT : null);
+      if (reason) {
+        e.dropped = reason;
+        await appendEvent(this.t.threadId, 'reply_dropped', 'bot', { turnId: this.t.turnId, index: e.index, reason, text });
+        return reason;
+      }
     }
     const mode = await e.mode;
     let delivered: 'streamed' | 'posted' = 'posted';
@@ -220,6 +255,7 @@ export class ReplyManager {
       }
     }
     this.delivered++;
+    this.deliveredTexts.push(text);
     if (files?.length) {
       try {
         await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files, idempotencyKey: this.key(e, ':files') });

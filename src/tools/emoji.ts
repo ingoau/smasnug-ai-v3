@@ -120,7 +120,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        'Add an emoji reaction. Defaults to the message you are responding to; pass message_ts (the bracketed ts from context) to react to another message. Any standard or custom emoji name, without colons.',
+        'Add an emoji reaction INSTEAD of a reply, when a reaction is the whole response (e.g. to a "thanks"). Never together with a reply; at most one per turn. Defaults to the message you are responding to; pass message_ts (the bracketed ts from context) to react to another message. Any standard or custom emoji name, without colons.',
       inputSchema: z.object({
         emoji: z.string().describe('Emoji name, e.g. "eyes" or "white_check_mark"'),
         message_ts: z.string().optional().describe('ts of the message to react to; default: the triggering message'),

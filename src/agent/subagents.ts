@@ -247,21 +247,27 @@ export type RunOutcome =
 /**
  * Atomically finish a run. For `complete`, refuses (returns 'inbox') when steer messages arrived that the run has
  * not seen yet, so the loop can continue instead of dropping them. Returns 'gone' if the run was already
- * terminal (e.g. the sweeper got there first).
+ * terminal (e.g. the sweeper got there first). A run that completes after cancellation was requested is recorded
+ * as `cancelled` (its result text is kept for the logs) so it is never reported as a fresh result.
  */
 export async function finishRun(
   run: Pick<RunRow, 'id' | 'subagentId' | 'threadId' | 'cardId'>,
   outcome: RunOutcome,
   extra: { tokens?: number; history?: ModelMessage[] } = {},
 ): Promise<'ok' | 'inbox' | 'gone'> {
+  let finalStatus: RunOutcome['status'] = outcome.status;
   const res = await sql.begin(async (tx) => {
     await tx`select id from subagents where id = ${run.subagentId} for update`;
     if (outcome.status === 'complete') {
-      const [p] = await tx<{ n: number }[]>`select count(*)::int as n from subagent_inbox where subagent_id = ${run.subagentId} and consumed_at is null`;
-      if ((p?.n ?? 0) > 0) return 'inbox' as const;
+      const [c] = await tx<{ cancelRequested: boolean }[]>`select cancel_requested from runs where id = ${run.id}`;
+      if (c?.cancelRequested) finalStatus = 'cancelled';
+      else {
+        const [p] = await tx<{ n: number }[]>`select count(*)::int as n from subagent_inbox where subagent_id = ${run.subagentId} and consumed_at is null`;
+        if ((p?.n ?? 0) > 0) return 'inbox' as const;
+      }
     }
     const updated = await tx`
-      update runs set status = ${outcome.status},
+      update runs set status = ${finalStatus},
         result = ${outcome.status === 'complete' ? outcome.result : null},
         output = ${outcome.status === 'complete' ? outcome.output : null},
         error = ${outcome.status === 'error' ? outcome.error : null},
@@ -271,7 +277,7 @@ export async function finishRun(
       where id = ${run.id} and status = 'running' returning id`;
     if (updated.length === 0) return 'gone' as const;
     const history = extra.history ? sql.json(extra.history as any) : null;
-    if (outcome.status === 'cancelled') {
+    if (finalStatus === 'cancelled') {
       await tx`update subagents set status = 'cancelled', last_active_at = now(), history = coalesce(${history}, history) where id = ${run.subagentId}`;
     } else {
       const summary = outcome.status === 'complete' ? outcome.output : null;
@@ -287,7 +293,8 @@ export async function finishRun(
   if (res !== 'ok') return res;
   await appendEvent(run.threadId, 'run_finished', `subagent:${run.subagentId}`, {
     runId: run.id,
-    status: outcome.status,
+    status: finalStatus,
+    ...(finalStatus !== outcome.status ? { finishedAfterCancel: true } : {}),
     output: outcome.status === 'complete' ? outcome.output : undefined,
     error: outcome.status === 'error' ? outcome.error : undefined,
   });

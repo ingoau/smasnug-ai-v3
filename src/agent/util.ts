@@ -161,3 +161,40 @@ export function describeToolStep(toolName: string, input: unknown): string {
     }
   }
 }
+
+/** Lowercased words only: markdown, links, mentions and punctuation stripped. */
+export function normalizeForCompare(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function firstSentence(s: string): string {
+  const first = s.split(/[.!?…\n]/).find((p) => p.trim()) ?? '';
+  return normalizeForCompare(first);
+}
+
+/**
+ * True when two replies say essentially the same thing: identical after normalising, one contained in the other,
+ * the same first sentence, or ≥ 70% word overlap. Deliberately simple; used to drop repeated replies in a turn.
+ */
+export function isNearDuplicate(a: string, b: string): boolean {
+  const na = normalizeForCompare(a);
+  const nb = normalizeForCompare(b);
+  if (!na || !nb) return false;
+  if (na === nb) return true;
+  const [short, long] = na.length <= nb.length ? [na, nb] : [nb, na];
+  if (short.length >= 20 && long.includes(short)) return true;
+  const fa = firstSentence(a);
+  if (fa.length >= 20 && fa === firstSentence(b)) return true;
+  const wa = new Set(na.split(' '));
+  const wb = new Set(nb.split(' '));
+  if (wa.size < 4 || wb.size < 4) return false;
+  let inter = 0;
+  for (const w of wa) if (wb.has(w)) inter++;
+  return inter / (wa.size + wb.size - inter) >= 0.7;
+}

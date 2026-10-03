@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelMessage } from 'ai';
-import { chooseDelivery, clipTokens, compactHistory, describeToolStep, splitResult } from './util.js';
+import { chooseDelivery, clipTokens, compactHistory, describeToolStep, isNearDuplicate, splitResult } from './util.js';
 
 describe('chooseDelivery', () => {
   it('streams when nothing runs, posts whole while runs are active, streams synthesis', () => {
@@ -69,5 +69,19 @@ describe('describeToolStep', () => {
     expect(describeToolStep('fetch_url', { url: 'https://example.com' })).toBe('Reading https://example.com');
     expect(describeToolStep('slack_search', { query: 'hackathon' })).toBe('Searching Slack for “hackathon”');
     expect(describeToolStep('mystery', {})).toBe('Using mystery');
+  });
+});
+
+describe('isNearDuplicate', () => {
+  it('flags repeated replies', () => {
+    expect(isNearDuplicate('On it!', 'on it')).toBe(true);
+    expect(isNearDuplicate("I'm checking the Raspberry Pi specs now.", "**I'm checking the Raspberry Pi specs now** — hang on")).toBe(true);
+    expect(isNearDuplicate('The Pico 2 is the latest model. It has an RP2350.', 'The Pico 2 is the latest model! Here is a table: ...')).toBe(true);
+    expect(isNearDuplicate('Checking the official Raspberry Pi product pages and specs now', 'checking official Raspberry Pi product pages and the specs')).toBe(true);
+  });
+  it('keeps different replies', () => {
+    expect(isNearDuplicate('On it — digging through the docs.', 'The Pico 2 has an RP2350 with 520 KB SRAM and costs $5.')).toBe(false);
+    expect(isNearDuplicate('ok', 'sure')).toBe(false);
+    expect(isNearDuplicate('', 'anything')).toBe(false);
   });
 });
