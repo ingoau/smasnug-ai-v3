@@ -50,6 +50,7 @@ export async function disengage(threadId: string, reason: string, actor: string 
 }
 
 async function handleNewMessage(ev: MessageEvent) {
+  markMessage(ev.channel, ev.ts, { i_enter: Date.now() });
   const bot = await getBotIdentity();
   const channelId = ev.channel;
   const isDm = ev.channel_type === 'im';
@@ -68,6 +69,7 @@ async function handleNewMessage(ev: MessageEvent) {
   }
   // Threads the bot was never part of: not stored (the context module backfills what it needs).
   if (!thread) return;
+  markMessage(channelId, ev.ts, { i_thread: Date.now() });
 
   const { deleted } = await storeMessage(channelId, threadId, ev);
   if (deleted) return; // deleted before we got to process it
@@ -78,6 +80,7 @@ async function handleNewMessage(ev: MessageEvent) {
     ...(isBot ? { bot: true } : {}),
   });
   if (isBot || !ev.user) return; // bots never start a turn
+  markMessage(channelId, ev.ts, { i_stored: Date.now() });
 
   const authorId = ev.user;
   if (isBangStop(text, bot.userId, { isDm })) return handleBangStop(channelId, threadRootTs(ev), authorId, ev.ts);
@@ -104,7 +107,9 @@ async function handleNewMessage(ev: MessageEvent) {
     await markAddressed(threadId, true);
   }
 
+  markMessage(channelId, ev.ts, { i_decided: Date.now() });
   const entry = await guardEntry(authorId, channelId);
+  markMessage(channelId, ev.ts, { i_guarded: Date.now() });
   if (!entry.ok) {
     if (entry.reason === 'rate_limited' && (isDm || mentionsBot)) {
       await slackCall(
