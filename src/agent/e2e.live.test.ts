@@ -68,8 +68,8 @@ describe.skipIf(!LIVE)('agent e2e through the pipeline (LIVE)', () => {
     const [card] = await sql<any[]>`select * from cards where thread_id = ${threadId}`;
     expect(card.frozen).toBe(true);
     const lastUpdate = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
-    expect(lastUpdate.args.blocks).toHaveLength(1);
+    expect(lastUpdate!.args.blocks).toHaveLength(1);
     // eslint-disable-next-line no-console
-    console.log('e2e:', calls.map((c) => c.method).join(' → '), '| title:', lastUpdate.args.blocks[0].title);
+    console.log('e2e:', calls.map((c) => c.method).join(' → '), '| title:', lastUpdate!.args.blocks[0].title);
   }, 180_000);
 });
