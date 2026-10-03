@@ -145,6 +145,55 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     expect(res.text).not.toContain('Pico 2 is newest');
   });
 
+  it('the card attaches to the turn\'s reply (chat.update); if that fails it is posted as its own message', async () => {
+    const cards = await import('./cards.js');
+    const { fakeCalls, addFakeHandler, fakeSlackError } = await import('../core/slack-fake.js');
+    const mk = async () => {
+      const turn = await newTurn('U_G');
+      const s = await sub.spawnSubagent({ threadId, turnId: turn, ownerId: 'U_G', title: 'Card test', instructions: 'x' });
+      return s;
+    };
+    // Attached.
+    const a = await mk();
+    const before = (await fakeCalls()).length;
+    await cards.postCard(a.cardId, { ts: '1790001000.000100', text: 'On it — checking.', streamed: false });
+    let calls = (await fakeCalls()).slice(before);
+    const upd = calls.find((c) => c.method === 'chat.update' && c.args.ts === '1790001000.000100')!;
+    expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'plan', 'actions']);
+    expect(upd.args.text).toBe('On it — checking.');
+    expect(calls.some((c) => c.method === 'chat.postMessage')).toBe(false);
+    const [cardA] = await sql<any[]>`select message_ts, reply_text from cards where id = ${a.cardId}`;
+    expect(cardA).toEqual({ messageTs: '1790001000.000100', replyText: 'On it — checking.' });
+    // Later renders keep the reply text above the plan.
+    await sub.cancelSubagent({ threadId, subagentId: a.subagentId, actor: 'U_G' });
+    const b4 = (await fakeCalls()).length;
+    await cards.renderCardNow(a.cardId);
+    calls = (await fakeCalls()).slice(b4);
+    const re = calls.filter((c) => c.method === 'chat.update' && c.args.ts === '1790001000.000100').at(-1)!;
+    expect(re.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'plan']);
+    expect(re.args.blocks[0].text).toBe('On it — checking.');
+
+    // Attaching fails (e.g. Slack refuses to update a streamed message) → standalone card.
+    const b = await mk();
+    const off = addFakeHandler((method, args) => {
+      if (method === 'chat.update' && args.ts === '1790002000.000100') throw fakeSlackError('cant_update_message');
+      return undefined;
+    });
+    const b5 = (await fakeCalls()).length;
+    await cards.postCard(b.cardId, { ts: '1790002000.000100', text: 'streamed ack', streamed: true });
+    off();
+    calls = (await fakeCalls()).slice(b5);
+    const post = calls.find((c) => c.method === 'chat.postMessage')!;
+    expect(post.args.blocks[0].type).toBe('plan');
+    const [cardB] = await sql<any[]>`select message_ts, reply_text from cards where id = ${b.cardId}`;
+    expect(cardB.messageTs).toBeTruthy();
+    expect(cardB.messageTs).not.toBe('1790002000.000100');
+    expect(cardB.replyText).toBeNull();
+    const [ev] = await sql<any[]>`select payload from thread_events where thread_id = ${threadId} and type = 'card_attach_failed' order by id desc limit 1`;
+    expect(ev.payload).toMatchObject({ cardId: b.cardId, streamed: true, code: 'cant_update_message' });
+    await sub.cancelSubagent({ threadId, subagentId: b.subagentId, actor: 'U_G' });
+  });
+
   it('sweeper fails stale runs and expiry retires idle subagents', async () => {
     const turn = await newTurn('U_C');
     const s = await sub.spawnSubagent({ threadId, turnId: turn, ownerId: 'U_C', title: 'Stale', instructions: 'x' });

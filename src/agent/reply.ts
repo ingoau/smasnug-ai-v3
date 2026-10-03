@@ -92,6 +92,8 @@ export class ReplyManager {
   delivered = 0;
   /** Texts of the replies delivered this turn (for duplicate detection). */
   private deliveredTexts: string[] = [];
+  /** The last reply message delivered this turn (the plan card attaches to it). */
+  lastDelivered: { ts: string; text: string; streamed: boolean } | null = null;
 
   constructor(private readonly t: ReplyTarget) {}
 
@@ -223,6 +225,7 @@ export class ReplyManager {
     }
     const mode = await e.mode;
     let delivered: 'streamed' | 'posted' = 'posted';
+    let last: { ts: string | null; text: string } = { ts: null, text };
     if (mode === 'stream' && !e.failed && text.length <= MAX_MD) {
       try {
         if (e.streamTs) {
@@ -232,29 +235,33 @@ export class ReplyManager {
           await this.flush(e, text);
           await this.stopStream(e);
           delivered = 'streamed';
+          last = { ts: e.streamTs, text };
         } else {
           // No deltas arrived (non-streaming provider path): post whole, same visual result.
-          await this.post(e, text);
+          last = { ts: await this.post(e, text), text };
         }
       } catch (err) {
         log.warn({ err }, 'stream finish failed');
         if (e.streamTs) {
           await this.stopStream(e).catch(() => {});
           delivered = 'streamed';
-        } else await this.post(e, text);
+          last = { ts: e.streamTs, text: e.streamed };
+        } else last = { ts: await this.post(e, text), text };
       }
     } else {
       if (e.streamTs) {
         // Stream opened but can't be completed (too long / failed): close it and post the rest whole.
         await this.stopStream(e).catch(() => {});
         const rest = text.slice(e.sent);
-        if (rest.trim()) await this.post(e, rest, ':rest');
+        last = { ts: e.streamTs, text: e.streamed };
+        if (rest.trim()) last = { ts: await this.post(e, rest, ':rest'), text: rest };
         delivered = 'streamed';
       } else {
-        await this.post(e, text);
+        last = { ts: await this.post(e, text), text };
       }
     }
     this.delivered++;
+    if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs };
     this.deliveredTexts.push(text);
     if (files?.length) {
       try {
@@ -275,13 +282,14 @@ export class ReplyManager {
     return `Replied (${delivered}).`;
   }
 
-  private async post(e: ReplyEntry, text: string, suffix = '') {
+  private async post(e: ReplyEntry, text: string, suffix = ''): Promise<string | null> {
     const msg = markdownMessage(text);
-    await slackCall(
+    const res = await slackCall<any>(
       'chat.postMessage',
       { channel: this.t.channelId, thread_ts: this.t.threadTs, ...msg, unfurl_links: false },
       { idempotencyKey: this.key(e, suffix) },
     );
+    return res?.ts ?? null;
   }
 
   private async stopStream(e: ReplyEntry, extra?: string) {

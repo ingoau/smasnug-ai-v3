@@ -19,6 +19,10 @@ export interface PlanBlock {
   title: string;
   tasks: TaskCardBlock[];
 }
+export interface MarkdownBlock {
+  type: 'markdown';
+  text: string;
+}
 export interface ActionsBlock {
   type: 'actions';
   block_id?: string;
@@ -38,6 +42,8 @@ export interface CardState {
   /** Set by set_card_title on synthesis. */
   title: string | null;
   frozen: boolean;
+  /** The card lives in this reply message: its text is re-rendered above the plan. null/undefined = standalone. */
+  replyText?: string | null;
 }
 
 export interface CardRun {
@@ -116,15 +122,22 @@ function statusWord(run: CardRun) {
 
 export interface RenderedCard {
   text: string;
-  blocks: (PlanBlock | ActionsBlock)[];
+  blocks: (MarkdownBlock | PlanBlock | ActionsBlock)[];
 }
+
+/** Same limits as reply.ts markdownMessage: 12k chars per markdown block, 3k for the `text` fallback. */
+const MAX_MD = 11_500;
+const MAX_TEXT = 3_000;
 
 export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   const sorted = [...runs].sort((a, b) => a.id - b.id);
   const anyActive = sorted.some((r) => isActive(r.status));
   const title = card.frozen ? frozenTitle(card.title, sorted.length) : liveTitle(sorted);
   const plan: PlanBlock = { type: 'plan', title, tasks: sorted.map(taskFor) };
-  const blocks: (PlanBlock | ActionsBlock)[] = [plan];
+  const blocks: RenderedCard['blocks'] = [];
+  const reply = card.replyText;
+  if (reply != null) blocks.push({ type: 'markdown', text: reply.length > MAX_MD ? `${reply.slice(0, MAX_MD)}\n\n_[message truncated]_` : reply });
+  blocks.push(plan);
   if (anyActive && !card.frozen) {
     blocks.push({
       type: 'actions',
@@ -140,6 +153,7 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
       ],
     });
   }
-  const text = [title, ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n');
+  // Plain-text fallback: the reply's own text when the card lives in a reply, else a summary of the plan.
+  const text = reply != null ? reply.slice(0, MAX_TEXT) : [title, ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n');
   return { text, blocks };
 }

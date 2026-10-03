@@ -104,11 +104,22 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(card.messageTs).toBeTruthy();
 
     let calls = await fakeCalls();
-    const cardPost = calls.find((c) => c.method === 'chat.postMessage' && c.args.blocks?.[0]?.type === 'plan');
-    expect(cardPost).toBeTruthy();
-    expect(cardPost!.args.text).toBeTruthy();
-    expect(cardPost!.args.thread_ts).toBe(rootTs);
-    expect(cardPost!.args.blocks[1]?.elements?.[0]?.action_id).toBe('card:stop_all');
+    const hasPlan = (c: any) => c.args.blocks?.some((b: any) => b.type === 'plan');
+    const replied = (await sql<any[]>`select 1 from thread_events where thread_id = ${threadId} and type = 'reply'`).length > 0;
+    const cardMsg = calls.find((c) => (c.method === 'chat.postMessage' || c.method === 'chat.update') && hasPlan(c) && c.args.channel === channel);
+    expect(cardMsg).toBeTruthy();
+    expect(cardMsg!.args.text).toBeTruthy();
+    if (replied) {
+      // The card lives in the turn's reply: chat.update of that message, no separate card post.
+      expect(cardMsg!.method).toBe('chat.update');
+      expect(cardMsg!.args.ts).toBe(card.messageTs);
+      expect(cardMsg!.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'plan', 'actions']);
+      expect(calls.some((c) => c.method === 'chat.postMessage' && hasPlan(c) && c.args.channel === channel)).toBe(false);
+    } else {
+      expect(cardMsg!.method).toBe('chat.postMessage');
+      expect(cardMsg!.args.thread_ts).toBe(rootTs);
+    }
+    expect(cardMsg!.args.blocks.find((b: any) => b.type === 'actions')?.elements?.[0]?.action_id).toBe('card:stop_all');
     const events1 = await sql<any[]>`select type from thread_events where thread_id = ${threadId}`;
     expect(events1.map((e) => e.type)).toContain('spawn');
 
@@ -133,7 +144,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     await processCardRender(cardId);
     calls = await fakeCalls();
     const update = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
-    expect(update?.args.blocks[0].title).toMatch(/^Ran \d subagents?$/);
+    expect(update?.args.blocks.find((b: any) => b.type === 'plan').title).toMatch(/^Ran \d subagents?$/);
 
     // Synthesis turn.
     const before = calls.length;
@@ -152,7 +163,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
 
     const frozen = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
     expect(frozen).toBeTruthy();
-    expect(frozen!.args.blocks).toHaveLength(1); // no Stop all button
+    expect(frozen!.args.blocks.some((b: any) => b.type === 'actions')).toBe(false); // no Stop all button
     const [card2] = await sql<any[]>`select * from cards where id = ${cardId}`;
     expect(card2.frozen).toBe(true);
     expect(card2.synthesized).toBe(true);
@@ -161,7 +172,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const events = await sql<any[]>`select type, payload from thread_events where thread_id = ${threadId} order by id`;
     expect(events.filter((e) => e.type === 'reply').length).toBeGreaterThanOrEqual(1);
     // eslint-disable-next-line no-console
-    console.log('card title:', frozen!.args.blocks[0].title, '| synthesis:', streamed.slice(0, 200));
+    console.log('card title:', frozen!.args.blocks.find((b: any) => b.type === 'plan').title, '| in reply:', replied, '| synthesis:', streamed.slice(0, 200));
   }, 180_000);
 
   async function freshThread(tag: string) {

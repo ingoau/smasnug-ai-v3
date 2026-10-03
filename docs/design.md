@@ -151,7 +151,7 @@ Front agent streams its synthesis into a new message below the card
 The stream-or-post choice is made in code from `thread.tasks.some(running)`, never by the model.
 ### Plan cards
 - 
-A card is attached to the reply of the turn that started runs, and shows only the runs started in that turn. One task row per run.
+A card is attached to the reply of the turn that started runs, and shows only the runs started in that turn. One task row per run. Implementation: after the turn, the turn's last reply message is updated (`chat.update`) to [reply markdown, plan, Stop all]; every re-render rewrites the reply text plus the current plan. If that update fails (e.g. Slack refuses `chat.update` on a streamed message — unverified), the card is posted as its own message and a `card_attach_failed` event + warning (with the Slack error code) is logged. A turn without a reply posts the card alone.
 - 
 Steering a running subagent does not create a card. The steer appears on the original card's row as `↪ also checking #ship`.
 - 

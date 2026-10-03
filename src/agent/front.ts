@@ -340,7 +340,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   } finally {
     // The card goes in right after this turn's replies (or alone if there was no reply). Not when the turn cancelled
     // every subagent it started (then it is no longer delegating anything).
-    if (state.cardId && state.delegated) await postCard(state.cardId).catch((err) => log.error({ err }, 'postCard failed'));
+    if (state.cardId && state.delegated) await postCard(state.cardId, replies.lastDelivered).catch((err) => log.error({ err }, 'postCard failed'));
     if (turn.kind === 'synthesis' && turn.cardId) {
       await sql`update runs set reported = true where id = any(${built.synthesisRunIds}::bigint[])`.catch(() => {});
       await freezeCard(turn.cardId).catch((err) => log.error({ err }, 'freezeCard failed'));

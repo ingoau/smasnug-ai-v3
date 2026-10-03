@@ -82,4 +82,19 @@ describe('renderCard', () => {
     expect((r.blocks[0] as any).title).toBe('Ran 2 subagents');
     expect((r.blocks[0] as any).tasks.map((t: any) => t.task_id)).toEqual(['run_2', 'run_3']);
   });
+
+  it('lives in the reply message: [reply markdown, plan, actions], text = reply text; frozen keeps the text', () => {
+    const runs = [run(1, { status: 'running', details: 'Reading docs' })];
+    const live = renderCard({ id: 4, title: null, frozen: false, replyText: 'On it — checking the docs.' }, runs);
+    expect(live.blocks.map((b) => b.type)).toEqual(['markdown', 'plan', 'actions']);
+    expect((live.blocks[0] as any).text).toBe('On it — checking the docs.');
+    expect(live.text).toBe('On it — checking the docs.');
+    const frozen = renderCard({ id: 4, title: 'Checked the docs', frozen: true, replyText: 'On it — checking the docs.' }, [run(1, { status: 'complete', output: 'ok' })]);
+    expect(frozen.blocks.map((b) => b.type)).toEqual(['markdown', 'plan']);
+    expect((frozen.blocks[1] as any).title).toBe('Checked the docs');
+    expect(frozen.text).toBe('On it — checking the docs.');
+    const long = renderCard({ id: 4, title: null, frozen: false, replyText: 'x'.repeat(20_000) }, runs);
+    expect((long.blocks[0] as any).text.length).toBeLessThan(12_000);
+    expect(long.text.length).toBe(3_000);
+  });
 });

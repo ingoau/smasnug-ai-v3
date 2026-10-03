@@ -1,5 +1,6 @@
 /**
- * Plan cards: one card message per turn that started runs. The message is a pure render of DB state
+ * Plan cards: one card per turn that started runs, living in that turn's last reply message (blocks: reply markdown,
+ * plan, Stop all) — or in a message of its own when the turn didn't reply. The message is a pure render of DB state
  * (card-render.ts); children write progress to the DB and call `scheduleCardRender`, which coalesces updates per
  * card to at most one per `limits.cardCoalesceMs` via a Redis flag + delayed `card-render` job. Updates always go
  * through `chat.update` (never a held-open stream).
@@ -9,7 +10,7 @@ import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { enqueue, QUEUE } from '../core/queues.js';
 import { redis } from '../core/redis.js';
-import { slackCall } from '../core/slack.js';
+import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import { renderCard, type CardRun, type CardState, type RunStatus } from './card-render.js';
 
@@ -22,6 +23,8 @@ export interface CardRow {
   title: string | null;
   frozen: boolean;
   synthesized: boolean;
+  /** Set when the card lives in the turn's reply message (message_ts is then the reply's ts). */
+  replyText: string | null;
 }
 
 export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: CardRun[] } | undefined> {
@@ -54,11 +57,37 @@ export async function ensureTurnCard(opts: { threadId: string; turnId: number })
   return Number(row!.id);
 }
 
-/** Post the card message in-thread (once). Called after the turn's replies. */
-export async function postCard(cardId: number): Promise<void> {
+/** The turn's last delivered reply, which the card attaches to. */
+export interface ReplyRef {
+  ts: string;
+  text: string;
+  /** Delivered via chat.startStream/stopStream (chat.update on it is unverified). */
+  streamed: boolean;
+}
+
+/**
+ * Show the card once, after the turn's replies: attached to the turn's last reply (chat.update of that message:
+ * [reply markdown, plan, actions]) when there is one, else as its own message. If attaching fails (e.g. Slack
+ * refuses to update a streamed message), the card is posted as its own message and a warning is logged.
+ */
+export async function postCard(cardId: number, reply?: ReplyRef | null): Promise<void> {
   const loaded = await loadCard(cardId);
   if (!loaded || loaded.card.messageTs || loaded.runs.length === 0) return;
   const { card, runs } = loaded;
+  if (reply) {
+    const msg = renderCard({ ...toState(card), replyText: reply.text }, runs);
+    try {
+      await slackCall('chat.update', { channel: card.channelId, ts: reply.ts, text: msg.text, blocks: msg.blocks });
+      await sql`update cards set message_ts = ${reply.ts}, reply_text = ${reply.text} where id = ${cardId} and message_ts is null`;
+      await appendEvent(card.threadId, 'card_posted', 'bot', { cardId, ts: reply.ts, attachedToReply: true, streamed: reply.streamed, runs: runs.map((r) => r.id) });
+      await scheduleCardRender(cardId);
+      return;
+    } catch (err) {
+      const code = slackErrorCode(err) ?? String((err as any)?.message ?? err);
+      log.warn({ cardId, replyTs: reply.ts, streamed: reply.streamed, code }, 'attaching plan card to the reply failed; posting it as its own message');
+      await appendEvent(card.threadId, 'card_attach_failed', 'bot', { cardId, replyTs: reply.ts, streamed: reply.streamed, code }).catch(() => {});
+    }
+  }
   const { threadTs } = parseThreadId(card.threadId);
   const msg = renderCard(toState(card), runs);
   const res = await slackCall<any>(
@@ -128,5 +157,5 @@ export async function freezeCard(cardId: number): Promise<void> {
 }
 
 function toState(card: CardRow): CardState {
-  return { id: card.id, title: card.title, frozen: card.frozen };
+  return { id: card.id, title: card.title, frozen: card.frozen, replyText: card.replyText ?? null };
 }

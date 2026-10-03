@@ -61,15 +61,19 @@ describe.skipIf(!LIVE)('agent e2e through the pipeline (LIVE)', () => {
     const turns = await sql<any[]>`select kind, status from turns where thread_id = ${threadId} order by id`;
     expect(turns.every((t) => t.status === 'done')).toBe(true);
     const calls = await fakeCalls();
-    const cardIdx = calls.findIndex((c) => c.method === 'chat.postMessage' && c.args.blocks?.[0]?.type === 'plan');
+    const hasPlan = (c: any) => c.args.blocks?.some((b: any) => b.type === 'plan');
+    const cardIdx = calls.findIndex((c) => (c.method === 'chat.postMessage' || c.method === 'chat.update') && hasPlan(c) && c.args.channel === channel);
     expect(cardIdx).toBeGreaterThanOrEqual(0);
+    const replied = (await sql<any[]>`select 1 from thread_events where thread_id = ${threadId} and type = 'reply' and (payload->>'turnId')::bigint = (select min(id) from turns where thread_id = ${threadId})`).length > 0;
+    // With a reply in the spawning turn, the card is attached to it (chat.update), never posted separately.
+    if (replied) expect(calls[cardIdx]!.method).toBe('chat.update');
     const streamIdx = calls.findIndex((c, i) => i > cardIdx && c.method === 'chat.startStream');
     expect(streamIdx).toBeGreaterThan(cardIdx);
     const [card] = await sql<any[]>`select * from cards where thread_id = ${threadId}`;
     expect(card.frozen).toBe(true);
     const lastUpdate = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
-    expect(lastUpdate!.args.blocks).toHaveLength(1);
+    expect(lastUpdate!.args.blocks.some((b: any) => b.type === 'actions')).toBe(false);
     // eslint-disable-next-line no-console
-    console.log('e2e:', calls.map((c) => c.method).join(' → '), '| title:', lastUpdate!.args.blocks[0].title);
+    console.log('e2e:', calls.map((c) => c.method).join(' → '), '| in reply:', replied, '| title:', lastUpdate!.args.blocks.find((b: any) => b.type === 'plan').title);
   }, 180_000);
 });
