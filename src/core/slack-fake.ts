@@ -31,6 +31,21 @@ export async function fakeCall(method: string, args: Record<string, unknown>, to
       return { ok: true, messages: [], has_more: false };
     case 'conversations.info':
       return { ok: true, channel: { id: args.channel, name: 'fake-channel', is_private: false, creator: 'UADMIN', is_member: true } };
+    case 'conversations.list':
+      return {
+        ok: true,
+        channels: [
+          { id: 'CGENERAL', name: 'general', is_private: false, is_member: true },
+          { id: 'CRANDOM', name: 'random', is_private: false, is_member: false },
+        ],
+        response_metadata: { next_cursor: '' },
+      };
+    case 'conversations.members':
+      return { ok: true, members: ['UADMIN', 'UBOT'], response_metadata: { next_cursor: '' } };
+    case 'conversations.join':
+      return { ok: true, channel: { id: args.channel } };
+    case 'chat.delete':
+      return { ok: true, channel: args.channel, ts: args.ts };
     case 'conversations.open':
       return { ok: true, channel: { id: `D${String(args.users)}` } };
     case 'search.messages':

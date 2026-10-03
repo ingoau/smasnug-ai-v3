@@ -1,0 +1,62 @@
+# Slack app manifest for smasnug-ai. Create the app at https://api.slack.com/apps → "Create New App" →
+# "From a manifest", paste this file. See docs/slack-setup.md for tokens and .env.
+display_information:
+  name: Smasnug
+  description: Workspace assistant — answers, researches in the background, sends messages on your behalf.
+  background_color: "#2c2d30"
+  long_description: >-
+    Smasnug is a workspace Slack agent. Mention it in a thread or DM it: it replies, reacts, delegates longer
+    research to background subagents shown in plan cards, and can send messages on your behalf after you confirm a
+    preview. It remembers a few facts about you to personalise answers; the App Home tab lists them and lets you
+    delete them at any time. Channel creators can turn it off in their channel with /smasnug off.
+features:
+  app_home:
+    home_tab_enabled: true
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Smasnug
+    always_online: true
+  slash_commands:
+    - command: /smasnug
+      description: Turn Smasnug off or on in this channel, or show its status
+      usage_hint: "off | on | status"
+      should_escape: false
+oauth_config:
+  scopes:
+    bot:
+      - chat:write            # post, stream, update; also covers assistant.threads.setStatus
+      - chat:write.customize  # "Smasnug on behalf of <user>" username + avatar
+      - chat:write.public     # send to public channels the bot hasn't joined
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+      - channels:read
+      - groups:read
+      - im:read
+      - mpim:read
+      - im:write              # conversations.open for on-behalf DMs
+      - users:read
+      - reactions:read
+      - reactions:write
+      - files:read
+      - files:write
+      - channels:join         # join public channels when posting needs membership
+      - commands              # /smasnug
+      - emoji:read
+    user:
+      - search:read           # Slack search (user token, public channels only — enforced in code)
+settings:
+  event_subscriptions:
+    bot_events:
+      - message.channels
+      - message.groups
+      - message.im
+      - message.mpim
+      - app_home_opened
+  interactivity:
+    is_enabled: true
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: false
