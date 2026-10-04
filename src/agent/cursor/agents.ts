@@ -11,7 +11,7 @@
  *   (`for update skip locked`, claim id + lease, like reminders), so two workers never handle the same poll, and
  *   restarts / deploys don't matter (nothing is held in memory; the stale-heartbeat sweeper and shutdown hook skip
  *   these runs). Delayed BullMQ jobs per run were the alternative; polling the DB needs no job bookkeeping on
- *   cancel / restart / Redis loss, and 60 s precision is plenty for 10–60 min tasks.
+ *   cancel / restart / Redis loss, and 45 s precision is plenty for 10–60 min tasks.
  * - Steering: Cursor can't inject a message into a running cloud run (see api.ts), so a steer is queued in the
  *   subagent inbox and sent as a follow-up Cursor run (same conversation, branch and PR) as soon as the current one
  *   finishes; the bot run (card row) stays running until Cursor is done with everything.
