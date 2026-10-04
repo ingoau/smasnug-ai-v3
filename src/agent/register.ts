@@ -12,6 +12,8 @@ import { cancelCardRuns } from './subagents.js';
 import './leave-thread.js';
 import './session-title.js';
 import './tools.js';
+import './cursor/tools.js';
+import { pollCursorRuns } from './cursor/agents.js';
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
   [QUEUE.subagentRun]: async (job) => {
@@ -28,6 +30,13 @@ export const maintenance: Record<string, { everyMs: number; run: () => Promise<v
     everyMs: Math.max(5_000, Math.floor(limits.staleHeartbeatMs / 3)),
     run: async () => {
       await sweepStaleRuns();
+    },
+  },
+  // Coding agents (Cursor): poll running ones (claims per run, exactly-once; see src/agent/cursor/agents.ts).
+  'agent:cursor-poll': {
+    everyMs: limits.cursorPollMs,
+    run: async () => {
+      await pollCursorRuns();
     },
   },
   'agent:expire-subagents': {

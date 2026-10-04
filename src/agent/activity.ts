@@ -29,6 +29,7 @@ const LABELS: Record<string, string> = {
   create_watch: 'Setting up a watch…',
   list_watches: 'Checking watches…',
   cancel_watch: 'Cancelling a watch…',
+  spawn_coding_agent: 'Starting a coding agent…',
 };
 
 /** Tools that only respond; they never show or change the indicator. */

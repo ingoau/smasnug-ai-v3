@@ -35,6 +35,20 @@ const Env = z.object({
    * (docs/perf.md).
    */
   CHILD_REASONING_EFFORT: z.enum(['default', 'none', 'minimal', 'low', 'medium', 'high']).default('low'),
+  /**
+   * Coding agents (Cursor Cloud Agents, src/agent/cursor/): admin-only background agents that change the bot's own repo
+   * and open a PR. Off unless both CURSOR_API_KEY and CURSOR_REPO are set. Never logged.
+   */
+  CURSOR_API_KEY: z.string().optional(),
+  /** GitHub URL of the bot's repository, e.g. https://github.com/ingoau/smasnug-ai-v3. */
+  CURSOR_REPO: z.string().optional(),
+  /** Branch (or commit) the coding agent starts from; its PR targets this. */
+  CURSOR_REF: z.string().default('main'),
+  /** Cursor model id (GET /v1/models); unset = the Cursor account's default model. */
+  CURSOR_MODEL: z.string().optional(),
+  CURSOR_API_URL: z.string().default('https://api.cursor.com'),
+  /** Optional read-only GitHub token: lets the post-run check list a private repo's PR files (public repos need none). */
+  CURSOR_GITHUB_TOKEN: z.string().optional(),
 });
 
 export const env = Env.parse(process.env);
@@ -100,4 +114,16 @@ export const limits = {
   watchMaxLifetimeMs: 30 * 24 * 60 * 60 * 1000,
   watchNotificationsPerDay: 3,
   scheduleTickMs: 60_000,
+  // coding agents (Cursor, src/agent/cursor/)
+  /** How often running Cursor agents are polled (maintenance task + per-run next_poll_at). */
+  cursorPollMs: 30_000,
+  /** A poller's lease on one Cursor run while it checks it (exactly-once handling across workers). */
+  cursorPollLeaseMs: 2 * 60_000,
+  /** Cursor runs get their own max duration (the subagent run limit / heartbeat sweeper don't apply). */
+  cursorRunMaxMs: 3 * 60 * 60 * 1000,
+  /** Coding agents running at once (all users; it's admin-only anyway). */
+  cursorMaxActive: 3,
+  cursorApiTimeoutMs: 20_000,
+  /** Consecutive failed polls (backing off up to 5 min) before the run is marked failed. */
+  cursorMaxPollErrors: 30,
 } as const;
