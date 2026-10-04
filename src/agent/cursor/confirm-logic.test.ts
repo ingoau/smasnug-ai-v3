@@ -35,6 +35,13 @@ describe('launch preview', () => {
     expect(task.map((b) => b.text.text).join('')).toBe('a'.repeat(CODING_INSTRUCTIONS_MAX));
     expect(blocks.at(-1).elements.map((e: any) => e.action_id)).toEqual(['coding:launch', 'coding:cancel']);
   });
+  it('preview rules blurb: tests and self-review are judgment-based; PR when there are changes', () => {
+    const blocks = launchPreviewBlocks({ pendingId: 'p', title: 'T', instructions: 'x', repoUrl: 'https://github.com/o/r', ref: 'main', ttlMin: 15 }) as any[];
+    const intro = blocks.find((b) => b.type === 'section' && b.text?.type === 'mrkdwn')?.text?.text as string;
+    expect(intro).toMatch(/pull request opens when there are changes/);
+    const rules = blocks.find((b) => b.type === 'context' && String(b.elements?.[0]?.text ?? '').includes('fixed rules'))?.elements?.[0]?.text as string;
+    expect(rules).toMatch(/tests and self-review when the agent judges them necessary/);
+  });
 });
 
 // Review #12: the admin-only section isn't part of everyone's system prompt.
@@ -43,6 +50,12 @@ describe('front prompt', () => {
     expect(frontSystemPrompt('Bot')).not.toContain('spawn_coding_agent');
     expect(CODING_AGENTS_PROMPT).toContain('spawn_coding_agent');
     expect(CODING_AGENTS_PROMPT).toContain('Launch');
+  });
+  it('allows explore/search and treats tests/review as judgment-based in the admin prompt', () => {
+    expect(CODING_AGENTS_PROMPT).toMatch(/explore or search/);
+    expect(CODING_AGENTS_PROMPT).toMatch(/tests and self-review when the agent judges them necessary/);
+    expect(CODING_AGENTS_PROMPT).toMatch(/PR link if one is present|share findings/i);
+    expect(CODING_AGENTS_PROMPT).toMatch(/mention testing only if checks ran/);
   });
 });
 

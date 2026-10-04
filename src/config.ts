@@ -116,7 +116,7 @@ export const limits = {
   scheduleTickMs: 60_000,
   // coding agents (Cursor, src/agent/cursor/)
   /** How often running Cursor agents are polled (maintenance task + per-run next_poll_at). */
-  cursorPollMs: 30_000,
+  cursorPollMs: 60_000,
   /** A poller's lease on one Cursor run while it checks it (exactly-once handling across workers); renewed before slow steps, well above the worst-case handling time (a few API calls with 20 s timeouts + GitHub). */
   cursorPollLeaseMs: 10 * 60_000,
   /** Cursor runs get their own max duration (the subagent run limit / heartbeat sweeper don't apply). */
