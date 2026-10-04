@@ -201,8 +201,41 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       expect(await statuses(dm.channelId)).toEqual([]); // still pending
       const send = await import('../features/send/send.js');
       await send.handleSendCancel({ userId: 'U1', actionId: 'send:cancel', value: p!.id, responseUrl: 'https://hooks.fake/x', body: {} } as any);
-      await vi.waitFor(async () => expect(await statuses(dm.channelId)).toEqual(['active']));
+      // The Cancel starts an outcome turn (a mention): that turn takes the session from suspended to processing to
+      // active; the click itself doesn't set active underneath it.
+      expect(await statuses(dm.channelId)).toEqual([]);
       expect(await s.finalSessionStatus(dm.id, 2)).toBe('active');
+      await processThreadRun(job({ threadId: dm.id }));
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(run.mock.calls[0]![0]).toMatchObject({ kind: 'scheduled', authorId: 'U1', isMention: true });
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'active']);
+    });
+
+    it('a pending coding-agent launch suspends the session too; resolving it resumes', async () => {
+      const dm = await thread(true);
+      const [p] = await sql<{ id: string }[]>`
+        insert into pending_coding_agents (thread_id, owner_id, title, instructions, expires_at)
+        values (${dm.id}, 'UADMIN', 't', 'i', now() + interval '10 minutes') returning id`;
+      expect(await s.finalSessionStatus(dm.id, 1)).toBe('suspended');
+      await s.noteSessionSuspended(dm.id);
+      expect(await redis.zscore('sessions:suspended', dm.id)).not.toBeNull();
+      await s.resumeSuspendedSession(dm.id);
+      expect(await statuses(dm.channelId)).toEqual([]); // still pending
+      await sql`update pending_coding_agents set status = 'launched' where id = ${p!.id}`;
+      await s.resumeSuspendedSession(dm.id);
+      expect(await statuses(dm.channelId)).toEqual(['active']);
+      expect(await redis.zscore('sessions:suspended', dm.id)).toBeNull();
+    });
+
+    it('an expired send confirmation: non-mention outcome turn, and the session resumes right away', async () => {
+      const dm = await thread(true);
+      await sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${dm.id}, 'C1', 'hi', now() - interval '1 minute')`;
+      const send = await import('../features/send/send.js');
+      await send.expirePendingSends();
+      expect(await statuses(dm.channelId)).toEqual(['active']);
+      await processThreadRun(job({ threadId: dm.id }));
+      expect(run.mock.calls[0]![0]).toMatchObject({ kind: 'scheduled', isMention: false });
+      expect(await statuses(dm.channelId)).toEqual(['active']); // a silent turn shows no status
     });
 
     it('expired confirmations resume the session too', async () => {

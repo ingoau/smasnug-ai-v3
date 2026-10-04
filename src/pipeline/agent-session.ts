@@ -15,8 +15,9 @@
  *   (the current one or an earlier one, from the `session_titled` events), is not taken as a user rename. A
  *   user-chosen title is never overwritten afterwards; one that lands while our rename is in flight is re-applied.
  * - Statuses: `suspended` = "the agent cannot make progress until the user intervenes, for example when the agent
- *   needs user clarification or a tool approval" → a DM turn that leaves a send_message confirmation pending ends
- *   `suspended`, and resolving it (Send / Cancel / expiry) sets `active`. `closed` = "the agent has closed the session
+ *   needs user clarification or a tool approval" → a DM turn that leaves a confirmation pending (a send_message
+ *   preview, or a coding-agent launch preview) ends `suspended`, and resolving it (Send / Launch / Cancel / expiry)
+ *   sets `active` (or the outcome turn it starts does, src/features/outcome-turn.ts). `closed` = "the agent has closed the session
  *   and will no longer respond on it" → leave_thread in a DM ends the turn `closed`; a later message in the thread
  *   sets `processing` again like any turn (the bot always answers DMs).
  */
@@ -183,16 +184,20 @@ export async function requestSessionClose(threadId: string, turnId: number): Pro
   return rows.length > 0;
 }
 
+/** Whether thread `t` has a confirmation the user still has to answer: a send_message or coding-agent launch preview. */
+const AWAITING_USER = sql`(
+  exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now())
+  or exists (select 1 from pending_coding_agents c where c.thread_id = t.id and c.status = 'pending' and c.expires_at > now()))`;
+
 /**
- * The status a turn leaves its session in. DMs: `suspended` while a send confirmation from this thread is pending
+ * The status a turn leaves its session in. DMs: `suspended` while a confirmation from this thread is pending
  * (the user has to act), `closed` after leave_thread in this turn, else `active`. Channel threads: always `active`.
  * Without `turnId` (side paths that clear a status outside a turn: intake, stop, a resolved confirmation): the
  * status the session rests in, i.e. `closed` if the latest turn that ran (or runs) is the one that closed it.
  */
 export async function finalSessionStatus(threadId: string, turnId?: number): Promise<FinalSessionStatus> {
   const [row] = await sql<{ isDm: boolean; closeTurnId: number | null; pendingSend: boolean; lastTurnId: number | null }[]>`
-    select t.is_dm, s.close_turn_id,
-      exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now()) as pending_send,
+    select t.is_dm, s.close_turn_id, ${AWAITING_USER} as pending_send,
       (select max(u.id) from turns u where u.thread_id = t.id and u.status <> 'pending') as last_turn_id
     from threads t left join agent_sessions s on s.thread_id = t.id where t.id = ${threadId}`;
   if (!row?.isDm) return 'active';
@@ -219,7 +224,10 @@ const SUSPENDED_KEY = 'sessions:suspended';
 export async function noteSessionSuspended(threadId: string): Promise<void> {
   try {
     const [row] = await sql<{ at: Date | null }[]>`
-      select min(expires_at) as at from pending_sends where thread_id = ${threadId} and status = 'pending' and expires_at > now()`;
+      select min(expires_at) as at from (
+        select expires_at from pending_sends where thread_id = ${threadId} and status = 'pending' and expires_at > now()
+        union all
+        select expires_at from pending_coding_agents where thread_id = ${threadId} and status = 'pending' and expires_at > now()) w`;
     if (row?.at) await redis.zadd(SUSPENDED_KEY, new Date(row.at).getTime(), threadId);
   } catch (err) {
     log.warn({ err, threadId }, 'noting a suspended session failed');
@@ -235,7 +243,7 @@ export async function resumeExpiredSuspensions(): Promise<void> {
 }
 
 /**
- * A send confirmation was resolved (Send, Cancel or expiry): a DM session suspended for it goes back to `active`,
+ * A confirmation was resolved (Send / Launch, Cancel or expiry): a DM session suspended for it goes back to `active`,
  * unless another confirmation is still pending or a turn is running (that turn sets the final status; the thread run
  * re-checks after releasing the lock). Never throws.
  */
@@ -243,8 +251,7 @@ export async function resumeSuspendedSession(threadId: string | null | undefined
   if (!threadId) return;
   try {
     const [row] = await sql<{ isDm: boolean; pendingSend: boolean }[]>`
-      select t.is_dm, exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now()) as pending_send
-      from threads t where t.id = ${threadId}`;
+      select t.is_dm, ${AWAITING_USER} as pending_send from threads t where t.id = ${threadId}`;
     if (!row?.isDm) return;
     if (row.pendingSend) return void (await noteSessionSuspended(threadId)); // resume when the next one expires
     if (await isLocked(threadLockKey(threadId))) return;

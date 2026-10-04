@@ -3,11 +3,14 @@
  * launch and the admin gets an ephemeral preview with the exact title and task as they will be sent, plus Launch /
  * Cancel. Only ADMIN_USER_ID pressing Launch starts it (checked here, on the click). Same pattern as send_message's
  * confirmation (src/features/send/): server-side pending row with expiry, atomic claim (double clicks launch once),
- * stale-click replies, idempotent preview post. The launched agent gets a plan card of its own in the thread.
+ * stale-click replies, idempotent preview post. The launched agent gets a plan card of its own in the thread (and the
+ * preview is deleted: the card is the feedback). Cancel, a failed launch and expiry start an outcome turn so the agent
+ * can acknowledge it (src/features/outcome-turn.ts); while the preview is pending a DM session shows `suspended`.
  *
  * Why: everything a turn's model reads (thread history, other people's messages, fetched pages, subagent results)
  * can carry injected instructions; a human look at the exact task is the last gate before code changes start.
  */
+import type { TransactionSql } from 'postgres';
 import { env, limits } from '../../config.js';
 import type { ActionContext } from '../../core/actions.js';
 import { appendEvent, parseThreadId } from '../../core/events.js';
@@ -15,13 +18,25 @@ import { slackCall } from '../../core/slack.js';
 import type { TurnRow } from '../../core/types.js';
 import { sql } from '../../db/index.js';
 import { checkEntry, takeLimit } from '../../features/guard.js';
-import { ephemeral } from '../../features/util.js';
+import { settleWithOutcome } from '../../features/outcome-turn.js';
+import { deleteOriginal, ephemeral, respond } from '../../features/util.js';
+import { resumeSuspendedSession } from '../../pipeline/agent-session.js';
 import { log } from '../../log.js';
 import { postCard } from '../cards.js';
 import { ToolError } from '../subagents.js';
 import { oneLine } from '../util.js';
 import { activeCodingRuns, cursorConfig, cursorInstructRefusal, spawnCodingAgent } from './agents.js';
-import { CODING_INSTRUCTIONS_MAX, decideLaunchClick, LAUNCH_CLICK_REPLIES, launchPreviewBlocks, type LaunchDecision, type PendingLaunchRow } from './confirm-logic.js';
+import {
+  CODING_INSTRUCTIONS_MAX,
+  decideLaunchClick,
+  LAUNCH_CLICK_REPLIES,
+  launchOutcomeIsMention,
+  launchPreviewBlocks,
+  renderLaunchOutcome,
+  type LaunchDecision,
+  type LaunchOutcome,
+  type PendingLaunchRow,
+} from './confirm-logic.js';
 
 const ttlMin = () => Math.round(limits.cursorConfirmTtlMs / 60_000);
 
@@ -84,14 +99,50 @@ async function loadPending(id: string | undefined): Promise<PendingLaunchRow | u
 
 async function replyDecision(ctx: ActionContext, d: Exclude<LaunchDecision, 'ok'>) {
   const r = LAUNCH_CLICK_REPLIES[d];
+  // A second click on a preview already removed after launching: nothing to replace, no new ephemeral.
+  if (d === 'launched') return void (await respond(ctx.responseUrl, { replace_original: true, text: r.text }));
   await ephemeral(ctx, r.text, { replace: r.replace });
+}
+
+/** Conditional status change of a pending launch (true = this call changed it). */
+const transitionTo = (id: string, from: 'pending' | 'launching', to: 'cancelled' | 'expired' | 'failed', when: 'live' | 'expired' | 'any', error?: string) =>
+  async (tx: TransactionSql<{}>) => {
+    const expiry = when === 'live' ? sql`and expires_at > now()` : when === 'expired' ? sql`and expires_at <= now()` : sql``;
+    const rows = await tx`
+      update pending_coding_agents set status = ${to}, error = coalesce(${error ?? null}, error)
+      where id = ${id} and status = ${from} ${expiry} returning id`;
+    return rows.length > 0;
+  };
+
+/**
+ * Resolve a pending launch without starting it (Cancel, a failed Launch, expiry) and tell the agent in an outcome turn
+ * (exactly once; src/features/outcome-turn.ts). A DM session suspended for it resumes unless a mention turn will set
+ * its status itself.
+ */
+async function settleLaunch(p: PendingLaunchRow, outcome: LaunchOutcome, transition: (tx: TransactionSql<{}>) => Promise<boolean>) {
+  const isMention = launchOutcomeIsMention(outcome);
+  const res = await settleWithOutcome({
+    threadId: p.threadId,
+    speakerId: p.ownerId,
+    source: 'coding_launch',
+    sourceRef: p.id,
+    input: renderLaunchOutcome({ pendingId: p.id, ownerId: p.ownerId, title: p.title, outcome }),
+    isMention,
+    transition,
+  });
+  if (res.settled && (res.turnId == null || !isMention)) await resumeSuspendedSession(p.threadId);
+  return res;
 }
 
 export async function handleCodingCancel(ctx: ActionContext): Promise<void> {
   const p = await loadPending(ctx.value);
   const d = decideLaunchClick(p, ctx.userId, env.ADMIN_USER_ID);
   if (d !== 'ok') return replyDecision(ctx, d);
-  await sql`update pending_coding_agents set status = 'cancelled' where id = ${p!.id} and status = 'pending'`;
+  const res = await settleLaunch(p!, { kind: 'cancelled' }, transitionTo(p!.id, 'pending', 'cancelled', 'live'));
+  if (!res.settled) {
+    const again = decideLaunchClick(await loadPending(p!.id), ctx.userId, env.ADMIN_USER_ID);
+    return replyDecision(ctx, again === 'ok' ? 'expired' : again);
+  }
   await appendEvent(p!.threadId, 'coding_agent_declined', ctx.userId, { pendingId: p!.id }).catch(() => {});
   await ephemeral(ctx, LAUNCH_CLICK_REPLIES.cancelled.text, { replace: true });
 }
@@ -112,28 +163,52 @@ export async function handleCodingLaunch(ctx: ActionContext): Promise<void> {
     return replyDecision(ctx, again === 'ok' ? 'expired' : again);
   }
   const fail = async (msg: string) => {
-    await sql`update pending_coding_agents set status = 'failed', error = ${msg} where id = ${c.id}`;
+    await settleLaunch(c, { kind: 'failed', error: msg }, transitionTo(c.id, 'launching', 'failed', 'any', msg));
     await ephemeral(ctx, `Not launched: ${msg}`, { replace: true });
   };
   const [th] = await sql<{ rootDeletedAt: Date | null }[]>`select root_deleted_at from threads where id = ${c.threadId}`;
   if (!th || th.rootDeletedAt) return fail('the thread was deleted. Ask again somewhere else.');
 
+  let r: Awaited<ReturnType<typeof spawnCodingAgent>>;
   try {
     // The pending id doubles as the client-supplied Cursor agent id: a retried launch can't create a second agent.
-    const r = await spawnCodingAgent({ threadId: c.threadId, turnId: null, ownerId: c.ownerId, title: c.title, instructions: c.instructions, agentId: `bc-${c.id}` });
-    await sql`update pending_coding_agents set status = 'launched', subagent_id = ${r.subagentId} where id = ${c.id}`;
-    await postCard(r.cardId).catch((err) => log.error({ err, cardId: r.cardId }, 'posting the coding agent card failed'));
-    await ephemeral(ctx, `Launched ✓ ${c.title}: it shows on the plan card in this thread. The PR link and summary come here when it's done.`, { replace: true });
+    r = await spawnCodingAgent({ threadId: c.threadId, turnId: null, ownerId: c.ownerId, title: c.title, instructions: c.instructions, agentId: `bc-${c.id}` });
   } catch (err) {
     log.warn({ err, pendingId: c.id }, 'coding agent launch failed');
-    await fail(err instanceof ToolError ? err.message : 'something went wrong. Try asking again.');
+    return fail(err instanceof ToolError ? err.message : 'something went wrong. Try asking again.');
   }
+  await sql`update pending_coding_agents set status = 'launched', subagent_id = ${r.subagentId} where id = ${c.id}`;
+  await resumeSuspendedSession(c.threadId); // a DM session waiting for this launch → active
+  // The plan card in the thread is the visible feedback (the PR link and summary follow there): the preview goes
+  // away. Only if the card couldn't be posted does the preview turn into the confirmation.
+  const cardPosted = await postCard(r.cardId).then(
+    () => true,
+    (err) => (log.error({ err, cardId: r.cardId }, 'posting the coding agent card failed'), false),
+  );
+  if (cardPosted && (await deleteOriginal(ctx))) return;
+  await ephemeral(ctx, `Launched ✓ ${c.title}: it shows on the plan card in this thread. The PR link and summary come here when it's done.`, { replace: true });
 }
 
-/** Maintenance: expire unanswered previews; drop old rows (they only matter while pending). */
+/** Outcome turns only for previews that expired recently (a sweep after downtime doesn't dig up old ones). */
+const OUTCOME_MAX_AGE_MS = 60 * 60 * 1000;
+
+/** Maintenance: expire unanswered previews (the agent hears about it); drop old rows (they only matter while pending). */
 export async function expirePendingLaunches(): Promise<void> {
-  await sql`update pending_coding_agents set status = 'expired' where status = 'pending' and expires_at <= now()`;
+  const due = await sql<PendingLaunchRow[]>`
+    select * from pending_coding_agents where status = 'pending' and expires_at <= now() order by expires_at limit 200`;
+  for (const p of due) {
+    const transition = transitionTo(p.id, 'pending', 'expired', 'expired');
+    try {
+      if (Date.now() - new Date(p.expiresAt).getTime() < OUTCOME_MAX_AGE_MS) await settleLaunch(p, { kind: 'expired', ttlMin: ttlMin() }, transition);
+      else if (await sql.begin(transition)) await resumeSuspendedSession(p.threadId);
+    } catch (err) {
+      log.warn({ err, pendingId: p.id }, 'expiring a pending coding agent launch failed');
+    }
+  }
   // A click that crashed mid-launch: the agent (if any) is tracked by its own rows; just make the state honest.
-  await sql`update pending_coding_agents set status = 'failed', error = 'interrupted' where status = 'launching' and expires_at <= now() - interval '10 minutes'`;
+  const stuck = await sql<{ threadId: string }[]>`
+    update pending_coding_agents set status = 'failed', error = 'interrupted'
+    where status = 'launching' and expires_at <= now() - interval '10 minutes' returning thread_id`;
+  for (const threadId of new Set(stuck.map((s) => s.threadId))) await resumeSuspendedSession(threadId);
   await sql`delete from pending_coding_agents where created_at < now() - interval '30 days'`;
 }

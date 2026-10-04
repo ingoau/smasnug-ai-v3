@@ -40,6 +40,32 @@ export const LAUNCH_CLICK_REPLIES: Record<Exclude<LaunchDecision, 'ok'>, { text:
   failed: { text: "This launch failed. Ask again to retry.", replace: true },
 };
 
+/**
+ * What happened to a proposed launch, for the agent's outcome turn (src/features/outcome-turn.ts). A successful launch
+ * has none: its plan card and later synthesis cover it.
+ */
+export type LaunchOutcome = { kind: 'cancelled' } | { kind: 'failed'; error: string } | { kind: 'expired'; ttlMin: number };
+
+/** The admin acted (Cancel, a failed Launch): treat it like a mention. Expiry: the agent may stay silent. */
+export const launchOutcomeIsMention = (o: LaunchOutcome) => o.kind !== 'expired';
+
+/** The input of the outcome turn: a system notice, not the admin's words. */
+export function renderLaunchOutcome(o: { pendingId: string; ownerId: string; title: string; outcome: LaunchOutcome }): string {
+  const who = `<@${o.ownerId}>`;
+  const title = o.title.replace(/["<>]/g, '');
+  const out = o.outcome;
+  const notice =
+    out.kind === 'cancelled'
+      ? `${who} clicked Cancel on the launch preview for the coding agent "${title}", so nothing was started. Acknowledge it in a few words (e.g. "ok, cancelled"), or ask what to change if that's clearly useful.`
+      : out.kind === 'failed'
+        ? `${who} clicked Launch on the coding agent "${title}", but it could not start (${out.error.replace(/[<>]/g, '')}). Tell them briefly.`
+        : `Nobody clicked Launch or Cancel on the preview for the coding agent "${title}" within ${out.ttlMin} min, so it expired and nothing was started. If the conversation has moved on, stay silent (call end_turn without replying); otherwise at most one short line that it wasn't started and they can ask again.`;
+  return [
+    `<coding_agent_outcome id="${o.pendingId}" status="${out.kind}" title="${title}"/>`,
+    `System notice (not a message from ${who}): this turn reports what happened to a coding agent you proposed with spawn_coding_agent earlier in this thread. ${notice} Don't propose it again unless they ask.`,
+  ].join('\n');
+}
+
 /** Section text limit (https://docs.slack.dev/reference/block-kit/blocks/section-block: max 3000 characters). */
 const SECTION_MAX = 3000;
 /** Longest task the preview can show in full (plain-text sections within the 50-block limit). */

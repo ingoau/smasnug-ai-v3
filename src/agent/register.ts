@@ -42,7 +42,7 @@ export const maintenance: Record<string, { everyMs: number; run: () => Promise<v
   },
   // Coding agents: expire unanswered Launch / Cancel previews (src/agent/cursor/confirm.ts).
   'agent:cursor-confirm-expiry': {
-    everyMs: 5 * 60 * 1000,
+    everyMs: 60 * 1000,
     run: expirePendingLaunches,
   },
   'agent:expire-subagents': {

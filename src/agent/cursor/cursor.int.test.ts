@@ -726,9 +726,12 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
       const ctx = { userId, actionId, value, responseUrl: `https://hooks.slack.test/${value}`, body: {} } as any;
       return actionId === 'coding:launch' ? confirm.handleCodingLaunch(ctx) : confirm.handleCodingCancel(ctx);
     };
-    const responses = async (value: string) =>
-      (await slackFake.fakeCalls()).filter((c) => c.method === 'response_url' && c.args.url === `https://hooks.slack.test/${value}`).map((c) => c.args.text as string);
+    const responseCalls = async (value: string) =>
+      (await slackFake.fakeCalls()).filter((c) => c.method === 'response_url' && c.args.url === `https://hooks.slack.test/${value}`);
+    const responses = async (value: string) => (await responseCalls(value)).filter((c) => !c.args.delete_original).map((c) => c.args.text as string);
     const pendingRow = async (id: string) => (await sql<any[]>`select * from pending_coding_agents where id = ${id}`)[0];
+    const outcomeTurns = (pendingId: string) =>
+      sql<any[]>`select t.*, i.input from scheduled_turn_inputs i join turns t on t.id = i.turn_id where i.source = 'coding_launch' and i.source_ref = ${pendingId}`;
 
     it('spawn_coding_agent only proposes: an ephemeral preview with the exact task, nothing sent to Cursor', async () => {
       const t = await newThread();
@@ -780,9 +783,12 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
       expect(card.messageTs).toBeTruthy(); // posted as its own message in the thread
       const posted = (await slackFake.fakeCalls()).slice(n).filter((c) => c.method === 'chat.postMessage' && c.args.thread_ts === t.split(':')[1]);
       expect(posted).toHaveLength(1);
+      // The plan card is the feedback: the preview is deleted (no "Launched ✓" left behind), and no outcome turn.
+      expect((await responseCalls(p.pendingId)).filter((c) => c.args.delete_original === true)).toHaveLength(1);
       const texts = await responses(p.pendingId);
-      expect(texts.some((x) => x.startsWith('Launched ✓'))).toBe(true);
+      expect(texts.some((x) => x.startsWith('Launched ✓'))).toBe(false);
       expect(texts.some((x) => x === 'Already launched.' || x === 'Launching…')).toBe(true);
+      expect(await outcomeTurns(p.pendingId)).toHaveLength(0);
 
       // It finishes → synthesis for the admin on that card.
       fake.set(fake.only(), { status: 'FINISHED', result: 'done', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
@@ -807,6 +813,90 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
       await confirm.expirePendingLaunches();
       expect((await pendingRow(p2.pendingId)).status).toBe('expired');
       expect(fake.calls).toEqual([]);
+    });
+
+    it('Cancel, a failed launch and expiry each start exactly one outcome turn for the admin', async () => {
+      const t1 = await newThread();
+      const p1 = await propose(t1);
+      await Promise.all([click('coding:cancel', p1.pendingId), click('coding:cancel', p1.pendingId)]);
+      await confirm.expirePendingLaunches();
+      const c = await outcomeTurns(p1.pendingId);
+      expect(c).toHaveLength(1);
+      expect(c[0]).toMatchObject({ kind: 'scheduled', authorId: 'UADMIN', isMention: true, threadId: t1 });
+      expect(c[0].input).toContain('status="cancelled"');
+      expect(c[0].input).toContain('Fix tmrw parsing');
+      expect(c[0].input).toMatch(/^System notice \(not a message from <@UADMIN>\)/m);
+
+      const t2 = await newThread();
+      const p2 = await propose(t2);
+      const { CursorApiError } = await import('./api.js');
+      fake.failCreate = new CursorApiError(403, 'repository_access', 'Cursor API 403 repository_access: no access');
+      try {
+        await click('coding:launch', p2.pendingId);
+      } finally {
+        fake.failCreate = null;
+      }
+      expect((await pendingRow(p2.pendingId)).status).toBe('failed');
+      expect((await responses(p2.pendingId)).at(-1)).toMatch(/^Not launched/);
+      const f = await outcomeTurns(p2.pendingId);
+      expect(f).toHaveLength(1);
+      expect(f[0]).toMatchObject({ isMention: true });
+      expect(f[0].input).toContain('status="failed"');
+
+      // Expiry racing a click: one outcome, nothing launched; old expiries get none.
+      const t3 = await newThread();
+      const p3 = await propose(t3);
+      const p4 = await propose(await newThread());
+      await sql`update pending_coding_agents set expires_at = now() - interval '1 second' where id = ${p3.pendingId}`;
+      await sql`update pending_coding_agents set expires_at = now() - interval '2 hours' where id = ${p4.pendingId}`;
+      const creates = fake.calls.filter((x) => x === 'createAgent').length;
+      await Promise.all([click('coding:launch', p3.pendingId), click('coding:cancel', p3.pendingId), confirm.expirePendingLaunches(), confirm.expirePendingLaunches()]);
+      expect((await pendingRow(p3.pendingId)).status).toBe('expired');
+      const e = await outcomeTurns(p3.pendingId);
+      expect(e).toHaveLength(1);
+      expect(e[0]).toMatchObject({ isMention: false, threadId: t3 });
+      expect(e[0].input).toContain('status="expired"');
+      expect((await pendingRow(p4.pendingId)).status).toBe('expired');
+      expect(await outcomeTurns(p4.pendingId)).toHaveLength(0);
+      expect(fake.calls.filter((x) => x === 'createAgent')).toHaveLength(creates);
+    });
+
+    it('no outcome turn in a disabled channel or for a gone thread; the launch still resolves', async () => {
+      const state = await import('../../features/state.js');
+      const p1 = await propose(await newThread());
+      await sql`update pending_coding_agents set expires_at = now() - interval '1 second' where id = ${p1.pendingId}`;
+      // The admin bypasses pause and suspension (guard.evaluateEntry), not a disabled channel.
+      const ch = (await import('../../core/events.js')).parseThreadId((await pendingRow(p1.pendingId)).threadId).channelId;
+      await state.setChannelDisabled(ch, true);
+      try {
+        await confirm.expirePendingLaunches();
+      } finally {
+        await state.setChannelDisabled(ch, false);
+      }
+      expect((await pendingRow(p1.pendingId)).status).toBe('expired');
+      expect(await outcomeTurns(p1.pendingId)).toHaveLength(0);
+
+      const t2 = await newThread();
+      const p2 = await propose(t2);
+      await sql`update threads set root_deleted_at = now() where id = ${t2}`;
+      await click('coding:cancel', p2.pendingId);
+      expect((await pendingRow(p2.pendingId)).status).toBe('cancelled');
+      expect(await outcomeTurns(p2.pendingId)).toHaveLength(0);
+    });
+
+    it('a DM session is suspended while the launch preview is pending and resumes on Launch', async () => {
+      const channelId = `DCUR${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+      const dm = `${channelId}:1791000000.000100`;
+      await sql`insert into threads (id, channel_id, thread_ts, is_dm) values (${dm}, ${channelId}, '1791000000.000100', true)`;
+      threads.push(dm);
+      const session = await import('../../pipeline/agent-session.js');
+      const p = await propose(dm);
+      expect(await session.finalSessionStatus(dm, 1)).toBe('suspended');
+      await click('coding:launch', p.pendingId);
+      expect((await pendingRow(p.pendingId)).status).toBe('launched');
+      expect(await session.finalSessionStatus(dm, 1)).toBe('active');
+      const statuses = (await slackFake.fakeCalls()).filter((c) => c.method === 'agents.sessions.setStatus' && c.args.channel_id === channelId).map((c) => c.args.status);
+      expect(statuses).toEqual(['active']);
     });
   });
 
