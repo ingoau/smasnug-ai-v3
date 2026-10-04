@@ -26,7 +26,7 @@ Not built yet (by design): a code sandbox for subagents, and observability (trac
 
 Scale by running more workers. Ingress and workers share only Postgres and Redis.
 
-Models ([GPT-6 Luna](https://openrouter.ai/openai/gpt-6-luna)) go through [Hack Club AI](https://ai.hackclub.com) when `HACKCLUB_AI_KEY` is set, with OpenRouter (`OPENROUTER_KEY`) as the fallback. Web search uses Hack Club's Exa proxy, then Exa directly (`EXA_API_KEY`).
+Models ([GPT-6 Luna](https://openrouter.ai/openai/gpt-6-luna)) need `OPENROUTER_KEY`. When `HACKCLUB_AI_KEY` is also set, chat goes through [Hack Club AI](https://ai.hackclub.com) first, with OpenRouter as the fallback. Web search uses Hack Club's Exa proxy, then Exa directly (`EXA_API_KEY`).
 
 ## Prerequisites
 
