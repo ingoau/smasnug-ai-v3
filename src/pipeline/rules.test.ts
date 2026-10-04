@@ -57,11 +57,11 @@ describe('batch helpers', () => {
 });
 
 describe('shouldDisengage', () => {
-  const opts = { afterMessages: 10, afterMs: 3 * 3600_000 };
+  const opts = { afterMessages: 25, afterMs: 3 * 3600_000 };
   const now = new Date('2026-10-03T12:00:00Z');
   it('after more than N messages without being addressed', () => {
-    expect(shouldDisengage({ messagesSinceAddressed: 10, lastAddressedAt: now }, now, opts)).toBe(false);
-    expect(shouldDisengage({ messagesSinceAddressed: 11, lastAddressedAt: now }, now, opts)).toBe(true);
+    expect(shouldDisengage({ messagesSinceAddressed: 25, lastAddressedAt: now }, now, opts)).toBe(false);
+    expect(shouldDisengage({ messagesSinceAddressed: 26, lastAddressedAt: now }, now, opts)).toBe(true);
   });
   it('after the time window', () => {
     const t = new Date(now.getTime() - 3 * 3600_000 - 1);

@@ -62,7 +62,7 @@ export const limits = {
   contextReplies: 29,
   contextChannelMessages: 5,
   messageTruncateTokens: 300,
-  disengageAfterMessages: 10,
+  disengageAfterMessages: 25,
   disengageAfterMs: 3 * 60 * 60 * 1000,
   gateContextMessages: 6,
   subagentIdleExpiryMs: 24 * 60 * 60 * 1000,
