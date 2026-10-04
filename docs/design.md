@@ -79,6 +79,10 @@ Fetch URL (no local addresses)
 
 ✓
 
+`set_session_title` (DM threads only)
+
+✓
+
 `remember`, `forget`, `propose_workspace_fact`
 
 ✓
@@ -117,7 +121,7 @@ The bot always runs on a mention or DM. In threads where it has been mentioned, 
 `<>` **prefix: don't reply unless mentioned.** A message whose trimmed raw text starts with a literal `<>` (Slack delivers it as `&lt;&gt;`) never triggers a turn or the gate unless it @mentions the bot, in which case it's a normal mention. It is still stored and visible as context. DMs included.
 - 
 **The bot never pings groups.** `reply` text (also while streaming) and card fallback text have `<!channel>`, `<!here>`, `<!everyone>`, `<!subteam^…>` and plain `@here`/`@channel`/`@everyone` neutralised; `send_message` already did this.
-**Status indicator.** `agents.sessions.setStatus` `processing` (Slack's "Working…" plus the native stop button, which behaves like saying "stop") and `active` when the turn ends, always (also on errors). Mentions and DMs show it as soon as the message is accepted at intake ("Thinking…"), before the debounce window; the turn takes it over, and it is cleared if no turn follows. Status calls never delay the model call. Unmentioned follow-ups show it only once the turn commits to work — its first tool call other than `reply`/`react`/`unreact`/`search_emojis`; a turn that stays silent or goes straight to `reply` never shows a status (the streamed reply is its own indicator) and gets no acknowledgement reaction. The activity text is code-derived from the tool being started ("Searching Slack…", "Reading the page…", "Starting a subagent…"), coalesced to at most one update per second, and sent through the legacy `assistant.threads.setStatus` (the only free-text status; it still works through Slack's compatibility bridge) on top of the session status. Web search shows "Searching the web…". A turn the user stopped never sets `processing` again.
+**Status indicator.** The agent session's lifecycle via `agents.sessions.setStatus`: `processing` (Slack's "Working…" plus the native stop button, which behaves like saying "stop") and `active` when the turn ends, always (also on errors). Mentions and DMs show it as soon as the message is accepted at intake, before the debounce window; the turn takes it over, and it is cleared if no turn follows. Status calls never delay the model call. Unmentioned follow-ups show it only once the turn commits to work — its first tool call other than `reply`/`react`/`unreact`/`search_emojis` (and the bookkeeping `set_session_title`/`leave_thread`); a turn that stays silent or goes straight to `reply` never shows a status (the streamed reply is its own indicator) and gets no acknowledgement reaction. A reply stream that ends mid-turn sets the session `active` (`chat.stopStream`'s default), so the next tool call sets `processing` again. A turn the user stopped never sets `processing` again. **Activity text** ("Searching Slack…", "Reading the page…", "Starting a subagent…", code-derived from the tool being started; "Searching the web…" for web search): the deprecated `assistant.threads.setStatus` (the only free-text status, removed with `assistant_view` in February 2027) is no longer used, and `agents.sessions.setStatus` takes no custom text. Instead (`STATUS_ACTIVITY_MODE=tasks`, default) the activity is a transient `task_update` card in the turn's reply message: the first activity opens a stream holding just that card, later ones mark it complete and add the next (at most one update per second, latest wins, unchanged text skipped). The turn's next reply streams into that message below the cards, and its final layout (`chat.update`) drops them, so the finished message is exactly the reply; a reply posted whole (subagents running) deletes the activity message instead, and so does the end of a turn that never replied (silent, error, stop), so nothing is left behind. If Slack refuses a cards-only stream, the turn just shows "Working…". `STATUS_ACTIVITY_MODE=off`: "Working…" only. In DMs the session also gets a title and richer statuses (see Agent sessions in DMs).
 ## Turns
 Every front-agent turn has exactly one speaker, and only one front agent runs per thread at a time. This keeps "current speaker" well defined for memory, tools and steering.
 **Debounce per (thread, author).** Messages from the same person within the window merge into one turn; messages from different people never merge. The window scales: about 300 ms for messages that skip the relevance gate (DMs, mentions, two-party follow-ups, "stop"), about 1 second for gated messages, 3 seconds while the thread has running subagents. It is re-evaluated as each message arrives. A same-author message that misses the short window still reaches the running turn through its inbox (or starts the next turn once the reply is out).
@@ -243,6 +247,14 @@ Channel canvases (`conversations.canvases.create`) are not used: they change a c
 **Artifacts.** Slack Code (2026) shows agent "artifacts" (code diffs, Block Kit views, HTML previews, canvases) in code channels, but there is no documented public API for apps to publish them: docs.slack.dev has no artifact methods, the help article only says "Code channel APIs will be available to any developer", and code channels (`features.code_channels` manifest flag) appear limited to a list of partner agents for now (checked 2026-10). Artifacts in code channels are collected from what the agent shares there (canvases, files), so the canvases and file attachments above are what this bot publishes. Revisit when an API is documented.
 - 
 Retention: canvases are user deliverables and are never deleted from Slack. A `bot_canvases` row holds no content and is what keeps a canvas editable, so it outlives thread retention and is deleted after 180 days without use (create, read or edit).
+### Agent sessions in DMs
+Slack lists agent sessions (one per thread) in the user's sidebar with a title and a status. In DM threads with the bot (`threads.is_dm`, channel type `im`) the bot manages both (`src/pipeline/agent-session.ts`, table `agent_sessions`); channel threads keep the plain processing/active indicator and get no title.
+-
+**Titles.** The front agent gets `set_session_title` only in DM threads, and the turn prompt shows the current title in `<session>`. It titles a conversation on its first substantive turn (≤ 40 characters, one line, markup stripped) and retitles only when the topic clearly changes; at most one title per turn (idempotent). It uses `agents.sessions.rename` (`chat:write`); `agents.sessions.setStatus`'s `title` only applies when a session is created, which intake already did, so it is just the fallback for `session_not_found`.
+-
+**User renames win.** `agent_session_title_changed` with a human `user` stores the user's title; the bot never renames that session again (the tool says so). Events without a user, from the bot user, or repeating the bot's own title within two minutes are treated as the echo of our rename.
+-
+**Statuses.** A DM turn ends `suspended` instead of `active` while a `send_message` confirmation from that thread is pending (Slack: "needs user clarification or a tool approval"); Send, Cancel or expiry set it `active` again. `leave_thread` in a DM (DMs always reach the bot, so it doesn't disengage there) ends the turn `closed`: the conversation shows as done until the user writes again, which starts a normal turn (`processing`, then `active`). The prompt asks for it only when the user wraps up.
 ## Context, images and the web
 ### Thread context
 Each turn includes the thread's parent message plus the last 29 replies, and about 5 channel messages from around the thread's parent.
@@ -388,6 +400,6 @@ Does the AI SDK's OpenRouter provider pass `openrouter:*` server tool types thro
 - 
 Can a message be edited with `chat.update` after `stopStream`? (docs.slack.dev chat.update: only refused while streaming, `streaming_state_conflict`; editable once the stream completed.)
 - 
-Does `assistant.threads.setStatus` render for mentions in regular channels?
+Do `task_update` chunks render in a stream opened with nothing else, and does `chat.update` after `stopStream` drop them (activity cards)? Is the bot's activity message notified before it is adopted or deleted?
 - 
 Exact values for per-user limits and the auto-suspension report threshold.

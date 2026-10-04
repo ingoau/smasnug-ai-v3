@@ -13,10 +13,10 @@ import { loadMessageMarks, timingReport, TurnTiming } from '../core/timing.js';
 import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from './lock.js';
 import { claimNextPending, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
 import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, TurnStatus } from './session-status.js';
+import { finalSessionStatus } from './agent-session.js';
 import { stopRequestedSince } from './stop.js';
 import { currentlyViewing } from './view-context.js';
 
-export { STATUS_TEXT } from './session-status.js';
 export const ERROR_TEXT = 'Something broke, try again.';
 
 /** In-process bookkeeping for graceful shutdown only (correctness never depends on it). */
@@ -87,6 +87,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     setPhase: (phase) => setPhase(turn.id, phase),
     isMention: turn.isMention,
     setActivity: (text) => indicator.setActivity(text),
+    sessionReleased: () => indicator.released(),
     stopRequested,
     // DM / agent-container turns: what the user is looking at next to the container.
     viewingChannelId: turn.kind === 'user' && channelId.startsWith('D') ? await currentlyViewing(turn.authorId, channelId) : null,
@@ -111,7 +112,9 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
       }
     }
   } finally {
-    await indicator.finish();
+    // DMs may end `suspended` (a send confirmation is pending) or `closed` (leave_thread); else `active`.
+    const final = await finalSessionStatus(turn.threadId, Number(turn.id)).catch((err) => (log.warn({ err }, 'finalSessionStatus failed'), 'active' as const));
+    await indicator.finish(final);
     // This turn cleared the indicator (any intake status with it); a turn that never showed one still takes back an
     // intake status left for messages that ended up in its inbox.
     if (indicator.isShown) await noteStatusCleared(turn.threadId);

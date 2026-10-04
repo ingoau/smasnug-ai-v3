@@ -33,6 +33,8 @@ const LABELS: Record<string, string> = {
 
 /** Tools that only respond; they never show or change the indicator. */
 const RESPONDING = new Set(['reply', 'react', 'unreact', 'search_emojis', 'end_turn']);
+/** Bookkeeping (DM session title, leaving / closing the conversation): not work either, no card flashing after a reply. */
+for (const name of ['set_session_title', 'leave_thread']) RESPONDING.add(name);
 /** Tools that must stay invisible in the thread (report_user is never hinted at). */
 const SILENT = new Set(['report_user']);
 

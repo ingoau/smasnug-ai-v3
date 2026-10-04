@@ -18,6 +18,11 @@ describe('activityForTool', () => {
     for (const t of ['reply', 'react', 'unreact', 'search_emojis']) expect(activityForTool(t)).toBeNull();
   });
 
+  it('naming a DM session or leaving is bookkeeping, not work', () => {
+    expect(activityForTool('set_session_title')).toBeNull();
+    expect(activityForTool('leave_thread')).toBeNull();
+  });
+
   it('unknown tools get a generic label', () => {
     expect(activityForTool('some_new_tool')).toBe(DEFAULT_ACTIVITY);
   });

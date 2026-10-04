@@ -10,6 +10,7 @@ import { processSubagentRun, shutdownRuns } from './child.js';
 import { expireIdleSubagents, sweepStaleRuns } from './maintenance.js';
 import { cancelCardRuns } from './subagents.js';
 import './leave-thread.js';
+import './session-title.js';
 import './tools.js';
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {

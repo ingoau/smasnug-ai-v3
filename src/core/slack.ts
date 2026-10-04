@@ -47,8 +47,8 @@ const METHOD_RPM: Record<string, number> = {
   'chat.appendStream': 600,
   'chat.stopStream': 100,
   'reactions.add': 100,
-  'assistant.threads.setStatus': 300,
   'agents.sessions.setStatus': 300,
+  'agents.sessions.rename': 50, // Tier 3 (docs.slack.dev/reference/methods/agents.sessions.rename)
   'search.messages': 20,
   'conversations.replies': 50,
   'conversations.history': 50,
