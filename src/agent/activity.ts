@@ -19,6 +19,7 @@ const LABELS: Record<string, string> = {
   propose_workspace_fact: 'Noting a workspace fact…',
   send_message: 'Preparing a message…',
   set_card_title: 'Writing up the results…',
+  slack_semantic_search: 'Searching Slack…',
 };
 
 /** Tools that only respond; they never show or change the indicator. */
