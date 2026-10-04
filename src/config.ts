@@ -115,8 +115,13 @@ export const limits = {
   watchNotificationsPerDay: 3,
   scheduleTickMs: 60_000,
   // coding agents (Cursor, src/agent/cursor/)
-  /** How often running Cursor agents are polled (maintenance task + per-run next_poll_at). */
-  cursorPollMs: 30_000,
+  /**
+   * How often running Cursor agents are polled (maintenance task + per-run next_poll_at).
+   * 10 s: under the Cloud Agents API default of 20 req/min per endpoint per key (each steady-state poll is one
+   * getRun). At limits.cursorMaxActive (3) that is ~18 getRun/min — a little headroom for bursts (e.g. several runs
+   * becoming due together, or an immediate cancel poll). 5 s would be ~36/min and hit 429s when several agents run.
+   */
+  cursorPollMs: 10_000,
   /** A poller's lease on one Cursor run while it checks it (exactly-once handling across workers); renewed before slow steps, well above the worst-case handling time (a few API calls with 20 s timeouts + GitHub). */
   cursorPollLeaseMs: 10 * 60_000,
   /** Cursor runs get their own max duration (the subagent run limit / heartbeat sweeper don't apply). */

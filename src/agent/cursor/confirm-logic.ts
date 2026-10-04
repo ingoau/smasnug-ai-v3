@@ -98,7 +98,7 @@ export function launchPreviewBlocks(o: { pendingId: string; title: string; instr
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `*Launch a coding agent?* Only you can see this. It works on ${o.repoUrl} (from \`${o.ref}\`) and opens a pull request. Nothing starts until you press Launch (expires in ${o.ttlMin} min).`,
+        text: `*Launch a coding agent?* Only you can see this. It works on ${o.repoUrl} (from \`${o.ref}\`); a pull request opens when there are changes. Nothing starts until you press Launch (expires in ${o.ttlMin} min).`,
       },
     },
     { type: 'section', text: { type: 'plain_text', text: `Title: ${o.title}`.slice(0, SECTION_MAX), emoji: false } },
@@ -106,7 +106,7 @@ export function launchPreviewBlocks(o: { pendingId: string; title: string; instr
     ...chunkText(o.instructions).map((t) => ({ type: 'section', text: { type: 'plain_text', text: t, emoji: false } })),
     {
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: 'Code adds the fixed rules: follow CLAUDE.md, no CI or repo-policy changes, tests, self-review, PR only.' }],
+      elements: [{ type: 'mrkdwn', text: 'Code adds the fixed rules: follow CLAUDE.md, no CI or repo-policy changes, PR only; tests and self-review when the agent judges them necessary.' }],
     },
     {
       type: 'actions',
