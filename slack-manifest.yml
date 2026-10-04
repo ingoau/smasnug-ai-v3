@@ -48,6 +48,8 @@ oauth_config:
       - channels:join         # join public channels when posting needs membership
       - commands              # /smasnug
       - emoji:read
+      - canvases:read         # read_canvas: canvases.getContent (access rule enforced in code: own / this conversation / public)
+      - canvases:write        # create_canvas / edit_canvas: canvases.create, canvases.edit, canvases.access.set (bot's own canvases only)
     user:
       - search:read           # Slack search (user token, public channels only — enforced in code)
       - channels:history      # read_public_thread only: open public-channel threads found via search (verified public in code)
