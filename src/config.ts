@@ -23,8 +23,11 @@ const Env = z.object({
   GATE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
   BOT_DISPLAY_NAME: z.string().default('smasnug ai'),
   LOG_LEVEL: z.string().default('info'),
-  /** Turn status text: see src/pipeline/session-status.ts (overlay = native processing + activity text). */
-  STATUS_ACTIVITY_MODE: z.enum(['overlay', 'text', 'off']).default('overlay'),
+  /**
+   * Turn activity text (src/agent/activity-trail.ts): `tasks` = transient task cards in the reply message, `off` =
+   * Slack's "Working…" only. The old values `overlay` / `text` (deprecated assistant.threads.setStatus) mean `tasks`.
+   */
+  STATUS_ACTIVITY_MODE: z.preprocess((v) => (v === 'overlay' || v === 'text' ? 'tasks' : v), z.enum(['tasks', 'off'])).default('tasks'),
   /** Front agent reasoning effort on OpenRouter (see docs/perf.md for the latency/quality comparison). */
   FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('none'),
   /**

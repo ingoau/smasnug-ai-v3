@@ -32,11 +32,17 @@ export interface TurnIO {
   isMention: boolean;
   /**
    * Called as soon as the model starts a tool call that commits the turn to work (anything but reply / react /
-   * unreact / search_emojis), with a code-derived label such as "Searching the web…". The pipeline owns the status
-   * indicator: it shows it from the first call on (unmentioned turns stay status-free until then), coalesces
-   * updates and clears it when the turn ends. Fire-and-forget: must not block or throw.
+   * unreact / search_emojis), with a code-derived label such as "Searching the web…". The pipeline owns the session
+   * status: it sets `processing` from the first call on (unmentioned turns stay status-free until then) and the
+   * final status when the turn ends. The label itself is shown by the reply manager as a transient task card
+   * (activity-trail.ts), only when this is provided. Fire-and-forget: must not block or throw.
    */
   setActivity?(text: string): void;
+  /**
+   * Slack set the session `active` by itself mid-turn (chat.stopStream's default `session_status`): the next
+   * activity sets `processing` again. Fire-and-forget.
+   */
+  sessionReleased?(): void;
   /**
    * True once the user pressed Slack's native stop button for this thread while this turn was running. The turn
    * then ends at its next step boundary, delivers no further replies and posts no fallback.
@@ -264,6 +270,14 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     activeRuns: () => activeRunsInThread(turn.threadId),
     stopRequested: checkStop,
     timing: io.timing,
+    activityCards: Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks',
+    onSessionReleased: () => {
+      try {
+        io.sessionReleased?.();
+      } catch (err) {
+        log.warn({ err }, 'sessionReleased failed');
+      }
+    },
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
   const state: FrontTurnState = {
@@ -322,6 +336,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     } catch (err) {
       log.warn({ err }, 'setActivity failed');
     }
+    replies.activity(text);
   };
 
   let failed: unknown;
@@ -412,6 +427,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   } catch (err) {
     if (!(err instanceof TurnStopped)) failed = err;
   } finally {
+    // An activity message no reply took over (silent turn, error, stop) leaves nothing behind.
+    await replies.closeActivity();
     // The card goes in right after this turn's replies (or alone if there was no reply). Not when the turn cancelled
     // every subagent it started (then it is no longer delegating anything).
     if (state.cardId && state.delegated) await postCard(state.cardId, replies.lastDelivered).catch((err) => log.error({ err }, 'postCard failed'));

@@ -10,6 +10,8 @@
  * Quick-reply buttons (reply-buttons.ts) go into the same message: an actions block in the post, or `blocks` on
  * chat.stopStream ("rendered at the bottom of the finalized message"); if that fails, chat.update adds them, and as
  * a last resort they are posted as a small follow-up message.
+ * Tool activity ("Searching Slack…") shows as transient task cards (activity-trail.ts): a reply's stream adopts the
+ * open activity message and its final layout (chat.update) drops the cards; a posted reply deletes it instead.
  */
 import { appendEvent } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
@@ -22,6 +24,7 @@ import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type ButtonsActionsBlock } from './reply-buttons.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
+import { ActivityTrail } from './activity-trail.js';
 
 /** Coalescing interval for appends once the stream is open. */
 const FLUSH_MS = 250;
@@ -49,6 +52,10 @@ export interface ReplyTarget {
   stopRequested?: () => Promise<boolean>;
   /** Latency instrumentation: first reply delta, stream start/stop, post. */
   timing?: TurnTiming;
+  /** Show tool activity as transient task cards in the reply message (STATUS_ACTIVITY_MODE=tasks). */
+  activityCards?: boolean;
+  /** chat.stopStream set the session `active` (its default): the pipeline re-sets `processing` on the next activity. */
+  onSessionReleased?: () => void;
 }
 
 /** Stream errors meaning Slack is no longer streaming this message (e.g. the user pressed stop). */
@@ -70,6 +77,8 @@ interface ReplyEntry {
   blockCount: number;
   /** Blocks chunks sent (code / rich paragraphs): the message gets its final layout via chat.update. */
   blocksChunks: number;
+  /** Activity task cards in this message (adopted from the activity trail): dropped by the final layout. */
+  activityCards: number;
   /** Offset in the reply text up to which everything is visible. */
   rawSent: number;
   /** The text visible in the stream so far (`text.slice(0, rawSent)`). */
@@ -114,8 +123,31 @@ export class ReplyManager {
   private deliveredTexts: string[] = [];
   /** The last reply message delivered this turn (the plan card attaches to it). */
   lastDelivered: { ts: string; text: string; streamed: boolean } | null = null;
+  private readonly trail: ActivityTrail | null;
 
-  constructor(private readonly t: ReplyTarget) {}
+  constructor(private readonly t: ReplyTarget) {
+    this.trail = t.activityCards
+      ? new ActivityTrail({
+          channelId: t.channelId,
+          threadTs: t.threadTs,
+          turnId: t.turnId,
+          recipientUserId: t.recipientUserId,
+          teamId,
+          stopRequested: t.stopRequested,
+          onSessionReleased: t.onSessionReleased,
+        })
+      : null;
+  }
+
+  /** A tool that commits the turn to work started (code-derived label): show it as an activity card. Never blocks. */
+  activity(text: string): void {
+    this.trail?.activity(text);
+  }
+
+  /** End of turn: delete an activity message no reply took over (silent turn, error, stop). Never throws. */
+  async closeActivity(): Promise<void> {
+    await this.trail?.close().catch((err) => log.warn({ err }, 'closing the activity trail failed'));
+  }
 
   /** True if any reply has started becoming visible (a stream started or a message posted). */
   get anyVisible() {
@@ -144,6 +176,7 @@ export class ReplyManager {
       mdTotal: 0,
       blockCount: 0,
       blocksChunks: 0,
+      activityCards: 0,
       rawSent: 0,
       streamed: '',
       overflow: false,
@@ -243,7 +276,16 @@ export class ReplyManager {
         e.failed = true;
         return;
       }
-      if (!e.streamTs) {
+      const adopted = !e.streamTs && this.trail ? await this.trail.adopt() : null;
+      if (adopted) {
+        // The activity message is open: the reply streams into it, below its cards (marked complete now).
+        e.streamTs = adopted.ts;
+        e.activityCards = adopted.cards;
+        st.blockCount += adopted.cards;
+        this.t.timing?.mark('stream_open_call');
+        await slackCall('chat.appendStream', { channel: this.t.channelId, ts: e.streamTs, chunks: [...adopted.chunks, ...chunks] });
+        this.t.timing?.mark('stream_started');
+      } else if (!e.streamTs) {
         const team = await teamId();
         this.t.timing?.mark('stream_open_call');
         // Opened in chunks mode, so markdown text and blocks can be mixed for the whole stream.
@@ -296,6 +338,7 @@ export class ReplyManager {
     if (e.halted || (await this.isStopped())) {
       // Close our side quietly (Slack may already have stopped it) and deliver nothing else.
       if (e.streamTs) await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after stop failed'));
+      await this.dropActivityCards(e, e.streamed);
       await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, stopped: true, streamed: e.streamed });
       return STOPPED_RESULT;
     }
@@ -325,6 +368,8 @@ export class ReplyManager {
     let last: { ts: string | null; text: string } = { ts: null, text };
     if (mode === 'stream' && !e.failed) {
       try {
+        // Nothing streamed yet but an activity message is open: stream into it (same result as posting whole).
+        if (!e.streamTs && this.trail?.isOpen) await this.flush(e, text);
         if (e.streamTs) {
           if (!text.startsWith(e.streamed)) {
             log.warn({ index: e.index }, 'streamed prefix diverged from final reply text');
@@ -334,6 +379,7 @@ export class ReplyManager {
           if (e.overflow) {
             // Too long for one message: close the stream and post the rest as its own message.
             await this.stopStream(e);
+            await this.dropActivityCards(e, e.streamed);
             last = { ts: e.streamTs, text: e.streamed };
             const rest = text.slice(e.rawSent);
             if (rest.trim()) {
@@ -342,7 +388,7 @@ export class ReplyManager {
             }
           } else {
             if (await this.stopStreamWithButtons(e, actions)) buttonsTs = e.streamTs;
-            if (e.blocksChunks > 0) await this.finalLayout(e, text, buttonsTs ? actions : undefined);
+            if (e.blocksChunks > 0 || e.activityCards > 0) await this.finalLayout(e, text, buttonsTs ? actions : undefined);
             last = { ts: e.streamTs, text };
           }
         } else {
@@ -368,6 +414,8 @@ export class ReplyManager {
       last = { ts: await this.post(e, text, '', actions), text };
       buttonsTs = last.ts;
     }
+    // Posted as a message of its own (e.g. subagents running): the activity message has done its job.
+    if (delivered === 'posted') await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
     if (btnRow) await this.recordButtons(e, btnRow, buttonsTs && buttonsTs === last.ts ? buttonsTs : null, last);
     this.delivered++;
     if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs };
@@ -445,6 +493,21 @@ export class ReplyManager {
       { idempotencyKey: this.key(e, suffix) },
     );
     this.t.timing?.mark('stream_stopped');
+    this.t.onSessionReleased?.();
+  }
+
+  /**
+   * A message that carried activity cards but ends without the normal final layout (stop, overflow, error): show
+   * just its visible text (chat.update), or delete it if no text is visible. Never throws.
+   */
+  private async dropActivityCards(e: ReplyEntry, text: string) {
+    if (!e.activityCards || !e.streamTs) return;
+    try {
+      if (text.trim()) await slackCall('chat.update', { channel: this.t.channelId, ts: e.streamTs, ...markdownMessage(text) });
+      else await slackCall('chat.delete', { channel: this.t.channelId, ts: e.streamTs });
+    } catch (err) {
+      log.warn({ err, code: slackErrorCode(err), index: e.index }, 'removing activity cards from a reply failed');
+    }
   }
 
   /**
@@ -509,11 +572,13 @@ export class ReplyManager {
       await e.chain.catch(() => {});
       if (e.halted) {
         any = true; // visible, and Slack already stopped it
+        await this.dropActivityCards(e, e.streamed);
         continue;
       }
       if (e.streamTs && !e.stopped) {
         any = true;
         await this.stopStream(e, note ? `\n\n${note}` : undefined).catch((err) => log.warn({ err }, 'stopStream failed'));
+        await this.dropActivityCards(e, note ? `${e.streamed}\n\n${note}` : e.streamed);
       }
     }
     return any;

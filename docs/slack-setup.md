@@ -35,8 +35,9 @@ scopes.
   bot remembers it for a few minutes and tells the front agent on that user's next DM turn ("User is currently
   viewing #…"), so "summarise this channel" works. Mentions in channel threads work as before.
 - The status indicator uses `agents.sessions.setStatus` (`chat:write`): `processing` while a mention/DM turn runs,
-  `active` when it ends (always, also on errors — unlike the old `assistant.threads.setStatus` it does not clear
-  itself when the bot posts). If it fails unexpectedly, the bot falls back to `assistant.threads.setStatus` once.
+  `active` when it ends (always, also on errors: it does not clear itself when the bot posts). The deprecated
+  `assistant.threads.*` methods are not used. Tool activity ("Searching Slack…") shows as transient task cards in the
+  reply message (`STATUS_ACTIVITY_MODE`, see docs/design.md "Status indicator").
 - **Native stop button**: while a session is `processing`, Slack shows a stop button (because the app subscribes to
   `agent_session_stopped`). Clicking it behaves like saying "stop": the running turn ends at its next step, active
   subagent runs in the thread are cancelled, the user's queued turns are dropped, the thread disengages, and the bot

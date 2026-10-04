@@ -16,7 +16,6 @@ import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, TurnStatus } f
 import { stopRequestedSince } from './stop.js';
 import { currentlyViewing } from './view-context.js';
 
-export { STATUS_TEXT } from './session-status.js';
 export const ERROR_TEXT = 'Something broke, try again.';
 
 /** In-process bookkeeping for graceful shutdown only (correctness never depends on it). */
@@ -87,6 +86,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     setPhase: (phase) => setPhase(turn.id, phase),
     isMention: turn.isMention,
     setActivity: (text) => indicator.setActivity(text),
+    sessionReleased: () => indicator.released(),
     stopRequested,
     // DM / agent-container turns: what the user is looking at next to the container.
     viewingChannelId: turn.kind === 'user' && channelId.startsWith('D') ? await currentlyViewing(turn.authorId, channelId) : null,
