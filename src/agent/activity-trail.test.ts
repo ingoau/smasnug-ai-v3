@@ -295,6 +295,33 @@ describe('ReplyManager with activity cards', () => {
     expect(methods().filter((m) => m === 'chat.update')).toHaveLength(1);
   });
 
+  it('a reply stream whose tool call never executed is closed at turn end (cards with it)', async () => {
+    const rm = new ReplyManager(target());
+    rm.activity('Searching the web…');
+    await sleep(10);
+    const json = JSON.stringify({ text: 'A first attempt at the answer' });
+    rm.delta('bad', json.slice(0, -5)); // the call is cut off / invalid: never executed
+    await sleep(200);
+    const activityTs = calls.find((c) => c.method === 'chat.appendStream')!.args.ts;
+    await rm.closeUnfinished();
+    // kept with its visible text, cards dropped (no other reply was delivered)
+    expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.update']);
+    expect(calls.at(-1)!.args).toMatchObject({ ts: activityTs, text: 'A first attempt at the ans' });
+    await rm.closeUnfinished(); // idempotent
+    expect(methods()).toHaveLength(4);
+  });
+
+  it('…and deleted when the retried call delivered the reply; pending deltas never open a stream after the turn', async () => {
+    const rm = new ReplyManager(target());
+    rm.delta('bad', JSON.stringify({ text: 'A first attempt at the answer' }).slice(0, -5));
+    await sleep(200);
+    await rm.finish('good', 'The answer.');
+    rm.delta('late', '{"text":"Something more to say');
+    await rm.closeUnfinished();
+    await sleep(150);
+    expect(methods()).toEqual(['chat.startStream', 'chat.postMessage', 'chat.stopStream', 'chat.delete']);
+  });
+
   it('without activityCards nothing is shown', async () => {
     const rm = new ReplyManager({ ...target(), activityCards: false });
     rm.activity('Searching Slack…');

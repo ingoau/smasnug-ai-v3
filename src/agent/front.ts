@@ -485,6 +485,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     throw failed;
   }
 
+  // Reply streams whose tool call never executed (invalid input, retried under a new call id) are closed too.
+  await replies.closeUnfinished();
   if (state.visible.size === 0 && needsFallback(turn, io, built.allCancelled)) {
     await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(FALLBACK_TEXT) }, { idempotencyKey: `fallback:${turnId}` });
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, text: FALLBACK_TEXT });

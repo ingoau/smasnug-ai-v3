@@ -96,6 +96,8 @@ interface ReplyEntry {
   halted: boolean;
   /** Not delivered (duplicate / blocked): the model-facing reason. */
   dropped: string | null;
+  /** The reply tool executed (finish() ran), or the turn closed the entry (closeUnfinished). */
+  finished: boolean;
 }
 
 /**
@@ -214,6 +216,7 @@ export class ReplyManager {
       failed: false,
       halted: false,
       dropped: null,
+      finished: false,
     };
     this.entries.set(toolCallId, e);
     return e;
@@ -392,6 +395,7 @@ export class ReplyManager {
   /** Called from the tool's execute with the complete, validated input. */
   async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly string[]): Promise<string> {
     const e = this.start(toolCallId);
+    e.finished = true;
     const text = neutralizeBroadcasts(rawText);
     if (e.timer) {
       clearTimeout(e.timer);
@@ -624,6 +628,32 @@ export class ReplyManager {
       if (res?.ts) await setButtonsMessage(row.id, res.ts, null);
     } catch (err) {
       log.warn({ err, buttonsId: row.id }, 'delivering reply buttons failed');
+    }
+  }
+
+  /**
+   * End of a turn (not stopped, not failed): close replies whose tool call never executed (e.g. invalid or cut-off
+   * input, the model retrying with a new call). Nothing more is streamed for them; a stream they opened is deleted
+   * when another reply was delivered (the retry), else it keeps just its visible text (activity cards dropped).
+   * Never throws.
+   */
+  async closeUnfinished(): Promise<void> {
+    for (const e of this.entries.values()) {
+      if (e.finished) continue;
+      e.finished = true;
+      if (e.timer) clearTimeout(e.timer);
+      e.timer = null;
+      e.dropped ??= 'the reply tool call never executed';
+      await e.chain.catch(() => {});
+      if (!e.streamTs) continue;
+      log.info({ index: e.index, turnId: this.t.turnId }, 'closing a reply stream whose tool call never executed');
+      await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream of an unfinished reply failed'));
+      try {
+        if (this.delivered > 0 || !e.streamed.trim()) await editMessage('chat.delete', { channel: this.t.channelId, ts: e.streamTs });
+        else await this.dropActivityCards(e, e.streamed);
+      } catch (err) {
+        log.warn({ err, code: slackErrorCode(err), index: e.index }, 'removing an unfinished reply stream failed');
+      }
     }
   }
 
