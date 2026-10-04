@@ -192,6 +192,24 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       expect(await statuses(dm.channelId)).toEqual(['processing', 'closed', 'processing', 'active']);
     });
 
+    it('a crashed turn (stale sweep): its open activity message is removed and the session gets its final status', async () => {
+      const dm = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${dm.channelId}, '1.1', ${dm.id}, 'U1', 'send it to #general')`;
+      await scheduler.scheduleMessages(dm.id, 'U1', ['1.1'], true);
+      const crashed = await scheduler.claimNextPending(dm.id); // the worker died while it ran
+      const { recordOpenActivity } = await import('../agent/activity-registry.js');
+      await recordOpenActivity(Number(crashed!.id), dm.channelId, '1700000001.000001');
+      await sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${dm.id}, 'C1', 'hi', now() + interval '10 minutes')`;
+      await processThreadRun(job({ threadId: dm.id }));
+      const chat = (await calls(dm.channelId)).filter((c) => c.method.startsWith('chat.'));
+      expect(chat.map((c) => [c.method, c.args.ts])).toEqual([
+        ['chat.stopStream', '1700000001.000001'],
+        ['chat.delete', '1700000001.000001'],
+      ]);
+      expect(await statuses(dm.channelId)).toEqual(['suspended']);
+      expect(await redis.get(`activity:open:${crashed!.id}`)).toBeNull();
+    });
+
     it('channel threads keep processing / active even if the turn asked to close', async () => {
       const ch = await thread(false);
       await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${ch.channelId}, '1.1', ${ch.id}, 'U1', 'go away')`;

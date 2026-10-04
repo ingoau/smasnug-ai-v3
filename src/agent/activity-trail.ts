@@ -50,6 +50,9 @@ export interface ActivityTarget {
   stopRequested?: () => Promise<boolean>;
   /** chat.stopStream set the session `active` (its default `session_status`). */
   onSessionReleased?: () => void;
+  /** Crash safety (activity-registry.ts): a message was opened / is no longer the trail's. Errors are ignored. */
+  onOpened?: (ts: string) => Promise<void>;
+  onClosed?: () => Promise<void>;
   minIntervalMs?: number;
 }
 
@@ -130,6 +133,7 @@ export class ActivityTrail {
       const last = this.cards.at(-1);
       const adopted: AdoptedActivity = { ts: this.ts, chunks: last ? [card(last.id, last.title, 'complete')] : [], cards: this.cards.length, stopKey: this.key(':stop') };
       this.reset();
+      await this.hook(() => this.t.onClosed?.()); // the reply owns it now
       return adopted;
     });
   }
@@ -211,6 +215,7 @@ export class ActivityTrail {
         );
         if (!res?.ts) throw new Error('chat.startStream returned no ts');
         this.ts = res.ts;
+        await this.hook(() => this.t.onOpened?.(res.ts));
       } else {
         await slackCall('chat.appendStream', { channel: this.t.channelId, ts: this.ts, chunks });
       }
@@ -238,7 +243,17 @@ export class ActivityTrail {
     const ts = this.ts;
     const key = this.key(':stop');
     this.reset();
-    if (ts) await this.removeMessage(ts, key);
+    if (!ts) return;
+    await this.removeMessage(ts, key);
+    await this.hook(() => this.t.onClosed?.());
+  }
+
+  private async hook(fn: () => Promise<void> | undefined): Promise<void> {
+    try {
+      await fn();
+    } catch (err) {
+      log.debug({ err, turnId: this.t.turnId }, 'activity registry hook failed');
+    }
   }
 
   private async removeMessage(ts: string, key: string): Promise<void> {

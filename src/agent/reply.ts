@@ -25,6 +25,7 @@ import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type Button
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
+import { forgetOpenActivity, recordOpenActivity } from './activity-registry.js';
 
 /** Coalescing interval for appends once the stream is open. */
 const FLUSH_MS = 250;
@@ -164,6 +165,8 @@ export class ReplyManager {
           teamId,
           stopRequested: t.stopRequested,
           onSessionReleased: t.onSessionReleased,
+          onOpened: (ts) => recordOpenActivity(t.turnId, t.channelId, ts),
+          onClosed: () => forgetOpenActivity(t.turnId),
         })
       : null;
   }

@@ -121,6 +121,31 @@ describe('ActivityTrail', () => {
     expect(calls).toEqual([]);
   });
 
+  it('crash safety: the open message is recorded while the trail holds it (until adopted or removed)', async () => {
+    const log: string[] = [];
+    const mk = () =>
+      new ActivityTrail({
+        channelId: 'D1',
+        threadTs: '1.1',
+        turnId: 7,
+        recipientUserId: 'U1',
+        teamId: async () => 'T1',
+        onOpened: async (ts) => void log.push(`open ${ts}`),
+        onClosed: async () => void log.push('closed'),
+      });
+    const t = mk();
+    t.activity('Searching Slack…');
+    await sleep(10);
+    const a = await t.adopt();
+    expect(log).toEqual([`open ${a!.ts}`, 'closed']);
+    log.length = 0;
+    const t2 = mk();
+    t2.activity('Searching Slack…');
+    await sleep(10);
+    await t2.close();
+    expect(log).toEqual([expect.stringMatching(/^open /), 'closed']);
+  });
+
   it('a halted stream (append fails) is not adopted and gets deleted at the end', async () => {
     const t = trail();
     t.activity('Searching Slack…');

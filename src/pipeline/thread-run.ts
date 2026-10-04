@@ -12,7 +12,8 @@ import { log } from '../log.js';
 import { loadMessageMarks, timingReport, TurnTiming } from '../core/timing.js';
 import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from './lock.js';
 import { claimNextPending, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
-import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, TurnStatus } from './session-status.js';
+import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, setSessionStatus, TurnStatus } from './session-status.js';
+import { removeOpenActivity } from '../agent/activity-registry.js';
 import { finalSessionStatus } from './agent-session.js';
 import { stopRequestedSince } from './stop.js';
 import { currentlyViewing } from './view-context.js';
@@ -38,6 +39,7 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
     // We hold the lock, so nothing else is running here: any 'running' turn is left over from a crash.
     for (const id of await runningTurnIds(threadId)) {
       log.warn({ threadId, turnId: id }, 'marking stale running turn as error');
+      await settleAbandonedTurn(threadId, Number(id));
       await finishTurn(id, 'error');
       await appendEvent(threadId, 'turn_finished', 'system', { turnId: id, status: 'error', reason: 'stale' });
     }
@@ -143,6 +145,26 @@ async function reportTiming(turn: TurnRow, timing: TurnTiming) {
 }
 
 /**
+ * A turn that won't end normally (worker crash → stale-turn sweep, or shutdown): remove the activity message it left
+ * open and set the session's final status (DMs may stay `suspended` / `closed`), so no task card keeps spinning and
+ * the session isn't left `processing` for an hour. A later turn shows its own indicator. Never throws.
+ */
+async function settleAbandonedTurn(threadId: string, turnId: number, status?: TurnStatus) {
+  try {
+    await removeOpenActivity(turnId);
+    const final = await finalSessionStatus(threadId, turnId).catch(() => 'active' as const);
+    if (status) await status.finish(final);
+    else {
+      const { channelId, threadTs } = parseThreadId(threadId);
+      await setSessionStatus(channelId, threadTs, final);
+    }
+    await noteStatusCleared(threadId);
+  } catch (err) {
+    log.warn({ err, threadId, turnId }, 'settling an abandoned turn failed');
+  }
+}
+
+/**
  * Shutdown: stop claiming turns, give in-flight turns `graceMs` to finish, then mark the rest errored, release their
  * locks and hand the threads to other workers.
  */
@@ -153,7 +175,7 @@ export async function shutdownThreadRuns(graceMs: number) {
   for (const [turnId, { threadId, lock, status }] of inFlight) {
     log.warn({ turnId, threadId }, 'shutdown: abandoning in-flight turn');
     // Otherwise the session would stay `processing` (with a stop button) for up to an hour.
-    await status?.finish();
+    await settleAbandonedTurn(threadId, turnId, status);
     await finishTurn(turnId, 'error').catch(() => {});
     await appendEvent(threadId, 'turn_finished', 'system', { turnId, status: 'error', reason: 'shutdown' }).catch(() => {});
     await lock.release().catch(() => {});
