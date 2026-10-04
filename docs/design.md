@@ -113,7 +113,7 @@ The bot always runs on a mention or DM. In threads where it has been mentioned, 
 - 
 **Front agent.** On yes, the front agent runs and can still choose silence by not calling `reply`.
 **Never triggered by bots.** Messages from bots (`bot_id` or `subtype: bot_message`), including the bot's own and its on-behalf-of messages, never start a turn. Bot messages are still included in context, labelled as bots.
-**Disengagement.** If the bot hasn't been addressed for about 10 messages or a few hours, it stops considering follow-ups until mentioned again. "Stop" or "shut up" also disengages it.
+**Disengagement.** If the bot hasn't been addressed for about 25 messages or a few hours, it stops considering follow-ups until mentioned again. "Stop" or "shut up" also disengages it.
 **Workspace AI-bot guidelines** (enforced in code: pure checks in `src/pipeline/guidelines.ts`, side effects in `src/pipeline/guideline-actions.ts`; they apply in channels, threads and DMs and run before the rules above):
 - 
 `##` **prefix: ignored completely.** A message whose trimmed text starts with `##` (mention or not) is never stored, adds no thread events, never triggers a turn, the gate or a debounce batch, and doesn't count toward limits or disengagement. It is also hidden from everything the bot reads: thread/channel backfill, `read_thread`/`read_channel` and `slack_search` results. Editing a message to start with `##` is treated like deleting it (stored copy blanked, dropped from batches and pending turns). Editing the `##` away never triggers a turn; a copy that was blanked stays blank, a never-stored one may be stored as plain context.

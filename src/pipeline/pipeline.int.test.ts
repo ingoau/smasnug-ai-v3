@@ -581,9 +581,11 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const root = nextTs();
       const tid = `${C}:${root}`;
       await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> hey', ts: root }));
-      for (let i = 0; i < 11; i++) {
+      for (let i = 0; i < 25; i++) {
         await processSlackEvent(messageEnvelope({ user: i % 2 ? 'U2' : 'U3', text: `chat ${i}`, ts: nextTs(), thread_ts: root }));
       }
+      expect((await sql`select engaged from threads where id = ${tid}`)[0]!.engaged).toBe(true);
+      await processSlackEvent(messageEnvelope({ user: 'U2', text: 'chat 25', ts: nextTs(), thread_ts: root }));
       const [th] = await sql`select engaged from threads where id = ${tid}`;
       expect(th!.engaged).toBe(false);
       const evs = await sql`select payload from thread_events where thread_id = ${tid} and type = 'disengaged'`;
