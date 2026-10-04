@@ -19,7 +19,8 @@ vi.mock('../core/events.js', () => ({ appendEvent: vi.fn(async () => {}) }));
 vi.mock('./files.js', () => ({ uploadFiles: vi.fn(async () => {}) }));
 
 const { ActivityTrail } = await import('./activity-trail.js');
-const { ReplyManager } = await import('./reply.js');
+const { ReplyManager, editRetry } = await import('./reply.js');
+editRetry.delaysMs = [5, 5];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const methods = () => calls.map((c) => c.method);
@@ -89,7 +90,7 @@ describe('ActivityTrail', () => {
     t.activity('Searching Slack…');
     await sleep(10);
     const a = await t.adopt();
-    expect(a).toEqual({ ts: expect.stringMatching(/^1700000000\./), chunks: [{ type: 'task_update', id: 'activity-1', title: 'Searching Slack…', status: 'complete' }], cards: 1 });
+    expect(a).toEqual({ ts: expect.stringMatching(/^1700000000\./), chunks: [{ type: 'task_update', id: 'activity-1', title: 'Searching Slack…', status: 'complete' }], cards: 1, stopKey: 'activity:7:0:stop' });
     expect(t.isOpen).toBe(false);
     t.activity('Starting a subagent…');
     await sleep(10);
@@ -118,6 +119,31 @@ describe('ActivityTrail', () => {
     await sleep(10);
     await t.close();
     expect(calls).toEqual([]);
+  });
+
+  it('crash safety: the open message is recorded while the trail holds it (until adopted or removed)', async () => {
+    const log: string[] = [];
+    const mk = () =>
+      new ActivityTrail({
+        channelId: 'D1',
+        threadTs: '1.1',
+        turnId: 7,
+        recipientUserId: 'U1',
+        teamId: async () => 'T1',
+        onOpened: async (ts) => void log.push(`open ${ts}`),
+        onClosed: async () => void log.push('closed'),
+      });
+    const t = mk();
+    t.activity('Searching Slack…');
+    await sleep(10);
+    const a = await t.adopt();
+    expect(log).toEqual([`open ${a!.ts}`, 'closed']);
+    log.length = 0;
+    const t2 = mk();
+    t2.activity('Searching Slack…');
+    await sleep(10);
+    await t2.close();
+    expect(log).toEqual([expect.stringMatching(/^open /), 'closed']);
   });
 
   it('a halted stream (append fails) is not adopted and gets deleted at the end', async () => {
@@ -212,6 +238,122 @@ describe('ReplyManager with activity cards', () => {
     expect(await rm.abortOpenStreams('_Something broke_')).toBe(true);
     const update = calls.find((c) => c.method === 'chat.update')!;
     expect(update.args.text).toBe('Partial answer so far\n\n_Something broke_');
+  });
+
+  it('an adopted activity stream Slack already ended is replaced by a fresh stream: the reply is delivered', async () => {
+    n = 0; // the activity message gets ts …001
+    const dead = '1700000000.000001';
+    const rm = new ReplyManager(target(0, { stopRequested: async () => false }));
+    rm.activity('Searching the web…');
+    await sleep(10);
+    failOn = (m, a) => (m === 'chat.appendStream' && a.ts === dead ? 'message_not_in_streaming_state' : null);
+    const text = 'Here is the answer you asked for, with details.';
+    rm.start('c1');
+    rm.delta('c1', JSON.stringify({ text }).slice(0, -2));
+    await sleep(200);
+    expect(await rm.finish('c1', text)).toMatch(/^Replied \(streamed\)/);
+    await rm.closeActivity();
+    // The dead activity message is stopped and deleted; the reply streams into a new message of its own.
+    expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.delete', 'chat.startStream', 'chat.stopStream']);
+    expect(calls[3]!.args.ts).toBe(dead);
+    const replyTs = calls.at(-1)!.args.ts;
+    expect(replyTs).not.toBe(dead);
+    expect(rm.lastDelivered).toMatchObject({ ts: replyTs, text, streamed: true });
+  });
+
+  it('an adopted activity stream halted by a user stop: nothing delivered, the message is removed', async () => {
+    let checks = 0;
+    // false for the activity and the reply's pre-send check, true once the append into the adopted message failed
+    const rm = new ReplyManager(target(0, { stopRequested: async () => ++checks >= 3 }));
+    rm.activity('Searching the web…');
+    await sleep(10);
+    failOn = (m) => (m === 'chat.appendStream' ? 'message_not_in_streaming_state' : null);
+    const text = 'Here is the answer you asked for, with details.';
+    rm.delta('c1', JSON.stringify({ text }).slice(0, -2));
+    await sleep(200);
+    expect(await rm.finish('c1', text)).toMatch(/^Not delivered: the user pressed stop/);
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.delete']);
+  });
+
+  it('a message posted after the activity message (postedSince): the reply gets a message of its own below it', async () => {
+    const seen: string[] = [];
+    const rm = new ReplyManager(target(0, { postedSince: async (ts: string) => (seen.push(ts), true) }));
+    rm.activity('Searching the web…');
+    await sleep(10);
+    const activityTs = calls[0]!.args && '1700000000.00000' + n;
+    await rm.finish('tc1', 'The answer.');
+    await rm.closeActivity();
+    expect(seen).toEqual([activityTs]);
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.startStream', 'chat.stopStream']);
+    expect(calls[2]!.args.ts).toBe(activityTs);
+    expect(calls[3]!.args.chunks.every((c: any) => c.type !== 'task_update')).toBe(true);
+    expect(rm.lastDelivered!.ts).not.toBe(activityTs);
+  });
+
+  it('the turn posting in the thread itself (send_message) also keeps the reply out of the activity message', async () => {
+    const rm = new ReplyManager(target(0, { postedSince: async () => false }));
+    rm.activity('Preparing a message…');
+    await sleep(10);
+    rm.notePostedInThread();
+    await rm.finish('tc1', 'Sent it.');
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.startStream', 'chat.stopStream']);
+  });
+
+  it('the final layout is retried while Slack still counts the message as streaming', async () => {
+    let conflicts = 2;
+    const rm = new ReplyManager(target());
+    rm.activity('Reading the page…');
+    await sleep(10);
+    failOn = (m) => (m === 'chat.update' && conflicts-- > 0 ? 'streaming_state_conflict' : null);
+    expect(await rm.finish('tc1', 'Short answer.')).toBe('Replied (streamed).');
+    expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.update', 'chat.update', 'chat.update']);
+  });
+
+  it('a non-transient chat.update error is not retried', async () => {
+    const rm = new ReplyManager(target());
+    rm.activity('Reading the page…');
+    await sleep(10);
+    failOn = (m) => (m === 'chat.update' ? 'message_not_found' : null);
+    await rm.finish('tc1', 'Short answer.');
+    expect(methods().filter((m) => m === 'chat.update')).toHaveLength(1);
+  });
+
+  it('a reply stream whose tool call never executed is closed at turn end (cards with it)', async () => {
+    const rm = new ReplyManager(target());
+    rm.activity('Searching the web…');
+    await sleep(10);
+    const json = JSON.stringify({ text: 'A first attempt at the answer' });
+    rm.delta('bad', json.slice(0, -5)); // the call is cut off / invalid: never executed
+    await sleep(200);
+    const activityTs = calls.find((c) => c.method === 'chat.appendStream')!.args.ts;
+    await rm.closeUnfinished();
+    // kept with its visible text, cards dropped (no other reply was delivered)
+    expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.update']);
+    expect(calls.at(-1)!.args).toMatchObject({ ts: activityTs, text: 'A first attempt at the ans' });
+    await rm.closeUnfinished(); // idempotent
+    expect(methods()).toHaveLength(4);
+  });
+
+  it('…and deleted when the retried call delivered the reply; pending deltas never open a stream after the turn', async () => {
+    const rm = new ReplyManager(target());
+    rm.delta('bad', JSON.stringify({ text: 'A first attempt at the answer' }).slice(0, -5));
+    await sleep(200);
+    await rm.finish('good', 'The answer.');
+    rm.delta('late', '{"text":"Something more to say');
+    await rm.closeUnfinished();
+    await sleep(150);
+    expect(methods()).toEqual(['chat.startStream', 'chat.postMessage', 'chat.stopStream', 'chat.delete']);
+  });
+
+  it('no activity message once a reply is visible', async () => {
+    const rm = new ReplyManager(target());
+    await rm.finish('tc1', 'Done, noted.');
+    rm.activity('Saving a note…');
+    await sleep(20);
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.postMessage']);
   });
 
   it('without activityCards nothing is shown', async () => {

@@ -24,7 +24,8 @@ import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type ButtonsActionsBlock } from './reply-buttons.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
-import { ActivityTrail } from './activity-trail.js';
+import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
+import { forgetOpenActivity, recordOpenActivity } from './activity-registry.js';
 
 /** Coalescing interval for appends once the stream is open. */
 const FLUSH_MS = 250;
@@ -56,6 +57,8 @@ export interface ReplyTarget {
   activityCards?: boolean;
   /** chat.stopStream set the session `active` (its default): the pipeline re-sets `processing` on the next activity. */
   onSessionReleased?: () => void;
+  /** True if a message was posted in the thread after `ts` (then a reply doesn't stream into that activity message). */
+  postedSince?: (ts: string) => Promise<boolean>;
 }
 
 /** Stream errors meaning Slack is no longer streaming this message (e.g. the user pressed stop). */
@@ -94,6 +97,33 @@ interface ReplyEntry {
   halted: boolean;
   /** Not delivered (duplicate / blocked): the model-facing reason. */
   dropped: string | null;
+  /** The reply tool executed (finish() ran), or the turn closed the entry (closeUnfinished). */
+  finished: boolean;
+}
+
+/**
+ * chat.update / chat.delete errors worth a short retry: right after chat.stopStream the message may still count as
+ * streaming ("streaming_state_conflict: The message is currently streaming text and cannot be edited",
+ * https://docs.slack.dev/reference/methods/chat.update), or Slack had a transient failure (no code: network).
+ */
+const RETRYABLE_EDIT = new Set(['streaming_state_conflict', 'internal_error', 'fatal_error', 'service_unavailable', 'request_timeout', 'ratelimited']);
+/** Backoff between attempts (tests shorten it). */
+export const editRetry = { delaysMs: [300, 1000] };
+
+/** A chat.update / chat.delete of a reply message, retried briefly on transient errors. Throws the last error. */
+async function editMessage(method: 'chat.update' | 'chat.delete', args: Record<string, unknown>): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await slackCall(method, args);
+      return;
+    } catch (err) {
+      const code = slackErrorCode(err);
+      const delay = editRetry.delaysMs[attempt];
+      if (delay === undefined || (code !== undefined && !RETRYABLE_EDIT.has(code))) throw err;
+      log.debug({ code, method, attempt }, 'editing a reply message failed; retrying');
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
 }
 
 let teamIdCache: string | undefined;
@@ -135,12 +165,18 @@ export class ReplyManager {
           teamId,
           stopRequested: t.stopRequested,
           onSessionReleased: t.onSessionReleased,
+          onOpened: (ts) => recordOpenActivity(t.turnId, t.channelId, ts),
+          onClosed: () => forgetOpenActivity(t.turnId),
         })
       : null;
   }
 
-  /** A tool that commits the turn to work started (code-derived label): show it as an activity card. Never blocks. */
+  /**
+   * A tool that commits the turn to work started (code-derived label): show it as an activity card. Never blocks.
+   * Not once a reply is visible: a new activity message would appear below the reply (and flash away again).
+   */
   activity(text: string): void {
+    if (this.anyVisible) return;
     this.trail?.activity(text);
   }
 
@@ -187,6 +223,7 @@ export class ReplyManager {
       failed: false,
       halted: false,
       dropped: null,
+      finished: false,
     };
     this.entries.set(toolCallId, e);
     return e;
@@ -276,15 +313,17 @@ export class ReplyManager {
         e.failed = true;
         return;
       }
-      const adopted = !e.streamTs && this.trail ? await this.trail.adopt() : null;
-      if (adopted) {
-        // The activity message is open: the reply streams into it, below its cards (marked complete now).
+      let adopted = !e.streamTs && this.trail ? await this.trail.adopt() : null;
+      if (adopted && (await this.postedSince(adopted.ts))) {
+        // Messages arrived below the activity message: the reply goes below them, in a message of its own.
+        await this.trail!.dropAdopted(adopted);
+        adopted = null;
+      }
+      if (adopted && (await this.streamInto(e, adopted, chunks))) {
+        // The activity message was open: the reply streams into it, below its cards (marked complete now).
         e.streamTs = adopted.ts;
         e.activityCards = adopted.cards;
         st.blockCount += adopted.cards;
-        this.t.timing?.mark('stream_open_call');
-        await slackCall('chat.appendStream', { channel: this.t.channelId, ts: e.streamTs, chunks: [...adopted.chunks, ...chunks] });
-        this.t.timing?.mark('stream_started');
       } else if (!e.streamTs) {
         const team = await teamId();
         this.t.timing?.mark('stream_open_call');
@@ -311,15 +350,49 @@ export class ReplyManager {
     e.streamed = base.slice(0, e.rawSent);
   }
 
-  private onStreamError(e: ReplyEntry, err: unknown) {
+  /**
+   * Open the reply in the adopted activity message. False when it can't take the reply (Slack already ended its
+   * stream, e.g. after a long tool call): the message is deleted and the reply opens a fresh stream. A user stop is
+   * re-thrown (the entry then counts as halted, and finish() removes the message).
+   */
+  private async streamInto(e: ReplyEntry, adopted: AdoptedActivity, chunks: unknown[]): Promise<boolean> {
+    try {
+      this.t.timing?.mark('stream_open_call');
+      await slackCall('chat.appendStream', { channel: this.t.channelId, ts: adopted.ts, chunks: [...adopted.chunks, ...chunks] });
+      this.t.timing?.mark('stream_started');
+      return true;
+    } catch (err) {
+      if (await this.isStopped()) {
+        e.streamTs = adopted.ts;
+        e.activityCards = adopted.cards;
+        throw err;
+      }
+      log.info({ code: slackErrorCode(err), turnId: this.t.turnId }, 'the activity message cannot take the reply; opening a fresh one');
+      await this.trail?.dropAdopted(adopted);
+      return false;
+    }
+  }
+
+  private async onStreamError(e: ReplyEntry, err: unknown) {
     e.failed = true;
     const code = slackErrorCode(err);
-    if (e.streamTs && isHalted(code)) {
+    // Only a confirmed user stop counts as halted: Slack also ends streams by itself (e.g. one left idle while a
+    // tool ran), and then the reply must still be delivered (recoverStream / post).
+    if (e.streamTs && isHalted(code) && (await this.isStopped())) {
       e.halted = true;
       log.info({ code, index: e.index }, 'reply stream halted by Slack (stop button?)');
     } else {
       log.warn({ err, index: e.index }, 'reply stream failed; will fall back to posting');
     }
+  }
+
+  private async postedSince(ts: string): Promise<boolean> {
+    return this.t.postedSince ? this.t.postedSince(ts).catch((err) => (log.warn({ err }, 'postedSince check failed'), false)) : false;
+  }
+
+  /** The turn posted something else in the thread (send_message): an open activity message can't take a reply now. */
+  notePostedInThread(): void {
+    this.trail?.notePostBelow();
   }
 
   private async isStopped(): Promise<boolean> {
@@ -329,6 +402,7 @@ export class ReplyManager {
   /** Called from the tool's execute with the complete, validated input. */
   async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly string[]): Promise<string> {
     const e = this.start(toolCallId);
+    e.finished = true;
     const text = neutralizeBroadcasts(rawText);
     if (e.timer) {
       clearTimeout(e.timer);
@@ -459,7 +533,7 @@ export class ReplyManager {
     await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after failure failed'));
     try {
       const msg = markdownMessage(text);
-      await slackCall('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
+      await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
       return { last: { ts: e.streamTs, text }, buttonsTs: actions ? e.streamTs : null };
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), index: e.index }, 'completing a failed stream via chat.update failed; posting the rest');
@@ -477,7 +551,7 @@ export class ReplyManager {
   private async finalLayout(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock) {
     try {
       const msg = markdownMessage(text);
-      await slackCall('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
+      await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), index: e.index }, 'final layout update of a streamed reply failed; keeping the streamed layout');
     }
@@ -503,8 +577,8 @@ export class ReplyManager {
   private async dropActivityCards(e: ReplyEntry, text: string) {
     if (!e.activityCards || !e.streamTs) return;
     try {
-      if (text.trim()) await slackCall('chat.update', { channel: this.t.channelId, ts: e.streamTs, ...markdownMessage(text) });
-      else await slackCall('chat.delete', { channel: this.t.channelId, ts: e.streamTs });
+      if (text.trim()) await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, ...markdownMessage(text) });
+      else await editMessage('chat.delete', { channel: this.t.channelId, ts: e.streamTs });
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), index: e.index }, 'removing activity cards from a reply failed');
     }
@@ -546,7 +620,7 @@ export class ReplyManager {
       if (last.ts) {
         try {
           const msg = markdownMessage(last.text);
-          await slackCall('chat.update', { channel: this.t.channelId, ts: last.ts, text: msg.text, blocks: [...msg.blocks, actions] });
+          await editMessage('chat.update', { channel: this.t.channelId, ts: last.ts, text: msg.text, blocks: [...msg.blocks, actions] });
           await setButtonsMessage(row.id, last.ts, last.text);
           return;
         } catch (err) {
@@ -561,6 +635,32 @@ export class ReplyManager {
       if (res?.ts) await setButtonsMessage(row.id, res.ts, null);
     } catch (err) {
       log.warn({ err, buttonsId: row.id }, 'delivering reply buttons failed');
+    }
+  }
+
+  /**
+   * End of a turn (not stopped, not failed): close replies whose tool call never executed (e.g. invalid or cut-off
+   * input, the model retrying with a new call). Nothing more is streamed for them; a stream they opened is deleted
+   * when another reply was delivered (the retry), else it keeps just its visible text (activity cards dropped).
+   * Never throws.
+   */
+  async closeUnfinished(): Promise<void> {
+    for (const e of this.entries.values()) {
+      if (e.finished) continue;
+      e.finished = true;
+      if (e.timer) clearTimeout(e.timer);
+      e.timer = null;
+      e.dropped ??= 'the reply tool call never executed';
+      await e.chain.catch(() => {});
+      if (!e.streamTs) continue;
+      log.info({ index: e.index, turnId: this.t.turnId }, 'closing a reply stream whose tool call never executed');
+      await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream of an unfinished reply failed'));
+      try {
+        if (this.delivered > 0 || !e.streamed.trim()) await editMessage('chat.delete', { channel: this.t.channelId, ts: e.streamTs });
+        else await this.dropActivityCards(e, e.streamed);
+      } catch (err) {
+        log.warn({ err, code: slackErrorCode(err), index: e.index }, 'removing an unfinished reply stream failed');
+      }
     }
   }
 

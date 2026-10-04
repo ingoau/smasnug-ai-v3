@@ -7,6 +7,7 @@ import { handleReplyChoice } from './reply-choice.js';
 import { processDebounce } from './fire.js';
 import { enableLocalDebounce } from './debounce.js';
 import { recoverOrphanedTurns } from './maintenance.js';
+import { resumeExpiredSuspensions } from './agent-session.js';
 import { processSlackEvent } from './slack-events.js';
 import { processThreadRun, shutdownThreadRuns } from './thread-run.js';
 
@@ -22,6 +23,7 @@ registerAction(REPLY_CHOICE_ACTION, handleReplyChoice);
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {
   'pipeline:recover-turns': { everyMs: 30_000, run: recoverOrphanedTurns },
+  'pipeline:resume-suspended': { everyMs: 15_000, run: resumeExpiredSuspensions },
 };
 
 /** Worker start: fire debounce windows from precise in-process timers (delayed jobs remain the backup). */

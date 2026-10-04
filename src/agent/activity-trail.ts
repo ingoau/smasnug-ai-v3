@@ -15,7 +15,9 @@
  *   unchanged text is skipped). Nothing is shown before the turn commits to work (same rule as the status).
  * - When the turn's next reply starts streaming, it adopts this message (ReplyManager): the reply text streams in
  *   below the cards, and the finished reply is re-rendered with chat.update without them, so the final message is
- *   exactly the posted reply. A reply that is posted whole (subagents running) deletes the activity message.
+ *   exactly the posted reply. A reply that is posted whole (subagents running) deletes the activity message. So does
+ *   a reply when anything was posted in the thread after the activity message (a user message, send_message, …):
+ *   adopting it would put the reply above that post; the reply opens a message of its own instead.
  * - At the end of the turn, an activity message no reply adopted (silent turn, error, stop) is deleted, so it
  *   leaves nothing behind.
  * Best-effort: any failure only drops the activity text for the rest of the turn; nothing here throws.
@@ -48,6 +50,9 @@ export interface ActivityTarget {
   stopRequested?: () => Promise<boolean>;
   /** chat.stopStream set the session `active` (its default `session_status`). */
   onSessionReleased?: () => void;
+  /** Crash safety (activity-registry.ts): a message was opened / is no longer the trail's. Errors are ignored. */
+  onOpened?: (ts: string) => Promise<void>;
+  onClosed?: () => Promise<void>;
   minIntervalMs?: number;
 }
 
@@ -56,6 +61,8 @@ export interface AdoptedActivity {
   ts: string;
   chunks: TaskUpdateChunk[];
   cards: number;
+  /** Idempotency key for stopping it, should the reply not be able to use it after all (dropAdopted). */
+  stopKey: string;
 }
 
 const card = (id: string, title: string, status: TaskUpdateChunk['status']): TaskUpdateChunk => ({ type: 'task_update', id, title, status });
@@ -71,6 +78,8 @@ export class ActivityTrail {
   private started = false;
   /** appendStream failed on the open message (e.g. Slack halted it): no more updates, delete it at the end. */
   private broken = false;
+  /** Something was posted in the thread below the open message: a reply must not stream into it (above that post). */
+  private passed = false;
   /** No more activity this turn (closed, stopped, or Slack refused the stream). */
   private disabled = false;
   private pending: string | null = null;
@@ -116,11 +125,30 @@ export class ActivityTrail {
         return null;
       }
       if (this.broken) return null; // close() deletes it
+      if (this.passed) {
+        // A reply streamed into it would land above what was posted meanwhile: remove it, the reply opens its own.
+        await this.remove();
+        return null;
+      }
       const last = this.cards.at(-1);
-      const adopted: AdoptedActivity = { ts: this.ts, chunks: last ? [card(last.id, last.title, 'complete')] : [], cards: this.cards.length };
+      const adopted: AdoptedActivity = { ts: this.ts, chunks: last ? [card(last.id, last.title, 'complete')] : [], cards: this.cards.length, stopKey: this.key(':stop') };
       this.reset();
+      await this.hook(() => this.t.onClosed?.()); // the reply owns it now
       return adopted;
     });
+  }
+
+  /**
+   * A reply adopted the message but can't use it (Slack already ended its stream, or the thread moved on below it):
+   * stop and delete it, so the reply opens a fresh message instead. Never throws.
+   */
+  dropAdopted(a: AdoptedActivity): Promise<void> {
+    return this.enqueue(() => this.removeMessage(a.ts, a.stopKey));
+  }
+
+  /** The turn posted something else in the thread (e.g. send_message): the open message can't take a reply anymore. */
+  notePostBelow(): void {
+    if (this.started) this.passed = true;
   }
 
   /** The reply was posted as a message of its own: remove the activity message. */
@@ -187,6 +215,7 @@ export class ActivityTrail {
         );
         if (!res?.ts) throw new Error('chat.startStream returned no ts');
         this.ts = res.ts;
+        await this.hook(() => this.t.onOpened?.(res.ts));
       } else {
         await slackCall('chat.appendStream', { channel: this.t.channelId, ts: this.ts, chunks });
       }
@@ -215,6 +244,19 @@ export class ActivityTrail {
     const key = this.key(':stop');
     this.reset();
     if (!ts) return;
+    await this.removeMessage(ts, key);
+    await this.hook(() => this.t.onClosed?.());
+  }
+
+  private async hook(fn: () => Promise<void> | undefined): Promise<void> {
+    try {
+      await fn();
+    } catch (err) {
+      log.debug({ err, turnId: this.t.turnId }, 'activity registry hook failed');
+    }
+  }
+
+  private async removeMessage(ts: string, key: string): Promise<void> {
     try {
       await slackCall('chat.stopStream', { channel: this.t.channelId, ts }, { idempotencyKey: key });
       this.t.onSessionReleased?.();
@@ -234,5 +276,6 @@ export class ActivityTrail {
     this.cards = [];
     this.started = false;
     this.broken = false;
+    this.passed = false;
   }
 }

@@ -11,8 +11,9 @@
  * - "Users may change the title of a session at any time, even if the agent previously set it", and the app gets
  *   `agent_session_title_changed` (https://docs.slack.dev/reference/events/agent_session_title_changed: `title`,
  *   `previous_title`, `user`). The docs describe it as sent when "a user changes the title"; in case Slack echoes
- *   our own rename, an event without a human `user`, or one repeating the title we set moments ago, is not taken
- *   as a user rename. A user-chosen title is never overwritten afterwards.
+ *   our own rename, an event without a human `user`, or one repeating a title we set within the last two minutes
+ *   (the current one or an earlier one, from the `session_titled` events), is not taken as a user rename. A
+ *   user-chosen title is never overwritten afterwards; one that lands while our rename is in flight is re-applied.
  * - Statuses: `suspended` = "the agent cannot make progress until the user intervenes, for example when the agent
  *   needs user clarification or a tool approval" → a DM turn that leaves a send_message confirmation pending ends
  *   `suspended`, and resolving it (Send / Cancel / expiry) sets `active`. `closed` = "the agent has closed the session
@@ -21,10 +22,11 @@
  */
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { getBotIdentity, slackCall, slackErrorCode } from '../core/slack.js';
+import { redis } from '../core/redis.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { isLocked, threadLockKey } from './lock.js';
-import { setSessionStatus, type FinalSessionStatus } from './session-status.js';
+import { setSessionStatus, turnIndicatorLive, type FinalSessionStatus } from './session-status.js';
 
 /** Sidebar titles are kept short, like plan card titles. */
 export const SESSION_TITLE_MAX = 40;
@@ -100,6 +102,15 @@ export async function setSessionTitle(o: { threadId: string; turnId: number; tit
     return `Not renamed: Slack refused (${code}).`;
   }
   await appendEvent(o.threadId, 'session_titled', 'bot', { turnId: o.turnId, title }).catch(() => {});
+  // A user rename that arrived between our claim and our rename was overwritten in Slack by ours, while the DB says
+  // the user's title wins: put theirs back.
+  const after = await loadSessionInfo(o.threadId);
+  if (after.titleBy === 'user' && after.title) {
+    await renameSession(channelId, threadTs, after.title, `session-title:${o.threadId}:${o.turnId}:user`).catch((err) =>
+      log.warn({ err, threadId: o.threadId }, "re-applying the user's session title failed"),
+    );
+    return `Not renamed: the user just named this conversation "${after.title}" themselves. Keep their title.`;
+  }
   return `Conversation titled "${title}".`;
 }
 
@@ -109,8 +120,10 @@ async function renameSession(channelId: string, threadTs: string, title: string,
     await slackCall('agents.sessions.rename', { channel_id: channelId, thread_ts: threadTs, title }, { idempotencyKey: key });
   } catch (err) {
     if (slackErrorCode(err) !== 'session_not_found') throw err;
-    // Only reached mid-turn (the tool runs during a turn), where the session is `processing` anyway.
-    await slackCall('agents.sessions.setStatus', { channel_id: channelId, thread_ts: threadTs, status: 'processing', title }, { idempotencyKey: `${key}:create` });
+    // No session yet, so no status was ever set: create it with the turn's current one (`processing` only while
+    // the turn's indicator shows it; the turn's TurnStatus wouldn't clear a `processing` it never set).
+    const status = turnIndicatorLive(`${channelId}:${threadTs}`) ? 'processing' : 'active';
+    await slackCall('agents.sessions.setStatus', { channel_id: channelId, thread_ts: threadTs, status, title }, { idempotencyKey: `${key}:create` });
   }
 }
 
@@ -144,6 +157,14 @@ export async function handleSessionTitleChanged(ev: AgentSessionTitleChangedEven
     log.debug({ threadId }, 'agent session title event repeats our own rename (echo)');
     return;
   }
+  // A late echo of an earlier rename of ours (the bot retitled since): any title we set within the window.
+  const [recent] = await sql<{ ours: boolean }[]>`
+    select exists (select 1 from thread_events where thread_id = ${threadId} and type = 'session_titled' and actor = 'bot'
+      and payload->>'title' = ${title} and created_at > now() - ${ECHO_WINDOW_MS} * interval '1 millisecond') as ours`;
+  if (recent?.ours && row.titleBy !== 'user') {
+    log.debug({ threadId }, 'agent session title event repeats an earlier rename of ours (echo)');
+    return;
+  }
   await sql`
     insert into agent_sessions (thread_id, title, title_by, user_renamed_at)
     values (${threadId}, ${title}, 'user', now())
@@ -165,21 +186,58 @@ export async function requestSessionClose(threadId: string, turnId: number): Pro
 /**
  * The status a turn leaves its session in. DMs: `suspended` while a send confirmation from this thread is pending
  * (the user has to act), `closed` after leave_thread in this turn, else `active`. Channel threads: always `active`.
+ * Without `turnId` (side paths that clear a status outside a turn: intake, stop, a resolved confirmation): the
+ * status the session rests in, i.e. `closed` if the latest turn that ran (or runs) is the one that closed it.
  */
-export async function finalSessionStatus(threadId: string, turnId: number): Promise<FinalSessionStatus> {
-  const [row] = await sql<{ isDm: boolean; closeTurnId: number | null; pendingSend: boolean }[]>`
+export async function finalSessionStatus(threadId: string, turnId?: number): Promise<FinalSessionStatus> {
+  const [row] = await sql<{ isDm: boolean; closeTurnId: number | null; pendingSend: boolean; lastTurnId: number | null }[]>`
     select t.is_dm, s.close_turn_id,
-      exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now()) as pending_send
+      exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now()) as pending_send,
+      (select max(u.id) from turns u where u.thread_id = t.id and u.status <> 'pending') as last_turn_id
     from threads t left join agent_sessions s on s.thread_id = t.id where t.id = ${threadId}`;
   if (!row?.isDm) return 'active';
   if (row.pendingSend) return 'suspended';
-  if (row.closeTurnId != null && Number(row.closeTurnId) === Number(turnId)) return 'closed';
+  const turn = turnId ?? row.lastTurnId;
+  if (row.closeTurnId != null && turn != null && Number(row.closeTurnId) === Number(turn)) return 'closed';
   return 'active';
+}
+
+/** Set the session's resting status (finalSessionStatus without a turn) from a side path. Never throws. */
+export async function restoreSessionStatus(threadId: string, userId?: string): Promise<void> {
+  const status = await finalSessionStatus(threadId).catch((err) => (log.warn({ err, threadId }, 'finalSessionStatus failed'), 'active' as const));
+  const { channelId, threadTs } = parseThreadId(threadId);
+  await setSessionStatus(channelId, threadTs, status, userId);
+}
+
+/** Suspended DM sessions by the time their earliest pending confirmation expires (ms): resumed by the sweep below. */
+const SUSPENDED_KEY = 'sessions:suspended';
+
+/**
+ * A turn left a DM session `suspended`: remember when its confirmation expires, so the session resumes then (the
+ * pending-send expiry sweep runs only every few minutes). Never throws.
+ */
+export async function noteSessionSuspended(threadId: string): Promise<void> {
+  try {
+    const [row] = await sql<{ at: Date | null }[]>`
+      select min(expires_at) as at from pending_sends where thread_id = ${threadId} and status = 'pending' and expires_at > now()`;
+    if (row?.at) await redis.zadd(SUSPENDED_KEY, new Date(row.at).getTime(), threadId);
+  } catch (err) {
+    log.warn({ err, threadId }, 'noting a suspended session failed');
+  }
+}
+
+/** Maintenance (every few seconds): resume suspended sessions whose confirmation has expired. */
+export async function resumeExpiredSuspensions(): Promise<void> {
+  const due = await redis.zrangebyscore(SUSPENDED_KEY, 0, Date.now());
+  for (const threadId of due) {
+    if (await redis.zrem(SUSPENDED_KEY, threadId)) await resumeSuspendedSession(threadId);
+  }
 }
 
 /**
  * A send confirmation was resolved (Send, Cancel or expiry): a DM session suspended for it goes back to `active`,
- * unless another confirmation is still pending or a turn is running (that turn sets the final status). Never throws.
+ * unless another confirmation is still pending or a turn is running (that turn sets the final status; the thread run
+ * re-checks after releasing the lock). Never throws.
  */
 export async function resumeSuspendedSession(threadId: string | null | undefined): Promise<void> {
   if (!threadId) return;
@@ -187,10 +245,11 @@ export async function resumeSuspendedSession(threadId: string | null | undefined
     const [row] = await sql<{ isDm: boolean; pendingSend: boolean }[]>`
       select t.is_dm, exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now()) as pending_send
       from threads t where t.id = ${threadId}`;
-    if (!row?.isDm || row.pendingSend) return;
+    if (!row?.isDm) return;
+    if (row.pendingSend) return void (await noteSessionSuspended(threadId)); // resume when the next one expires
     if (await isLocked(threadLockKey(threadId))) return;
-    const { channelId, threadTs } = parseThreadId(threadId);
-    await setSessionStatus(channelId, threadTs, 'active');
+    await redis.zrem(SUSPENDED_KEY, threadId);
+    await restoreSessionStatus(threadId); // `active` (or `closed` if the conversation was closed meanwhile)
   } catch (err) {
     log.warn({ err, threadId }, 'resuming a suspended session failed');
   }

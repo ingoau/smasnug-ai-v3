@@ -111,6 +111,32 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       expect(await s.setSessionTitle({ threadId: t.id, turnId: 2, title: 'Pico power' })).toMatch(/^Conversation titled/);
     });
 
+    it('a late echo of an earlier bot title is not a user rename', async () => {
+      const t = await thread(true);
+      await s.setSessionTitle({ threadId: t.id, turnId: 1, title: 'Pico question' });
+      await s.setSessionTitle({ threadId: t.id, turnId: 2, title: 'Pico power budget' });
+      await processSlackEvent(titleEvent(t, 'Pico question', 'U1')); // echo of turn 1's rename, delivered late
+      expect(await row(t.id)).toMatchObject({ title: 'Pico power budget', titleBy: 'bot', userRenamedAt: null });
+      await processSlackEvent(titleEvent(t, 'My own name', 'U1'));
+      expect(await row(t.id)).toMatchObject({ title: 'My own name', titleBy: 'user' });
+    });
+
+    it('a user rename landing while our rename is in flight wins in Slack too (re-applied)', async () => {
+      const t = await thread(true);
+      const remove = fake.addFakeHandler(async (method, args) => {
+        if (method !== 'agents.sessions.rename' || args.channel_id !== t.channelId || args.title !== 'Pico question') return undefined;
+        await processSlackEvent(titleEvent(t, 'My robot project', 'U1')); // the user renamed between claim and rename
+        return undefined;
+      });
+      try {
+        expect(await s.setSessionTitle({ threadId: t.id, turnId: 1, title: 'Pico question' })).toMatch(/^Not renamed: the user just named this conversation "My robot project"/);
+      } finally {
+        remove();
+      }
+      expect((await calls(t.channelId, 'agents.sessions.rename')).map((c) => c.args.title)).toEqual(['Pico question', 'My robot project']);
+      expect(await row(t.id)).toMatchObject({ title: 'My robot project', titleBy: 'user' });
+    });
+
     it('title events outside DM threads are only logged', async () => {
       const t = await thread(false);
       await processSlackEvent(titleEvent(t, 'Whatever', 'U1'));
@@ -124,11 +150,20 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
         if (method === 'agents.sessions.rename' && args.channel_id === t.channelId) throw fake.fakeSlackError(code);
       });
       try {
+        // No indicator showing (e.g. an unmentioned turn that went straight to the title): created `active`.
         expect(await s.setSessionTitle({ threadId: t.id, turnId: 1, title: 'Pico question' })).toMatch(/^Conversation titled/);
-        expect((await calls(t.channelId, 'agents.sessions.setStatus')).map((c) => c.args)).toEqual([{ channel_id: t.channelId, thread_ts: t.threadTs, status: 'processing', title: 'Pico question' }]);
+        expect((await calls(t.channelId, 'agents.sessions.setStatus')).map((c) => c.args)).toEqual([{ channel_id: t.channelId, thread_ts: t.threadTs, status: 'active', title: 'Pico question' }]);
+        // The turn's indicator is showing: created `processing` (the turn sets the final status).
+        const { TurnStatus, trackTurnStatus } = await import('./session-status.js');
+        const ind = new TurnStatus({ channelId: t.channelId, threadTs: t.threadTs, userId: 'U1', transport: { lifecycle: async () => {} } });
+        ind.adopt();
+        const untrack = trackTurnStatus(t.id, ind);
+        expect(await s.setSessionTitle({ threadId: t.id, turnId: 4, title: 'Pico pins' })).toMatch(/^Conversation titled/);
+        untrack();
+        expect((await calls(t.channelId, 'agents.sessions.setStatus')).at(-1)!.args).toMatchObject({ status: 'processing', title: 'Pico pins' });
         code = 'ratelimited';
         expect(await s.setSessionTitle({ threadId: t.id, turnId: 2, title: 'Pico power' })).toBe('Not renamed: Slack refused (ratelimited).');
-        expect(await row(t.id)).toMatchObject({ title: 'Pico question', titleBy: 'bot', titleTurnId: '1' });
+        expect(await row(t.id)).toMatchObject({ title: 'Pico pins', titleBy: 'bot', titleTurnId: '4' });
       } finally {
         remove();
       }
@@ -190,6 +225,100 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       await scheduler.scheduleMessages(dm.id, 'U1', ['1.2'], true);
       await processThreadRun(job({ threadId: dm.id }));
       expect(await statuses(dm.channelId)).toEqual(['processing', 'closed', 'processing', 'active']);
+    });
+
+    it('a crashed turn (stale sweep): its open activity message is removed and the session gets its final status', async () => {
+      const dm = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${dm.channelId}, '1.1', ${dm.id}, 'U1', 'send it to #general')`;
+      await scheduler.scheduleMessages(dm.id, 'U1', ['1.1'], true);
+      const crashed = await scheduler.claimNextPending(dm.id); // the worker died while it ran
+      const { recordOpenActivity } = await import('../agent/activity-registry.js');
+      await recordOpenActivity(Number(crashed!.id), dm.channelId, '1700000001.000001');
+      await sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${dm.id}, 'C1', 'hi', now() + interval '10 minutes')`;
+      await processThreadRun(job({ threadId: dm.id }));
+      const chat = (await calls(dm.channelId)).filter((c) => c.method.startsWith('chat.'));
+      expect(chat.map((c) => [c.method, c.args.ts])).toEqual([
+        ['chat.stopStream', '1700000001.000001'],
+        ['chat.delete', '1700000001.000001'],
+      ]);
+      expect(await statuses(dm.channelId)).toEqual(['suspended']);
+      expect(await redis.get(`activity:open:${crashed!.id}`)).toBeNull();
+    });
+
+    it('side paths never overwrite suspended / closed with active (stop, intake clears, a turn without indicator)', async () => {
+      const { clearIntakeStatus } = await import('./session-status.js');
+      const { handleAgentSessionStopped } = await import('./stop.js');
+      const pendingSend = async (threadId: string) =>
+        sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${threadId}, 'C1', 'hi', now() + interval '10 minutes')`;
+      const intake = (threadId: string) => redis.set(`status:intake:${threadId}`, String(Date.now()), 'PX', 60_000);
+
+      // native stop / !stop while a send confirmation is pending: suspended, not active
+      const a = await thread(true);
+      await pendingSend(a.id);
+      await handleAgentSessionStopped({ type: 'agent_session_stopped', channel: a.channelId, thread_ts: a.threadTs, user: 'U1', event_ts: '1700000050.000001' });
+      expect(await statuses(a.channelId)).toEqual(['suspended']);
+
+      // a batch that ends without a turn after the conversation was closed: back to closed
+      const b = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${b.channelId}, '1.1', ${b.id}, 'U1', 'bye')`;
+      await scheduler.scheduleMessages(b.id, 'U1', ['1.1'], true);
+      run.mockImplementationOnce(async (turn: any) => void (await s.requestSessionClose(b.id, Number(turn.id))));
+      await processThreadRun(job({ threadId: b.id }));
+      await intake(b.id);
+      await clearIntakeStatus(b.id, 'U1');
+      expect(await statuses(b.channelId)).toEqual(['processing', 'closed', 'closed']);
+
+      // a turn that never showed the indicator takes back an intake status with its final one
+      const c = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${c.channelId}, '1.1', ${c.id}, 'U1', 'send hi to #general')`;
+      await scheduler.scheduleMessages(c.id, 'U1', ['1.1'], false);
+      run.mockImplementationOnce(async () => {
+        await intake(c.id); // a follow-up's intake status, left for this turn
+        await pendingSend(c.id);
+      });
+      await processThreadRun(job({ threadId: c.id }));
+      expect(await statuses(c.channelId)).not.toContain('active');
+      expect((await statuses(c.channelId)).at(-1)).toBe('suspended');
+    });
+
+    it('a Send / Cancel click while the turn still holds the lock: resumed once the lock is released', async () => {
+      const dm = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${dm.channelId}, '1.1', ${dm.id}, 'U1', 'send hi to #general')`;
+      await scheduler.scheduleMessages(dm.id, 'U1', ['1.1'], true);
+      run.mockImplementationOnce(async () => {
+        await sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${dm.id}, 'C1', 'hi', now() + interval '10 minutes')`;
+      });
+      const remove = fake.addFakeHandler(async (method, args) => {
+        if (method !== 'agents.sessions.setStatus' || args.channel_id !== dm.channelId || args.status !== 'suspended') return undefined;
+        // The user clicks Cancel right after the turn computed `suspended`: the lock is still held, resume skips.
+        await sql`update pending_sends set status = 'cancelled' where thread_id = ${dm.id}`;
+        await s.resumeSuspendedSession(dm.id);
+        return undefined;
+      });
+      try {
+        await processThreadRun(job({ threadId: dm.id }));
+      } finally {
+        remove();
+      }
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended', 'active']);
+    });
+
+    it('a suspended session resumes when its confirmation expires (not only at the 5-minute expiry sweep)', async () => {
+      const dm = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${dm.channelId}, '1.1', ${dm.id}, 'U1', 'send hi to #general')`;
+      await scheduler.scheduleMessages(dm.id, 'U1', ['1.1'], true);
+      run.mockImplementationOnce(async () => {
+        await sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${dm.id}, 'C1', 'hi', now() + interval '1 second')`;
+      });
+      await processThreadRun(job({ threadId: dm.id }));
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended']);
+      await s.resumeExpiredSuspensions();
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended']); // not expired yet
+      await new Promise((r) => setTimeout(r, 1100));
+      await s.resumeExpiredSuspensions();
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended', 'active']);
+      await s.resumeExpiredSuspensions(); // once
+      expect(await statuses(dm.channelId)).toHaveLength(3);
     });
 
     it('channel threads keep processing / active even if the turn asked to close', async () => {

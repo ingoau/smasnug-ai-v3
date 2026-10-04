@@ -20,7 +20,7 @@ import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
 import { cursorRefusal } from './cursor/agents.js';
-import { activityForTool } from './activity.js';
+import { activityForTool, quietAfterReply } from './activity.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
 ;
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
@@ -285,7 +285,12 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     activeRuns: () => activeRunsInThread(turn.threadId),
     stopRequested: checkStop,
     timing: io.timing,
-    activityCards: Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks',
+    // Cards only where a reply is expected (DMs, mentions, reminder turns, write-ups): a silent unmentioned turn
+    // would otherwise post and delete a message in the thread, which can notify its followers.
+    activityCards: Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks' && (io.isMention || turn.kind === 'synthesis'),
+    // A reply only streams into the activity message if nothing was posted below it meanwhile.
+    postedSince: async (ts) =>
+      Boolean((await sql<{ moved: boolean }[]>`select exists (select 1 from messages where thread_id = ${turn.threadId} and not deleted and ts::numeric > ${ts}::numeric) as moved`)[0]?.moved),
     onSessionReleased: () => {
       try {
         io.sessionReleased?.();
@@ -353,6 +358,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     announced.add(toolCallId);
     const text = activityForTool(toolName);
     if (!text) return;
+    if (replies.anyVisible && quietAfterReply(toolName)) return; // bookkeeping after the reply: no "Working…" flash
     try {
       io.setActivity(text);
     } catch (err) {
@@ -410,6 +416,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
         case 'tool-result': {
           const v = VISIBLE_TOOLS[part.toolName];
           if (v) state.visible.add(v);
+          if (v === 'send') replies.notePostedInThread(); // posted below any open activity message
           break;
         }
         case 'tool-error':
@@ -481,6 +488,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     throw failed;
   }
 
+  // Reply streams whose tool call never executed (invalid input, retried under a new call id) are closed too.
+  await replies.closeUnfinished();
   // A canvas made this turn with no reply after it: nobody would see its link (create_canvas leaves posting it to
   // the reply). Post the link instead of the generic fallback.
   if (!state.visible.has('reply')) {
