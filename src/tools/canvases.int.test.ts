@@ -234,6 +234,41 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
     expect(await exec('front', await ctx(OTHERPUB, 'UOWNER'), 'edit_canvas', { canvas: id, action: 'append', content: 'c' })).toMatch(/Canvas updated/);
   });
 
+  it("from_subagent: publishes a thread subagent's full stored result server-side (pings neutralised, capped)", async () => {
+    const c = await ctx(PUB);
+    const sa = `sa_cv${rand().toLowerCase()}`;
+    const longDoc = `## Report <!channel>\n${Array.from({ length: 3000 }, (_, i) => `- finding ${i} <@U5>`).join('\n')}\n## End\nlast line`;
+    await sql`insert into subagents (id, thread_id, owner_id, title) values (${sa}, ${c.threadId}, 'USPEAK', 'Research')`;
+    await sql`insert into runs (subagent_id, thread_id, instructions, status, result) values
+      (${sa}, ${c.threadId}, 'x', 'complete', 'old result'), (${sa}, ${c.threadId}, 'y', 'complete', ${longDoc}), (${sa}, ${c.threadId}, 'z', 'error', null)`;
+    const out = await exec('front', c, 'create_canvas', { title: 'Report', content: 'Short intro.', from_subagent: sa });
+    const id = linkOf(out)![2]!;
+    const md = content.get(id)!;
+    expect(md.startsWith('Short intro.\n\n## Report @​channel\n- finding 0 ![](@U5)')).toBe(true);
+    expect(md).toContain('last line'); // the latest complete run, in full
+    expect(md).not.toContain('old result');
+
+    // Another thread's subagent can't be published here.
+    const other = await ctx(PUB);
+    expect(await exec('front', other, 'create_canvas', { title: 'X', from_subagent: sa })).toMatch(/Not created: no finished result/);
+    // Unknown id, and neither content nor subagent.
+    expect(await exec('front', c, 'create_canvas', { title: 'X', from_subagent: 'sa_nope' })).toMatch(/Not created: no finished result/);
+    expect(await exec('front', c, 'create_canvas', { title: 'X' })).toMatch(/content is empty/);
+
+    // Too long for a canvas: cut with a note, not refused.
+    const sa2 = `sa_cv${rand().toLowerCase()}`;
+    await sql`insert into subagents (id, thread_id, owner_id, title) values (${sa2}, ${c.threadId}, 'USPEAK', 'Huge')`;
+    await sql`insert into runs (subagent_id, thread_id, instructions, status, result) values (${sa2}, ${c.threadId}, 'x', 'complete', ${'line\n'.repeat(30_000)})`;
+    const huge = await exec('front', c, 'create_canvas', { title: 'Huge', from_subagent: sa2 });
+    expect(huge).toMatch(/was cut/);
+    expect(content.get(linkOf(huge)![2]!)!.length).toBeLessThanOrEqual(100_000);
+
+    // edit_canvas append takes it too.
+    calls = [];
+    expect(await exec('front', c, 'edit_canvas', { canvas: id, action: 'append', from_subagent: sa, content: '## Again' })).toMatch(/Canvas updated/);
+    expect(callsOf('canvases.edit')[0]!.args.changes[0].document_content.markdown).toContain('## Again\n\n## Report @​channel');
+  });
+
   it('edit: a deleted canvas drops its row', async () => {
     const c = await ctx(PUB);
     const id = linkOf(await exec('front', c, 'create_canvas', { title: 'Gone', content: 'a' }))![2]!;

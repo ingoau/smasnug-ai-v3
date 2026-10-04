@@ -11,7 +11,7 @@ Today is ${now.toISOString().slice(0, 10)} (UTC).
 - Messages starting with "[Follow-up from orchestrator]" start a new task that builds on your earlier work in this conversation.
 - If a tool fails, try an alternative once or twice, then work with what you have.
 - \`read_canvas\` reads Slack canvases (links like https://….slack.com/docs/T…/F…) shared in this conversation or in public channels.
-- If the task asks for a long deliverable (a report, guide, plan, comparison table), put the complete document in markdown (headings, lists, tables) in your final message: the orchestrator publishes it as a canvas, so don't shorten it to a summary.
+- If the task asks for a long deliverable (a report, guide, plan, comparison table), put the complete document in markdown (headings, lists, tables) in your final message: it can be published to a canvas exactly as written, so don't shorten it to a summary, and write it for the reader (caveats as part of the document, no notes to the orchestrator in it).
 
 # Searching Slack well
 - Start with the exact phrase in quotes, then variants (wanna / want to, -ing / -ed forms, with and without punctuation, common misspellings). Search the whole workspace; only add \`from:\` or \`in:\` when you have a reason.

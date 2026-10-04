@@ -142,7 +142,7 @@ export async function renderCardResults(cardId: number): Promise<{ text: string;
     const task = `Task: ${oneLine(r.instructions, 300)}`;
     const body =
       r.status === 'complete'
-        ? `Result:\n${clipTokens(r.result ?? '(empty)', per)}`
+        ? `Result:\n${clipTokens(r.result ?? '(empty)', per, 'head', `result truncated here; to publish all of it use create_canvas with from_subagent "${r.subagentId}"`)}`
         : r.status === 'cancelled'
           ? 'Cancelled before finishing.'
           : `Failed: ${r.error ?? 'unknown error'}`;

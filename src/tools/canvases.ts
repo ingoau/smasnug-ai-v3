@@ -219,6 +219,39 @@ async function grantAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, ca
   return null;
 }
 
+/** Longest intro (`content`) the agent may put above a subagent's result. */
+const MAX_INTRO_CHARS = 3000;
+const FROM_SUBAGENT_DESC =
+  "Publish the finished result of one of this thread's subagents (its id, sa_…) in full, server-side: use this for a long subagent deliverable instead of re-typing it (you may only see it cut short). `content` then is an optional short intro placed above it.";
+
+/**
+ * A long deliverable straight from a subagent's stored result (its latest complete run's `runs.result`), so it
+ * reaches the canvas in full: synthesis turns see results clipped, and re-emitting a whole document as tool args is
+ * slow and lossy. Only subagents of the current thread. The text stays untrusted (written from web/Slack content):
+ * it goes through the same conversion and ping neutralisation as anything else; capped at the canvas write limit.
+ */
+export async function subagentDocument(threadId: string, subagentId: string, intro: string | undefined): Promise<{ content: string; note: string } | { error: string }> {
+  const id = subagentId.trim();
+  const head = intro?.trim() ?? '';
+  if (head.length > MAX_INTRO_CHARS) return { error: `the intro (\`content\`) is too long (${head.length} chars, max ${MAX_INTRO_CHARS}); the subagent's result is the document.` };
+  const [run] = await sql<{ result: string | null }[]>`
+    select r.result from runs r join subagents s on s.id = r.subagent_id
+    where s.id = ${id} and s.thread_id = ${threadId} and r.thread_id = ${threadId} and r.status = 'complete'
+    order by r.id desc limit 1`;
+  if (!run?.result?.trim()) return { error: `no finished result from a subagent "${id}" in this thread. Pass the id (sa_…) of one of this thread's subagents whose run completed, or write the document in \`content\`.` };
+  let body = run.result.trim();
+  let note = '';
+  const room = limits.canvasWriteMaxChars - (head ? head.length + 2 : 0) - 100;
+  if (body.length > room) {
+    let cut = body.slice(0, room);
+    const nl = cut.lastIndexOf('\n');
+    if (nl > room * 0.8) cut = cut.slice(0, nl);
+    body = `${cut}\n\n_(The rest didn't fit in the canvas.)_`;
+    note = ` The result was longer than a canvas allows and was cut at ${limits.canvasWriteMaxChars} chars.`;
+  }
+  return { content: head ? `${head}\n\n${body}` : body, note };
+}
+
 const canvasMarkdownHint =
   'Markdown: # / ## / ### headings, lists, checklists (- [ ]), tables (max 300 cells), code blocks, links, quotes. Mention people as <@U123> and channels as <#C123>.';
 
@@ -231,10 +264,21 @@ registerTool({
         `Create a Slack canvas (a document people can keep, share and edit) for a long-form deliverable: research write-ups, guides, plans, comparison tables, notes. The current conversation can read it and the speaker can edit it. Returns the link: then reply with a short summary plus the link (don't paste the content into the reply). ${canvasMarkdownHint}`,
       inputSchema: z.object({
         title: z.string().describe('Canvas title, short (e.g. "Hosting options compared")'),
-        content: z.string().describe('The full document in markdown. Start with the content, not with the title (the title is shown above it).'),
+        content: z
+          .string()
+          .optional()
+          .describe('The full document in markdown. Start with the content, not with the title (the title is shown above it). With from_subagent: an optional short intro.'),
+        from_subagent: z.string().optional().describe(FROM_SUBAGENT_DESC),
       }),
-      execute: async ({ title, content }) => {
+      execute: async ({ title, content: given, from_subagent }) => {
         const cleanTitle = neutralizeBroadcasts(title.replace(/\s+/g, ' ').trim()).slice(0, 150) || 'Untitled';
+        let content = given ?? '';
+        let note = '';
+        if (from_subagent?.trim()) {
+          const doc = await subagentDocument(ctx.threadId, from_subagent, given);
+          if ('error' in doc) return `Not created: ${doc.error}`;
+          ({ content, note } = doc);
+        }
         if (!content.trim()) return 'Not created: the content is empty.';
         if (content.length > limits.canvasWriteMaxChars) return `Not created: the content is too long (${content.length} chars, max ${limits.canvasWriteMaxChars}). Shorten it.`;
         const key = `${ctx.turnId ?? ctx.runId ?? ctx.threadId}:${hash(`${cleanTitle}\n${content}`)}`;
@@ -259,7 +303,7 @@ registerTool({
             on conflict do nothing`;
           const warning = await grantAccess(ctx, canvasId);
           await appendEvent(ctx.threadId, 'canvas_created', 'bot', { canvasId, title: cleanTitle, speakerId: ctx.speakerId }).catch(() => {});
-          return `Canvas created: ${permalink} (id ${canvasId}).${warning ? ` ${warning}` : ''} Now reply with a short summary and this link; don't paste the content.`;
+          return `Canvas created: ${permalink} (id ${canvasId}).${note}${warning ? ` ${warning}` : ''} Now reply with a short summary and this link; don't paste the content.`;
         } catch (err) {
           const code = slackErrorCode(err);
           log.warn({ err, code }, 'create_canvas failed');
@@ -309,17 +353,26 @@ registerTool({
       inputSchema: z.object({
         canvas: z.string().describe('Canvas link or id (F…)'),
         action: z.enum(EDIT_ACTIONS),
-        content: z.string().optional().describe('Markdown for append / replace_section / replace_all'),
+        content: z.string().optional().describe('Markdown for append / replace_section / replace_all (with from_subagent: an optional short intro)'),
+        from_subagent: z.string().optional().describe(`append / replace_section / replace_all: ${FROM_SUBAGENT_DESC}`),
         heading: z.string().optional().describe('replace_section: the heading text of the section to replace'),
         title: z.string().optional().describe('rename: the new title'),
       }),
-      execute: async (input) => {
+      execute: async (args) => {
+        let input = args;
+        let note = '';
         const canvasId = parseCanvasId(input.canvas);
         if (!canvasId) return NOT_A_CANVAS;
         const row = await getBotCanvas(canvasId);
         if (!row) return "I can only edit canvases I created, and this one isn't mine. I can read it (if it's shared here or in a public channel) and make a new canvas instead.";
         if (!canEditCanvas(row, ctx.speakerId))
           return `That canvas belongs to <@${row.creatorId}> (they asked for it); only they can have me edit it. I can make a new canvas instead.`;
+        if (input.from_subagent?.trim() && input.action !== 'rename') {
+          const doc = await subagentDocument(ctx.threadId, input.from_subagent, input.content);
+          if ('error' in doc) return `Not edited: ${doc.error}`;
+          input = { ...input, content: doc.content };
+          note = doc.note;
+        }
         const key = `${ctx.turnId ?? ctx.threadId}:${hash(JSON.stringify([canvasId, input.action, input.heading ?? '', input.title ?? '', input.content ?? '']))}`;
         const over = await takeLimit('canvas_write', ctx.speakerId, ctx.threadId);
         if (over) return over;
@@ -330,7 +383,7 @@ registerTool({
           if (input.action === 'rename') await sql`update bot_canvases set title = ${(built.change.title_content as any).markdown}, last_used_at = now() where canvas_id = ${canvasId}`;
           else await touch(canvasId);
           await appendEvent(ctx.threadId, 'canvas_edited', 'bot', { canvasId, action: input.action, speakerId: ctx.speakerId }).catch(() => {});
-          return `Canvas updated (${input.action}): ${row.permalink ?? canvasId}. Tell the speaker briefly (with the link).`;
+          return `Canvas updated (${input.action}): ${row.permalink ?? canvasId}.${note} Tell the speaker briefly (with the link).`;
         } catch (err) {
           const code = slackErrorCode(err);
           if (code === 'canvas_not_found' || code === 'canvas_deleted') {
