@@ -234,25 +234,37 @@ export async function noteSessionSuspended(threadId: string): Promise<void> {
   }
 }
 
-/** Maintenance (every few seconds): resume suspended sessions whose confirmation has expired. */
+/**
+ * Maintenance (every few seconds): resume suspended sessions whose confirmation has expired. An entry stays until it
+ * is resolved: a thread whose lock is held (a turn, e.g. the expiry's own silent outcome turn, is running) is retried
+ * on the next sweep (and by the thread run after it releases the lock), not dropped.
+ */
 export async function resumeExpiredSuspensions(): Promise<void> {
   const due = await redis.zrangebyscore(SUSPENDED_KEY, 0, Date.now());
-  for (const threadId of due) {
-    if (await redis.zrem(SUSPENDED_KEY, threadId)) await resumeSuspendedSession(threadId);
-  }
+  for (const threadId of due) await resumeSuspendedSession(threadId);
+}
+
+/** The session was noted `suspended` and not resumed yet (thread runs re-check these after releasing the lock). */
+export async function isNotedSuspended(threadId: string): Promise<boolean> {
+  return (await redis.zscore(SUSPENDED_KEY, threadId).catch(() => null)) != null;
+}
+
+/** A turn just set the session's status itself (its indicator was shown) and it isn't `suspended`: forget the note. */
+export async function noteSessionSettled(threadId: string): Promise<void> {
+  await redis.zrem(SUSPENDED_KEY, threadId).catch(() => {});
 }
 
 /**
  * A confirmation was resolved (Send / Launch, Cancel or expiry): a DM session suspended for it goes back to `active`,
  * unless another confirmation is still pending or a turn is running (that turn sets the final status; the thread run
- * re-checks after releasing the lock). Never throws.
+ * re-checks after releasing the lock; the expiry sweep keeps its entry). Never throws.
  */
 export async function resumeSuspendedSession(threadId: string | null | undefined): Promise<void> {
   if (!threadId) return;
   try {
     const [row] = await sql<{ isDm: boolean; pendingSend: boolean }[]>`
       select t.is_dm, ${AWAITING_USER} as pending_send from threads t where t.id = ${threadId}`;
-    if (!row?.isDm) return;
+    if (!row?.isDm) return void (await redis.zrem(SUSPENDED_KEY, threadId));
     if (row.pendingSend) return void (await noteSessionSuspended(threadId)); // resume when the next one expires
     if (await isLocked(threadLockKey(threadId))) return;
     await redis.zrem(SUSPENDED_KEY, threadId);

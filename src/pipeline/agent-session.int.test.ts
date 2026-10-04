@@ -227,6 +227,53 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       expect(await redis.zscore('sessions:suspended', dm.id)).toBeNull();
     });
 
+    // Review #1: the expiry's silent outcome turn never touches the status, and resume / the 15 s sweep skipped while a
+    // worker held the thread lock (the sweep even dropped its entry): the session stayed `suspended` for good.
+    it('expiry while the thread lock is held: the session still ends active (sweep keeps its entry, thread run re-checks)', async () => {
+      const dm = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${dm.channelId}, '1.1', ${dm.id}, 'U1', 'send hi to #general')`;
+      await scheduler.scheduleMessages(dm.id, 'U1', ['1.1'], true);
+      run.mockImplementationOnce(async () => {
+        await sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${dm.id}, 'C1', 'hi', now() + interval '10 minutes')`;
+      });
+      await processThreadRun(job({ threadId: dm.id }));
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended']);
+      await sql`update pending_sends set expires_at = now() - interval '1 second' where thread_id = ${dm.id}`;
+      await redis.zadd('sessions:suspended', Date.now() - 1000, dm.id); // its confirmation is due
+
+      const { acquireLock, threadLockKey } = await import('./lock.js');
+      const held = await acquireLock(threadLockKey(dm.id), 60_000);
+      expect(held).toBeTruthy();
+      try {
+        const send = await import('../features/send/send.js');
+        await send.expirePendingSends(); // a non-mention outcome turn; resuming skips (locked)
+        await s.resumeExpiredSuspensions(); // skips (locked) but keeps the entry
+        expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended']);
+        expect(await s.isNotedSuspended(dm.id)).toBe(true);
+      } finally {
+        await held!.release();
+      }
+      // The outcome turn runs silently (no indicator); after releasing the lock the thread run resumes the session.
+      await processThreadRun(job({ threadId: dm.id }));
+      expect(run.mock.calls.at(-1)![0]).toMatchObject({ kind: 'scheduled', isMention: false });
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended', 'active']);
+      expect(await s.isNotedSuspended(dm.id)).toBe(false);
+    });
+
+    it('the 15 s sweep keeps a locked entry and resumes it once the lock is free', async () => {
+      const dm = await thread(true);
+      await redis.zadd('sessions:suspended', Date.now() - 1000, dm.id);
+      const { acquireLock, threadLockKey } = await import('./lock.js');
+      const held = await acquireLock(threadLockKey(dm.id), 60_000);
+      await s.resumeExpiredSuspensions();
+      expect(await statuses(dm.channelId)).toEqual([]);
+      await held!.release();
+      await s.resumeExpiredSuspensions();
+      expect(await statuses(dm.channelId)).toEqual(['active']);
+      await s.resumeExpiredSuspensions(); // once
+      expect(await statuses(dm.channelId)).toEqual(['active']);
+    });
+
     it('an expired send confirmation: non-mention outcome turn, and the session resumes right away', async () => {
       const dm = await thread(true);
       await sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${dm.id}, 'C1', 'hi', now() - interval '1 minute')`;

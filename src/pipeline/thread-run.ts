@@ -14,7 +14,7 @@ import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from '.
 import { claimNextPending, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
 import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, setSessionStatus, trackTurnStatus, TurnStatus, type FinalSessionStatus } from './session-status.js';
 import { removeOpenActivity } from '../agent/activity-registry.js';
-import { finalSessionStatus, noteSessionSuspended, resumeSuspendedSession } from './agent-session.js';
+import { finalSessionStatus, isNotedSuspended, noteSessionSettled, noteSessionSuspended, resumeSuspendedSession } from './agent-session.js';
 import { stopRequestedSince } from './stop.js';
 import { currentlyViewing } from './view-context.js';
 
@@ -66,8 +66,9 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
     await lock.release();
   }
   // A Send / Cancel click between the last turn's final status and the release skipped resuming (lock held): the
-  // session may still say `suspended` with nothing pending. Re-check now.
-  if (lastFinal === 'suspended') await resumeSuspendedSession(threadId);
+  // session may still say `suspended` with nothing pending. Re-check now. Same when a confirmation was resolved while
+  // turns ran here (e.g. an expiry whose silent outcome turn never touched the status): its note is still there.
+  if (lastFinal === 'suspended' || (lastFinal && (await isNotedSuspended(threadId)))) await resumeSuspendedSession(threadId);
   if (await hasPendingTurns(threadId)) await ensureThreadRun(threadId);
 }
 
@@ -127,6 +128,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     untrack();
     // Resume promptly when the confirmation expires (not only at the next expiry sweep).
     if (final === 'suspended') await noteSessionSuspended(turn.threadId);
+    else if (indicator.isShown) await noteSessionSettled(turn.threadId);
     // This turn cleared the indicator (any intake status with it); a turn that never showed one still takes back an
     // intake status left for messages that ended up in its inbox.
     if (indicator.isShown) await noteStatusCleared(turn.threadId);
