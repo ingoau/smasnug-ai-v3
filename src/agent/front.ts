@@ -1,5 +1,5 @@
 // OWNER: agent module. Front agent turn: the only agent that talks to users.
-import { hasToolCall, streamText, stepCountIs, type ModelMessage } from 'ai';
+import { hasToolCall, streamText, stepCountIs, type ModelMessage, type Tool } from 'ai';
 import { env } from '../config.js';
 import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
@@ -22,7 +22,6 @@ import { activeRunsInThread } from './subagents.js';
 import { cursorInstructRefusal, cursorRefusal } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
-;
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 
@@ -82,6 +81,25 @@ const VISIBLE_TOOLS: Record<string, VisibleAction> = {
   cancel_subagent: 'cancel',
   set_card_title: 'card',
 };
+
+/**
+ * `react` lives in the tools module and reports skipped/failed attempts as ordinary text. Wrap it so a successful
+ * reaction (or an already-present one) counts as a visible effect — otherwise a mention that only reacts gets the
+ * "couldn't come up with a reply" fallback (or an error post if the turn later fails).
+ */
+function recordReactVisibility(tools: Record<string, Tool>, state: FrontTurnState): void {
+  const orig = tools.react;
+  const exec = orig?.execute;
+  if (!orig || !exec) return;
+  tools.react = {
+    ...orig,
+    execute: async (input: any, options: any) => {
+      const out = await exec(input, options);
+      if (/reacted/i.test(String(out))) state.visible.add('react');
+      return out;
+    },
+  } as Tool;
+}
 
 // ---------- Prompt sections ----------
 
@@ -332,6 +350,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     // EXTRAS.queueUserImage deliberately unset: Luna accepts images in tool results.
   };
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, extras });
+  recordReactVisibility(tools, state);
   // Naming a card only makes sense when writing up its results.
   if (turn.kind !== 'synthesis') delete tools.set_card_title;
   // Coding agents change the bot's own code: only offered in the admin's own message turns when configured (not in
@@ -505,6 +524,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       return;
     }
     if (outcome) return void (await postOutcomeFallback());
+    // A reaction (or other non-reply visible effect) already answered the user: don't throw, or the pipeline posts
+    // "Something broke" on top of it.
+    if (state.visible.size > 0) return;
     throw failed;
   }
 

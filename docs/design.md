@@ -172,7 +172,7 @@ Everything the user sees is produced through tools, and code decides how it's de
 - 
 Multiple `reply` calls per turn are allowed (for example, one before spawning, one after), but most turns have one or none.
 - 
-If a turn ends with no reply, no card change and no spawn, fall back to posting a short message so the user isn't left with silence.
+If a turn ends with no reply, no reaction, no card change and no spawn, fall back to posting a short message so the user isn't left with silence.
 - 
 Reply text is markdown, delivered exactly as the model wrote it (`src/agent/slack-markdown.ts`): prose as `markdown` blocks, fenced code as `rich_text` blocks with a `rich_text_preformatted` element (always with a `language`, else Slack drops the rich code component). Reason: Slack's markdown converter rewrites `<h1-6>`, `<code>` and `<img>` into markdown everywhere, even inside code (verified); in prose only those tags' `<` is written as `&lt;`, and a paragraph whose inline code contains one is rendered as `rich_text`. Streams run in `chunks` mode: prose as `markdown_text` chunks, each code block held until its fence closes and sent as a `blocks` chunk; a stream that carried blocks is re-rendered with `chat.update` after `stopStream` so its final layout equals the posted one. No other rewriting of model output (no citation-marker stripping); group pings are still neutralised.
 State
