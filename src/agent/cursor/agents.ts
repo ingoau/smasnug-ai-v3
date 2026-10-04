@@ -86,6 +86,9 @@ function client(): CursorClient {
   return c;
 }
 
+/** Cursor answered with a definite rejection (4xx other than 408), so nothing was created. Anything else is ambiguous. */
+export const definitelyRejected = (err: unknown) => err instanceof CursorApiError && err.status >= 400 && err.status < 500 && err.status !== 408;
+
 const errText = (err: unknown) => oneLine(err instanceof Error ? err.message : String(err), 200);
 
 async function setSources(runId: number, sources: RunSource[]) {
@@ -156,7 +159,7 @@ export async function spawnCodingAgent(opts: {
     return id;
   });
 
-  let launched: Awaited<ReturnType<typeof launchAgent>>;
+  let launched: Awaited<ReturnType<typeof launchAgent>> | null = null;
   try {
     launched = await launchAgent(c, {
       agentId,
@@ -167,14 +170,21 @@ export async function spawnCodingAgent(opts: {
       model: cfg.model ?? undefined,
     });
   } catch (err) {
-    // Nothing started: drop the rows again (the card stays unposted without runs) and let the model tell the admin.
-    await sql`delete from subagents where id = ${subagentId}`;
-    log.warn({ err: errText(err), threadId: opts.threadId }, 'cursor agent launch failed');
-    throw new ToolError(`Couldn't start the coding agent: ${errText(err)}`);
+    if (definitelyRejected(err)) {
+      // Nothing started: drop the rows again (the card stays unposted without runs) and let the model tell the admin.
+      await sql`delete from subagents where id = ${subagentId}`;
+      log.warn({ err: errText(err), threadId: opts.threadId }, 'cursor agent launch failed');
+      throw new ToolError(`Couldn't start the coding agent: ${errText(err)}`);
+    }
+    // Timeout / network / 5xx: Cursor may well have created the agent. Keep the rows; the poller looks the agent up
+    // by its client-supplied id (cursor_run_id is still null) and fails the run if it never appears.
+    log.warn({ err: errText(err), threadId: opts.threadId, agentId }, 'cursor agent launch outcome unknown; the poller will check');
   }
-  const agentUrl = launched.agent.url ?? null;
-  await sql`update cursor_runs set cursor_run_id = ${launched.run?.id ?? null}, cursor_status = ${launched.run?.status ?? null} where run_id = ${runId}`;
-  await sql`update subagents set cursor_agent_url = ${agentUrl} where id = ${subagentId}`;
+  const agentUrl = launched?.agent.url ?? null;
+  if (launched) {
+    await sql`update cursor_runs set cursor_run_id = ${launched.run?.id ?? null}, cursor_status = ${launched.run?.status ?? null} where run_id = ${runId}`;
+    await sql`update subagents set cursor_agent_url = ${agentUrl} where id = ${subagentId}`;
+  }
   await setSources(runId, sourcesFor(agentUrl));
   await appendEvent(opts.threadId, 'spawn', opts.ownerId, {
     subagentId,
@@ -183,7 +193,7 @@ export async function spawnCodingAgent(opts: {
     title,
     kind: 'cursor',
     agentId,
-    cursorRunId: launched.run?.id ?? null,
+    cursorRunId: launched?.run?.id ?? null,
     instructions: opts.instructions,
   });
   await scheduleCardRender(cardId);
@@ -230,13 +240,19 @@ export async function messageCodingAgent(
     const [sa] = await tx<{ status: string }[]>`select status from subagents where id = ${pre.id} for update`;
     if (sa?.status !== 'idle') return null;
     const [last] = await tx<{ model: string | null }[]>`select model from runs where subagent_id = ${pre.id} order by id desc limit 1`;
+    // The agent's latest Cursor run before this follow-up: if the create call's answer is lost, the poller must not
+    // mistake it for the new run.
+    const [prevRun] = await tx<{ cursorRunId: string | null }[]>`
+      select c.cursor_run_id from cursor_runs c join runs r on r.id = c.run_id
+      where r.subagent_id = ${pre.id} and c.cursor_run_id is not null order by c.run_id desc limit 1`;
     const [run] = await tx<{ id: number }[]>`
       insert into runs (subagent_id, thread_id, card_id, turn_id, instructions, is_resume, status, model, details, started_at, heartbeat_at)
       values (${pre.id}, ${opts.threadId}, ${cardId}, ${opts.turnId}, ${opts.text}, true, 'running', ${last?.model ?? 'cursor:default'},
               ${describeRunStatus('CREATING', 1)}, now(), now())
       returning id`;
     const id = Number(run!.id);
-    await tx`insert into cursor_runs (run_id, agent_id, next_poll_at) values (${id}, ${agentId}, now() + ${limits.cursorPollMs / 1000} * interval '1 second')`;
+    await tx`insert into cursor_runs (run_id, agent_id, after_run_id, next_poll_at)
+             values (${id}, ${agentId}, ${prevRun?.cursorRunId ?? null}, now() + ${limits.cursorPollMs / 1000} * interval '1 second')`;
     await tx`update subagents set status = 'running', last_active_at = now() where id = ${pre.id}`;
     return id;
   });
@@ -245,6 +261,14 @@ export async function messageCodingAgent(
   try {
     run = await client().createRun(agentId, composeCursorFollowUp([opts.text], cfg));
   } catch (err) {
+    if (!definitelyRejected(err)) {
+      // Cursor may have accepted it: keep the run; the poller adopts the agent's new latest run (or fails the run if
+      // none shows up).
+      log.warn({ err: errText(err), runId, agentId }, 'cursor follow-up outcome unknown; the poller will check');
+      await appendEvent(opts.threadId, 'resume', opts.speakerId, { subagentId: pre.id, runId, cardId, text: opts.text, kind: 'cursor', cursorRunId: null });
+      await scheduleCardRender(cardId);
+      return { mode: 'resumed', runId, cardId };
+    }
     await sql.begin(async (tx) => {
       await tx`delete from runs where id = ${runId}`;
       await tx`update subagents set status = 'idle' where id = ${pre.id} and status = 'running'`;
@@ -281,6 +305,8 @@ interface Claimed {
   prUrl: string | null;
   pollErrors: number;
   inboxDefers: number;
+  /** A follow-up whose create call's answer was lost: the agent's latest run before it (not ours). */
+  afterRunId: string | null;
   claimId: string;
   createdAt: Date;
   // from runs / subagents
@@ -297,13 +323,13 @@ const LEASE_S = limits.cursorPollLeaseMs / 1000;
 /** Claim one due Cursor-backed run (or one whose lease ran out); `runId` restricts it to that run. */
 export async function claimDueCursorRun(runId?: number): Promise<Claimed | null> {
   const only = runId != null ? sql`and c2.run_id = ${runId}` : sql``;
-  const [c] = await sql<{ runId: number; agentId: string; cursorRunId: string | null; followUps: number; prUrl: string | null; pollErrors: number; inboxDefers: number; claimId: string; createdAt: Date }[]>`
+  const [c] = await sql<{ runId: number; agentId: string; cursorRunId: string | null; followUps: number; prUrl: string | null; pollErrors: number; inboxDefers: number; afterRunId: string | null; claimId: string; createdAt: Date }[]>`
     update cursor_runs c set claim_id = gen_random_uuid(), claimed_until = now() + ${LEASE_S} * interval '1 second', last_polled_at = now()
     where c.run_id = (
       select c2.run_id from cursor_runs c2 join runs r on r.id = c2.run_id
       where r.status = 'running' and c2.next_poll_at <= now() and (c2.claim_id is null or c2.claimed_until < now()) ${only}
       order by c2.next_poll_at limit 1 for update of c2 skip locked)
-    returning c.run_id::int as run_id, c.agent_id, c.cursor_run_id, c.follow_ups, c.pr_url, c.poll_errors, c.inbox_defers, c.claim_id, c.created_at`;
+    returning c.run_id::int as run_id, c.agent_id, c.cursor_run_id, c.follow_ups, c.pr_url, c.poll_errors, c.inbox_defers, c.after_run_id, c.claim_id, c.created_at`;
   if (!c) return null;
   const [r] = await sql<{ subagentId: string; threadId: string; cardId: number | null; cancelRequested: boolean; startedAt: Date | null; agentUrl: string | null }[]>`
     select r.subagent_id, r.thread_id, r.card_id::int as card_id, r.cancel_requested, r.started_at, s.cursor_agent_url as agent_url
@@ -423,9 +449,15 @@ async function handleClaimed(c: Claimed): Promise<void> {
     // The launch call's answer was never recorded (crash or slow API): look the agent up by its client-supplied id.
     try {
       const agent = await api.getAgent(c.agentId);
-      if (agent.latestRunId) {
+      if (agent.latestRunId && agent.latestRunId !== c.afterRunId) {
         await sql`update cursor_runs set cursor_run_id = ${agent.latestRunId} where run_id = ${c.runId} and claim_id = ${c.claimId}`;
+        if (agent.url && !c.agentUrl) {
+          await sql`update subagents set cursor_agent_url = ${agent.url} where id = ${c.subagentId} and cursor_agent_url is null`;
+          await setSources(c.runId, sourcesFor(agent.url, c.prUrl));
+        }
         await release(c, 0);
+      } else if (c.afterRunId && agent.latestRunId === c.afterRunId && Date.now() - c.createdAt.getTime() > 2 * 60_000) {
+        await finish(c, { status: 'error', error: "The follow-up never reached Cursor (the request failed); send it again" });
       } else if (elapsedMs(c) > limits.cursorRunMaxMs) {
         // The agent exists but never got a run: don't poll it forever (and free the cursorMaxActive slot).
         await finish(c, { status: 'error', error: 'The Cursor agent never started a run' });

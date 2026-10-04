@@ -598,6 +598,78 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     expect(await synthTurns(s.cardId)).toHaveLength(1);
   });
 
+  // Regression (review #5): an ambiguous launch failure (timeout / 5xx) keeps the rows; the poller resolves it.
+  it('ambiguous launch failure: rows kept, the poller adopts the agent if Cursor created it, else fails the run', async () => {
+    const { CursorApiError } = await import('./api.js');
+    const t = await newThread();
+    const orig = fake.createAgent.bind(fake);
+    fake.createAgent = async (input) => {
+      await orig(input); // Cursor created it, but the answer is lost
+      throw new CursorApiError(504, 'http_504', 'gateway timeout');
+    };
+    const s = await spawn(t);
+    const agentId = fake.only();
+    expect((await subRow(s.subagentId)).status).toBe('running');
+    expect((await sql<any[]>`select cursor_run_id from cursor_runs where run_id = ${s.runId}`)[0].cursorRunId).toBeNull();
+    fake.set(agentId, { status: 'RUNNING' });
+    await poll(s.runId); // getAgent → adopt the latest run
+    await poll(s.runId);
+    expect((await sql<any[]>`select cursor_run_id, cursor_status from cursor_runs where run_id = ${s.runId}`)[0]).toMatchObject({
+      cursorRunId: fake.latest(agentId).id,
+      cursorStatus: 'RUNNING',
+    });
+
+    // Never created (network error on both attempts): kept until the poller gives up.
+    fake = new FakeCursor();
+    api.setCursorClientForTests(fake);
+    fake.failCreate = new CursorApiError(0, 'network_error', 'timeout');
+    const t2 = await newThread();
+    const s2 = await spawn(t2);
+    expect(fake.calls.filter((c) => c === 'createAgent')).toHaveLength(2);
+    await poll(s2.runId);
+    expect((await runRow(s2.runId)).status).toBe('running');
+    await sql`update cursor_runs set created_at = now() - interval '3 minutes' where run_id = ${s2.runId}`;
+    await poll(s2.runId);
+    expect(await runRow(s2.runId)).toMatchObject({ status: 'error', error: 'The Cursor agent never started' });
+  });
+
+  it('ambiguous follow-up failure: the run is kept and resolved by the poller, never confused with the old run', async () => {
+    const { CursorApiError } = await import('./api.js');
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.set(agentId, { status: 'FINISHED', result: 'v1' });
+    await poll(s.runId);
+    const oldRunId = fake.latest(agentId).id;
+
+    const orig = fake.createRun.bind(fake);
+    fake.createRun = async (a, p) => {
+      await orig(a, p);
+      throw new CursorApiError(0, 'network_error', 'timeout');
+    };
+    const m = await sub.messageSubagent({ threadId: t, turnId: await newTurn(t), speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' });
+    expect(m.mode).toBe('resumed');
+    expect((await sql<any[]>`select cursor_run_id, after_run_id from cursor_runs where run_id = ${m.runId}`)[0]).toMatchObject({ cursorRunId: null, afterRunId: oldRunId });
+    await poll(m.runId);
+    const newRunId = fake.latest(agentId).id;
+    expect(newRunId).not.toBe(oldRunId);
+    expect((await sql<any[]>`select cursor_run_id from cursor_runs where run_id = ${m.runId}`)[0].cursorRunId).toBe(newRunId);
+    expect((await runRow(m.runId)).status).toBe('running'); // not finished with the old run's result
+
+    // Not accepted at all: after 2 minutes the run fails instead of adopting the old run.
+    fake.set(agentId, { status: 'FINISHED', result: 'v2' });
+    await poll(m.runId);
+    fake.createRun = async () => {
+      throw new CursorApiError(0, 'network_error', 'timeout');
+    };
+    const m2 = await sub.messageSubagent({ threadId: t, turnId: await newTurn(t), speakerId: 'UADMIN', subagentId: s.subagentId, text: 'again' });
+    await poll(m2.runId);
+    expect((await runRow(m2.runId)).status).toBe('running');
+    await sql`update cursor_runs set created_at = now() - interval '3 minutes' where run_id = ${m2.runId}`;
+    await poll(m2.runId);
+    expect(await runRow(m2.runId)).toMatchObject({ status: 'error', error: 'The follow-up never reached Cursor (the request failed); send it again' });
+  });
+
   // Regression (review #7): an agent that never yields a run is not polled forever.
   it('a launch whose run id never appears times out after cursorRunMaxMs', async () => {
     const t = await newThread();
