@@ -4,8 +4,8 @@
  * finish, and are steered / cancelled through message_subagent / cancel_subagent. What differs:
  *
  * - Admin only, enforced here (not in the prompt): starting, steering and cancelling need the speaker to be
- *   ADMIN_USER_ID and CURSOR_API_KEY + CURSOR_REPO to be set. Bulk cancels by anyone else (old "Stop all" buttons, a
- *   deleted thread root) leave coding agents running.
+ *   ADMIN_USER_ID and CURSOR_API_KEY + CURSOR_REPO to be set. Bulk cancels by anyone else (old "Stop all" buttons)
+ *   leave coding agents running; a deleted thread root moves them to a DM with the admin (rehomeCodingAgents).
  * - The bot run is backed by Cursor runs (table cursor_runs). There is no worker loop: a maintenance task polls
  *   Cursor every limits.cursorPollMs. Postgres is the source of truth and pollers claim one due row at a time
  *   (`for update skip locked`, claim id + lease, like reminders), so two workers never handle the same poll, and
@@ -20,13 +20,15 @@
 import { randomUUID } from 'node:crypto';
 import type { TransactionSql } from 'postgres';
 import { env, limits } from '../../config.js';
-import { appendEvent, parseThreadId, shortId } from '../../core/events.js';
+import { appendEvent, parseThreadId, shortId, threadIdOf } from '../../core/events.js';
+import { slackCall } from '../../core/slack.js';
+import { upsertThread } from '../../pipeline/store.js';
 import { sql } from '../../db/index.js';
 import type { TurnRow } from '../../core/types.js';
 import { takeLimit } from '../../features/guard.js';
 import { log } from '../../log.js';
-import { ensureTurnCard, scheduleCardRender } from '../cards.js';
-import { finishRun, ToolError, type MessageResult, type RunOutcome, type SubagentRow } from '../subagents.js';
+import { ensureTurnCard, postCard, scheduleCardRender } from '../cards.js';
+import { finishRun, maybeSynthesize, ToolError, type MessageResult, type RunOutcome, type SubagentRow } from '../subagents.js';
 import { addSource, deriveSteerNote, oneLine, type RunSource } from '../util.js';
 import {
   CursorApiError,
@@ -330,6 +332,59 @@ export async function cancelCodingAgentNow(subagentId: string): Promise<void> {
     await sql`update cursor_runs set next_poll_at = now() where run_id = ${r.id}`;
     await pollCursorRuns({ runId: Number(r.id), max: 1 }).catch((err) => log.warn({ err: errText(err), runId: r.id }, 'immediate cursor cancel failed'));
   }
+}
+
+/**
+ * The thread's root message was deleted (pipeline intake): nothing can be posted there any more, and cancelling a
+ * coding agent is the admin's call. So its running coding agents keep going but move to a DM thread with their owner
+ * (the admin), rooted at a short note: subagent, active runs and a new plan card are re-homed there, so steering,
+ * cancelling and the result's synthesis turn all happen in the DM. Idle ones stay (nothing is in flight). Returns the
+ * re-homed subagent ids. Best effort per agent: a failure is logged and the agent stays where it was.
+ */
+export async function rehomeCodingAgents(threadId: string): Promise<string[]> {
+  const agents = await sql<{ id: string; ownerId: string; title: string }[]>`
+    select s.id, s.owner_id, s.title from subagents s
+    where s.thread_id = ${threadId} and s.kind = 'cursor'
+      and exists (select 1 from runs r where r.subagent_id = s.id and r.status in ('queued', 'running'))`;
+  const moved: string[] = [];
+  for (const a of agents) {
+    try {
+      const open = await slackCall<any>('conversations.open', { users: a.ownerId });
+      const dm: string | undefined = open.channel?.id;
+      if (!dm) throw new Error('conversations.open returned no channel');
+      const posted = await slackCall<any>(
+        'chat.postMessage',
+        { channel: dm, text: `🛠️ Your coding agent "${a.title}" from a deleted thread continues here. Reply in this thread to steer or stop it.`, unfurl_links: false },
+        { idempotencyKey: `cursor-rehome:${a.id}` },
+      );
+      const ts: string | undefined = posted.ts ?? posted.message?.ts;
+      if (!ts) throw new Error('re-home note returned no ts');
+      const newThreadId = threadIdOf(dm, ts);
+      await upsertThread({ id: newThreadId, channelId: dm, threadTs: ts, isDm: true });
+      const cardId = await standaloneCard(newThreadId);
+      const oldCards = await sql.begin(async (tx) => {
+        await tx`select id from subagents where id = ${a.id} for update`;
+        const runs = await tx<{ cardId: number | null }[]>`
+          update runs r set thread_id = ${newThreadId}, card_id = ${cardId}
+          from (select id, card_id as old_card from runs where subagent_id = ${a.id} and status in ('queued', 'running')) o
+          where r.id = o.id returning o.old_card as card_id`;
+        await tx`update subagents set thread_id = ${newThreadId}, last_active_at = now() where id = ${a.id}`;
+        await tx`update threads set last_addressed_at = now(), last_activity_at = now() where id = ${newThreadId}`;
+        return [...new Set(runs.map((r) => Number(r.cardId)).filter(Boolean))];
+      });
+      await appendEvent(threadId, 'cursor_rehomed', 'system', { subagentId: a.id, to: newThreadId });
+      await appendEvent(newThreadId, 'cursor_rehomed', 'system', { subagentId: a.id, from: threadId, cardId });
+      await postCard(cardId).catch((err) => log.error({ err, cardId }, 'posting the re-homed coding agent card failed'));
+      for (const c of oldCards) {
+        await scheduleCardRender(c);
+        await maybeSynthesize(c);
+      }
+      moved.push(a.id);
+    } catch (err) {
+      log.error({ err, subagentId: a.id, threadId }, 're-homing a coding agent failed');
+    }
+  }
+  return moved;
 }
 
 // ---------- polling ----------

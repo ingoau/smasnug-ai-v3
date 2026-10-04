@@ -810,6 +810,48 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     });
   });
 
+  // Regression (review #4): a deleted thread root used to orphan a running coding agent (not cancelled, but steer /
+  // cancel / synthesis all pointed at the gone thread). It now moves to a DM thread with the admin.
+  it('a deleted thread root moves a running coding agent to a DM with the admin', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.set(agentId, { status: 'RUNNING' });
+    await poll(s.runId);
+    await sql`update threads set root_deleted_at = now() where id = ${t}`;
+    expect(await sub.cancelThreadRuns(t, 'system')).toEqual([]); // what intake does first: coding agents untouched
+    const moved = await agents.rehomeCodingAgents(t);
+    expect(moved).toEqual([s.subagentId]);
+    const sa = await subRow(s.subagentId);
+    expect(sa.threadId).toMatch(/^DUADMIN:/);
+    const dmThread: string = sa.threadId;
+    threads.push(dmThread);
+    const run = await runRow(s.runId);
+    expect(run.threadId).toBe(dmThread);
+    expect(Number(run.cardId)).not.toBe(s.cardId);
+    const [card] = await sql<any[]>`select * from cards where id = ${run.cardId}`;
+    expect(card).toMatchObject({ threadId: dmThread, turnId: null });
+    expect(card.messageTs).toBeTruthy();
+    // Idempotent: a second call finds nothing left in the old thread.
+    expect(await agents.rehomeCodingAgents(t)).toEqual([]);
+
+    // Steering works from the DM thread (and no longer from the gone one).
+    await expect(sub.messageSubagent({ threadId: t, turnKind: 'user', turnId: await newTurn(t), speakerId: 'UADMIN', subagentId: s.subagentId, text: 'x' })).rejects.toThrow(/No subagent/);
+    const m = await sub.messageSubagent({ threadId: dmThread, turnKind: 'user', turnId: await newTurn(dmThread), speakerId: 'UADMIN', subagentId: s.subagentId, text: 'also add tests' });
+    expect(m).toMatchObject({ mode: 'steered', runId: s.runId, queued: true });
+
+    // The result's synthesis turn runs in the DM thread.
+    fake.set(agentId, { status: 'FINISHED', result: 'done', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    await poll(s.runId); // sends the queued steer as a follow-up
+    fake.set(agentId, { status: 'FINISHED', result: 'done 2', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    await poll(s.runId);
+    expect((await runRow(s.runId)).status).toBe('complete');
+    const turns = await synthTurns(Number(run.cardId));
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({ threadId: dmThread, authorId: 'UADMIN' });
+    expect(await synthTurns(s.cardId)).toHaveLength(0);
+  });
+
   // Regression (review #7): an agent that never yields a run is not polled forever.
   it('a launch whose run id never appears times out after cursorRunMaxMs', async () => {
     const t = await newThread();
