@@ -132,12 +132,26 @@ export async function resolveTarget(opts: { ownerId: string; threadId: string; i
  */
 export async function createScheduledTurnTx(
   tx: Tx,
-  opts: { threadId: string; ownerId: string; source: 'reminder' | 'watch'; sourceId: number; input: string; isMention: boolean },
+  opts: {
+    threadId: string;
+    ownerId: string;
+    source: 'reminder' | 'watch' | 'send' | 'coding_launch';
+    /** reminder / watch id; outcome turns use `sourceRef` (a uuid) instead. */
+    sourceId: number | null;
+    sourceRef?: string;
+    input: string;
+    isMention: boolean;
+    /** Default true. False: only bump last_activity_at (e.g. an expired confirmation nobody acted on). */
+    markAddressed?: boolean;
+  },
 ): Promise<number> {
   const turnId = await insertTurnTx(tx, { threadId: opts.threadId, authorId: opts.ownerId, kind: 'scheduled', isMention: opts.isMention });
-  await tx`insert into scheduled_turn_inputs (turn_id, source, source_id, input) values (${turnId}, ${opts.source}, ${opts.sourceId}, ${opts.input})`;
-  await tx`update threads set engaged = true, last_addressed_at = now(), messages_since_addressed = 0, last_activity_at = now()
-           where id = ${opts.threadId}`;
+  await tx`insert into scheduled_turn_inputs (turn_id, source, source_id, source_ref, input)
+           values (${turnId}, ${opts.source}, ${opts.sourceId}, ${opts.sourceRef ?? null}, ${opts.input})`;
+  if (opts.markAddressed === false) await tx`update threads set last_activity_at = now() where id = ${opts.threadId}`;
+  else
+    await tx`update threads set engaged = true, last_addressed_at = now(), messages_since_addressed = 0, last_activity_at = now()
+             where id = ${opts.threadId}`;
   return turnId;
 }
 

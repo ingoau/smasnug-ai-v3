@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CODING_AGENTS_PROMPT, frontSystemPrompt } from '../prompts/front.js';
-import { chunkText, CODING_INSTRUCTIONS_MAX, decideLaunchClick, launchPreviewBlocks } from './confirm-logic.js';
+import { chunkText, CODING_INSTRUCTIONS_MAX, decideLaunchClick, launchOutcomeIsMention, launchPreviewBlocks, renderLaunchOutcome } from './confirm-logic.js';
 
 const future = new Date(Date.now() + 60_000);
 
@@ -43,5 +43,24 @@ describe('front prompt', () => {
     expect(frontSystemPrompt('Bot')).not.toContain('spawn_coding_agent');
     expect(CODING_AGENTS_PROMPT).toContain('spawn_coding_agent');
     expect(CODING_AGENTS_PROMPT).toContain('Launch');
+  });
+});
+
+describe('renderLaunchOutcome', () => {
+  const r = (outcome: Parameters<typeof renderLaunchOutcome>[0]['outcome'], title = 'Fix "tmrw" <parsing>') =>
+    renderLaunchOutcome({ pendingId: 'p1', ownerId: 'UADMIN', title, outcome });
+  it('renders each outcome as a system notice', () => {
+    expect(r({ kind: 'cancelled' })).toContain('<coding_agent_outcome id="p1" status="cancelled" title="Fix tmrw parsing"/>');
+    expect(r({ kind: 'cancelled' })).toMatch(/^System notice \(not a message from <@UADMIN>\)/m);
+    expect(r({ kind: 'cancelled' })).toContain('clicked Cancel');
+    expect(r({ kind: 'failed', error: "Couldn't start the coding agent: <403>" })).toContain("could not start (Couldn't start the coding agent: 403)");
+    expect(r({ kind: 'expired', ttlMin: 15 })).toContain('within 15 min');
+    expect(r({ kind: 'expired', ttlMin: 15 })).toContain('stay silent');
+    for (const o of [{ kind: 'cancelled' as const }, { kind: 'expired' as const, ttlMin: 1 }]) expect(r(o)).toContain("Don't propose it again unless they ask.");
+  });
+  it('only expiry may stay silent', () => {
+    expect(launchOutcomeIsMention({ kind: 'cancelled' })).toBe(true);
+    expect(launchOutcomeIsMention({ kind: 'failed', error: 'x' })).toBe(true);
+    expect(launchOutcomeIsMention({ kind: 'expired', ttlMin: 1 })).toBe(false);
   });
 });

@@ -51,6 +51,16 @@ export async function ephemeral(ctx: ActionContext, text: string, opts: { replac
   }
 }
 
+/**
+ * Remove the message the clicked button sits on (e.g. an ephemeral preview) via response_url: `delete_original` as
+ * the sole attribute; works for ephemeral messages, within 30 minutes / 5 responses of the click.
+ * https://docs.slack.dev/interactivity/handling-user-interaction (no Web API method can delete an ephemeral message).
+ * Returns false when there is no response_url or the post failed (the caller may replace it instead).
+ */
+export async function deleteOriginal(ctx: ActionContext): Promise<boolean> {
+  return respond(ctx.responseUrl, { delete_original: true });
+}
+
 export interface UserProfile {
   id: string;
   name: string;

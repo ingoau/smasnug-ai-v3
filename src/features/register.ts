@@ -42,7 +42,7 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {
   'features:memory-extraction': { everyMs: 5 * 60 * 1000, run: runMemoryExtraction },
-  'features:pending-send-expiry': { everyMs: 5 * 60 * 1000, run: expirePendingSends },
+  'features:pending-send-expiry': { everyMs: 60 * 1000, run: expirePendingSends },
   'features:retention': { everyMs: 24 * 60 * 60 * 1000, run: async () => void (await runRetention()) },
   ...scheduleMaintenance,
 };
