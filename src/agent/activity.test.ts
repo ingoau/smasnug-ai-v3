@@ -5,6 +5,7 @@ describe('activityForTool', () => {
   it('labels lookups and work tools', () => {
     expect(activityForTool('web_search')).toBe('Searching the web…');
     expect(activityForTool('slack_search')).toBe('Searching Slack…');
+    expect(activityForTool('slack_semantic_search')).toBe('Searching Slack…');
     expect(activityForTool('fetch_url')).toBe('Reading the page…');
     expect(activityForTool('read_thread')).toBe('Reading the thread…');
     expect(activityForTool('read_channel')).toBe('Reading the channel…');

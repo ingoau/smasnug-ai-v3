@@ -65,6 +65,8 @@ export const limits = {
   userWebSearchesPerHour: 100,
   userFetchesPerHour: 100,
   userSendsPerHour: 100,
+  /** slack_semantic_search (Slack Real-time Search): secondary search, kept rare. */
+  userSemanticSearchesPerHour: 20,
   // per thread / run
   threadConcurrentSubagents: 10,
   runMaxDurationMs: 10 * 60 * 1000,

@@ -42,7 +42,7 @@ export async function checkEntry(userId: string, channelId?: string, opts: { cou
   return { ok: true };
 }
 
-export type LimitKind = 'search' | 'websearch' | 'fetch' | 'send' | 'subagent';
+export type LimitKind = 'search' | 'websearch' | 'fetch' | 'send' | 'subagent' | 'semantic_search';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -51,6 +51,7 @@ const HOURLY: Record<Exclude<LimitKind, 'subagent'>, { max: number; noun: string
   websearch: { max: limits.userWebSearchesPerHour, noun: 'web searches' },
   fetch: { max: limits.userFetchesPerHour, noun: 'page fetches' },
   send: { max: limits.userSendsPerHour, noun: 'messages sent on their behalf' },
+  semantic_search: { max: limits.userSemanticSearchesPerHour, noun: 'semantic Slack searches' },
 };
 
 /**
