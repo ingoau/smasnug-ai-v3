@@ -16,11 +16,17 @@ import type { ToolContext } from '../../core/tools.js';
 import { getUserInfo } from '../../context/users.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
+import { slackCall } from '../../core/slack.js';
+import { oneLine } from '../../agent/util.js';
+import { sanitizeOutgoing } from '../send/logic.js';
 import { ensureThreadRun } from '../../pipeline/scheduler.js';
 import { createScheduledTurnTx, logScheduled, resolveTarget, scheduleEntryCheck } from './deliver.js';
 import { formatDuration, formatInZone, resolveWhen } from './time.js';
 
 export const MAX_FIRE_ATTEMPTS = 5;
+/** Wait before the next attempt after a failed one (by attempt number), so a transient blip doesn't burn them all. */
+export const RETRY_BACKOFF_MS = [60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000];
+export const retryDelayMs = (attempt: number) => RETRY_BACKOFF_MS[Math.min(Math.max(attempt, 1), RETRY_BACKOFF_MS.length) - 1]!;
 const LEASE = sql`interval '5 minutes'`;
 
 export interface ReminderRow {
@@ -159,17 +165,39 @@ export async function claimDueReminder(): Promise<(ReminderRow & { claimId: stri
       attempts = attempts + 1, updated_at = now()
     where id = (
       select id from reminders
-      where (status = 'pending' and due_at <= now()) or (status = 'firing' and claimed_until < now())
-      order by due_at limit 1 for update skip locked)
+      where (status = 'pending' and coalesce(retry_at, due_at) <= now()) or (status = 'firing' and claimed_until < now())
+      order by coalesce(retry_at, due_at) limit 1 for update skip locked)
     returning ${COLS}`;
   return row ?? null;
 }
 
-/** End a claim without firing (skipped / failed / back to pending), only if we still hold it. */
-async function releaseClaim(r: { id: number; claimId: string }, status: 'skipped' | 'failed' | 'pending', reason: string | null) {
-  await sql`
-    update reminders set status = ${status}, skip_reason = ${reason}, claim_id = null, claimed_until = null, updated_at = now()
-    where id = ${r.id} and claim_id = ${r.claimId} and status = 'firing'`;
+/** End a claim without firing (skipped / failed / back to pending, due again in `retryInMs`), only if we still hold it. */
+async function releaseClaim(r: { id: number; claimId: string }, status: 'skipped' | 'failed' | 'pending', reason: string | null, retryInMs = 0) {
+  const rows = await sql`
+    update reminders set status = ${status}, skip_reason = ${reason}, claim_id = null, claimed_until = null, updated_at = now(),
+      retry_at = case when ${status === 'pending'} then now() + ${retryInMs / 1000} * interval '1 second' else retry_at end
+    where id = ${r.id} and claim_id = ${r.claimId} and status = 'firing' returning id`;
+  return rows.length > 0;
+}
+
+/** A reminder that finally failed: tell the owner in a short plain DM (best effort, once per reminder). */
+async function notifyFailed(r: ReminderRow) {
+  try {
+    const open = await slackCall<any>('conversations.open', { users: r.ownerId });
+    const dm: string | undefined = open.channel?.id;
+    if (!dm) return;
+    const text = `⏰ Sorry, I couldn't deliver a reminder you set for ${formatInZone(r.dueAt, r.tz ?? undefined)}: "${sanitizeOutgoing(oneLine(r.text, 300))}"`;
+    await slackCall('chat.postMessage', { channel: dm, text, unfurl_links: false }, { idempotencyKey: `reminder-failed:${r.id}` });
+  } catch (err) {
+    log.warn({ err, reminderId: r.id }, 'reminder failure note failed');
+  }
+}
+
+async function fail(r: ReminderRow & { claimId: string }, reason: string) {
+  if (await releaseClaim(r, 'failed', reason)) {
+    await logScheduled(r.threadId, 'reminder_failed', 'system', { reminderId: r.id, reason });
+    await notifyFailed(r);
+  }
 }
 
 export function renderReminderInput(r: Pick<ReminderRow, 'id' | 'ownerId' | 'text' | 'dueAt' | 'createdAt' | 'tz'>, fallback: boolean): string {
@@ -189,7 +217,7 @@ export function renderReminderInput(r: Pick<ReminderRow, 'id' | 'ownerId' | 'tex
 /** Fire one claimed reminder. Exactly once: the turn insert and the 'fired' mark commit together under our claim. */
 export async function fireReminder(r: ReminderRow & { claimId: string }): Promise<'fired' | 'skipped' | 'failed' | 'lost'> {
   if (r.attempts > MAX_FIRE_ATTEMPTS) {
-    await releaseClaim(r, 'failed', 'too_many_attempts');
+    await fail(r, 'too_many_attempts');
     return 'failed';
   }
   try {
@@ -223,7 +251,8 @@ export async function fireReminder(r: ReminderRow & { claimId: string }): Promis
     return 'fired';
   } catch (err) {
     log.error({ err, reminderId: r.id, attempt: r.attempts }, 'reminder fire failed');
-    await releaseClaim(r, r.attempts >= MAX_FIRE_ATTEMPTS ? 'failed' : 'pending', 'error').catch(() => {});
+    if (r.attempts >= MAX_FIRE_ATTEMPTS) await fail(r, 'error').catch(() => {});
+    else await releaseClaim(r, 'pending', 'error', retryDelayMs(r.attempts)).catch(() => {});
     return 'failed';
   }
 }

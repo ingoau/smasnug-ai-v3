@@ -227,6 +227,39 @@ describe.skipIf(!INTEGRATION)('reminders and watches', () => {
       expect(await reminderRow(id)).toMatchObject({ status: 'failed', skipReason: 'too_many_attempts' });
     });
 
+    // Regression (review #3): a transient error used to put the row straight back as due, so one poll loop burned all
+    // attempts in milliseconds. Now each retry backs off, and a final failure tells the owner by DM.
+    it('retries back off after an error; the final failure DMs the owner once', async () => {
+      const t = await newThread();
+      const owner = uid();
+      const id = await dueReminder(t, owner, 'feed the cat');
+      const undo = fake.addFakeHandler((m, a) => {
+        if (m === 'conversations.info' && a.channel === t.channelId) throw fake.fakeSlackError('internal_error');
+        return undefined;
+      });
+      try {
+        expect(await reminders.fireDueReminders()).toBe(1); // one attempt, not five
+        let row = await reminderRow(id);
+        expect(row).toMatchObject({ status: 'pending', attempts: 1, skipReason: 'error' });
+        expect(row.retryAt.getTime() - Date.now()).toBeGreaterThan(50_000);
+        expect(await reminders.claimDueReminder()).toBeNull(); // not due again yet
+
+        for (let attempt = 2; attempt <= reminders.MAX_FIRE_ATTEMPTS; attempt++) {
+          await sql`update reminders set retry_at = now() - interval '1 second' where id = ${id}`;
+          expect(await reminders.fireDueReminders()).toBe(1);
+          row = await reminderRow(id);
+          expect(row.attempts).toBe(attempt);
+          if (attempt < reminders.MAX_FIRE_ATTEMPTS) expect(row.retryAt.getTime() - Date.now()).toBeGreaterThan(reminders.retryDelayMs(attempt) - 10_000);
+        }
+        expect(row).toMatchObject({ status: 'failed', skipReason: 'error' });
+        const notes = (await fake.fakeCalls()).filter((c) => c.method === 'chat.postMessage' && c.args.channel === `D${owner}`);
+        expect(notes).toHaveLength(1);
+        expect(notes[0]!.args.text).toMatch(/couldn't deliver a reminder.*"feed the cat"/);
+      } finally {
+        undo();
+      }
+    });
+
     it('skips quietly when entry rules block it', async () => {
       const cases: [string, (t: { channelId: string }, owner: string) => Promise<() => void | Promise<void>>][] = [
         ['paused', async () => (await state.setPaused(true), () => state.setPaused(false))],
