@@ -90,6 +90,11 @@ export class TurnStatus {
     return this.shown;
   }
 
+  /** The session is `processing` because of this turn right now (or that is being set). */
+  get isLive() {
+    return this.live && !this.closed;
+  }
+
   /** The indicator is already showing (set at intake, see showIntakeStatus): take ownership without calling Slack. */
   adopt(): void {
     if (this.shown || this.closed) return;
@@ -148,6 +153,22 @@ export class TurnStatus {
       log.warn({ err, channelId: this.o.channelId }, 'status update failed');
     }
   }
+}
+
+/** The running turn's indicator per thread, in this process (the turn and its tools run in the same process). */
+const runningIndicators = new Map<string, TurnStatus>();
+
+/** runTurn: register the turn's indicator while it runs. Returns the unregister function. */
+export function trackTurnStatus(threadId: string, status: TurnStatus): () => void {
+  runningIndicators.set(threadId, status);
+  return () => {
+    if (runningIndicators.get(threadId) === status) runningIndicators.delete(threadId);
+  };
+}
+
+/** Mid-turn code that has to set a status itself (e.g. creating a session): is the turn's `processing` showing? */
+export function turnIndicatorLive(threadId: string): boolean {
+  return runningIndicators.get(threadId)?.isLive ?? false;
 }
 
 // ---- Intake status: DMs and mentions show the indicator as soon as the message is accepted ----

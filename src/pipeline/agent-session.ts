@@ -24,7 +24,7 @@ import { getBotIdentity, slackCall, slackErrorCode } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { isLocked, threadLockKey } from './lock.js';
-import { setSessionStatus, type FinalSessionStatus } from './session-status.js';
+import { setSessionStatus, turnIndicatorLive, type FinalSessionStatus } from './session-status.js';
 
 /** Sidebar titles are kept short, like plan card titles. */
 export const SESSION_TITLE_MAX = 40;
@@ -109,8 +109,10 @@ async function renameSession(channelId: string, threadTs: string, title: string,
     await slackCall('agents.sessions.rename', { channel_id: channelId, thread_ts: threadTs, title }, { idempotencyKey: key });
   } catch (err) {
     if (slackErrorCode(err) !== 'session_not_found') throw err;
-    // Only reached mid-turn (the tool runs during a turn), where the session is `processing` anyway.
-    await slackCall('agents.sessions.setStatus', { channel_id: channelId, thread_ts: threadTs, status: 'processing', title }, { idempotencyKey: `${key}:create` });
+    // No session yet, so no status was ever set: create it with the turn's current one (`processing` only while
+    // the turn's indicator shows it; the turn's TurnStatus wouldn't clear a `processing` it never set).
+    const status = turnIndicatorLive(`${channelId}:${threadTs}`) ? 'processing' : 'active';
+    await slackCall('agents.sessions.setStatus', { channel_id: channelId, thread_ts: threadTs, status, title }, { idempotencyKey: `${key}:create` });
   }
 }
 

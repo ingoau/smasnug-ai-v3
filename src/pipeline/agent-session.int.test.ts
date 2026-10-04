@@ -124,11 +124,20 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
         if (method === 'agents.sessions.rename' && args.channel_id === t.channelId) throw fake.fakeSlackError(code);
       });
       try {
+        // No indicator showing (e.g. an unmentioned turn that went straight to the title): created `active`.
         expect(await s.setSessionTitle({ threadId: t.id, turnId: 1, title: 'Pico question' })).toMatch(/^Conversation titled/);
-        expect((await calls(t.channelId, 'agents.sessions.setStatus')).map((c) => c.args)).toEqual([{ channel_id: t.channelId, thread_ts: t.threadTs, status: 'processing', title: 'Pico question' }]);
+        expect((await calls(t.channelId, 'agents.sessions.setStatus')).map((c) => c.args)).toEqual([{ channel_id: t.channelId, thread_ts: t.threadTs, status: 'active', title: 'Pico question' }]);
+        // The turn's indicator is showing: created `processing` (the turn sets the final status).
+        const { TurnStatus, trackTurnStatus } = await import('./session-status.js');
+        const ind = new TurnStatus({ channelId: t.channelId, threadTs: t.threadTs, userId: 'U1', transport: { lifecycle: async () => {} } });
+        ind.adopt();
+        const untrack = trackTurnStatus(t.id, ind);
+        expect(await s.setSessionTitle({ threadId: t.id, turnId: 4, title: 'Pico pins' })).toMatch(/^Conversation titled/);
+        untrack();
+        expect((await calls(t.channelId, 'agents.sessions.setStatus')).at(-1)!.args).toMatchObject({ status: 'processing', title: 'Pico pins' });
         code = 'ratelimited';
         expect(await s.setSessionTitle({ threadId: t.id, turnId: 2, title: 'Pico power' })).toBe('Not renamed: Slack refused (ratelimited).');
-        expect(await row(t.id)).toMatchObject({ title: 'Pico question', titleBy: 'bot', titleTurnId: '1' });
+        expect(await row(t.id)).toMatchObject({ title: 'Pico pins', titleBy: 'bot', titleTurnId: '4' });
       } finally {
         remove();
       }

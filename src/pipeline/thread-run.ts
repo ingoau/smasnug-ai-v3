@@ -12,7 +12,7 @@ import { log } from '../log.js';
 import { loadMessageMarks, timingReport, TurnTiming } from '../core/timing.js';
 import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from './lock.js';
 import { claimNextPending, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
-import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, setSessionStatus, TurnStatus } from './session-status.js';
+import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, setSessionStatus, trackTurnStatus, TurnStatus } from './session-status.js';
 import { removeOpenActivity } from '../agent/activity-registry.js';
 import { finalSessionStatus } from './agent-session.js';
 import { stopRequestedSince } from './stop.js';
@@ -77,6 +77,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
   // finally below.
   const indicator = new TurnStatus({ channelId, threadTs, userId: turn.authorId, stopped: stopRequested });
   onStatus?.(indicator);
+  const untrack = trackTurnStatus(turn.threadId, indicator);
   // DMs / mentions usually already show the status from intake (adopted here); otherwise show it now. Never awaited:
   // the model call must not wait for Slack.
   if (turn.isMention) {
@@ -117,6 +118,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     // DMs may end `suspended` (a send confirmation is pending) or `closed` (leave_thread); else `active`.
     const final = await finalSessionStatus(turn.threadId, Number(turn.id)).catch((err) => (log.warn({ err }, 'finalSessionStatus failed'), 'active' as const));
     await indicator.finish(final);
+    untrack();
     // This turn cleared the indicator (any intake status with it); a turn that never showed one still takes back an
     // intake status left for messages that ended up in its inbox.
     if (indicator.isShown) await noteStatusCleared(turn.threadId);
