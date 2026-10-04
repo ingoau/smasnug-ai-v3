@@ -98,6 +98,31 @@ interface ReplyEntry {
   dropped: string | null;
 }
 
+/**
+ * chat.update / chat.delete errors worth a short retry: right after chat.stopStream the message may still count as
+ * streaming ("streaming_state_conflict: The message is currently streaming text and cannot be edited",
+ * https://docs.slack.dev/reference/methods/chat.update), or Slack had a transient failure (no code: network).
+ */
+const RETRYABLE_EDIT = new Set(['streaming_state_conflict', 'internal_error', 'fatal_error', 'service_unavailable', 'request_timeout', 'ratelimited']);
+/** Backoff between attempts (tests shorten it). */
+export const editRetry = { delaysMs: [300, 1000] };
+
+/** A chat.update / chat.delete of a reply message, retried briefly on transient errors. Throws the last error. */
+async function editMessage(method: 'chat.update' | 'chat.delete', args: Record<string, unknown>): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await slackCall(method, args);
+      return;
+    } catch (err) {
+      const code = slackErrorCode(err);
+      const delay = editRetry.delaysMs[attempt];
+      if (delay === undefined || (code !== undefined && !RETRYABLE_EDIT.has(code))) throw err;
+      log.debug({ code, method, attempt }, 'editing a reply message failed; retrying');
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
 let teamIdCache: string | undefined;
 async function teamId(): Promise<string | undefined> {
   if (!teamIdCache) {
@@ -497,7 +522,7 @@ export class ReplyManager {
     await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after failure failed'));
     try {
       const msg = markdownMessage(text);
-      await slackCall('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
+      await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
       return { last: { ts: e.streamTs, text }, buttonsTs: actions ? e.streamTs : null };
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), index: e.index }, 'completing a failed stream via chat.update failed; posting the rest');
@@ -515,7 +540,7 @@ export class ReplyManager {
   private async finalLayout(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock) {
     try {
       const msg = markdownMessage(text);
-      await slackCall('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
+      await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), index: e.index }, 'final layout update of a streamed reply failed; keeping the streamed layout');
     }
@@ -541,8 +566,8 @@ export class ReplyManager {
   private async dropActivityCards(e: ReplyEntry, text: string) {
     if (!e.activityCards || !e.streamTs) return;
     try {
-      if (text.trim()) await slackCall('chat.update', { channel: this.t.channelId, ts: e.streamTs, ...markdownMessage(text) });
-      else await slackCall('chat.delete', { channel: this.t.channelId, ts: e.streamTs });
+      if (text.trim()) await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, ...markdownMessage(text) });
+      else await editMessage('chat.delete', { channel: this.t.channelId, ts: e.streamTs });
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), index: e.index }, 'removing activity cards from a reply failed');
     }
@@ -584,7 +609,7 @@ export class ReplyManager {
       if (last.ts) {
         try {
           const msg = markdownMessage(last.text);
-          await slackCall('chat.update', { channel: this.t.channelId, ts: last.ts, text: msg.text, blocks: [...msg.blocks, actions] });
+          await editMessage('chat.update', { channel: this.t.channelId, ts: last.ts, text: msg.text, blocks: [...msg.blocks, actions] });
           await setButtonsMessage(row.id, last.ts, last.text);
           return;
         } catch (err) {

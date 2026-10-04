@@ -19,7 +19,8 @@ vi.mock('../core/events.js', () => ({ appendEvent: vi.fn(async () => {}) }));
 vi.mock('./files.js', () => ({ uploadFiles: vi.fn(async () => {}) }));
 
 const { ActivityTrail } = await import('./activity-trail.js');
-const { ReplyManager } = await import('./reply.js');
+const { ReplyManager, editRetry } = await import('./reply.js');
+editRetry.delaysMs = [5, 5];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const methods = () => calls.map((c) => c.method);
@@ -273,6 +274,25 @@ describe('ReplyManager with activity cards', () => {
     await rm.finish('tc1', 'Sent it.');
     await rm.closeActivity();
     expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.startStream', 'chat.stopStream']);
+  });
+
+  it('the final layout is retried while Slack still counts the message as streaming', async () => {
+    let conflicts = 2;
+    const rm = new ReplyManager(target());
+    rm.activity('Reading the page…');
+    await sleep(10);
+    failOn = (m) => (m === 'chat.update' && conflicts-- > 0 ? 'streaming_state_conflict' : null);
+    expect(await rm.finish('tc1', 'Short answer.')).toBe('Replied (streamed).');
+    expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.update', 'chat.update', 'chat.update']);
+  });
+
+  it('a non-transient chat.update error is not retried', async () => {
+    const rm = new ReplyManager(target());
+    rm.activity('Reading the page…');
+    await sleep(10);
+    failOn = (m) => (m === 'chat.update' ? 'message_not_found' : null);
+    await rm.finish('tc1', 'Short answer.');
+    expect(methods().filter((m) => m === 'chat.update')).toHaveLength(1);
   });
 
   it('without activityCards nothing is shown', async () => {
