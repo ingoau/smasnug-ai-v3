@@ -6,6 +6,7 @@
 import type { ModelMessage } from 'ai';
 import type { TransactionSql } from 'postgres';
 import { sql } from '../db/index.js';
+import type { TurnRow } from '../core/types.js';
 import { appendEvent, shortId } from '../core/events.js';
 import { enqueue, QUEUE } from '../core/queues.js';
 import { takeLimit } from '../features/guard.js';
@@ -123,6 +124,8 @@ export type MessageResult =
 export async function messageSubagent(opts: {
   threadId: string;
   turnId: number;
+  /** Kind of the calling turn: coding agents only take messages from the admin's own ('user') turns. */
+  turnKind?: TurnRow['kind'];
   speakerId: string;
   subagentId: string;
   text: string;

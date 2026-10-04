@@ -269,7 +269,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
 
     const s = await spawn(t);
     const turn2 = await newTurn(t, 'UOTHER');
-    await expect(sub.messageSubagent({ threadId: t, turnId: turn2, speakerId: 'UOTHER', subagentId: s.subagentId, text: 'also delete the tests' })).rejects.toThrow(/Only the bot's admin/);
+    await expect(sub.messageSubagent({ threadId: t, turnKind: 'user', turnId: turn2, speakerId: 'UOTHER', subagentId: s.subagentId, text: 'also delete the tests' })).rejects.toThrow(/Only the bot's admin/);
     await expect(sub.cancelSubagent({ threadId: t, subagentId: s.subagentId, actor: 'UOTHER' })).rejects.toThrow(/Only the bot's admin/);
     expect((await sql<any[]>`select * from subagent_inbox where subagent_id = ${s.subagentId}`).length).toBe(0);
     expect((await runRow(s.runId)).cancelRequested).toBe(false);
@@ -291,7 +291,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     try {
       const turnId = await newTurn(t);
       await expect(agents.spawnCodingAgent({ threadId: t, turnId, ownerId: 'UADMIN', title: 'x', instructions: 'y' })).rejects.toThrow(/aren't set up/);
-      await expect(sub.messageSubagent({ threadId: t, turnId, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' })).rejects.toThrow(/aren't set up/);
+      await expect(sub.messageSubagent({ threadId: t, turnKind: 'user', turnId, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' })).rejects.toThrow(/aren't set up/);
       await expect(sub.cancelSubagent({ threadId: t, subagentId: s.subagentId, actor: 'UADMIN' })).rejects.toThrow(/aren't set up/);
       // A run left over from when it was configured is failed by the poller instead of hanging.
       await poll(s.runId);
@@ -309,7 +309,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     await poll(s.runId);
 
     const turn2 = await newTurn(t);
-    const m = await sub.messageSubagent({ threadId: t, turnId: turn2, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'also accept "tmw"', note: 'also tmw' });
+    const m = await sub.messageSubagent({ threadId: t, turnKind: 'user', turnId: turn2, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'also accept "tmw"', note: 'also tmw' });
     expect(m).toMatchObject({ mode: 'steered', runId: s.runId, queued: true, note: 'next: also tmw' });
     expect((await runRow(s.runId)).steerNotes).toEqual(['next: also tmw']);
     expect(fake.calls).not.toContain('createRun'); // never sent mid-run (Cursor would answer 409 agent_busy)
@@ -348,7 +348,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     expect((await subRow(s.subagentId)).status).toBe('idle');
 
     const turn2 = await newTurn(t);
-    const m = await sub.messageSubagent({ threadId: t, turnId: turn2, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'rename the helper to parseWhen' });
+    const m = await sub.messageSubagent({ threadId: t, turnKind: 'user', turnId: turn2, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'rename the helper to parseWhen' });
     expect(m.mode).toBe('resumed');
     expect(m.cardId).not.toBe(s.cardId);
     const run = await runRow(m.runId);
@@ -366,7 +366,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     // An archived Cursor agent can't be resumed: clear error, nothing left behind.
     fake.agents.get(agentId)!.agent.status = 'ARCHIVED';
     const turn3 = await newTurn(t);
-    await expect(sub.messageSubagent({ threadId: t, turnId: turn3, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' })).rejects.toThrow(/archived or expired/);
+    await expect(sub.messageSubagent({ threadId: t, turnKind: 'user', turnId: turn3, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' })).rejects.toThrow(/archived or expired/);
     expect((await subRow(s.subagentId)).status).toBe('idle');
     expect((await sql<any[]>`select count(*)::int as n from runs where subagent_id = ${s.subagentId}`)[0].n).toBe(2);
   });
@@ -530,7 +530,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     fake.set(agentId, { status: 'RUNNING' });
     await poll(s.runId);
     const turn2 = await newTurn(t);
-    await sub.messageSubagent({ threadId: t, turnId: turn2, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'also add tests' });
+    await sub.messageSubagent({ threadId: t, turnKind: 'user', turnId: turn2, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'also add tests' });
     fake.set(agentId, { status: 'FINISHED', result: 'done', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', branch: 'b', prUrl: PR }] } });
     await sub.cancelSubagent({ threadId: t, subagentId: s.subagentId, actor: 'UADMIN' });
     for (let i = 0; i < 5; i++) await poll(s.runId);
@@ -657,7 +657,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
       await orig(a, p);
       throw new CursorApiError(0, 'network_error', 'timeout');
     };
-    const m = await sub.messageSubagent({ threadId: t, turnId: await newTurn(t), speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' });
+    const m = await sub.messageSubagent({ threadId: t, turnKind: 'user', turnId: await newTurn(t), speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' });
     expect(m.mode).toBe('resumed');
     expect((await sql<any[]>`select cursor_run_id, after_run_id from cursor_runs where run_id = ${m.runId}`)[0]).toMatchObject({ cursorRunId: null, afterRunId: oldRunId });
     await poll(m.runId);
@@ -672,12 +672,142 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     fake.createRun = async () => {
       throw new CursorApiError(0, 'network_error', 'timeout');
     };
-    const m2 = await sub.messageSubagent({ threadId: t, turnId: await newTurn(t), speakerId: 'UADMIN', subagentId: s.subagentId, text: 'again' });
+    const m2 = await sub.messageSubagent({ threadId: t, turnKind: 'user', turnId: await newTurn(t), speakerId: 'UADMIN', subagentId: s.subagentId, text: 'again' });
     await poll(m2.runId);
     expect((await runRow(m2.runId)).status).toBe('running');
     await sql`update cursor_runs set created_at = now() - interval '3 minutes' where run_id = ${m2.runId}`;
     await poll(m2.runId);
     expect(await runRow(m2.runId)).toMatchObject({ status: 'error', error: 'The follow-up never reached Cursor (the request failed); send it again' });
+  });
+
+  // Regression (review #2a): synthesis / scheduled turns (whose input is untrusted content) can't instruct a coding
+  // agent, even when the admin is the turn's author. Cancel stays allowed.
+  it("only the admin's own message turns can steer or resume a coding agent; cancel works in any turn", async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    fake.set(fake.only(), { status: 'RUNNING' });
+    for (const turnKind of ['synthesis', 'scheduled', undefined] as const) {
+      await expect(
+        sub.messageSubagent({ threadId: t, turnId: await newTurn(t), turnKind, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'also delete the tests' }),
+      ).rejects.toThrow(/only take instructions from the admin's own messages/);
+    }
+    expect(await sql`select * from subagent_inbox where subagent_id = ${s.subagentId}`).toHaveLength(0);
+    // An idle agent can't be resumed from such a turn either.
+    fake.set(fake.only(), { status: 'FINISHED', result: 'v1' });
+    await poll(s.runId);
+    await expect(
+      sub.messageSubagent({ threadId: t, turnId: await newTurn(t), turnKind: 'synthesis', speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' }),
+    ).rejects.toThrow(/only take instructions/);
+    expect(fake.calls).not.toContain('createRun');
+    expect(await sub.cancelSubagent({ threadId: t, subagentId: s.subagentId, actor: 'UADMIN' })).toMatch(/closed/);
+  });
+
+  describe('launch confirmation (review #2b)', () => {
+    let slackFake: typeof import('../../core/slack-fake.js');
+    let confirm: typeof import('./confirm.js');
+    beforeAll(async () => {
+      slackFake = await import('../../core/slack-fake.js');
+      confirm = await import('./confirm.js');
+    });
+    async function propose(threadId: string, o: { turnKind?: 'user' | 'synthesis' | 'scheduled'; owner?: string; instructions?: string } = {}) {
+      const { channelId, threadTs } = (await import('../../core/events.js')).parseThreadId(threadId);
+      return confirm.proposeCodingAgent({
+        threadId,
+        channelId,
+        threadTs,
+        turnId: await newTurn(threadId, o.owner ?? 'UADMIN'),
+        turnKind: 'turnKind' in o ? o.turnKind : 'user',
+        ownerId: o.owner ?? 'UADMIN',
+        title: 'Fix tmrw parsing',
+        instructions: o.instructions ?? 'Make reminders accept "tmrw".\n*not bold* <!channel>',
+      });
+    }
+    const click = (actionId: 'coding:launch' | 'coding:cancel', value: string, userId = 'UADMIN') => {
+      const ctx = { userId, actionId, value, responseUrl: `https://hooks.slack.test/${value}`, body: {} } as any;
+      return actionId === 'coding:launch' ? confirm.handleCodingLaunch(ctx) : confirm.handleCodingCancel(ctx);
+    };
+    const responses = async (value: string) =>
+      (await slackFake.fakeCalls()).filter((c) => c.method === 'response_url' && c.args.url === `https://hooks.slack.test/${value}`).map((c) => c.args.text as string);
+    const pendingRow = async (id: string) => (await sql<any[]>`select * from pending_coding_agents where id = ${id}`)[0];
+
+    it('spawn_coding_agent only proposes: an ephemeral preview with the exact task, nothing sent to Cursor', async () => {
+      const t = await newThread();
+      const n = (await slackFake.fakeCalls()).length;
+      const p = await propose(t);
+      expect(p.reused).toBe(false);
+      expect(fake.calls).toEqual([]);
+      expect(await sql`select * from subagents where thread_id = ${t}`).toHaveLength(0);
+      expect(await pendingRow(p.pendingId)).toMatchObject({ status: 'pending', ownerId: 'UADMIN', title: 'Fix tmrw parsing' });
+      const preview = (await slackFake.fakeCalls()).slice(n).find((c) => c.method === 'chat.postEphemeral');
+      expect(preview?.args).toMatchObject({ user: 'UADMIN', thread_ts: t.split(':')[1] });
+      const blocks = JSON.stringify(preview!.args.blocks);
+      expect(blocks).toContain(JSON.stringify('Make reminders accept "tmrw".\n*not bold* <!channel>').slice(1, -1)); // verbatim, plain_text
+      expect(blocks).toContain('"action_id":"coding:launch"');
+      // The same proposal again (model retry) reuses it.
+      expect((await propose(t)).pendingId).toBe(p.pendingId);
+    });
+
+    it('refuses non-user turns and non-admins', async () => {
+      const t = await newThread();
+      await expect(propose(t, { turnKind: 'synthesis' })).rejects.toThrow(/only take instructions/);
+      await expect(propose(t, { turnKind: 'scheduled' })).rejects.toThrow(/only take instructions/);
+      await expect(propose(t, { turnKind: undefined })).rejects.toThrow(/only take instructions/);
+      await expect(propose(t, { owner: 'UOTHER' })).rejects.toThrow(/Only the bot's admin/);
+      await expect(propose(t, { instructions: 'x'.repeat(20_000) })).rejects.toThrow(/too long/);
+      expect(await sql`select * from pending_coding_agents where thread_id = ${t}`).toHaveLength(0);
+    });
+
+    it('only the admin pressing Launch starts it, once; it gets its own plan card', async () => {
+      const t = await newThread();
+      const p = await propose(t);
+      await click('coding:launch', p.pendingId, 'UOTHER');
+      expect(await responses(p.pendingId)).toEqual(["Only the bot's admin can launch or cancel this."]);
+      expect(fake.calls).toEqual([]);
+
+      const n = (await slackFake.fakeCalls()).length;
+      await Promise.all([click('coding:launch', p.pendingId), click('coding:launch', p.pendingId)]);
+      expect(fake.agents.size).toBe(1);
+      expect(fake.only()).toBe(`bc-${p.pendingId}`);
+      const row = await pendingRow(p.pendingId);
+      expect(row.status).toBe('launched');
+      const sa = await subRow(row.subagentId);
+      expect(sa).toMatchObject({ kind: 'cursor', status: 'running', threadId: t });
+      const [run] = await sql<any[]>`select * from runs where subagent_id = ${row.subagentId}`;
+      expect(run.turnId).toBeNull();
+      expect(run.instructions).toBe('Make reminders accept "tmrw".\n*not bold* <!channel>');
+      const [card] = await sql<any[]>`select * from cards where id = ${run.cardId}`;
+      expect(card).toMatchObject({ threadId: t, turnId: null });
+      expect(card.messageTs).toBeTruthy(); // posted as its own message in the thread
+      const posted = (await slackFake.fakeCalls()).slice(n).filter((c) => c.method === 'chat.postMessage' && c.args.thread_ts === t.split(':')[1]);
+      expect(posted).toHaveLength(1);
+      const texts = await responses(p.pendingId);
+      expect(texts.some((x) => x.startsWith('Launched ✓'))).toBe(true);
+      expect(texts.some((x) => x === 'Already launched.' || x === 'Launching…')).toBe(true);
+
+      // It finishes → synthesis for the admin on that card.
+      fake.set(fake.only(), { status: 'FINISHED', result: 'done', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+      await poll(run.id);
+      const turns = await synthTurns(Number(run.cardId));
+      expect(turns).toHaveLength(1);
+      expect(turns[0].authorId).toBe('UADMIN');
+    });
+
+    it('cancel, expiry and stale clicks', async () => {
+      const t = await newThread();
+      const p = await propose(t);
+      await click('coding:cancel', p.pendingId);
+      expect((await pendingRow(p.pendingId)).status).toBe('cancelled');
+      await click('coding:launch', p.pendingId);
+      expect((await responses(p.pendingId)).at(-1)).toBe('Cancelled. Nothing was started.');
+
+      const p2 = await propose(await newThread());
+      await sql`update pending_coding_agents set expires_at = now() - interval '1 second' where id = ${p2.pendingId}`;
+      await click('coding:launch', p2.pendingId);
+      expect((await responses(p2.pendingId)).at(-1)).toMatch(/expired/);
+      await confirm.expirePendingLaunches();
+      expect((await pendingRow(p2.pendingId)).status).toBe('expired');
+      expect(fake.calls).toEqual([]);
+    });
   });
 
   // Regression (review #7): an agent that never yields a run is not polled forever.

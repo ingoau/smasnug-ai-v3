@@ -1,0 +1,90 @@
+/** Pure parts of the coding-agent launch confirmation (confirm.ts): click decisions and the preview blocks. */
+
+export interface PendingLaunchRow {
+  id: string;
+  threadId: string;
+  ownerId: string;
+  title: string;
+  instructions: string;
+  status: string; // pending | launching | launched | cancelled | expired | failed
+  subagentId: string | null;
+  expiresAt: Date;
+}
+
+export type LaunchDecision = 'ok' | 'not_found' | 'wrong_user' | 'expired' | 'launched' | 'launching' | 'cancelled' | 'failed';
+
+/** What a click on Launch / Cancel should do. Only the admin who asked (owner = ADMIN_USER_ID) may press them. */
+export function decideLaunchClick(
+  p: Pick<PendingLaunchRow, 'ownerId' | 'status' | 'expiresAt'> | undefined,
+  clickerId: string,
+  adminId: string | undefined,
+  now = new Date(),
+): LaunchDecision {
+  if (!p) return 'not_found';
+  if (!adminId || clickerId !== adminId || clickerId !== p.ownerId) return 'wrong_user';
+  if (p.status === 'launched') return 'launched';
+  if (p.status === 'launching') return 'launching';
+  if (p.status === 'cancelled') return 'cancelled';
+  if (p.status === 'failed') return 'failed';
+  if (p.status !== 'pending' || p.expiresAt.getTime() <= now.getTime()) return 'expired';
+  return 'ok';
+}
+
+export const LAUNCH_CLICK_REPLIES: Record<Exclude<LaunchDecision, 'ok'>, { text: string; replace: boolean }> = {
+  not_found: { text: 'This expired. Ask again to start a coding agent.', replace: true },
+  expired: { text: 'This expired. Ask again to start a coding agent.', replace: true },
+  wrong_user: { text: "Only the bot's admin can launch or cancel this.", replace: false },
+  launched: { text: 'Already launched.', replace: true },
+  launching: { text: 'Launching…', replace: false },
+  cancelled: { text: 'Cancelled. Nothing was started.', replace: true },
+  failed: { text: "This launch failed. Ask again to retry.", replace: true },
+};
+
+/** Section text limit (https://docs.slack.dev/reference/block-kit/blocks/section-block: max 3000 characters). */
+const SECTION_MAX = 3000;
+/** Longest task the preview can show in full (plain-text sections within the 50-block limit). */
+export const CODING_INSTRUCTIONS_MAX = 12_000;
+
+/** Split text into chunks of at most `max` characters, preferring line breaks. */
+export function chunkText(text: string, max = SECTION_MAX - 100): string[] {
+  const out: string[] = [];
+  let rest = text;
+  while (rest.length > max) {
+    let cut = rest.lastIndexOf('\n', max);
+    if (cut < max / 2) cut = max;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n/, '');
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
+/**
+ * The ephemeral preview: the title and the task exactly as they will be sent (plain_text, so Slack formatting can't
+ * hide or alter anything), the fixed rules code adds, and Launch / Cancel.
+ */
+export function launchPreviewBlocks(o: { pendingId: string; title: string; instructions: string; repoUrl: string; ref: string; ttlMin: number }): unknown[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `*Launch a coding agent?* Only you can see this. It works on ${o.repoUrl} (from \`${o.ref}\`) and opens a pull request. Nothing starts until you press Launch (expires in ${o.ttlMin} min).`,
+      },
+    },
+    { type: 'section', text: { type: 'plain_text', text: `Title: ${o.title}`.slice(0, SECTION_MAX), emoji: false } },
+    { type: 'context', elements: [{ type: 'mrkdwn', text: 'Task, exactly as it will be sent:' }] },
+    ...chunkText(o.instructions).map((t) => ({ type: 'section', text: { type: 'plain_text', text: t, emoji: false } })),
+    {
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: 'Code adds the fixed rules: follow CLAUDE.md, no CI or repo-policy changes, tests, self-review, PR only.' }],
+    },
+    {
+      type: 'actions',
+      elements: [
+        { type: 'button', action_id: 'coding:launch', text: { type: 'plain_text', text: 'Launch' }, style: 'primary', value: o.pendingId },
+        { type: 'button', action_id: 'coding:cancel', text: { type: 'plain_text', text: 'Cancel' }, value: o.pendingId },
+      ],
+    },
+  ];
+}

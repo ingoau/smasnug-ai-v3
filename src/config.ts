@@ -126,4 +126,6 @@ export const limits = {
   cursorApiTimeoutMs: 20_000,
   /** Consecutive failed polls (backing off up to 5 min) before the run is marked failed. */
   cursorMaxPollErrors: 30,
+  /** How long the admin's Launch / Cancel confirmation for a new coding agent stays valid. */
+  cursorConfirmTtlMs: 15 * 60_000,
 } as const;
