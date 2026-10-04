@@ -180,6 +180,46 @@ describe('runFrontTurn (mock model)', () => {
     expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
   });
 
+  it('a mention that only reacts posts no fallback or error reply', async () => {
+    h.model = mockModel([toolStep(['react', { emoji: 'thumbsup' }]), textStep('')]);
+    await expect(runFrontTurn(turn({ id: 80 }), io(true).io)).resolves.toBeUndefined();
+    expect(h.slack.map((c) => c.method)).toEqual(['reactions.add']);
+    expect(h.slack[0]!.args).toMatchObject({ channel: 'C1', timestamp: '100.000002', name: 'thumbsup' });
+    expect(h.events.some((e) => e.type === 'reply' && e.payload?.fallback)).toBe(false);
+  });
+
+  it('already_reacted still counts as a visible reaction (no fallback)', async () => {
+    h.slackHook = (method) => {
+      if (method === 'reactions.add') throw Object.assign(new Error('already_reacted'), { data: { ok: false, error: 'already_reacted' } });
+    };
+    h.model = mockModel([toolStep(['react', { emoji: 'eyes' }]), textStep('')]);
+    await expect(runFrontTurn(turn({ id: 81 }), io(true).io)).resolves.toBeUndefined();
+    expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
+    expect(h.events.some((e) => e.type === 'reply' && e.payload?.fallback)).toBe(false);
+  });
+
+  it('a skipped reaction on a mention still gets the fallback (nothing was visible)', async () => {
+    h.slackHook = (method) => {
+      if (method === 'reactions.add') throw Object.assign(new Error('no_permission'), { data: { ok: false, error: 'no_permission' } });
+    };
+    h.model = mockModel([toolStep(['react', { emoji: 'tada' }]), textStep('')]);
+    await runFrontTurn(turn({ id: 82 }), io(true).io);
+    const posts = h.slack.filter((c) => c.method === 'chat.postMessage');
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.args.text).toMatch(/couldn't come up with a reply/);
+  });
+
+  it('after a successful reaction, a later model failure does not throw or post an error reply', async () => {
+    h.model = mockModel([
+      toolStep(['react', { emoji: 'thumbsup' }]),
+      [{ type: 'stream-start', warnings: [] }, { type: 'error', error: new Error('down') }],
+    ]);
+    await expect(runFrontTurn(turn({ id: 83 }), io(true).io)).resolves.toBeUndefined();
+    expect(h.slack.map((c) => c.method)).toEqual(['reactions.add']);
+    expect(h.events.some((e) => e.type === 'error')).toBe(true);
+    expect(h.slack.some((c) => c.method === 'chat.postMessage' && String(c.args.text ?? '').includes('Something broke'))).toBe(false);
+  });
+
   it('a turn that made a canvas but posted no reply posts the canvas link instead of the fallback', async () => {
     h.sqlHook = (q) => (q.includes('from bot_canvases where turn_id') ? [{ title: 'Plan [v1] <@U9>', permalink: 'https://x.slack.com/docs/T1/F123' }] : undefined);
     h.model = mockModel([textStep('made it')]);
@@ -332,6 +372,13 @@ describe('runFrontTurn: model freedom', () => {
     expect(methods()).toContain('chat.postMessage');
     expect(methods()).not.toContain('reactions.remove');
     expect(((h.model as any).doStreamCalls as any[]).length).toBe(3);
+  });
+
+  it('a reaction-only turn with end_turn completes with no chat post', async () => {
+    h.model = mockModel([toolStep(['react', { emoji: 'heart' }], ['end_turn', {}])]);
+    await expect(runFrontTurn(turn({ id: 72 }), io(true).io)).resolves.toBeUndefined();
+    expect(methods()).toEqual(['reactions.add']);
+    expect(h.events.some((e) => e.type === 'reply')).toBe(false);
   });
 
   it('posts a second reply if the model sends one', async () => {
