@@ -61,8 +61,42 @@ async function rootMissing(channelId: string, threadTs: string): Promise<boolean
 
 export interface Target {
   threadId: string;
-  /** True when the original thread is gone and the turn runs in a DM thread with the owner. */
+  /** True when the turn runs in a DM thread with the owner (the original thread is gone, or can't be used). */
   fallback: boolean;
+}
+
+/** Reasons the original channel can't be used although the owner may still be reached by DM. */
+const CHANNEL_UNAVAILABLE: ReadonlySet<SkipReason> = new Set(['channel_disabled', 'bot_removed', 'channel_archived']);
+
+/**
+ * Where a fired reminder runs, with the entry checks applied to the channel actually used. Pause, suspension and a
+ * deactivated owner skip it. A disabled channel, a channel the bot left or an archived one don't: the reminder goes
+ * to a DM thread with the owner instead (a one-shot reminder would otherwise be lost for good), as when the thread
+ * root is gone. A DM target is then checked again against the DM channel (e.g. suspension, which a disabled channel
+ * hides in checkEntry's order).
+ */
+export async function resolveDelivery(opts: {
+  ownerId: string;
+  threadId: string;
+  channelId: string;
+  idempotencyKey: string;
+  rootText: (why: 'gone' | 'unavailable') => string;
+}): Promise<{ skip: SkipReason } | { target: Target; why: 'gone' | 'unavailable' | null }> {
+  const reason = await scheduleEntryCheck(opts.ownerId, opts.channelId);
+  if (reason && !CHANNEL_UNAVAILABLE.has(reason)) return { skip: reason };
+  const forceDm = reason != null;
+  const target = await resolveTarget({
+    ownerId: opts.ownerId,
+    threadId: opts.threadId,
+    idempotencyKey: opts.idempotencyKey,
+    rootText: opts.rootText(forceDm ? 'unavailable' : 'gone'),
+    forceDm,
+  });
+  if (target.fallback) {
+    const dmReason = await scheduleEntryCheck(opts.ownerId, parseThreadId(target.threadId).channelId);
+    if (dmReason) return { skip: dmReason };
+  }
+  return { target, why: target.fallback ? (forceDm ? 'unavailable' : 'gone') : null };
 }
 
 /**
@@ -70,14 +104,16 @@ export interface Target {
  * retention removed it); otherwise a new DM thread with the owner, rooted at a short bot message (idempotent on
  * `idempotencyKey`, so a retried fire reuses it).
  */
-export async function resolveTarget(opts: { ownerId: string; threadId: string; idempotencyKey: string; rootText: string }): Promise<Target> {
+export async function resolveTarget(opts: { ownerId: string; threadId: string; idempotencyKey: string; rootText: string; forceDm?: boolean }): Promise<Target> {
   const { channelId, threadTs } = parseThreadId(opts.threadId);
-  const [row] = await sql<{ rootDeletedAt: Date | null }[]>`select root_deleted_at from threads where id = ${opts.threadId}`;
-  let gone = Boolean(row?.rootDeletedAt) || (await isThreadGone(channelId, threadTs));
-  if (!row && !gone) gone = await rootMissing(channelId, threadTs);
-  if (!gone) {
-    if (!row) await upsertThread({ id: opts.threadId, channelId, threadTs, isDm: channelId.startsWith('D') });
-    return { threadId: opts.threadId, fallback: false };
+  if (!opts.forceDm) {
+    const [row] = await sql<{ rootDeletedAt: Date | null }[]>`select root_deleted_at from threads where id = ${opts.threadId}`;
+    let gone = Boolean(row?.rootDeletedAt) || (await isThreadGone(channelId, threadTs));
+    if (!row && !gone) gone = await rootMissing(channelId, threadTs);
+    if (!gone) {
+      if (!row) await upsertThread({ id: opts.threadId, channelId, threadTs, isDm: channelId.startsWith('D') });
+      return { threadId: opts.threadId, fallback: false };
+    }
   }
   const open = await slackCall<any>('conversations.open', { users: opts.ownerId });
   const dm: string | undefined = open.channel?.id;

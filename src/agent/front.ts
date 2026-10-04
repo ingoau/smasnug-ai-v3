@@ -16,10 +16,10 @@ import { chatModel, MODELS } from '../models.js';
 import { log } from '../log.js';
 import { TurnTiming } from '../core/timing.js';
 import { freezeCard, postCard } from './cards.js';
-import { frontSystemPrompt } from './prompts/front.js';
+import { CODING_AGENTS_PROMPT, frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
-import { cursorRefusal } from './cursor/agents.js';
+import { cursorInstructRefusal, cursorRefusal } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
 ;
@@ -85,11 +85,13 @@ const VISIBLE_TOOLS: Record<string, VisibleAction> = {
 
 // ---------- Prompt sections ----------
 
-async function buildSystem(): Promise<string> {
+async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
-  const base = frontSystemPrompt(env.BOT_DISPLAY_NAME);
-  if (!facts) return base;
-  return `${base}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
+  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME);
+  if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
+  // Admin-only section last: the shared prefix stays the same for everyone.
+  if (opts.codingAgents) system = `${system}\n\n${CODING_AGENTS_PROMPT}`;
+  return system;
 }
 
 async function speakerInfo(userId: string): Promise<{ name: string; tz: string | undefined }> {
@@ -329,8 +331,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, extras });
   // Naming a card only makes sense when writing up its results.
   if (turn.kind !== 'synthesis') delete tools.set_card_title;
-  // Coding agents change the bot's own code: only offered in the admin's turns when configured (re-checked on use).
-  if (cursorRefusal(turn.authorId)) delete tools.spawn_coding_agent;
+  // Coding agents change the bot's own code: only offered in the admin's own message turns when configured (not in
+  // synthesis / scheduled turns, whose input is other content; re-checked on use).
+  if (cursorInstructRefusal(turn.authorId, turn.kind)) delete tools.spawn_coding_agent;
 
   const timing = io.timing ?? new TurnTiming();
   timing.mark('context_start');
@@ -340,7 +343,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   ]);
   // Session titles (sidebar) only in DMs with the bot.
   if (!session?.isDm) delete tools.set_session_title;
-  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem()), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session)]);
+  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session)]);
   timing.mark('context_built');
   timing.set('prompt_chars', system.length + built.text.length);
   const messages: ModelMessage[] = [{ role: 'user', content: built.text }];

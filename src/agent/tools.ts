@@ -119,7 +119,7 @@ registerTool({
       }),
       execute: async ({ id, text, note }) => {
         const s = turnState(ctx);
-        const r = await messageSubagent({ threadId: s.threadId, turnId: s.turn.id, speakerId: s.turn.authorId, subagentId: id, text, note });
+        const r = await messageSubagent({ threadId: s.threadId, turnId: s.turn.id, turnKind: s.turn.kind, speakerId: s.turn.authorId, subagentId: id, text, note });
         if (r.mode === 'resumed') {
           s.cardId = r.cardId;
           s.delegated = true;

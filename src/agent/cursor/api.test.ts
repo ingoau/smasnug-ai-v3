@@ -135,6 +135,10 @@ describe('run status helpers', () => {
     expect(api.isCiPath('.github/actions/setup/action.yml')).toBe(true);
     expect(api.isCiPath('src/.github/workflows.ts')).toBe(false);
     expect(api.isCiPath('docs/design.md')).toBe(false);
+    // Repo policy under .github/ and other CI systems (review #11).
+    for (const p of ['.github/CODEOWNERS', '.github/dependabot.yml', '/.github/rulesets/main.json', 'CODEOWNERS', 'docs/CODEOWNERS', '.gitlab-ci.yml', '.circleci/config.yml', 'Jenkinsfile', '.travis.yml', 'azure-pipelines.yml', '.buildkite/pipeline.yml', 'bitbucket-pipelines.yml'])
+      expect(api.isCiPath(p), p).toBe(true);
+    for (const p of ['src/ci.ts', 'docs/github.md', 'src/codeowners.ts', 'packages/x/.gitlab-ci.yml.md']) expect(api.isCiPath(p), p).toBe(false);
   });
 });
 

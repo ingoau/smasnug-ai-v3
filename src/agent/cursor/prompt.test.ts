@@ -18,7 +18,7 @@ describe('Cursor prompt preamble', () => {
 
   it('forbids touching .github/workflows/ and CI config, and says GitHub enforces it', () => {
     expect(p).toMatch(/NEVER create, modify, rename or delete anything under `\.github\/workflows\/`/);
-    expect(p).toMatch(/other CI configuration/);
+    expect(p).toMatch(/other CI or repository-policy configuration: nothing under `\.github\/` \(workflows, actions, CODEOWNERS, dependabot…\) or other CI\/CD config \(`\.gitlab-ci\.yml`/);
     expect(p).toMatch(/enforced at the GitHub level/);
   });
 
@@ -48,6 +48,8 @@ describe('Cursor prompt preamble', () => {
   it('follow-ups restate the rules (workflows, review, checks, same branch)', () => {
     const f = composeCursorFollowUp(['also handle "tmw"', 'and add a test'], ctx);
     expect(f).toMatch(/never touch `\.github\/workflows\/`/);
+    expect(f).toContain('CODEOWNERS');
+    expect(f).toContain('`.circleci/`');
     expect(f).toMatch(/subagent review your changes/);
     expect(f).toContain('`pnpm typecheck`');
     expect(f).toMatch(/same branch/);

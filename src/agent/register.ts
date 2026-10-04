@@ -14,6 +14,7 @@ import './session-title.js';
 import './tools.js';
 import './cursor/tools.js';
 import { pollCursorRuns } from './cursor/agents.js';
+import { expirePendingLaunches, handleCodingCancel, handleCodingLaunch } from './cursor/confirm.js';
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
   [QUEUE.subagentRun]: async (job) => {
@@ -39,6 +40,11 @@ export const maintenance: Record<string, { everyMs: number; run: () => Promise<v
       await pollCursorRuns();
     },
   },
+  // Coding agents: expire unanswered Launch / Cancel previews (src/agent/cursor/confirm.ts).
+  'agent:cursor-confirm-expiry': {
+    everyMs: 5 * 60 * 1000,
+    run: expirePendingLaunches,
+  },
   'agent:expire-subagents': {
     everyMs: 10 * 60 * 1000,
     run: async () => {
@@ -63,3 +69,7 @@ export async function onShutdown(): Promise<void> {
     log.error({ err }, 'agent shutdown failed');
   }
 }
+
+/** Coding agents: the admin's Launch / Cancel on a proposed coding agent (only ADMIN_USER_ID; checked in the handlers). */
+registerAction('coding:launch', handleCodingLaunch);
+registerAction('coding:cancel', handleCodingCancel);

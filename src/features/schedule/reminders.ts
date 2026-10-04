@@ -16,11 +16,17 @@ import type { ToolContext } from '../../core/tools.js';
 import { getUserInfo } from '../../context/users.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
+import { slackCall } from '../../core/slack.js';
+import { oneLine } from '../../agent/util.js';
+import { sanitizeOutgoing } from '../send/logic.js';
 import { ensureThreadRun } from '../../pipeline/scheduler.js';
-import { createScheduledTurnTx, logScheduled, resolveTarget, scheduleEntryCheck } from './deliver.js';
+import { createScheduledTurnTx, logScheduled, resolveDelivery } from './deliver.js';
 import { formatDuration, formatInZone, resolveWhen } from './time.js';
 
 export const MAX_FIRE_ATTEMPTS = 5;
+/** Wait before the next attempt after a failed one (by attempt number), so a transient blip doesn't burn them all. */
+export const RETRY_BACKOFF_MS = [60_000, 2 * 60_000, 5 * 60_000, 10 * 60_000];
+export const retryDelayMs = (attempt: number) => RETRY_BACKOFF_MS[Math.min(Math.max(attempt, 1), RETRY_BACKOFF_MS.length) - 1]!;
 const LEASE = sql`interval '5 minutes'`;
 
 export interface ReminderRow {
@@ -58,27 +64,31 @@ export function canShowText(currentChannel: string, itemChannel: string): boolea
 export async function setReminder(ctx: ToolContext, input: { text: string; at?: string; in?: string }): Promise<string> {
   const text = input.text.trim();
   if (!text) return 'The reminder text is empty.';
-  const [{ n } = { n: 0 }] = await sql<{ n: number }[]>`
-    select count(*)::int as n from reminders where owner_id = ${ctx.speakerId} and status in ('pending', 'firing')`;
-  if (n >= limits.userPendingReminders)
-    return `Limit reached: this user already has ${n} pending reminders (max ${limits.userPendingReminders}). They can cancel some first (list_reminders).`;
   const tz = (await getUserInfo(ctx.speakerId).catch(() => null))?.tz;
   const now = Date.now();
   const when = resolveWhen(input, { now, tz, maxAheadMs: limits.reminderMaxAheadMs });
   if (!when.ok) return when.error;
 
-  // A retried / repeated call in the same thread for the same text and time reuses the reminder.
-  const [dupe] = await sql<{ id: number }[]>`
-    select id::int as id from reminders where owner_id = ${ctx.speakerId} and thread_id = ${ctx.threadId} and text = ${text}
-      and due_at = ${when.due} and status = 'pending'`;
-  const id =
-    dupe?.id ??
-    (
-      await sql<{ id: number }[]>`
-        insert into reminders (owner_id, thread_id, channel_id, text, due_at, tz)
-        values (${ctx.speakerId}, ${ctx.threadId}, ${ctx.channelId}, ${text}, ${when.due}, ${tz ?? null})
-        returning id::int as id`
-    )[0]!.id;
+  // Cap check, duplicate check and insert under a per-owner lock: concurrent calls can't exceed the cap.
+  const res = await sql.begin(async (tx): Promise<{ id: number; dupe: boolean } | { full: number }> => {
+    await tx`select pg_advisory_xact_lock(hashtext('reminders:owner'), hashtext(${ctx.speakerId}))`;
+    // A retried / repeated call in the same thread for the same text and time reuses the reminder.
+    const [dupe] = await tx<{ id: number }[]>`
+      select id::int as id from reminders where owner_id = ${ctx.speakerId} and thread_id = ${ctx.threadId} and text = ${text}
+        and due_at = ${when.due} and status = 'pending'`;
+    if (dupe) return { id: dupe.id, dupe: true };
+    const [{ n } = { n: 0 }] = await tx<{ n: number }[]>`
+      select count(*)::int as n from reminders where owner_id = ${ctx.speakerId} and status in ('pending', 'firing')`;
+    if (n >= limits.userPendingReminders) return { full: n };
+    const [row] = await tx<{ id: number }[]>`
+      insert into reminders (owner_id, thread_id, channel_id, text, due_at, tz)
+      values (${ctx.speakerId}, ${ctx.threadId}, ${ctx.channelId}, ${text}, ${when.due}, ${tz ?? null})
+      returning id::int as id`;
+    return { id: row!.id, dupe: false };
+  });
+  if ('full' in res)
+    return `Limit reached: this user already has ${res.full} pending reminders (max ${limits.userPendingReminders}). They can cancel some first (list_reminders).`;
+  const { id, dupe } = res;
   if (!dupe) await logScheduled(ctx.threadId, 'reminder_set', ctx.speakerId, { reminderId: id, dueAt: when.due.toISOString(), turnId: ctx.turnId ?? null });
   const zoneNote = tz ? '' : ' (their time zone is unknown, so times without an offset were read as UTC)';
   const where = ctx.channelId.startsWith('D') ? 'in this DM' : 'in this thread';
@@ -155,22 +165,44 @@ export async function claimDueReminder(): Promise<(ReminderRow & { claimId: stri
       attempts = attempts + 1, updated_at = now()
     where id = (
       select id from reminders
-      where (status = 'pending' and due_at <= now()) or (status = 'firing' and claimed_until < now())
-      order by due_at limit 1 for update skip locked)
+      where (status = 'pending' and coalesce(retry_at, due_at) <= now()) or (status = 'firing' and claimed_until < now())
+      order by coalesce(retry_at, due_at) limit 1 for update skip locked)
     returning ${COLS}`;
   return row ?? null;
 }
 
-/** End a claim without firing (skipped / failed / back to pending), only if we still hold it. */
-async function releaseClaim(r: { id: number; claimId: string }, status: 'skipped' | 'failed' | 'pending', reason: string | null) {
-  await sql`
-    update reminders set status = ${status}, skip_reason = ${reason}, claim_id = null, claimed_until = null, updated_at = now()
-    where id = ${r.id} and claim_id = ${r.claimId} and status = 'firing'`;
+/** End a claim without firing (skipped / failed / back to pending, due again in `retryInMs`), only if we still hold it. */
+async function releaseClaim(r: { id: number; claimId: string }, status: 'skipped' | 'failed' | 'pending', reason: string | null, retryInMs = 0) {
+  const rows = await sql`
+    update reminders set status = ${status}, skip_reason = ${reason}, claim_id = null, claimed_until = null, updated_at = now(),
+      retry_at = case when ${status === 'pending'} then now() + ${retryInMs / 1000} * interval '1 second' else retry_at end
+    where id = ${r.id} and claim_id = ${r.claimId} and status = 'firing' returning id`;
+  return rows.length > 0;
 }
 
-export function renderReminderInput(r: Pick<ReminderRow, 'id' | 'ownerId' | 'text' | 'dueAt' | 'createdAt' | 'tz'>, fallback: boolean): string {
+/** A reminder that finally failed: tell the owner in a short plain DM (best effort, once per reminder). */
+async function notifyFailed(r: ReminderRow) {
+  try {
+    const open = await slackCall<any>('conversations.open', { users: r.ownerId });
+    const dm: string | undefined = open.channel?.id;
+    if (!dm) return;
+    const text = `⏰ Sorry, I couldn't deliver a reminder you set for ${formatInZone(r.dueAt, r.tz ?? undefined)}: "${sanitizeOutgoing(oneLine(r.text, 300))}"`;
+    await slackCall('chat.postMessage', { channel: dm, text, unfurl_links: false }, { idempotencyKey: `reminder-failed:${r.id}` });
+  } catch (err) {
+    log.warn({ err, reminderId: r.id }, 'reminder failure note failed');
+  }
+}
+
+async function fail(r: ReminderRow & { claimId: string }, reason: string) {
+  if (await releaseClaim(r, 'failed', reason)) {
+    await logScheduled(r.threadId, 'reminder_failed', 'system', { reminderId: r.id, reason });
+    await notifyFailed(r);
+  }
+}
+
+export function renderReminderInput(r: Pick<ReminderRow, 'id' | 'ownerId' | 'text' | 'dueAt' | 'createdAt' | 'tz'>, fallback: false | 'gone' | 'unavailable'): string {
   const where = fallback
-    ? `The thread where they set it no longer exists, so this runs in a DM with them (the DM starts with a short "reminder" note from you).`
+    ? `The thread where they set it ${fallback === 'gone' ? 'no longer exists' : "can't be used any more (you're not active in that channel now)"}, so this runs in a DM with them (the DM starts with a short "reminder" note from you).`
     : 'This is the thread where they set it.';
   return [
     `<reminder id="${reminderLabel(r.id)}" owner="<@${r.ownerId}>" set="${formatInZone(r.createdAt, r.tz ?? undefined)}" due="${formatInZone(r.dueAt, r.tz ?? undefined)}">`,
@@ -185,24 +217,26 @@ export function renderReminderInput(r: Pick<ReminderRow, 'id' | 'ownerId' | 'tex
 /** Fire one claimed reminder. Exactly once: the turn insert and the 'fired' mark commit together under our claim. */
 export async function fireReminder(r: ReminderRow & { claimId: string }): Promise<'fired' | 'skipped' | 'failed' | 'lost'> {
   if (r.attempts > MAX_FIRE_ATTEMPTS) {
-    await releaseClaim(r, 'failed', 'too_many_attempts');
+    await fail(r, 'too_many_attempts');
     return 'failed';
   }
   try {
-    const skip = await scheduleEntryCheck(r.ownerId, r.channelId);
-    if (skip) {
-      await releaseClaim(r, 'skipped', skip);
-      log.info({ reminderId: r.id, reason: skip }, 'reminder skipped');
-      await logScheduled(r.threadId, 'reminder_skipped', 'system', { reminderId: r.id, reason: skip });
-      return 'skipped';
-    }
-    const target = await resolveTarget({
+    const delivery = await resolveDelivery({
       ownerId: r.ownerId,
       threadId: r.threadId,
+      channelId: r.channelId,
       idempotencyKey: `reminder-dm:${r.id}`,
-      rootText: `⏰ Reminder for <@${r.ownerId}> (the thread you set it in was deleted)`,
+      rootText: (why) => `⏰ Reminder for <@${r.ownerId}> (${why === 'gone' ? 'the thread you set it in was deleted' : "I can't post in the channel you set it in right now"})`,
     });
-    const input = renderReminderInput(r, target.fallback);
+    if ('skip' in delivery) {
+      // Pause / suspension / a deactivated owner: dropped on purpose (not retried later), see docs/design.md.
+      await releaseClaim(r, 'skipped', delivery.skip);
+      log.info({ reminderId: r.id, reason: delivery.skip }, 'reminder skipped');
+      await logScheduled(r.threadId, 'reminder_skipped', 'system', { reminderId: r.id, reason: delivery.skip });
+      return 'skipped';
+    }
+    const { target } = delivery;
+    const input = renderReminderInput(r, delivery.why ?? false);
     const turnId = await sql.begin(async (tx) => {
       const [cur] = await tx<{ status: string; claimId: string | null }[]>`select status, claim_id from reminders where id = ${r.id} for update`;
       if (!cur || cur.status !== 'firing' || cur.claimId !== r.claimId) return null;
@@ -219,7 +253,8 @@ export async function fireReminder(r: ReminderRow & { claimId: string }): Promis
     return 'fired';
   } catch (err) {
     log.error({ err, reminderId: r.id, attempt: r.attempts }, 'reminder fire failed');
-    await releaseClaim(r, r.attempts >= MAX_FIRE_ATTEMPTS ? 'failed' : 'pending', 'error').catch(() => {});
+    if (r.attempts >= MAX_FIRE_ATTEMPTS) await fail(r, 'error').catch(() => {});
+    else await releaseClaim(r, 'pending', 'error', retryDelayMs(r.attempts)).catch(() => {});
     return 'failed';
   }
 }

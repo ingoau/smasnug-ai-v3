@@ -4,7 +4,9 @@
  * the turn that started it.
  */
 import type { ModelMessage } from 'ai';
+import type { TransactionSql } from 'postgres';
 import { sql } from '../db/index.js';
+import type { TurnRow } from '../core/types.js';
 import { appendEvent, shortId } from '../core/events.js';
 import { enqueue, QUEUE } from '../core/queues.js';
 import { takeLimit } from '../features/guard.js';
@@ -122,6 +124,8 @@ export type MessageResult =
 export async function messageSubagent(opts: {
   threadId: string;
   turnId: number;
+  /** Kind of the calling turn: coding agents only take messages from the admin's own ('user') turns. */
+  turnKind?: TurnRow['kind'];
   speakerId: string;
   subagentId: string;
   text: string;
@@ -191,6 +195,8 @@ export async function cancelSubagent(opts: { threadId: string; subagentId: strin
       where subagent_id = ${sa.id} and status = 'queued' returning card_id`;
     const running = await tx<{ cardId: number | null }[]>`
       update runs set cancel_requested = true where subagent_id = ${sa.id} and status = 'running' returning card_id`;
+    // Steers nobody has seen yet are moot now; left unconsumed they would keep a finishing run from ending ('inbox').
+    await tx`update subagent_inbox set consumed_at = now() where subagent_id = ${sa.id} and consumed_at is null`;
     if (running.length === 0) await tx`update subagents set status = 'cancelled' where id = ${sa.id}`;
     return {
       msg: running.length ? `Cancellation requested for ${sa.id}; it stops at its next step.` : `Subagent ${sa.id} cancelled.`,
@@ -275,12 +281,20 @@ export type RunOutcome =
 export async function finishRun(
   run: Pick<RunRow, 'id' | 'subagentId' | 'threadId' | 'cardId'>,
   outcome: RunOutcome,
-  extra: { tokens?: number; history?: ModelMessage[] } = {},
+  extra: {
+    tokens?: number;
+    history?: ModelMessage[];
+    /** Finish even with unseen steers (they are dropped like a failed run's): a cancelled coding agent, a bounded retry. */
+    dropInbox?: boolean;
+    /** Checked inside the transaction (after the subagent lock); false → 'gone', nothing written (e.g. a lost claim). */
+    guard?: (tx: TransactionSql<{}>) => Promise<boolean>;
+  } = {},
 ): Promise<'ok' | 'inbox' | 'gone'> {
   let finalStatus: RunOutcome['status'] = outcome.status;
   const res = await sql.begin(async (tx) => {
     await tx`select id from subagents where id = ${run.subagentId} for update`;
-    if (outcome.status === 'complete') {
+    if (extra.guard && !(await extra.guard(tx))) return 'gone' as const;
+    if (outcome.status === 'complete' && !extra.dropInbox) {
       // A run that finished despite a cancel request still reports its result; the front agent decides what to say.
       const [p] = await tx<{ n: number }[]>`select count(*)::int as n from subagent_inbox where subagent_id = ${run.subagentId} and consumed_at is null`;
       if ((p?.n ?? 0) > 0) return 'inbox' as const;
