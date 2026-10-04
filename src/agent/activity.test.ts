@@ -17,6 +17,10 @@ describe('activityForTool', () => {
     for (const t of ['reply', 'react', 'unreact', 'search_emojis']) expect(activityForTool(t)).toBeNull();
   });
 
+  it('naming a DM session is bookkeeping, not work', () => {
+    expect(activityForTool('set_session_title')).toBeNull();
+  });
+
   it('unknown tools get a generic label', () => {
     expect(activityForTool('some_new_tool')).toBe(DEFAULT_ACTIVITY);
   });

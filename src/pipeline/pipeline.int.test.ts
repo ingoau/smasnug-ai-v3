@@ -463,9 +463,10 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(await redis.get('view:ctx:U7')).toBeNull();
     });
 
-    it('agent_session_title_changed is only logged', async () => {
+    it('agent_session_title_changed makes no Slack calls (a user rename is only recorded, see agent-session.int.test.ts)', async () => {
       await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'agent_session_title_changed', channel: 'D1', thread_ts: '1.1', title: 'x' } } }));
-      expect(await fakeCalls()).toHaveLength(0);
+      await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'agent_session_title_changed', channel: 'D1', thread_ts: '1.1', title: 'x', user: 'U1' } } }));
+      expect((await fakeCalls()).filter((c) => c.method !== 'auth.test')).toHaveLength(0);
     });
   });
 

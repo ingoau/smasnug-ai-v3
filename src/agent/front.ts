@@ -19,6 +19,7 @@ import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
 import { activityForTool } from './activity.js';
+import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
 ;
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
@@ -182,7 +183,7 @@ function section(tag: string, body: string, attrs = ''): string {
   return body.trim() ? `<${tag}${attrs}>\n${body.trim()}\n</${tag}>` : '';
 }
 
-async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: string | undefined }, viewingChannelId?: string | null, timing = new TurnTiming()): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean }> {
+async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: string | undefined }, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean }> {
   const [memory, snapshot, ctx] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId)).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
@@ -198,6 +199,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: stri
   parts.push(section('subagents', snapshot ? clipTokens(snapshot, BUDGET.snapshot) : 'None in this thread.'));
   const viewing = viewingChannelId ? `\nUser is currently viewing <#${viewingChannelId}> (e.g. "this channel").` : '';
   parts.push(section('speaker', `<@${turn.authorId}> ${speaker.name}\nTheir local time: ${formatLocalTime(new Date(), speaker.tz)}${viewing}`));
+  if (session?.isDm) parts.push(section('session', renderSessionNote(session)));
   parts.push(
     section(
       'channel_background',
@@ -233,6 +235,13 @@ async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: stri
     );
   }
   return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, allCancelled };
+}
+
+/** DM threads: the conversation's sidebar title, so the model knows whether to (re)title it. */
+export function renderSessionNote(s: SessionInfo): string {
+  if (s.titleBy === 'user') return `Title: "${s.title ?? ''}" (chosen by the user; don't change it).`;
+  if (s.title) return `Title: "${s.title}" (set by you; change it only if the topic clearly changed).`;
+  return 'Untitled. Once the request is clear, title it with set_session_title alongside your reply.';
 }
 
 /** True when the turn's messages are nothing but @mentions (a bare ping with no request). */
@@ -312,8 +321,13 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 
   const timing = io.timing ?? new TurnTiming();
   timing.mark('context_start');
-  const speaker = await timing.span('ctx_speaker', () => speakerInfo(turn.authorId));
-  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem()), buildTurnMessage(turn, speaker, io.viewingChannelId, timing)]);
+  const [speaker, session] = await Promise.all([
+    timing.span('ctx_speaker', () => speakerInfo(turn.authorId)),
+    loadSessionInfo(turn.threadId).catch((err) => (log.warn({ err }, 'loadSessionInfo failed'), null)),
+  ]);
+  // Session titles (sidebar) only in DMs with the bot.
+  if (!session?.isDm) delete tools.set_session_title;
+  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem()), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session)]);
   timing.mark('context_built');
   timing.set('prompt_chars', system.length + built.text.length);
   const messages: ModelMessage[] = [{ role: 'user', content: built.text }];

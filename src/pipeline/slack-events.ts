@@ -6,6 +6,7 @@ import { handleAppHomeOpened, handleInteractive, handleSlash } from './interacti
 import { handleMessageEvent } from './intake.js';
 import { handleReactionEvent } from './reactions.js';
 import { handleAgentSessionStopped } from './stop.js';
+import { handleSessionTitleChanged } from './agent-session.js';
 import { handleAppContextChanged } from './view-context.js';
 
 export interface SlackEnvelopeJob {
@@ -32,8 +33,7 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
         case 'app_context_changed':
           return handleAppContextChanged(body); // user is in body.authorizations
         case 'agent_session_title_changed':
-          log.info({ channel: event.channel, threadTs: event.thread_ts, title: event.title }, 'agent session title changed');
-          return;
+          return handleSessionTitleChanged(event); // a user's title is never overwritten (DMs)
         case 'reaction_added':
         case 'reaction_removed':
           return handleReactionEvent(event);

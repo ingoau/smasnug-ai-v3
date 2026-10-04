@@ -20,6 +20,7 @@ import { peekLimit, takeLimit } from '../guard.js';
 import { getState } from '../state.js';
 import { ephemeral, truncate, userProfile } from '../util.js';
 import { CLICK_REPLIES, decideClick, isUuid, parseDestination, sanitizeOutgoing, type PendingSendRow } from './logic.js';
+import { resumeSuspendedSession } from '../../pipeline/agent-session.js';
 
 export const SEND_TEXT_MAX = 6000;
 
@@ -245,6 +246,7 @@ export async function handleSendCancel(ctx: ActionContext) {
   const decision = decideClick(p, ctx.userId);
   if (decision !== 'ok') return replyDecision(ctx, decision);
   await sql`update pending_sends set status = 'cancelled' where id = ${p!.id} and status = 'pending'`;
+  void resumeSuspendedSession(p!.threadId); // DM session waiting for this confirmation → active
   await ephemeral(ctx, 'Cancelled.', { replace: true });
 }
 
@@ -261,6 +263,7 @@ export async function handleSendConfirm(ctx: ActionContext) {
     const again = decideClick(await loadPending(p!.id), ctx.userId);
     return replyDecision(ctx, again === 'ok' ? 'expired' : again);
   }
+  void resumeSuspendedSession(claimed.threadId); // the user acted: a DM session waiting for it → active
 
   const block = (await getState()).blocks.get(claimed.requesterId);
   if (block?.suspended || block?.sendBlocked) {
@@ -371,7 +374,8 @@ async function postWithJoin(args: Record<string, unknown>, idempotencyKey: strin
 
 /** Mark expired pending sends (stale clicks are refused either way; this keeps the table tidy). */
 export async function expirePendingSends() {
-  await sql`update pending_sends set status = 'expired' where status = 'pending' and expires_at <= now()`;
+  const expired = await sql<{ threadId: string | null }[]>`update pending_sends set status = 'expired' where status = 'pending' and expires_at <= now() returning thread_id`;
+  for (const threadId of new Set(expired.map((r) => r.threadId))) await resumeSuspendedSession(threadId);
   // Clicks that crashed mid-send stay 'sending'; release them after the TTL so the state is honest.
   await sql`update pending_sends set status = 'expired' where status = 'sending' and expires_at <= now() - interval '10 minutes'`;
 }

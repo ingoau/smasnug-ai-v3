@@ -69,6 +69,7 @@ const { simulateReadableStream } = await import('ai');
 await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
+await import('./session-title.js');
 const { runFrontTurn } = await import('./front.js');
 const { streamArgsText } = await import('./slack-markdown.js');
 
@@ -334,6 +335,21 @@ describe('runFrontTurn: model freedom', () => {
     h.model = mockModel([textStep('')]);
     await runFrontTurn(turn({ id: 46, kind: 'synthesis', cardId: 5, messageTs: [] }), io(false).io);
     expect(toolNames(0)).toContain('set_card_title');
+  });
+
+  it('only offers set_session_title in DM threads, with the current title in <session>', async () => {
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 47, isMention: false }), io(false).io);
+    expect(toolNames(0)).not.toContain('set_session_title');
+    expect(JSON.stringify(h.model.doStreamCalls[0].prompt.at(-1))).not.toContain('<session>');
+
+    h.sqlHook = (q) => (q.includes('left join agent_sessions') ? [{ isDm: true, title: 'Pico question', titleBy: 'user' }] : undefined);
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 48 }), io().io);
+    expect(toolNames(0)).toContain('set_session_title');
+    const prompt = JSON.stringify(h.model.doStreamCalls[0].prompt.at(-1));
+    expect(prompt).toContain('<session>');
+    expect(prompt).toContain('Title: \\"Pico question\\" (chosen by the user');
   });
 
 });
