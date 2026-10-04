@@ -20,7 +20,7 @@ import { slackCall } from '../../core/slack.js';
 import { oneLine } from '../../agent/util.js';
 import { sanitizeOutgoing } from '../send/logic.js';
 import { ensureThreadRun } from '../../pipeline/scheduler.js';
-import { createScheduledTurnTx, logScheduled, resolveTarget, scheduleEntryCheck } from './deliver.js';
+import { createScheduledTurnTx, logScheduled, resolveDelivery } from './deliver.js';
 import { formatDuration, formatInZone, resolveWhen } from './time.js';
 
 export const MAX_FIRE_ATTEMPTS = 5;
@@ -200,9 +200,9 @@ async function fail(r: ReminderRow & { claimId: string }, reason: string) {
   }
 }
 
-export function renderReminderInput(r: Pick<ReminderRow, 'id' | 'ownerId' | 'text' | 'dueAt' | 'createdAt' | 'tz'>, fallback: boolean): string {
+export function renderReminderInput(r: Pick<ReminderRow, 'id' | 'ownerId' | 'text' | 'dueAt' | 'createdAt' | 'tz'>, fallback: false | 'gone' | 'unavailable'): string {
   const where = fallback
-    ? `The thread where they set it no longer exists, so this runs in a DM with them (the DM starts with a short "reminder" note from you).`
+    ? `The thread where they set it ${fallback === 'gone' ? 'no longer exists' : "can't be used any more (you're not active in that channel now)"}, so this runs in a DM with them (the DM starts with a short "reminder" note from you).`
     : 'This is the thread where they set it.';
   return [
     `<reminder id="${reminderLabel(r.id)}" owner="<@${r.ownerId}>" set="${formatInZone(r.createdAt, r.tz ?? undefined)}" due="${formatInZone(r.dueAt, r.tz ?? undefined)}">`,
@@ -221,20 +221,22 @@ export async function fireReminder(r: ReminderRow & { claimId: string }): Promis
     return 'failed';
   }
   try {
-    const skip = await scheduleEntryCheck(r.ownerId, r.channelId);
-    if (skip) {
-      await releaseClaim(r, 'skipped', skip);
-      log.info({ reminderId: r.id, reason: skip }, 'reminder skipped');
-      await logScheduled(r.threadId, 'reminder_skipped', 'system', { reminderId: r.id, reason: skip });
-      return 'skipped';
-    }
-    const target = await resolveTarget({
+    const delivery = await resolveDelivery({
       ownerId: r.ownerId,
       threadId: r.threadId,
+      channelId: r.channelId,
       idempotencyKey: `reminder-dm:${r.id}`,
-      rootText: `⏰ Reminder for <@${r.ownerId}> (the thread you set it in was deleted)`,
+      rootText: (why) => `⏰ Reminder for <@${r.ownerId}> (${why === 'gone' ? 'the thread you set it in was deleted' : "I can't post in the channel you set it in right now"})`,
     });
-    const input = renderReminderInput(r, target.fallback);
+    if ('skip' in delivery) {
+      // Pause / suspension / a deactivated owner: dropped on purpose (not retried later), see docs/design.md.
+      await releaseClaim(r, 'skipped', delivery.skip);
+      log.info({ reminderId: r.id, reason: delivery.skip }, 'reminder skipped');
+      await logScheduled(r.threadId, 'reminder_skipped', 'system', { reminderId: r.id, reason: delivery.skip });
+      return 'skipped';
+    }
+    const { target } = delivery;
+    const input = renderReminderInput(r, delivery.why ?? false);
     const turnId = await sql.begin(async (tx) => {
       const [cur] = await tx<{ status: string; claimId: string | null }[]>`select status, claim_id from reminders where id = ${r.id} for update`;
       if (!cur || cur.status !== 'firing' || cur.claimId !== r.claimId) return null;

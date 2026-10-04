@@ -400,6 +400,12 @@ export async function checkWatch(w: WatchRow, deps: WatchDeps = defaultDeps): Pr
     idempotencyKey: `watch-dm:${w.id}:${checkNo}`,
     rootText: `👀 Update on a watch for <@${w.ownerId}> (the thread you set it up in was deleted)`,
   });
+  // Entry rules for the channel actually used. (Unlike a one-shot reminder, a watch in a disabled / left channel is
+  // skipped at the start of the check, baseline kept, and resumes when the channel is usable again.)
+  if (target.fallback) {
+    const dmSkip = await scheduleEntryCheck(w.ownerId, parseThreadId(target.threadId).channelId);
+    if (dmSkip) return noteResult(w, `skipped: ${dmSkip}`);
+  }
   const tz = (await getUserInfo(w.ownerId).catch(() => null))?.tz;
   const input = renderWatchInput(w, verdict.summary, g.findings, target.fallback, tz);
   const turnId = await sql.begin(async (tx) => {

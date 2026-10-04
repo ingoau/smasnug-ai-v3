@@ -260,20 +260,21 @@ describe.skipIf(!INTEGRATION)('reminders and watches', () => {
       }
     });
 
-    it('skips quietly when entry rules block it', async () => {
+    it('skips quietly when pause or suspension block it', async () => {
       const cases: [string, (t: { channelId: string }, owner: string) => Promise<() => void | Promise<void>>][] = [
         ['paused', async () => (await state.setPaused(true), () => state.setPaused(false))],
-        ['channel_disabled', async (t) => (await state.setChannelDisabled(t.channelId, true), () => state.setChannelDisabled(t.channelId, false))],
         ['suspended', async (_t, owner) => (await state.setBlock(owner, { suspended: true }), () => state.setBlock(owner, { suspended: false }))],
+        // A disabled channel hides the suspension in checkEntry's order; the DM fallback's own check catches it.
         [
-          'bot_removed',
-          async (t) =>
-            fake.addFakeHandler((m, a) => (m === 'conversations.info' && a.channel === t.channelId ? { ok: true, channel: { id: t.channelId, is_member: false } } : undefined)),
-        ],
-        [
-          'channel_archived',
-          async (t) =>
-            fake.addFakeHandler((m, a) => (m === 'conversations.info' && a.channel === t.channelId ? { ok: true, channel: { id: t.channelId, is_member: true, is_archived: true } } : undefined)),
+          'suspended',
+          async (t, owner) => {
+            await state.setChannelDisabled(t.channelId, true);
+            await state.setBlock(owner, { suspended: true });
+            return async () => {
+              await state.setChannelDisabled(t.channelId, false);
+              await state.setBlock(owner, { suspended: false });
+            };
+          },
         ],
       ];
       for (const [reason, setup] of cases) {
@@ -289,6 +290,49 @@ describe.skipIf(!INTEGRATION)('reminders and watches', () => {
           await undo();
         }
         expect(await reminderRow(id)).toMatchObject({ status: 'skipped', skipReason: reason, turnId: null });
+      }
+    });
+
+    // Regression (review #8): a reminder whose channel can't be used was dropped; it now goes to the owner's DM.
+    it('goes to a DM thread when its channel is disabled, left or archived (also with the root deleted)', async () => {
+      const cases: [string, (t: { channelId: string; threadId: string }) => Promise<() => void | Promise<void>>][] = [
+        ['channel_disabled', async (t) => (await state.setChannelDisabled(t.channelId, true), () => state.setChannelDisabled(t.channelId, false))],
+        [
+          'bot_removed',
+          async (t) =>
+            fake.addFakeHandler((m, a) => (m === 'conversations.info' && a.channel === t.channelId ? { ok: true, channel: { id: t.channelId, is_member: false } } : undefined)),
+        ],
+        [
+          'channel_archived',
+          async (t) =>
+            fake.addFakeHandler((m, a) => (m === 'conversations.info' && a.channel === t.channelId ? { ok: true, channel: { id: t.channelId, is_member: true, is_archived: true } } : undefined)),
+        ],
+        [
+          'disabled + root deleted',
+          async (t) => {
+            await sql`update threads set root_deleted_at = now() where id = ${t.threadId}`;
+            await state.setChannelDisabled(t.channelId, true);
+            return () => state.setChannelDisabled(t.channelId, false);
+          },
+        ],
+      ];
+      for (const [name, setup] of cases) {
+        const t = await newThread();
+        const owner = uid();
+        const id = await dueReminder(t, owner);
+        const undo = await setup(t);
+        try {
+          const r = await reminders.claimDueReminder();
+          expect(r?.id, name).toBe(id);
+          expect(await reminders.fireReminder(r!), name).toBe('fired');
+        } finally {
+          await undo();
+        }
+        const row = await reminderRow(id);
+        expect(row.firedThreadId, name).toMatch(new RegExp(`^D${owner}:`));
+        threads.push(row.firedThreadId);
+        const [inp] = await sql<any[]>`select input from scheduled_turn_inputs where turn_id = ${row.turnId}`;
+        expect(inp.input).toContain('runs in a DM with them');
       }
     });
 
