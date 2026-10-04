@@ -11,8 +11,9 @@
  * - "Users may change the title of a session at any time, even if the agent previously set it", and the app gets
  *   `agent_session_title_changed` (https://docs.slack.dev/reference/events/agent_session_title_changed: `title`,
  *   `previous_title`, `user`). The docs describe it as sent when "a user changes the title"; in case Slack echoes
- *   our own rename, an event without a human `user`, or one repeating the title we set moments ago, is not taken
- *   as a user rename. A user-chosen title is never overwritten afterwards.
+ *   our own rename, an event without a human `user`, or one repeating a title we set within the last two minutes
+ *   (the current one or an earlier one, from the `session_titled` events), is not taken as a user rename. A
+ *   user-chosen title is never overwritten afterwards; one that lands while our rename is in flight is re-applied.
  * - Statuses: `suspended` = "the agent cannot make progress until the user intervenes, for example when the agent
  *   needs user clarification or a tool approval" → a DM turn that leaves a send_message confirmation pending ends
  *   `suspended`, and resolving it (Send / Cancel / expiry) sets `active`. `closed` = "the agent has closed the session
@@ -101,6 +102,15 @@ export async function setSessionTitle(o: { threadId: string; turnId: number; tit
     return `Not renamed: Slack refused (${code}).`;
   }
   await appendEvent(o.threadId, 'session_titled', 'bot', { turnId: o.turnId, title }).catch(() => {});
+  // A user rename that arrived between our claim and our rename was overwritten in Slack by ours, while the DB says
+  // the user's title wins: put theirs back.
+  const after = await loadSessionInfo(o.threadId);
+  if (after.titleBy === 'user' && after.title) {
+    await renameSession(channelId, threadTs, after.title, `session-title:${o.threadId}:${o.turnId}:user`).catch((err) =>
+      log.warn({ err, threadId: o.threadId }, "re-applying the user's session title failed"),
+    );
+    return `Not renamed: the user just named this conversation "${after.title}" themselves. Keep their title.`;
+  }
   return `Conversation titled "${title}".`;
 }
 
@@ -145,6 +155,14 @@ export async function handleSessionTitleChanged(ev: AgentSessionTitleChangedEven
   }
   if (row.titleBy === 'bot' && row.title === title && row.botTitleAt && Date.now() - row.botTitleAt.getTime() < ECHO_WINDOW_MS) {
     log.debug({ threadId }, 'agent session title event repeats our own rename (echo)');
+    return;
+  }
+  // A late echo of an earlier rename of ours (the bot retitled since): any title we set within the window.
+  const [recent] = await sql<{ ours: boolean }[]>`
+    select exists (select 1 from thread_events where thread_id = ${threadId} and type = 'session_titled' and actor = 'bot'
+      and payload->>'title' = ${title} and created_at > now() - ${ECHO_WINDOW_MS} * interval '1 millisecond') as ours`;
+  if (recent?.ours && row.titleBy !== 'user') {
+    log.debug({ threadId }, 'agent session title event repeats an earlier rename of ours (echo)');
     return;
   }
   await sql`

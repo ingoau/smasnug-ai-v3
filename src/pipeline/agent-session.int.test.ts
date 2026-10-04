@@ -111,6 +111,32 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       expect(await s.setSessionTitle({ threadId: t.id, turnId: 2, title: 'Pico power' })).toMatch(/^Conversation titled/);
     });
 
+    it('a late echo of an earlier bot title is not a user rename', async () => {
+      const t = await thread(true);
+      await s.setSessionTitle({ threadId: t.id, turnId: 1, title: 'Pico question' });
+      await s.setSessionTitle({ threadId: t.id, turnId: 2, title: 'Pico power budget' });
+      await processSlackEvent(titleEvent(t, 'Pico question', 'U1')); // echo of turn 1's rename, delivered late
+      expect(await row(t.id)).toMatchObject({ title: 'Pico power budget', titleBy: 'bot', userRenamedAt: null });
+      await processSlackEvent(titleEvent(t, 'My own name', 'U1'));
+      expect(await row(t.id)).toMatchObject({ title: 'My own name', titleBy: 'user' });
+    });
+
+    it('a user rename landing while our rename is in flight wins in Slack too (re-applied)', async () => {
+      const t = await thread(true);
+      const remove = fake.addFakeHandler(async (method, args) => {
+        if (method !== 'agents.sessions.rename' || args.channel_id !== t.channelId || args.title !== 'Pico question') return undefined;
+        await processSlackEvent(titleEvent(t, 'My robot project', 'U1')); // the user renamed between claim and rename
+        return undefined;
+      });
+      try {
+        expect(await s.setSessionTitle({ threadId: t.id, turnId: 1, title: 'Pico question' })).toMatch(/^Not renamed: the user just named this conversation "My robot project"/);
+      } finally {
+        remove();
+      }
+      expect((await calls(t.channelId, 'agents.sessions.rename')).map((c) => c.args.title)).toEqual(['Pico question', 'My robot project']);
+      expect(await row(t.id)).toMatchObject({ title: 'My robot project', titleBy: 'user' });
+    });
+
     it('title events outside DM threads are only logged', async () => {
       const t = await thread(false);
       await processSlackEvent(titleEvent(t, 'Whatever', 'U1'));
