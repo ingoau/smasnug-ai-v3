@@ -47,6 +47,12 @@ scopes.
   fits (docs/design.md "Agent sessions in DMs"). `agent_session_title_changed` records a user's rename so the bot
   never overwrites it.
 - `/smasnug off|on|status` in a channel: only the channel's creator or the admin can toggle it.
+- **Canvases** need the bot scopes `canvases:read` (`read_canvas`) and `canvases:write` (`create_canvas` /
+  `edit_canvas`, sharing via `canvases.access.set`), both in the manifest; an app installed before they were added
+  must be reinstalled to get them (until then the tools tell the model canvases aren't enabled). Creating standalone
+  canvases needs a paid Slack plan: on a free workspace `canvases.create` fails
+  (`free_teams_cannot_create_standalone_canvases`) and the bot answers in the thread instead (a `.md` file for long
+  content).
 
 ## Dev and production apps (Hack Club workspace)
 
