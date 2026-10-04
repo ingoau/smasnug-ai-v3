@@ -392,4 +392,51 @@ describe('runFrontTurn: status activity', () => {
     await runFrontTurn(turn({ id: 63, isMention: false }), c.io);
     expect([a.activity, b.activity, c.activity]).toEqual([[], [], []]);
   });
+
+  describe('activity cards (STATUS_ACTIVITY_MODE=tasks)', () => {
+    const exaOk = async () => Response.json({ results: [{ title: 'Pico', url: 'https://example.com/pico', highlights: ['Costs $7.'] }] });
+    const cards = (m: { args: any }) => (m.args.chunks ?? []).filter((c: any) => c.type === 'task_update').map((c: any) => `${c.title}:${c.status}`);
+
+    it('the lookup shows as a task card in the message the reply then streams into; the final message drops it', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      const released: number[] = [];
+      try {
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), replyStep('About $7 at most shops.'), textStep('')]);
+        const a = ioWithActivity(true);
+        await runFrontTurn(turn({ id: 65 }), { ...a.io, sessionReleased: () => void released.push(1) });
+        const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
+        expect([...new Set(chat.map((c) => c.method))]).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.update']);
+        expect(chat.filter((c) => c.method === 'chat.startStream')).toHaveLength(1); // one message for card + reply
+        expect(cards(chat[0]!)).toEqual(['Searching the web…:in_progress']);
+        expect(cards(chat[1]!)).toEqual(['Searching the web…:complete']);
+        expect(chat[1]!.args.chunks.at(-1)).toMatchObject({ type: 'markdown_text' });
+        expect(chat.at(-1)!.args.blocks).toEqual([{ type: 'markdown', text: 'About $7 at most shops.' }]);
+        expect(released).toEqual([1]); // the reply's stopStream set the session active
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('a turn that looks something up and then stays silent leaves nothing behind', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
+        await runFrontTurn(turn({ id: 66, isMention: false }), ioWithActivity(false).io);
+        expect(h.slack.filter((c) => c.method.startsWith('chat.')).map((c) => c.method)).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete']);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('no activity cards when the pipeline shows no status (no setActivity)', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
+        await runFrontTurn(turn({ id: 67, isMention: false }), io(false).io);
+        expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toEqual([]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  });
 });
