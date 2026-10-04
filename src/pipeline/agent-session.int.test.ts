@@ -219,6 +219,42 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       expect(await redis.get(`activity:open:${crashed!.id}`)).toBeNull();
     });
 
+    it('side paths never overwrite suspended / closed with active (stop, intake clears, a turn without indicator)', async () => {
+      const { clearIntakeStatus } = await import('./session-status.js');
+      const { handleAgentSessionStopped } = await import('./stop.js');
+      const pendingSend = async (threadId: string) =>
+        sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${threadId}, 'C1', 'hi', now() + interval '10 minutes')`;
+      const intake = (threadId: string) => redis.set(`status:intake:${threadId}`, String(Date.now()), 'PX', 60_000);
+
+      // native stop / !stop while a send confirmation is pending: suspended, not active
+      const a = await thread(true);
+      await pendingSend(a.id);
+      await handleAgentSessionStopped({ type: 'agent_session_stopped', channel: a.channelId, thread_ts: a.threadTs, user: 'U1', event_ts: '1700000050.000001' });
+      expect(await statuses(a.channelId)).toEqual(['suspended']);
+
+      // a batch that ends without a turn after the conversation was closed: back to closed
+      const b = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${b.channelId}, '1.1', ${b.id}, 'U1', 'bye')`;
+      await scheduler.scheduleMessages(b.id, 'U1', ['1.1'], true);
+      run.mockImplementationOnce(async (turn: any) => void (await s.requestSessionClose(b.id, Number(turn.id))));
+      await processThreadRun(job({ threadId: b.id }));
+      await intake(b.id);
+      await clearIntakeStatus(b.id, 'U1');
+      expect(await statuses(b.channelId)).toEqual(['processing', 'closed', 'closed']);
+
+      // a turn that never showed the indicator takes back an intake status with its final one
+      const c = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${c.channelId}, '1.1', ${c.id}, 'U1', 'send hi to #general')`;
+      await scheduler.scheduleMessages(c.id, 'U1', ['1.1'], false);
+      run.mockImplementationOnce(async () => {
+        await intake(c.id); // a follow-up's intake status, left for this turn
+        await pendingSend(c.id);
+      });
+      await processThreadRun(job({ threadId: c.id }));
+      expect(await statuses(c.channelId)).not.toContain('active');
+      expect((await statuses(c.channelId)).at(-1)).toBe('suspended');
+    });
+
     it('channel threads keep processing / active even if the turn asked to close', async () => {
       const ch = await thread(false);
       await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${ch.channelId}, '1.1', ${ch.id}, 'U1', 'go away')`;

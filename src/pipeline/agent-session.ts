@@ -167,16 +167,27 @@ export async function requestSessionClose(threadId: string, turnId: number): Pro
 /**
  * The status a turn leaves its session in. DMs: `suspended` while a send confirmation from this thread is pending
  * (the user has to act), `closed` after leave_thread in this turn, else `active`. Channel threads: always `active`.
+ * Without `turnId` (side paths that clear a status outside a turn: intake, stop, a resolved confirmation): the
+ * status the session rests in, i.e. `closed` if the latest turn that ran (or runs) is the one that closed it.
  */
-export async function finalSessionStatus(threadId: string, turnId: number): Promise<FinalSessionStatus> {
-  const [row] = await sql<{ isDm: boolean; closeTurnId: number | null; pendingSend: boolean }[]>`
+export async function finalSessionStatus(threadId: string, turnId?: number): Promise<FinalSessionStatus> {
+  const [row] = await sql<{ isDm: boolean; closeTurnId: number | null; pendingSend: boolean; lastTurnId: number | null }[]>`
     select t.is_dm, s.close_turn_id,
-      exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now()) as pending_send
+      exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now()) as pending_send,
+      (select max(u.id) from turns u where u.thread_id = t.id and u.status <> 'pending') as last_turn_id
     from threads t left join agent_sessions s on s.thread_id = t.id where t.id = ${threadId}`;
   if (!row?.isDm) return 'active';
   if (row.pendingSend) return 'suspended';
-  if (row.closeTurnId != null && Number(row.closeTurnId) === Number(turnId)) return 'closed';
+  const turn = turnId ?? row.lastTurnId;
+  if (row.closeTurnId != null && turn != null && Number(row.closeTurnId) === Number(turn)) return 'closed';
   return 'active';
+}
+
+/** Set the session's resting status (finalSessionStatus without a turn) from a side path. Never throws. */
+export async function restoreSessionStatus(threadId: string, userId?: string): Promise<void> {
+  const status = await finalSessionStatus(threadId).catch((err) => (log.warn({ err, threadId }, 'finalSessionStatus failed'), 'active' as const));
+  const { channelId, threadTs } = parseThreadId(threadId);
+  await setSessionStatus(channelId, threadTs, status, userId);
 }
 
 /**
@@ -191,8 +202,7 @@ export async function resumeSuspendedSession(threadId: string | null | undefined
       from threads t where t.id = ${threadId}`;
     if (!row?.isDm || row.pendingSend) return;
     if (await isLocked(threadLockKey(threadId))) return;
-    const { channelId, threadTs } = parseThreadId(threadId);
-    await setSessionStatus(channelId, threadTs, 'active');
+    await restoreSessionStatus(threadId); // `active` (or `closed` if the conversation was closed meanwhile)
   } catch (err) {
     log.warn({ err, threadId }, 'resuming a suspended session failed');
   }

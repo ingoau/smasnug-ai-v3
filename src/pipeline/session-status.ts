@@ -27,6 +27,8 @@ import { slackCall, slackErrorCode } from '../core/slack.js';
 import { markMessage } from '../core/timing.js';
 import { log } from '../log.js';
 import { isLocked, threadLockKey } from './lock.js';
+// Cyclic, functions only (agent-session.ts imports setSessionStatus from here): resolved at call time.
+import { restoreSessionStatus } from './agent-session.js';
 
 export type SessionStatus = 'active' | 'processing' | 'suspended' | 'closed';
 /** The status a turn leaves the session in (DMs only use the last two, see agent-session.ts). */
@@ -201,9 +203,10 @@ export function showIntakeStatus(threadId: string, userId: string, messageTs: st
     await redis.set(intakeKey(threadId), String(at), 'PX', INTAKE_TTL_MS);
     const cleared = Number(await redis.get(clearedKey(threadId)));
     if (cleared > at) {
-      // A turn finished (cleared the status) while our call was in flight: don't leave `processing` behind.
+      // A turn finished (cleared the status) while our call was in flight: don't leave `processing` behind, and
+      // put back what that turn left (DMs: maybe `suspended` / `closed`).
       await redis.del(intakeKey(threadId));
-      await setSessionStatus(channelId, threadTs, 'active', userId);
+      await restoreSessionStatus(threadId, userId);
     }
   })().catch((err) => log.warn({ err, threadId }, 'intake status failed'));
 }
@@ -224,10 +227,15 @@ export async function noteStatusCleared(threadId: string): Promise<void> {
     .catch(() => {});
 }
 
-/** A debounce batch ended without a turn: clear the intake status if it is still showing. */
-export async function clearIntakeStatus(threadId: string, userId?: string): Promise<void> {
+/**
+ * A debounce batch ended without a turn (or a turn that never showed the indicator ends): clear the intake status if
+ * it is still showing, back to `status` (a turn's final status) or else the session's resting status (DMs may rest
+ * `suspended` / `closed`, see agent-session.ts).
+ */
+export async function clearIntakeStatus(threadId: string, userId?: string, status?: FinalSessionStatus): Promise<void> {
   const v = await redis.getdel(intakeKey(threadId)).catch(() => null);
   if (v == null) return;
   const { channelId, threadTs } = threadParts(threadId);
-  await setSessionStatus(channelId, threadTs, 'active', userId);
+  if (status) await setSessionStatus(channelId, threadTs, status, userId);
+  else await restoreSessionStatus(threadId, userId);
 }

@@ -122,7 +122,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     // This turn cleared the indicator (any intake status with it); a turn that never showed one still takes back an
     // intake status left for messages that ended up in its inbox.
     if (indicator.isShown) await noteStatusCleared(turn.threadId);
-    else await clearIntakeStatus(turn.threadId, turn.authorId);
+    else await clearIntakeStatus(turn.threadId, turn.authorId, final);
     const followUp = await finishTurn(turn.id, status);
     await appendEvent(turn.threadId, 'turn_finished', 'system', {
       turnId: turn.id,
