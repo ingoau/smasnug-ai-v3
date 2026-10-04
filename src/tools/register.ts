@@ -10,6 +10,7 @@ import './read-history.js';
 import './public-thread.js';
 import './read-image.js';
 import './emoji.js';
+import './canvases.js';
 import { pruneImageCache } from './read-image.js';
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {};

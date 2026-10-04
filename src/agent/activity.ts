@@ -19,6 +19,9 @@ const LABELS: Record<string, string> = {
   propose_workspace_fact: 'Noting a workspace fact…',
   send_message: 'Preparing a message…',
   set_card_title: 'Writing up the results…',
+  read_canvas: 'Reading the canvas…',
+  create_canvas: 'Writing a canvas…',
+  edit_canvas: 'Updating the canvas…',
 };
 
 /** Tools that only respond; they never show or change the indicator. */

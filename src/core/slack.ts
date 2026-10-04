@@ -41,6 +41,13 @@ const METHOD_RPM: Record<string, number> = {
   'conversations.history': 50,
   'users.info': 100,
   'views.publish': 100,
+  // Canvases (tiers from docs.slack.dev/reference/methods/canvases.*): create is tier 2, the rest tier 3.
+  'canvases.create': 20,
+  'canvases.edit': 50,
+  'canvases.getContent': 50,
+  'canvases.sections.lookup': 50,
+  'canvases.access.set': 50,
+  'files.info': 100,
 };
 /**
  * Posting a new message is ~1/sec per channel in Slack's docs; allow short bursts. Only calls that create a message

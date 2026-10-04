@@ -111,6 +111,10 @@ export async function fakeCall(method: string, args: Record<string, unknown>, to
       return { ok: true, messages: { matches: [], total: 0 } };
     case 'files.getUploadURLExternal':
       return { ok: true, upload_url: 'https://fake.invalid/upload', file_id: `F${++counter}` };
+    case 'canvases.create':
+      return { ok: true, canvas_id: `FCANVAS${++counter}` };
+    case 'canvases.getContent':
+      return { ok: true, content: '' };
     default:
       return { ok: true };
   }

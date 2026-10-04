@@ -75,4 +75,14 @@ export const limits = {
   webSearchDefaultResults: 5,
   webSearchMaxResults: 10,
   webSearchTimeoutMs: 10_000,
+  // canvases (src/tools/canvases.ts)
+  userCanvasReadsPerHour: 60,
+  /** create_canvas + edit_canvas calls. */
+  userCanvasWritesPerHour: 30,
+  /** read_canvas returns at most this many chars per call (`offset` pages through the rest). */
+  canvasReadMaxChars: 24_000,
+  /** create_canvas / edit_canvas content cap (Slack allows 1 MiB per change). */
+  canvasWriteMaxChars: 100_000,
+  /** bot_canvases rows (what makes a canvas editable) are dropped after this long without use. */
+  canvasRowExpiryMs: 180 * 24 * 60 * 60 * 1000,
 } as const;
