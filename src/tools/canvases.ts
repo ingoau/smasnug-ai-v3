@@ -272,7 +272,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        `Edit a canvas YOU created (only those; never someone else's). action: "append" adds content at the end; "replace_section" replaces everything under the heading \`heading\` (the heading stays unless your content starts with a heading); "replace_all" replaces the whole document; "rename" sets a new \`title\`. ${canvasMarkdownHint}`,
+        `Edit a canvas YOU created, only when the speaker is the person who asked for it (never someone else's). action: "append" adds content at the end; "replace_section" replaces everything under the heading \`heading\` (the heading stays unless your content starts with a heading); "replace_all" replaces the whole document; "rename" sets a new \`title\`. ${canvasMarkdownHint}`,
       inputSchema: z.object({
         canvas: z.string().describe('Canvas link or id (F…)'),
         action: z.enum(EDIT_ACTIONS),
@@ -285,8 +285,8 @@ registerTool({
         if (!canvasId) return NOT_A_CANVAS;
         const row = await getBotCanvas(canvasId);
         if (!row) return "I can only edit canvases I created, and this one isn't mine. I can read it (if it's shared here or in a public channel) and make a new canvas instead.";
-        if (!canEditCanvas(row, ctx.channelId, ctx.speakerId))
-          return 'That canvas was made for someone else in another conversation; I only edit it there or for the person who asked for it.';
+        if (!canEditCanvas(row, ctx.speakerId))
+          return `That canvas belongs to <@${row.creatorId}> (they asked for it); only they can have me edit it. I can make a new canvas instead.`;
         const key = `${ctx.turnId ?? ctx.threadId}:${hash(JSON.stringify([canvasId, input.action, input.heading ?? '', input.title ?? '', input.content ?? '']))}`;
         const over = await takeLimit('canvas_write', ctx.speakerId, ctx.threadId);
         if (over) return over;

@@ -91,7 +91,7 @@ Fetch URL (no local addresses)
 
 ✓
 ✓
-`create_canvas`, `edit_canvas` (edit: the bot's own canvases only)
+`create_canvas`, `edit_canvas` (edit: the bot's own canvases, for their creator only)
 
 ✓
 
@@ -244,7 +244,7 @@ Long-form deliverables (research write-ups, guides, plans, comparison tables) go
 - 
 **create_canvas(title, content)** (front only): `canvases.create` (standalone, owned by the bot) with the markdown converted to canvas syntax (`<@U…>` → `![](@U…)`, `<#C…>` → `![](#C…)`, `<url|text>` → `[text](url)`) and group pings neutralised (also the canvas forms). Access via `canvases.access.set`: the current channel gets read (`channel_ids`), a group DM's members get read by user id (channel ids are invalid there), the speaker gets write. Recorded in `bot_canvases` (canvas, channel, thread, creator = speaker, turn, title, link). Idempotent per turn + title/content hash (DB row + Slack idempotency key), so a retried turn or a repeated call returns the same canvas.
 - 
-**edit_canvas(canvas, action, …)** (front only): only canvases in `bot_canvases`, and only from the conversation they were made in or by their creator, so the bot can't be steered into editing anyone else's canvas. `append` (`insert_at_end`), `replace_all` (`replace` without section), `rename` (`title_content`), and `replace_section(heading, content)`: the canvas markdown is read, everything under the matching heading (up to the next heading of the same or higher level) is replaced, and the result is written back with `replace`. `canvases.sections.lookup` isn't used: a section id names a single block (a heading is its own section) and lookup can't list the blocks under a heading. Idempotent per turn + input hash. A canvas that no longer exists drops its row.
+**edit_canvas(canvas, action, …)** (front only): only canvases in `bot_canvases`, and only when the speaker is their creator (the person who asked for them; others in the same channel can read but not edit it), so the bot can't be steered into editing anyone else's canvas. `append` (`insert_at_end`), `replace_all` (`replace` without section), `rename` (`title_content`), and `replace_section(heading, content)`: the canvas markdown is read, everything under the matching heading (up to the next heading of the same or higher level) is replaced, and the result is written back with `replace`. `canvases.sections.lookup` isn't used: a section id names a single block (a heading is its own section) and lookup can't list the blocks under a heading. Idempotent per turn + input hash. A canvas that no longer exists drops its row.
 - 
 Channel canvases (`conversations.canvases.create`) are not used: they change a channel's tab for everyone and a channel has only one.
 - 

@@ -56,11 +56,11 @@ describe('access rule', () => {
     expect(decideCanvasAccess({ ...base, file, publicIds: new Set(['CNOTSHARED']) }).ok).toBe(false);
     expect(decideCanvasAccess({ ...base, file: null }).ok).toBe(false);
   });
-  it('edit only bot-created, from its conversation or for its creator', () => {
-    expect(canEditCanvas(null, 'CHERE', 'USPEAK')).toBe(false);
-    expect(canEditCanvas({ channelId: 'CHERE', creatorId: 'UOTHER' }, 'CHERE', 'USPEAK')).toBe(true);
-    expect(canEditCanvas({ channelId: 'CELSE', creatorId: 'USPEAK' }, 'CHERE', 'USPEAK')).toBe(true);
-    expect(canEditCanvas({ channelId: 'CELSE', creatorId: 'UOTHER' }, 'CHERE', 'USPEAK')).toBe(false);
+  it('edit only bot-created, and only for its creator', () => {
+    expect(canEditCanvas(null, 'USPEAK')).toBe(false);
+    expect(canEditCanvas({ creatorId: 'USPEAK' }, 'USPEAK')).toBe(true);
+    // Same channel isn't enough: someone else's canvas stays theirs.
+    expect(canEditCanvas({ creatorId: 'UOTHER' }, 'USPEAK')).toBe(false);
   });
 });
 

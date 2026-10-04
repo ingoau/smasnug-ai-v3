@@ -100,11 +100,11 @@ export function decideCanvasAccess(o: {
 }
 
 /**
- * edit_canvas rule: only canvases the bot created, and only from the conversation they were created in or by the
- * speaker who asked for them, so the bot can't be steered into editing someone else's canvas.
+ * edit_canvas rule: only canvases the bot created, and only for the speaker who asked for them (their deliverable).
+ * Being in the same channel isn't enough: anyone there could otherwise get the bot to rewrite someone else's canvas.
  */
-export function canEditCanvas(row: Pick<BotCanvasRow, 'channelId' | 'creatorId'> | null | undefined, channelId: string, speakerId: string): boolean {
-  return !!row && (row.channelId === channelId || row.creatorId === speakerId);
+export function canEditCanvas(row: Pick<BotCanvasRow, 'creatorId'> | null | undefined, speakerId: string): boolean {
+  return !!row && row.creatorId === speakerId;
 }
 
 /** Split markdown into alternating prose / fenced-code segments (code segments include their fences). */

@@ -183,7 +183,7 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
     expect((await sql`select title from bot_canvases where canvas_id = ${id}`)[0]!.title).toBe('Trip v2');
   });
 
-  it('edit: refused for canvases the bot did not create, and for its canvases elsewhere', async () => {
+  it("edit: refused for canvases the bot did not create, and for other people's canvases", async () => {
     const foreign = `F${rand()}${rand()}`;
     content.set(foreign, '# theirs');
     files.set(foreign, { id: foreign, channels: [PUB] });
@@ -193,7 +193,10 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
     const id = linkOf(await exec('front', await ctx(PUB, 'UOWNER'), 'create_canvas', { title: 'Mine', content: 'a' }))![2]!;
     calls = [];
     const elsewhere = await exec('front', await ctx(OTHERPUB, 'USTRANGER'), 'edit_canvas', { canvas: id, action: 'append', content: 'b' });
-    expect(elsewhere).toMatch(/someone else/);
+    expect(elsewhere).toMatch(/belongs to <@UOWNER>/);
+    // Someone else in the same channel can't have it rewritten either.
+    const sameChannel = await exec('front', await ctx(PUB, 'USTRANGER'), 'edit_canvas', { canvas: id, action: 'replace_all', content: 'pwned' });
+    expect(sameChannel).toMatch(/belongs to <@UOWNER>/);
     expect(callsOf('canvases.edit')).toHaveLength(0);
     // The creator can edit it from anywhere.
     expect(await exec('front', await ctx(OTHERPUB, 'UOWNER'), 'edit_canvas', { canvas: id, action: 'append', content: 'c' })).toMatch(/Canvas updated/);
