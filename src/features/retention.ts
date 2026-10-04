@@ -57,6 +57,9 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
     sql`delete from bot_reports where status <> 'pending' and coalesce(reviewed_at, created_at) < ${older(long)} returning id`,
   );
 
+  // Canvases the bot made stay in Slack (user deliverables); the row that makes one editable goes after long disuse.
+  await run('bot_canvases', sql`delete from bot_canvases where last_used_at < ${older(secs(limits.canvasRowExpiryMs))} returning canvas_id`);
+
   await run('pending_sends', sql`delete from pending_sends where created_at < ${older(short)} returning id`);
   await run('idempotency_keys', sql`delete from idempotency_keys where created_at < ${older(short)} returning key`);
   await run('slack_events_seen', sql`delete from slack_events_seen where received_at < ${older(short)} returning event_id`);

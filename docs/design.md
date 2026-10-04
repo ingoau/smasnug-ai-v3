@@ -83,6 +83,14 @@ Fetch URL (no local addresses)
 
 ✓
 
+`read_canvas` (canvases shared in this conversation or a verified public channel, or the bot's own; see Canvases and artifacts)
+
+✓
+✓
+`create_canvas`, `edit_canvas` (edit: the bot's own canvases only)
+
+✓
+
 Plain text output from the front agent is never shown to users; everything visible goes through tools. Discarded text is logged for debugging.
 ## When the bot responds
 The bot always runs on a mention or DM. In threads where it has been mentioned, follow-ups pass through three layers so it replies when it is useful and stays quiet otherwise.
@@ -217,6 +225,20 @@ Cancelled
 If a lookup fails or `reactions.add` returns `invalid_name`, fall back to `thumbsup` or skip silently.
 ### Files
 The `reply` and `send_message` tools accept file attachments, uploaded via `files.getUploadURLExternal` and `files.completeUploadExternal`. When a reply is streamed, files are uploaded after `stopStream` so they land just below it.
+### Canvases and artifacts
+Long-form deliverables (research write-ups, guides, plans, comparison tables) go into a Slack canvas instead of a wall of text: the front agent calls `create_canvas(title, content)` and replies with a short summary plus the link. Subagents only read canvases; for long deliverables they return the full markdown and the front agent publishes it. Code, scripts and HTML prototypes are attached as files through `reply(files)` (any text file; Slack picks the type from the extension).
+- 
+**read_canvas(canvas, offset?)** (front + children): link (`https://<ws>.slack.com/docs/T…/F…`, also `app.slack.com/docs/…` and `/files/U…/F…` permalinks) or `F…` id. Fail closed, allowed only when: the bot created it in this conversation, for the speaker, or in a verified public channel; or it is shared in / linked to the current conversation; or it is shared in / linked to a channel verified public via cached `conversations.info` (same check as Slack search). Where it is shared comes from `files.info` with the bot token (`channels`, `groups`, `ims`, `shares`, `linked_channel_id`), so canvases the bot can't see are refused. Content from `canvases.getContent` (markdown; canvas mentions `![](@U…)` turned back into `<@U…>`), wrapped as untrusted, 24k chars per call with `offset` paging. Counted against an hourly per-user limit.
+- 
+**create_canvas(title, content)** (front only): `canvases.create` (standalone, owned by the bot) with the markdown converted to canvas syntax (`<@U…>` → `![](@U…)`, `<#C…>` → `![](#C…)`, `<url|text>` → `[text](url)`) and group pings neutralised (also the canvas forms). Access via `canvases.access.set`: the current channel gets read (`channel_ids`), a group DM's members get read by user id (channel ids are invalid there), the speaker gets write. Recorded in `bot_canvases` (canvas, channel, thread, creator = speaker, turn, title, link). Idempotent per turn + title/content hash (DB row + Slack idempotency key), so a retried turn or a repeated call returns the same canvas.
+- 
+**edit_canvas(canvas, action, …)** (front only): only canvases in `bot_canvases`, and only from the conversation they were made in or by their creator, so the bot can't be steered into editing anyone else's canvas. `append` (`insert_at_end`), `replace_all` (`replace` without section), `rename` (`title_content`), and `replace_section(heading, content)`: the canvas markdown is read, everything under the matching heading (up to the next heading of the same or higher level) is replaced, and the result is written back with `replace`. `canvases.sections.lookup` isn't used: a section id names a single block (a heading is its own section) and lookup can't list the blocks under a heading. Idempotent per turn + input hash. A canvas that no longer exists drops its row.
+- 
+Channel canvases (`conversations.canvases.create`) are not used: they change a channel's tab for everyone and a channel has only one.
+- 
+**Artifacts.** Slack Code (2026) shows agent "artifacts" (code diffs, Block Kit views, HTML previews, canvases) in code channels, but there is no documented public API for apps to publish them: docs.slack.dev has no artifact methods, the help article only says "Code channel APIs will be available to any developer", and code channels (`features.code_channels` manifest flag) appear limited to a list of partner agents for now (checked 2026-10). Artifacts in code channels are collected from what the agent shares there (canvases, files), so the canvases and file attachments above are what this bot publishes. Revisit when an API is documented.
+- 
+Retention: canvases are user deliverables and are never deleted from Slack. A `bot_canvases` row holds no content and is what keeps a canvas editable, so it outlives thread retention and is deleted after 180 days without use (create, read or edit).
 ## Context, images and the web
 ### Thread context
 Each turn includes the thread's parent message plus the last 29 replies, and about 5 channel messages from around the thread's parent.

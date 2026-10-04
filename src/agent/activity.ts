@@ -20,6 +20,9 @@ const LABELS: Record<string, string> = {
   send_message: 'Preparing a message…',
   set_card_title: 'Writing up the results…',
   slack_semantic_search: 'Searching Slack…',
+  read_canvas: 'Reading the canvas…',
+  create_canvas: 'Writing a canvas…',
+  edit_canvas: 'Updating the canvas…',
 };
 
 /** Tools that only respond; they never show or change the indicator. */
