@@ -75,6 +75,10 @@ Fetch URL (no local addresses)
 
 ✓
 
+`set_session_title` (DM threads only)
+
+✓
+
 `remember`, `forget`, `propose_workspace_fact`
 
 ✓
@@ -213,6 +217,14 @@ Cancelled
 If a lookup fails or `reactions.add` returns `invalid_name`, fall back to `thumbsup` or skip silently.
 ### Files
 The `reply` and `send_message` tools accept file attachments, uploaded via `files.getUploadURLExternal` and `files.completeUploadExternal`. When a reply is streamed, files are uploaded after `stopStream` so they land just below it.
+### Agent sessions in DMs
+Slack lists agent sessions (one per thread) in the user's sidebar with a title and a status. In DM threads with the bot (`threads.is_dm`, channel type `im`) the bot manages both (`src/pipeline/agent-session.ts`, table `agent_sessions`); channel threads keep the plain processing/active indicator and get no title.
+-
+**Titles.** The front agent gets `set_session_title` only in DM threads, and the turn prompt shows the current title in `<session>`. It titles a conversation on its first substantive turn (≤ 40 characters, one line, markup stripped) and retitles only when the topic clearly changes; at most one title per turn (idempotent). It uses `agents.sessions.rename` (`chat:write`); `agents.sessions.setStatus`'s `title` only applies when a session is created, which intake already did, so it is just the fallback for `session_not_found`.
+-
+**User renames win.** `agent_session_title_changed` with a human `user` stores the user's title; the bot never renames that session again (the tool says so). Events without a user, from the bot user, or repeating the bot's own title within two minutes are treated as the echo of our rename.
+-
+**Statuses.** A DM turn ends `suspended` instead of `active` while a `send_message` confirmation from that thread is pending (Slack: "needs user clarification or a tool approval"); Send, Cancel or expiry set it `active` again. `leave_thread` in a DM (DMs always reach the bot, so it doesn't disengage there) ends the turn `closed`: the conversation shows as done until the user writes again, which starts a normal turn (`processing`, then `active`). The prompt asks for it only when the user wraps up.
 ## Context, images and the web
 ### Thread context
 Each turn includes the thread's parent message plus the last 29 replies, and about 5 channel messages from around the thread's parent.

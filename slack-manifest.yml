@@ -62,7 +62,7 @@ settings:
       - app_home_opened
       - app_context_changed          # what the user is viewing while the agent container is open
       - agent_session_stopped        # native stop button
-      - agent_session_title_changed
+      - agent_session_title_changed  # user renamed a session: never overwritten (DM titles)
       - reaction_added               # reactions shown in context (messages.reactions); never start a turn
       - reaction_removed
   interactivity:

@@ -42,7 +42,9 @@ scopes.
   `agent_session_stopped`). Clicking it behaves like saying "stop": the running turn ends at its next step, active
   subagent runs in the thread are cancelled, the user's queued turns are dropped, the thread disengages, and the bot
   confirms with "Stopped.".
-- `agent_session_title_changed` is only logged.
+- DM threads get a session title (`agents.sessions.rename`, `chat:write`) and end `suspended` / `closed` where it
+  fits (docs/design.md "Agent sessions in DMs"). `agent_session_title_changed` records a user's rename so the bot
+  never overwrites it.
 - `/smasnug off|on|status` in a channel: only the channel's creator or the admin can toggle it.
 
 ## Dev and production apps (Hack Club workspace)
