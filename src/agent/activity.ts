@@ -46,3 +46,14 @@ export function activityForTool(toolName: string): string | null {
   if (RESPONDING.has(toolName) || SILENT.has(toolName)) return null;
   return LABELS[toolName] ?? DEFAULT_ACTIVITY;
 }
+
+/**
+ * Bookkeeping a turn typically does after it has replied (notes, workspace facts, reminders / watches): once the
+ * reply is visible these change nothing on screen, so the session doesn't flip back to "Working…" for them.
+ */
+const QUIET_AFTER_REPLY = new Set(['remember', 'forget', 'propose_workspace_fact', 'set_reminder', 'list_reminders', 'cancel_reminder', 'create_watch', 'list_watches', 'cancel_watch']);
+
+/** True if this tool, started after the turn's reply became visible, should not touch the status indicator. */
+export function quietAfterReply(toolName: string): boolean {
+  return QUIET_AFTER_REPLY.has(toolName);
+}

@@ -168,8 +168,12 @@ export class ReplyManager {
       : null;
   }
 
-  /** A tool that commits the turn to work started (code-derived label): show it as an activity card. Never blocks. */
+  /**
+   * A tool that commits the turn to work started (code-derived label): show it as an activity card. Never blocks.
+   * Not once a reply is visible: a new activity message would appear below the reply (and flash away again).
+   */
   activity(text: string): void {
+    if (this.anyVisible) return;
     this.trail?.activity(text);
   }
 

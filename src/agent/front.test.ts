@@ -437,8 +437,37 @@ describe('runFrontTurn: status activity', () => {
       vi.stubGlobal('fetch', exaOk);
       try {
         h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
-        await runFrontTurn(turn({ id: 66, isMention: false }), ioWithActivity(false).io);
-        expect(h.slack.filter((c) => c.method.startsWith('chat.')).map((c) => c.method)).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete']);
+        await runFrontTurn(turn({ id: 66 }), ioWithActivity(true).io);
+        // the activity message is gone before the mention fallback is posted
+        expect(h.slack.filter((c) => c.method.startsWith('chat.')).map((c) => c.method)).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.postMessage']);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('unmentioned follow-ups get no cards (no post + delete in the thread), only the lifecycle status', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
+        const a = ioWithActivity(false);
+        await runFrontTurn(turn({ id: 68, isMention: false }), a.io);
+        expect(a.activity).toEqual(['Searching the web…']);
+        expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toEqual([]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('no new activity message once the turn has replied (the status still shows the work)', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.model = mockModel([replyStep('Let me check.'), toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
+        const a = ioWithActivity(true);
+        await runFrontTurn(turn({ id: 69 }), a.io);
+        expect(a.activity).toEqual(['Searching the web…']);
+        const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
+        expect(chat.filter((c) => c.method === 'chat.startStream')).toHaveLength(1); // the reply only
+        expect(chat.flatMap(cards)).toEqual([]);
       } finally {
         vi.unstubAllGlobals();
       }

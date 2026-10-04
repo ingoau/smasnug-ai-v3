@@ -322,6 +322,15 @@ describe('ReplyManager with activity cards', () => {
     expect(methods()).toEqual(['chat.startStream', 'chat.postMessage', 'chat.stopStream', 'chat.delete']);
   });
 
+  it('no activity message once a reply is visible', async () => {
+    const rm = new ReplyManager(target());
+    await rm.finish('tc1', 'Done, noted.');
+    rm.activity('Saving a note…');
+    await sleep(20);
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.postMessage']);
+  });
+
   it('without activityCards nothing is shown', async () => {
     const rm = new ReplyManager({ ...target(), activityCards: false });
     rm.activity('Searching Slack…');
