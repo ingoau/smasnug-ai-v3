@@ -18,6 +18,7 @@
  * - Own timeout (limits.cursorRunMaxMs, 3h): the Cursor run is cancelled and the bot run fails.
  */
 import { randomUUID } from 'node:crypto';
+import type { TransactionSql } from 'postgres';
 import { env, limits } from '../../config.js';
 import { appendEvent, shortId } from '../../core/events.js';
 import { sql } from '../../db/index.js';
@@ -279,6 +280,7 @@ interface Claimed {
   followUps: number;
   prUrl: string | null;
   pollErrors: number;
+  inboxDefers: number;
   claimId: string;
   createdAt: Date;
   // from runs / subagents
@@ -295,13 +297,13 @@ const LEASE_S = limits.cursorPollLeaseMs / 1000;
 /** Claim one due Cursor-backed run (or one whose lease ran out); `runId` restricts it to that run. */
 export async function claimDueCursorRun(runId?: number): Promise<Claimed | null> {
   const only = runId != null ? sql`and c2.run_id = ${runId}` : sql``;
-  const [c] = await sql<{ runId: number; agentId: string; cursorRunId: string | null; followUps: number; prUrl: string | null; pollErrors: number; claimId: string; createdAt: Date }[]>`
+  const [c] = await sql<{ runId: number; agentId: string; cursorRunId: string | null; followUps: number; prUrl: string | null; pollErrors: number; inboxDefers: number; claimId: string; createdAt: Date }[]>`
     update cursor_runs c set claim_id = gen_random_uuid(), claimed_until = now() + ${LEASE_S} * interval '1 second', last_polled_at = now()
     where c.run_id = (
       select c2.run_id from cursor_runs c2 join runs r on r.id = c2.run_id
       where r.status = 'running' and c2.next_poll_at <= now() and (c2.claim_id is null or c2.claimed_until < now()) ${only}
       order by c2.next_poll_at limit 1 for update of c2 skip locked)
-    returning c.run_id::int as run_id, c.agent_id, c.cursor_run_id, c.follow_ups, c.pr_url, c.poll_errors, c.claim_id, c.created_at`;
+    returning c.run_id::int as run_id, c.agent_id, c.cursor_run_id, c.follow_ups, c.pr_url, c.poll_errors, c.inbox_defers, c.claim_id, c.created_at`;
   if (!c) return null;
   const [r] = await sql<{ subagentId: string; threadId: string; cardId: number | null; cancelRequested: boolean; startedAt: Date | null; agentUrl: string | null }[]>`
     select r.subagent_id, r.thread_id, r.card_id::int as card_id, r.cancel_requested, r.started_at, s.cursor_agent_url as agent_url
@@ -311,21 +313,47 @@ export async function claimDueCursorRun(runId?: number): Promise<Claimed | null>
 }
 
 /** Release our claim and schedule the next poll (only if we still hold it). */
-async function release(c: Claimed, inMs: number, patch: { cursorStatus?: string; pollErrors?: number; lastError?: string | null } = {}) {
+async function release(c: Claimed, inMs: number, patch: { cursorStatus?: string; pollErrors?: number; inboxDefers?: number; lastError?: string | null } = {}) {
   await sql`
     update cursor_runs set claim_id = null, claimed_until = null,
       next_poll_at = now() + ${Math.max(0, inMs) / 1000} * interval '1 second',
       cursor_status = coalesce(${patch.cursorStatus ?? null}, cursor_status),
       poll_errors = coalesce(${patch.pollErrors ?? null}, poll_errors),
+      inbox_defers = coalesce(${patch.inboxDefers ?? null}, inbox_defers),
       last_error = case when ${patch.lastError !== undefined} then ${patch.lastError ?? null} else last_error end
     where run_id = ${c.runId} and claim_id = ${c.claimId}`;
 }
 
+/** Finishing a run deferred this many times for steers that arrived meanwhile (`'inbox'`) ends it anyway. */
+const MAX_INBOX_DEFERS = 3;
+
+/**
+ * Finish the bot run, atomically with a re-check that we still hold the claim (a poller whose lease ran out must not
+ * finish a run another poller now handles). A `complete` that finds unseen steers (`'inbox'`) is normally deferred:
+ * the next poll sends them as a follow-up. But never forever: a cancel request, or the defer count (kept in
+ * cursor_runs.inbox_defers) reaching MAX_INBOX_DEFERS, finishes with the steers dropped.
+ */
 async function finish(c: Claimed, outcome: RunOutcome): Promise<'ok' | 'inbox' | 'gone'> {
-  const res = await finishRun({ id: c.runId, subagentId: c.subagentId, threadId: c.threadId, cardId: c.cardId }, outcome);
-  if (res === 'inbox') await release(c, 0); // a steer arrived just now: the next poll sends it as a follow-up
-  else await sql`update cursor_runs set claim_id = null, claimed_until = null where run_id = ${c.runId} and claim_id = ${c.claimId}`;
+  const run = { id: c.runId, subagentId: c.subagentId, threadId: c.threadId, cardId: c.cardId };
+  const guard = async (tx: TransactionSql<{}>) =>
+    (await tx`select 1 from cursor_runs where run_id = ${c.runId} and claim_id = ${c.claimId} for update`).length > 0;
+  const defers = c.inboxDefers + 1;
+  const dropInbox = c.cancelRequested || defers >= MAX_INBOX_DEFERS;
+  const res = await finishRun(run, outcome, { guard, dropInbox });
+  if (res === 'inbox') {
+    // A steer arrived just now: the next poll sends it as a follow-up.
+    await release(c, 0, { inboxDefers: defers });
+    return res;
+  }
+  if (res === 'ok' && dropInbox && !c.cancelRequested) log.warn({ runId: c.runId }, 'cursor run finished with queued steers dropped (deferred too often)');
+  await sql`update cursor_runs set claim_id = null, claimed_until = null where run_id = ${c.runId} and claim_id = ${c.claimId}`;
   return res;
+}
+
+/** Extend our lease before a slow step; false if the claim was lost (another poller has the run now). */
+async function renewClaim(c: Claimed): Promise<boolean> {
+  const rows = await sql`update cursor_runs set claimed_until = now() + ${LEASE_S} * interval '1 second' where run_id = ${c.runId} and claim_id = ${c.claimId} returning run_id`;
+  return rows.length > 0;
 }
 
 const elapsedMs = (c: Claimed) => Date.now() - (c.startedAt?.getTime() ?? c.createdAt.getTime());
@@ -398,6 +426,9 @@ async function handleClaimed(c: Claimed): Promise<void> {
       if (agent.latestRunId) {
         await sql`update cursor_runs set cursor_run_id = ${agent.latestRunId} where run_id = ${c.runId} and claim_id = ${c.claimId}`;
         await release(c, 0);
+      } else if (elapsedMs(c) > limits.cursorRunMaxMs) {
+        // The agent exists but never got a run: don't poll it forever (and free the cursorMaxActive slot).
+        await finish(c, { status: 'error', error: 'The Cursor agent never started a run' });
       } else await release(c, limits.cursorPollMs);
     } catch (err) {
       if (err instanceof CursorApiError && err.status === 404 && Date.now() - c.createdAt.getTime() > 2 * 60_000)
@@ -447,9 +478,14 @@ async function handleClaimed(c: Claimed): Promise<void> {
   if (run.status === 'FINISHED' && !c.cancelRequested) {
     const steers = await takeQueuedSteers(c.subagentId);
     if (steers.texts.length) {
+      // Our lease must outlast the call, and a poller that lost its claim must not send anything.
+      if (!(await renewClaim(c))) {
+        await sql`update subagent_inbox set consumed_at = null where id = any(${steers.ids}::bigint[])`;
+        return;
+      }
       try {
         const next = await api.createRun(c.agentId, composeCursorFollowUp(steers.texts, cfg));
-        await sql`update cursor_runs set cursor_run_id = ${next.id}, cursor_status = ${next.status}, follow_ups = follow_ups + 1
+        await sql`update cursor_runs set cursor_run_id = ${next.id}, cursor_status = ${next.status}, follow_ups = follow_ups + 1, inbox_defers = 0
                   where run_id = ${c.runId} and claim_id = ${c.claimId}`;
         await sql`update runs set details = ${describeRunStatus('CREATING', c.followUps + 1)}, heartbeat_at = now() where id = ${c.runId} and status = 'running'`;
         await appendEvent(c.threadId, 'cursor_follow_up', `subagent:${c.subagentId}`, { runId: c.runId, cursorRunId: next.id, messages: steers.texts.length });
@@ -471,6 +507,8 @@ async function handleClaimed(c: Claimed): Promise<void> {
     }
   }
 
+  // Composing the result reads the PR's files from GitHub (slow): make sure we still hold the run.
+  if (!(await renewClaim(c))) return;
   switch (run.status) {
     case 'FINISHED': {
       const r = await composeResult(run, { repoUrl: cfg.repoUrl, agentUrl: c.agentUrl });

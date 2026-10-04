@@ -510,4 +510,105 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     expect((await runRow(s.runId)).status).toBe('error');
     expect((await runRow(s.runId)).error).toMatch(/Cursor agent gone/);
   });
+
+  // Regression (review #1): a steer queued on a running agent, Cursor finishing, then a cancel used to make finishRun
+  // answer 'inbox' forever: the run was re-polled endlessly (Cursor + GitHub calls), never synthesized and held a slot.
+  it('steer queued, Cursor finishes, then cancel → the run ends (no endless re-polling)', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.set(agentId, { status: 'RUNNING' });
+    await poll(s.runId);
+    const turn2 = await newTurn(t);
+    await sub.messageSubagent({ threadId: t, turnId: turn2, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'also add tests' });
+    fake.set(agentId, { status: 'FINISHED', result: 'done', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', branch: 'b', prUrl: PR }] } });
+    await sub.cancelSubagent({ threadId: t, subagentId: s.subagentId, actor: 'UADMIN' });
+    for (let i = 0; i < 5; i++) await poll(s.runId);
+    const run = await runRow(s.runId);
+    expect(run.status).not.toBe('running');
+    expect(run.result).toContain(PR); // Cursor did finish: the PR is still reported
+    expect(await sql`select * from subagent_inbox where subagent_id = ${s.subagentId} and consumed_at is null`).toHaveLength(0);
+    expect(fake.calls.filter((c) => c === 'getRun').length).toBeLessThanOrEqual(2);
+    expect(fake.calls).not.toContain('createRun'); // the cancelled steer is never sent
+    expect(await synthTurns(s.cardId)).toHaveLength(1);
+  });
+
+  it('the poller ends a cancel-requested run even with unseen steers left in the inbox', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    // Bypass cancelSubagent (which consumes the inbox): the poller itself must not loop.
+    await sql`update runs set cancel_requested = true where id = ${s.runId}`;
+    await sql`insert into subagent_inbox (subagent_id, text) values (${s.subagentId}, 'late steer')`;
+    fake.set(agentId, { status: 'FINISHED', result: 'done', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    await poll(s.runId);
+    expect((await runRow(s.runId)).status).toBe('complete');
+    expect(await poll(s.runId)).toBe(0);
+    expect(fake.calls).not.toContain('createRun');
+    expect(await synthTurns(s.cardId)).toHaveLength(1);
+  });
+
+  it('finishing is deferred for fresh steers only a bounded number of times', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.set(agentId, { status: 'FINISHED', result: 'done' });
+    const [row] = await sql<{ id: number }[]>`insert into subagent_inbox (subagent_id, text) values (${s.subagentId}, 'steer') returning id::int as id`;
+    // Another transaction holds the steer (so the poller can't take it as a follow-up) while it keeps showing as unseen.
+    const lock = await sql.reserve();
+    await lock`begin`;
+    await lock`select id from subagent_inbox where id = ${row!.id} for update`;
+    try {
+      // A deferred run is due again at once, so one poll call retries it until the bound, then blocks on our lock
+      // while dropping the steer.
+      const polling = poll(s.runId);
+      await sleep(300);
+      expect((await runRow(s.runId)).status).toBe('running');
+      expect((await sql<any[]>`select inbox_defers from cursor_runs where run_id = ${s.runId}`)[0].inboxDefers).toBe(2);
+      await lock`rollback`;
+      await polling;
+    } finally {
+      lock.release();
+    }
+    expect((await runRow(s.runId)).status).toBe('complete');
+    expect(await sql`select * from subagent_inbox where subagent_id = ${s.subagentId} and consumed_at is null`).toHaveLength(0);
+    expect(await synthTurns(s.cardId)).toHaveLength(1);
+  });
+
+  // Regression (review #6): a poller whose claim was taken over must not finish the run.
+  it('a poller that lost its claim does not finish the run', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.set(agentId, { status: 'FINISHED', result: 'done', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    const orig = fake.getRun.bind(fake);
+    fake.getRun = async (a, r) => {
+      // Our lease "ran out" mid-poll and another poller claimed the row.
+      await sql`update cursor_runs set claim_id = gen_random_uuid() where run_id = ${s.runId}`;
+      return orig(a, r);
+    };
+    await poll(s.runId);
+    expect((await runRow(s.runId)).status).toBe('running');
+    expect(await synthTurns(s.cardId)).toHaveLength(0);
+    // The new holder's lease runs out too; the next poller finishes it.
+    fake.getRun = orig;
+    await sql`update cursor_runs set claimed_until = now() - interval '1 second' where run_id = ${s.runId}`;
+    await poll(s.runId);
+    expect((await runRow(s.runId)).status).toBe('complete');
+    expect(await synthTurns(s.cardId)).toHaveLength(1);
+  });
+
+  // Regression (review #7): an agent that never yields a run is not polled forever.
+  it('a launch whose run id never appears times out after cursorRunMaxMs', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.agents.get(agentId)!.agent.latestRunId = undefined;
+    await sql`update cursor_runs set cursor_run_id = null where run_id = ${s.runId}`;
+    await poll(s.runId);
+    expect((await runRow(s.runId)).status).toBe('running');
+    await sql`update runs set started_at = now() - interval '3 hours 1 minute' where id = ${s.runId}`;
+    await poll(s.runId);
+    expect(await runRow(s.runId)).toMatchObject({ status: 'error', error: 'The Cursor agent never started a run' });
+  });
 });
