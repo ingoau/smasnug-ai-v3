@@ -99,6 +99,10 @@ Fetch URL (no local addresses)
 
 ✓
 
+`spawn_coding_agent` (admin only, Cursor; see Coding agents)
+
+✓
+
 Plain text output from the front agent is never shown to users; everything visible goes through tools. Discarded text is logged for debugging.
 ## When the bot responds
 The bot always runs on a mention or DM. In threads where it has been mentioned, follow-ups pass through three layers so it replies when it is useful and stays quiet otherwise.
@@ -349,6 +353,24 @@ Users can ask the bot to come back later (`src/features/schedule/`, tables in `1
 **Watches.** `create_watch(source, target, criteria, check_every_hours?, expires_in_days?)` checks a web page (SSRF-safe fetch; normalized text snapshot + hash, line diff), a web search query (new result URLs) or a Slack search query (public channels only, verified and fail-closed, `##` dropped; only matches newer than the last seen ts, excluding the owner's own messages, bots and the watch's own thread) every 6 hours by default (min 1h). The baseline is taken at creation. When a background check finds candidate changes, a cheap no-tools Luna call (reasoning off, usage recorded for the owner) judges them against the owner's criteria; only a "yes" starts a `scheduled` turn in the watch's thread (not a mention: the agent may still stay silent) with the findings as untrusted data. At most one notification per check (unique per check number), at most 3 per watch per day (the baseline is kept while capped), entry checks every check, and every check counts against the owner's hourly fetch/search limits. Watches expire after 30 days at most (said when created); the snapshot is dropped as soon as a watch ends. Caps: 5 active per user.
 - 
 **App Home** lists the viewer's pending reminders and active watches with Cancel buttons. **Retention:** fired/skipped/cancelled reminders and ended watches (with their notifications) are deleted 30 days after they finish.
+## Coding agents (Cursor)
+The bot's admin (`ADMIN_USER_ID`) can ask the bot to change its own code: a Cursor Cloud Agent works on the bot's repo and opens a PR (`src/agent/cursor/`, `160_cursor_agents.sql`). Off unless `CURSOR_API_KEY` and `CURSOR_REPO` are set (`CURSOR_REF` default `main`, optional `CURSOR_MODEL`). Uses Cursor's Cloud Agents API v1 (public beta; https://cursor.com/docs/cloud-agent/api/endpoints).
+- 
+**A subagent kind.** `subagents.kind = 'cursor'` plus the Cursor agent id; each run (card row) is backed by Cursor runs (`cursor_runs`). So a coding agent shows on the plan card like a subagent (details "Coding in Cursor…", the elapsed time, the Cursor agent and PR links as task sources), its result arrives through the same synthesis turn, and the front snapshot marks it `[coding agent, Cursor]`.
+- 
+**Tools.** `spawn_coding_agent(title, instructions)` (front only; not even offered outside the admin's turns). `message_subagent` / `cancel_subagent` dispatch on the kind. **Admin-only in code:** start, steer and cancel are refused unless the speaker is the admin and the feature is configured; bulk cancels by anyone else (old "Stop all" buttons, a deleted thread root) skip coding agents. Other users' messages never reach Cursor.
+- 
+**Instructions.** Code wraps the front agent's task in a fixed preamble: this repo is the bot, follow CLAUDE.md; never touch `.github/workflows/` or other CI config (also enforced on GitHub); focused change, run `pnpm typecheck` and `pnpm test`; when done, have a subagent review the diff (bugs, CLAUDE.md conventions, tests), fix its findings and re-run the checks before finishing; PR only (`autoCreatePR`), never push to the base branch or merge; end with a summary. Follow-ups restate the rules.
+- 
+**Steering.** Cursor can't inject a message into a running cloud run (create-run answers `409 agent_busy` while one is active; the SDK's `run.steer()` is local-only). A steer is queued in the subagent inbox (card note `↪ next: …`) and sent as a follow-up Cursor run (same conversation, branch and PR) as soon as the current run finishes; the card row stays running until Cursor is done. `message_subagent` on an idle coding agent starts a new run (↻) backed by a follow-up on the same Cursor agent.
+- 
+**Polling, exactly once.** No public HTTP endpoint (Socket Mode), so no webhooks: the `agent:cursor-poll` maintenance task (every 30 s) claims one due run at a time (`for update skip locked`, claim id + 2-minute lease, like reminders) and reads the Cursor run. Running → card details + next poll; finished with queued steers → follow-up run; FINISHED → result (PR link, branch, Cursor's summary) and `finishRun` → synthesis; ERROR / EXPIRED / cancelled elsewhere → error run. Creation is idempotent (client-supplied `bc-<uuid>` agent id; a retry gets `409 agent_id_conflict` and reuses the agent). Nothing lives in worker memory, so restarts don't matter. Transient API errors back off (up to 5 min); a vanished agent fails the run.
+- 
+**Timeouts.** The stale-heartbeat sweeper and shutdown hook skip coding agents (no worker loop); they have their own limit (`limits.cursorRunMaxMs`, 3 h): the Cursor run is cancelled and the run fails. At most `limits.cursorMaxActive` (3) run at once.
+- 
+**CI check.** The Cursor API doesn't list changed files, so after a run the PR's files are read from GitHub (REST "list pull request files", only for a PR in `CURSOR_REPO`; optional `CURSOR_GITHUB_TOKEN` for private repos). Any `.github/workflows/` or `.github/actions/` change is flagged loudly in the result (card output "⚠️ touches CI config"); if the check fails, the result says so.
+- 
+**Results.** The synthesis turn shares the PR link and a short summary; the prompt says never to claim it's merged. Rows follow the subagent retention.
 ## Safety, limits and reliability
 ### Limits
 Per user: messages per hour, concurrent subagents, searches and fetches, and on-behalf-of sends. Per thread: max concurrent subagents. Per run: max duration and a token cap. At GPT-6 Luna's prices these exist mainly to stop abuse and runaway loops, not to control budget.
@@ -387,7 +409,7 @@ Tools: `exec`, `read_file`, `write_file`; outputs attached to replies as files.
 Added as a registry entry granted to children only.
 ### Not planned
 - 
-Coding agents that open PRs.
+~~Coding agents that open PRs.~~ Now implemented, admin-only: see Coding agents (Cursor).
 - 
 Memory extraction over workspace messages beyond conversations with the bot.
 - 
