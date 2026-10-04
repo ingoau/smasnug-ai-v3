@@ -23,6 +23,19 @@ export interface SlackCallOpts {
   token?: TokenKind;
   /** Side effects: a key derived from the triggering event. A repeated key returns the stored result. */
   idempotencyKey?: string;
+  /**
+   * Fail fast instead of waiting longer than this (ms) for the shared rate limiter or a 429 backoff: throws
+   * SlackBusyError. For optional calls the caller can skip (e.g. a secondary search); default: wait.
+   */
+  maxWaitMs?: number;
+}
+
+/** Thrown when a call with `maxWaitMs` would have had to wait longer for a rate limit. */
+export class SlackBusyError extends Error {
+  readonly code = 'slack_busy';
+  constructor(what: string, waitMs: number) {
+    super(`${what} is rate limited (would wait ~${Math.ceil(waitMs / 1000)}s)`);
+  }
 }
 
 /** Requests per minute, roughly Slack's tiers. Unlisted methods default to tier 3. */
@@ -34,13 +47,24 @@ const METHOD_RPM: Record<string, number> = {
   'chat.appendStream': 600,
   'chat.stopStream': 100,
   'reactions.add': 100,
-  'assistant.threads.setStatus': 300,
   'agents.sessions.setStatus': 300,
+  'agents.sessions.rename': 50, // Tier 3 (docs.slack.dev/reference/methods/agents.sessions.rename)
   'search.messages': 20,
   'conversations.replies': 50,
   'conversations.history': 50,
   'users.info': 100,
   'views.publish': 100,
+  // Real-time Search: "an additional user-level limit of 10 requests per minute with burst"; every call uses the one
+  // user token, so this is also the per-user limit (docs.slack.dev/reference/methods/assistant.search.context).
+  'assistant.search.context': 10,
+  'assistant.search.info': 20, // Tier 2
+  // Canvases (tiers from docs.slack.dev/reference/methods/canvases.*): create is tier 2, the rest tier 3.
+  'canvases.create': 20,
+  'canvases.edit': 50,
+  'canvases.getContent': 50,
+  'canvases.sections.lookup': 50,
+  'canvases.access.set': 50,
+  'files.info': 100,
 };
 /**
  * Posting a new message is ~1/sec per channel in Slack's docs; allow short bursts. Only calls that create a message
@@ -50,7 +74,7 @@ const METHOD_RPM: Record<string, number> = {
 const PER_CHANNEL_PER_MIN = 60;
 const PER_CHANNEL_METHODS = new Set(['chat.postMessage', 'chat.startStream', 'chat.postEphemeral', 'chat.scheduleMessage']);
 
-async function acquire(key: string, perMin: number) {
+async function acquire(key: string, perMin: number, deadline = Infinity) {
   // Sliding window over 60s in a sorted set; wait until a slot frees.
   for (let attempt = 0; attempt < 120; attempt++) {
     const now = Date.now();
@@ -70,13 +94,21 @@ async function acquire(key: string, perMin: number) {
       member,
     )) as number;
     if (res === 0) return;
+    if (Date.now() + res > deadline) throw new SlackBusyError(key, res);
     await sleep(Math.min(Math.max(res, 50), 2000));
   }
   throw new Error(`rate limiter timeout for ${key}`);
 }
 
-async function pauseFor(method: string) {
-  const until = Number(await redis.get(`slack:429:${method}`));
+/**
+ * Redis key of a 429 pause. Scoped by token kind like the limiter keys (Slack's limits are per token: a 429 on the
+ * user token's conversations.replies must not pause the bot token's reads). The kind, never the token, is in the key.
+ */
+export const pauseKey = (token: TokenKind, method: string) => `slack:429:${token}:${method}`;
+
+async function pauseFor(token: TokenKind, method: string, deadline = Infinity) {
+  const until = Number(await redis.get(pauseKey(token, method)));
+  if (until && until > deadline) throw new SlackBusyError(method, until - Date.now());
   if (until && until > Date.now()) await sleep(until - Date.now());
 }
 
@@ -94,6 +126,11 @@ const POSTING_METHODS = new Set(['chat.postMessage', 'chat.startStream', 'chat.p
 /** Remember that a thread's root was deleted, so nothing gets posted into it (30 days, like other thread data). */
 export async function markThreadGone(channel: string, threadTs: string): Promise<void> {
   await redis.set(threadGoneKey(channel, threadTs), '1', 'EX', 30 * 24 * 60 * 60);
+}
+
+/** True if the thread's root was deleted (markThreadGone): posting into it would throw ThreadGoneError. */
+export async function isThreadGone(channel: string, threadTs: string): Promise<boolean> {
+  return (await redis.exists(threadGoneKey(channel, threadTs))) > 0;
 }
 
 async function assertThreadExists(method: string, args: Record<string, unknown>): Promise<void> {
@@ -120,7 +157,7 @@ export async function slackCall<T extends WebAPICallResult = WebAPICallResult & 
       return (row?.result ?? { ok: true, skipped: true }) as T;
     }
     try {
-      const result = await rawCall<T>(method, args, token);
+      const result = await rawCall<T>(method, args, token, opts.maxWaitMs);
       await sql`update idempotency_keys set result = ${sql.json(result as any)} where key = ${key}`;
       return result;
     } catch (err) {
@@ -128,27 +165,26 @@ export async function slackCall<T extends WebAPICallResult = WebAPICallResult & 
       throw err;
     }
   }
-  return rawCall<T>(method, args, token);
+  return rawCall<T>(method, args, token, opts.maxWaitMs);
 }
 
-async function rawCall<T>(method: string, args: Record<string, unknown>, token: TokenKind): Promise<T> {
+async function rawCall<T>(method: string, args: Record<string, unknown>, token: TokenKind, maxWaitMs?: number): Promise<T> {
   const channel = typeof args.channel === 'string' ? args.channel : undefined;
-  if (FAKE) {
-    // Benchmarks can include the shared rate limiter's overhead (SLACK_FAKE_LIMITER=1).
-    if (process.env.SLACK_FAKE_LIMITER === '1') await throttle(method, token, channel);
-    return (await fakeCall(method, args, token)) as T;
-  }
+  const deadline = maxWaitMs === undefined ? Infinity : Date.now() + maxWaitMs;
+  // Benchmarks and tests can run the fake through the shared rate limiter and 429 handling (SLACK_FAKE_LIMITER=1).
+  if (FAKE && process.env.SLACK_FAKE_LIMITER !== '1') return (await fakeCall(method, args, token)) as T;
   for (let attempt = 0; ; attempt++) {
-    await pauseFor(method);
-    await throttle(method, token, channel);
+    await pauseFor(token, method, deadline);
+    await throttle(method, token, channel, deadline);
     try {
-      return (await clients[token].apiCall(method, args)) as T;
+      return (FAKE ? await fakeCall(method, args, token) : await clients[token].apiCall(method, args)) as T;
     } catch (err: any) {
       const retryAfter = err?.retryAfter ?? err?.data?.retryAfter;
       if (err?.code === 'slack_webapi_rate_limited_error' && attempt < 5) {
         const ms = (Number(retryAfter) || 1) * 1000;
-        await redis.set(`slack:429:${method}`, String(Date.now() + ms), 'PX', ms);
-        log.warn({ method, ms }, 'slack 429, backing off');
+        await redis.set(pauseKey(token, method), String(Date.now() + ms), 'PX', ms);
+        log.warn({ method, token, ms }, 'slack 429, backing off');
+        if (Date.now() + ms > deadline) throw new SlackBusyError(method, ms);
         continue;
       }
       if (err?.code === 'slack_webapi_request_error' && attempt < 3) {
@@ -160,10 +196,10 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
   }
 }
 
-async function throttle(method: string, token: TokenKind, channel: string | undefined) {
-  await acquire(`slack:rl:${token}:${method}`, METHOD_RPM[method] ?? 50);
+async function throttle(method: string, token: TokenKind, channel: string | undefined, deadline = Infinity) {
+  await acquire(`slack:rl:${token}:${method}`, METHOD_RPM[method] ?? 50, deadline);
   if (channel && PER_CHANNEL_METHODS.has(method)) {
-    await acquire(`slack:rl:chan:${channel}`, PER_CHANNEL_PER_MIN);
+    await acquire(`slack:rl:chan:${channel}`, PER_CHANNEL_PER_MIN, deadline);
   }
 }
 

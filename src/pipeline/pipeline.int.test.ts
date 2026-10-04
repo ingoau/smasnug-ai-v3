@@ -154,10 +154,9 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const statusCalls = (await fakeCalls()).filter((c) => c.method.endsWith('.setStatus'));
       expect(statusCalls.map((c) => [c.method, c.args.status, c.args.initiator_user_id])).toEqual([
         ['agents.sessions.setStatus', 'processing', 'U1'],
-        ['assistant.threads.setStatus', 'is thinking…', undefined],
-        ['assistant.threads.setStatus', '', undefined],
         ['agents.sessions.setStatus', 'active', 'U1'],
       ]);
+      expect((await fakeCalls()).some((c) => c.method.startsWith('assistant.threads.'))).toBe(false); // deprecated API
       const events = await sql`select type from thread_events where thread_id = ${THREAD} and type <> 'turn_timing' order by id`;
       expect(events.map((e) => e.type)).toEqual(['turn_started', 'turn_finished', 'turn_started', 'turn_finished']);
     });
@@ -169,7 +168,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
       run.mockRejectedValueOnce(new Error('boom'));
       await processThreadRun(job({ threadId: THREAD }));
       const statuses = async () => (await fakeCalls()).filter((c) => c.method.endsWith('.setStatus')).map((c) => `${c.method}:${c.args.status}`);
-      const normal = ['agents.sessions.setStatus:processing', 'assistant.threads.setStatus:is thinking…', 'assistant.threads.setStatus:', 'agents.sessions.setStatus:active'];
+      const normal = ['agents.sessions.setStatus:processing', 'agents.sessions.setStatus:active'];
       expect(await statuses()).toEqual(normal);
 
       await redis.del('slack:fake:calls');
@@ -180,7 +179,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
       try {
         await scheduler.scheduleMessages(THREAD, 'U1', ['1.2'], true);
         await processThreadRun(job({ threadId: THREAD }));
-        // The activity text (assistant.threads.setStatus) doubles as the fallback: same calls, the turn goes on.
+        // Failures are logged and tolerated (no fallback): same calls, the turn goes on.
         expect(await statuses()).toEqual(normal);
         expect((await turns()).map((t) => t.status)).toEqual(['error', 'done']);
         // Expected errors (e.g. not in channel) are just skipped.
@@ -197,7 +196,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
 
     describe('status activity', () => {
       const statusCalls = async () =>
-        (await fakeCalls()).filter((c) => c.method.endsWith('.setStatus')).map((c) => (c.method === 'agents.sessions.setStatus' ? `session:${c.args.status}` : `text:${(c.args.loading_messages as string[] | undefined)?.[0] ?? ''}`));
+        (await fakeCalls()).filter((c) => c.method.endsWith('.setStatus')).map((c) => (c.method === 'agents.sessions.setStatus' ? `session:${c.args.status}` : `legacy:${c.method}`));
 
       const dmEnvelope = (ts: string, text = 'hello') => job({ kind: 'event' as const, body: { event: { type: 'message', channel: 'D1', channel_type: 'im', user: 'U1', text, ts } } });
 
@@ -205,14 +204,14 @@ describe.skipIf(!infra)('pipeline integration', () => {
         const ts = nextTs();
         const tid = `D1:${ts}`;
         await processSlackEvent(dmEnvelope(ts));
-        await vi.waitFor(async () => expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…']));
+        await vi.waitFor(async () => expect(await statusCalls()).toEqual(['session:processing']));
         await vi.waitFor(async () => expect(await redis.exists(`status:intake:${tid}`)).toBe(1));
         await processDebounce(job({ threadId: tid, authorId: 'U1', seq: 1 }));
         run.mockImplementationOnce(async () => {
           await new Promise((r) => setTimeout(r, 20));
         });
         await processThreadRun(job({ threadId: tid }));
-        expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…', 'text:', 'session:active']);
+        expect(await statusCalls()).toEqual(['session:processing', 'session:active']);
         expect(await redis.exists(`status:intake:${tid}`)).toBe(0);
       });
 
@@ -223,7 +222,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
         await vi.waitFor(async () => expect(await redis.exists(`status:intake:${tid}`)).toBe(1));
         await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'message', subtype: 'message_deleted', channel: 'D1', channel_type: 'im', deleted_ts: ts, previous_message: { user: 'U1', ts } } } }));
         await processDebounce(job({ threadId: tid, authorId: 'U1', seq: 1 }));
-        expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…', 'text:', 'session:active']);
+        expect(await statusCalls()).toEqual(['session:processing', 'session:active']);
         expect(await turns(tid)).toHaveLength(0);
       });
 
@@ -257,10 +256,10 @@ describe.skipIf(!infra)('pipeline integration', () => {
           duringTurn = await statusCalls();
         });
         await processThreadRun(job({ threadId: THREAD }));
-        expect(duringTurn).toEqual(['session:processing', 'text:Searching Slack…']);
-        expect(await statusCalls()).toEqual(['session:processing', 'text:Searching Slack…', 'text:', 'session:active']);
-        const set = (await fakeCalls()).find((c) => c.method === 'assistant.threads.setStatus')!;
-        expect(set.args).toEqual({ channel_id: C, thread_ts: T, status: 'is searching Slack…', loading_messages: ['Searching Slack…'] });
+        expect(duringTurn).toEqual(['session:processing']);
+        expect(await statusCalls()).toEqual(['session:processing', 'session:active']);
+        const set = (await fakeCalls()).find((c) => c.method === 'agents.sessions.setStatus')!;
+        expect(set.args).toEqual({ channel_id: C, thread_ts: T, status: 'processing', initiator_user_id: 'U2' });
 
         await redis.del('slack:fake:calls');
         await scheduler.scheduleMessages(THREAD, 'U2', ['1.2'], false);
@@ -270,32 +269,25 @@ describe.skipIf(!infra)('pipeline integration', () => {
           throw new Error('boom');
         });
         await processThreadRun(job({ threadId: THREAD }));
-        expect(await statusCalls()).toEqual(['session:processing', 'text:Reading the page…', 'text:', 'session:active']);
+        expect(await statusCalls()).toEqual(['session:processing', 'session:active']);
       });
 
-      it('mention turn: initial status, per-tool text updates (coalesced), cleared at the end', async () => {
+      it('mention turn: processing from the start, again after a reply stream released the session, active at the end', async () => {
         await makeThread();
         await scheduler.scheduleMessages(THREAD, 'U1', ['1.1'], true);
         run.mockImplementationOnce(async (_turn, io) => {
           // Shown without blocking the turn: the model call starts right away.
-          await vi.waitFor(async () => expect(await statusCalls()).toEqual(['session:processing', 'text:Thinking…']));
-          io.setActivity!('Searching the web…'); // superseded within the coalescing window
+          await vi.waitFor(async () => expect(await statusCalls()).toEqual(['session:processing']));
+          io.setActivity!('Searching the web…'); // already processing: no call
           io.setActivity!('Reading the page…');
-          await new Promise((r) => setTimeout(r, 1150));
-          io.setActivity!('Reading the page…'); // unchanged: skipped
           await new Promise((r) => setTimeout(r, 50));
+          io.sessionReleased!(); // a reply's chat.stopStream set the session active
           io.setActivity!('Starting a subagent…');
-          await new Promise((r) => setTimeout(r, 1100));
+          io.setActivity!('Searching Slack…');
+          await new Promise((r) => setTimeout(r, 50));
         });
         await processThreadRun(job({ threadId: THREAD }));
-        expect(await statusCalls()).toEqual([
-          'session:processing',
-          'text:Thinking…',
-          'text:Reading the page…',
-          'text:Starting a subagent…',
-          'text:',
-          'session:active',
-        ]);
+        expect(await statusCalls()).toEqual(['session:processing', 'session:processing', 'session:active']);
       });
 
       it('after the native stop, activity no longer re-sets the status', async () => {
@@ -471,9 +463,10 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(await redis.get('view:ctx:U7')).toBeNull();
     });
 
-    it('agent_session_title_changed is only logged', async () => {
+    it('agent_session_title_changed makes no Slack calls (a user rename is only recorded, see agent-session.int.test.ts)', async () => {
       await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'agent_session_title_changed', channel: 'D1', thread_ts: '1.1', title: 'x' } } }));
-      expect(await fakeCalls()).toHaveLength(0);
+      await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'agent_session_title_changed', channel: 'D1', thread_ts: '1.1', title: 'x', user: 'U1' } } }));
+      expect((await fakeCalls()).filter((c) => c.method !== 'auth.test')).toHaveLength(0);
     });
   });
 

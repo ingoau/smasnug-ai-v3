@@ -10,7 +10,11 @@ import { processSubagentRun, shutdownRuns } from './child.js';
 import { expireIdleSubagents, sweepStaleRuns } from './maintenance.js';
 import { cancelCardRuns } from './subagents.js';
 import './leave-thread.js';
+import './session-title.js';
 import './tools.js';
+import './cursor/tools.js';
+import { pollCursorRuns } from './cursor/agents.js';
+import { expirePendingLaunches, handleCodingCancel, handleCodingLaunch } from './cursor/confirm.js';
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
   [QUEUE.subagentRun]: async (job) => {
@@ -28,6 +32,18 @@ export const maintenance: Record<string, { everyMs: number; run: () => Promise<v
     run: async () => {
       await sweepStaleRuns();
     },
+  },
+  // Coding agents (Cursor): poll running ones (claims per run, exactly-once; see src/agent/cursor/agents.ts).
+  'agent:cursor-poll': {
+    everyMs: limits.cursorPollMs,
+    run: async () => {
+      await pollCursorRuns();
+    },
+  },
+  // Coding agents: expire unanswered Launch / Cancel previews (src/agent/cursor/confirm.ts).
+  'agent:cursor-confirm-expiry': {
+    everyMs: 60 * 1000,
+    run: expirePendingLaunches,
   },
   'agent:expire-subagents': {
     everyMs: 10 * 60 * 1000,
@@ -53,3 +69,7 @@ export async function onShutdown(): Promise<void> {
     log.error({ err }, 'agent shutdown failed');
   }
 }
+
+/** Coding agents: the admin's Launch / Cancel on a proposed coding agent (only ADMIN_USER_ID; checked in the handlers). */
+registerAction('coding:launch', handleCodingLaunch);
+registerAction('coding:cancel', handleCodingCancel);

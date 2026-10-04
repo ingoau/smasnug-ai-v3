@@ -68,6 +68,7 @@ describe('describeToolStep', () => {
   it('produces readable progress lines', () => {
     expect(describeToolStep('fetch_url', { url: 'https://example.com' })).toBe('Reading https://example.com');
     expect(describeToolStep('slack_search', { query: 'hackathon' })).toBe('Searching Slack for “hackathon”');
+    expect(describeToolStep('slack_semantic_search', { query: 'who ran it?' })).toBe('Searching Slack for “who ran it?”');
     expect(describeToolStep('mystery', {})).toBe('Using mystery');
   });
 });

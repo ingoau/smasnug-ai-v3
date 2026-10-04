@@ -1,5 +1,5 @@
-/** TurnStatus: show-on-first-activity, coalescing, stop handling and clearing (fake transport, fake timers). */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+/** TurnStatus: show-on-first-activity, re-show after a released session, stop handling and final statuses. */
+import { describe, expect, it, vi } from 'vitest';
 
 vi.hoisted(() => {
   process.env.OPENROUTER_KEY ||= 'test-key';
@@ -7,30 +7,25 @@ vi.hoisted(() => {
 });
 vi.mock('../core/slack.js', () => ({ slackCall: vi.fn(), slackErrorCode: (err: any) => err?.data?.error }));
 
-const { TurnStatus, statusPhrase } = await import('./session-status.js');
+const { TurnStatus } = await import('./session-status.js');
 
-function make(opts: { mode?: 'overlay' | 'text' | 'off'; stopped?: () => Promise<boolean>; failText?: boolean } = {}) {
+function make(opts: { stopped?: () => Promise<boolean>; fail?: boolean } = {}) {
   const calls: string[] = [];
   const status = new TurnStatus({
     channelId: 'C1',
     threadTs: '1.1',
     userId: 'U1',
-    mode: opts.mode ?? 'overlay',
     stopped: opts.stopped,
     transport: {
-      lifecycle: async (s) => void calls.push(s),
-      text: async (t) => {
-        calls.push(`text:${t}`);
-        if (opts.failText) throw new Error('boom');
+      lifecycle: async (s) => {
+        calls.push(s);
+        if (opts.fail) throw new Error('boom');
       },
     },
   });
   return { status, calls };
 }
-const settle = () => vi.advanceTimersByTimeAsync(0);
-
-beforeEach(() => void vi.useFakeTimers());
-afterEach(() => void vi.useRealTimers());
+const settle = () => new Promise((r) => setTimeout(r, 0));
 
 describe('TurnStatus', () => {
   it('shows nothing and clears nothing when no activity happened (unmentioned turn, direct reply)', async () => {
@@ -40,116 +35,94 @@ describe('TurnStatus', () => {
     expect(status.isShown).toBe(false);
   });
 
-  it('first activity shows the status right away; finish clears text then sets active', async () => {
+  it('first activity sets processing once (a burst of tools sends one call); finish sets active', async () => {
     const { status, calls } = make();
     status.setActivity('Searching Slack…');
+    status.setActivity('Reading the page…');
     await settle();
-    expect(calls).toEqual(['processing', 'text:Searching Slack…']);
+    expect(calls).toEqual(['processing']);
+    expect(status.isShown).toBe(true);
     await status.finish();
-    expect(calls).toEqual(['processing', 'text:Searching Slack…', 'text:', 'active']);
+    expect(calls).toEqual(['processing', 'active']);
   });
 
   it('adopt() takes over an indicator shown at intake: no calls, but finish() clears it', async () => {
     const { status, calls } = make();
     status.adopt();
-    status.setActivity('Thinking…'); // same text as already showing: skipped
+    status.setActivity('Searching Slack…');
     await settle();
     expect(calls).toEqual([]);
-    expect(status.isShown).toBe(true);
     await status.finish();
-    expect(calls).toEqual(['text:', 'active']);
+    expect(calls).toEqual(['active']);
   });
 
-  it('start() shows the initial text (mention turns)', async () => {
+  it('start() shows it right away (mention turns)', async () => {
     const { status, calls } = make();
     await status.start();
-    expect(calls).toEqual(['processing', 'text:Thinking…']);
+    expect(calls).toEqual(['processing']);
   });
 
-  it('coalesces updates to one per second, latest text wins, unchanged text is skipped', async () => {
+  it('after released() (a reply stream ended: Slack set active) the next activity sets processing again', async () => {
     const { status, calls } = make();
     await status.start();
-    status.setActivity('Searching the web…');
+    status.setActivity('Searching Slack…'); // still processing: nothing to do
+    await settle();
+    status.released();
+    await settle();
+    expect(calls).toEqual(['processing']);
     status.setActivity('Reading the page…');
     status.setActivity('Reading the thread…');
-    await vi.advanceTimersByTimeAsync(500);
-    expect(calls).toEqual(['processing', 'text:Thinking…']);
-    await vi.advanceTimersByTimeAsync(600);
-    expect(calls).toEqual(['processing', 'text:Thinking…', 'text:Reading the thread…']);
-    status.setActivity('Reading the thread…'); // unchanged
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(calls).toHaveLength(3);
-    status.setActivity('Searching Slack…'); // > 1s since the last update: immediate
     await settle();
-    expect(calls.at(-1)).toBe('text:Searching Slack…');
-  });
-
-  it('an activity the turn ends before it could be sent is dropped (no flash)', async () => {
-    const { status, calls } = make();
-    status.setActivity('Searching Slack…');
+    expect(calls).toEqual(['processing', 'processing']);
     await status.finish();
-    expect(calls).toEqual([]);
+    expect(calls).toEqual(['processing', 'processing', 'active']);
   });
 
-  it('a pending update is dropped when the turn finishes', async () => {
+  it('nothing after finish; finish is idempotent', async () => {
     const { status, calls } = make();
     await status.start();
-    status.setActivity('Reading the page…');
     await status.finish();
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(calls).toEqual(['processing', 'text:Thinking…', 'text:', 'active']);
+    status.released();
     status.setActivity('Late…');
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(calls).toHaveLength(4);
-    await status.finish(); // idempotent
-    expect(calls).toHaveLength(4);
+    await settle();
+    await status.finish();
+    expect(calls).toEqual(['processing', 'active']);
   });
 
-  it('after a native stop nothing re-sets processing; finish still sets active', async () => {
-    let stopped = false;
-    const { status, calls } = make({ stopped: async () => stopped });
-    stopped = true;
-    status.setActivity('Searching Slack…');
+  it('after a native stop nothing re-sets processing', async () => {
+    let stopped = true;
+    const a = make({ stopped: async () => stopped });
+    a.status.setActivity('Searching Slack…');
     await settle();
-    expect(calls).toEqual([]);
-    await status.finish();
-    expect(calls).toEqual([]); // never shown: the stop handler already set active
+    await a.status.finish();
+    expect(a.calls).toEqual([]); // never shown: the stop handler already set active
 
     stopped = false;
     const b = make({ stopped: async () => stopped });
     await b.status.start();
     stopped = true;
-    await vi.advanceTimersByTimeAsync(1500);
+    b.status.released();
     b.status.setActivity('Reading the page…');
-    await vi.advanceTimersByTimeAsync(1500);
-    expect(b.calls).toEqual(['processing', 'text:Thinking…']);
+    await settle();
+    expect(b.calls).toEqual(['processing']);
     await b.status.finish();
-    expect(b.calls).toEqual(['processing', 'text:Thinking…', 'text:', 'active']);
+    expect(b.calls).toEqual(['processing', 'active']);
   });
 
-  it('modes: text sends no processing; off sends no text', async () => {
-    const t = make({ mode: 'text' });
-    t.status.setActivity('Searching Slack…');
-    await settle();
-    await t.status.finish();
-    expect(t.calls).toEqual(['text:Searching Slack…', 'text:', 'active']);
-    const o = make({ mode: 'off' });
-    o.status.setActivity('Searching Slack…');
-    await vi.advanceTimersByTimeAsync(1500);
-    o.status.setActivity('Reading the page…');
-    await o.status.finish();
-    expect(o.calls).toEqual(['processing', 'active']);
+  it('final status: suspended / closed replace active, and apply even when nothing was shown', async () => {
+    const a = make();
+    await a.status.start();
+    await a.status.finish('suspended');
+    expect(a.calls).toEqual(['processing', 'suspended']);
+    const b = make();
+    await b.status.finish('closed');
+    expect(b.calls).toEqual(['closed']);
   });
 
   it('never throws when a Slack call fails', async () => {
-    const { status, calls } = make({ failText: true });
+    const { status, calls } = make({ fail: true });
     await expect(status.start()).resolves.toBeUndefined();
     await expect(status.finish()).resolves.toBeUndefined();
-    expect(calls).toEqual(['processing', 'text:Thinking…', 'text:', 'active']);
-  });
-
-  it('statusPhrase prefixes "is" for the app-name form', () => {
-    expect(statusPhrase('Searching the web…')).toBe('is searching the web…');
-    expect(statusPhrase('')).toBe('');
+    expect(calls).toEqual(['processing', 'active']);
   });
 });

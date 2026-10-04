@@ -87,7 +87,7 @@ describe('registry', () => {
     const child = Object.keys(toolsFor('child', baseCtx())).sort();
     const gate = Object.keys(toolsFor('gate', baseCtx()));
     for (const n of ['fetch_url', 'web_search', 'slack_search', 'read_thread', 'read_public_thread', 'read_channel', 'read_image', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
-    expect(child).toEqual(['fetch_url', 'read_channel', 'read_image', 'read_public_thread', 'read_thread', 'slack_search', 'web_search']);
+    expect(child).toEqual(['fetch_url', 'read_canvas', 'read_channel', 'read_image', 'read_public_thread', 'read_thread', 'slack_search', 'slack_semantic_search', 'web_search']);
     expect(gate).toEqual([]);
     // A normal client tool (Exa), not a provider/server tool.
     const ws = toolsFor('front', baseCtx()).web_search as any;

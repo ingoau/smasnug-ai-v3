@@ -109,8 +109,16 @@ export async function fakeCall(method: string, args: Record<string, unknown>, to
       return { ok: true, channel: { id: `D${String(args.users)}` } };
     case 'search.messages':
       return { ok: true, messages: { matches: [], total: 0 } };
+    case 'assistant.search.context':
+      return { ok: true, results: { messages: [] }, response_metadata: { next_cursor: '' } };
+    case 'assistant.search.info':
+      return { ok: true, is_ai_search_enabled: true };
     case 'files.getUploadURLExternal':
       return { ok: true, upload_url: 'https://fake.invalid/upload', file_id: `F${++counter}` };
+    case 'canvases.create':
+      return { ok: true, canvas_id: `FCANVAS${++counter}` };
+    case 'canvases.getContent':
+      return { ok: true, content: '' };
     default:
       return { ok: true };
   }

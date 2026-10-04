@@ -51,6 +51,23 @@ export async function requestTurn(opts: {
   return id;
 }
 
+/**
+ * requestTurn for a non-user turn inside the caller's transaction, so the turn commits atomically with the caller's
+ * own state change (fired reminders / watch notifications: exactly-once). Takes the thread row lock; the thread row
+ * must exist. The caller calls ensureThreadRun after commit.
+ */
+export async function insertTurnTx(
+  tx: Tx,
+  opts: { threadId: string; authorId: string; kind: Exclude<TurnRow['kind'], 'user'>; isMention?: boolean; cardId?: number },
+): Promise<number> {
+  await lockThread(tx, opts.threadId);
+  const [row] = await tx<{ id: number }[]>`
+    insert into turns (thread_id, author_id, kind, is_mention, message_ts, card_id)
+    values (${opts.threadId}, ${opts.authorId}, ${opts.kind}, ${opts.isMention ?? false}, '{}'::text[], ${opts.cardId ?? null})
+    returning id::int as id`;
+  return row!.id;
+}
+
 /** Append to the author's pending user turn, or create one. Caller holds the thread row lock. */
 async function addToPendingTurnTx(tx: Tx, threadId: string, authorId: string, ts: string[], isMention: boolean): Promise<number> {
   const [pending] = await tx<{ id: number; messageTs: string[] }[]>`

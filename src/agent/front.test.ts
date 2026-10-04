@@ -69,6 +69,7 @@ const { simulateReadableStream } = await import('ai');
 await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
+await import('./session-title.js');
 const { runFrontTurn } = await import('./front.js');
 const { streamArgsText } = await import('./slack-markdown.js');
 
@@ -177,6 +178,22 @@ describe('runFrontTurn (mock model)', () => {
     h.model = mockModel([textStep('nothing to add')]);
     await runFrontTurn(turn({ id: 8, isMention: false }), io(false).io);
     expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
+  });
+
+  it('a turn that made a canvas but posted no reply posts the canvas link instead of the fallback', async () => {
+    h.sqlHook = (q) => (q.includes('from bot_canvases where turn_id') ? [{ title: 'Plan [v1] <@U9>', permalink: 'https://x.slack.com/docs/T1/F123' }] : undefined);
+    h.model = mockModel([textStep('made it')]);
+    await runFrontTurn(turn(), io(true).io);
+    const posts = h.slack.filter((c) => c.method === 'chat.postMessage');
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.args.text).toBe("here's the canvas: [Plan v1 @U9](https://x.slack.com/docs/T1/F123)");
+    expect(h.events.find((e) => e.type === 'reply')!.payload).toMatchObject({ canvasLink: true });
+
+    // With a reply, nothing extra is posted (the reply carries the link).
+    h.slack = [];
+    h.model = mockModel([replyStep('here: https://x.slack.com/docs/T1/F123'), textStep('')]);
+    await runFrontTurn(turn({ id: 9 }), io(true).io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage' && c.args.text?.startsWith("here's the canvas"))).toHaveLength(0);
   });
 
   it('injects inbox messages before the next model call and updates defaultReactTs', async () => {
@@ -336,6 +353,21 @@ describe('runFrontTurn: model freedom', () => {
     expect(toolNames(0)).toContain('set_card_title');
   });
 
+  it('only offers set_session_title in DM threads, with the current title in <session>', async () => {
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 47, isMention: false }), io(false).io);
+    expect(toolNames(0)).not.toContain('set_session_title');
+    expect(JSON.stringify(h.model.doStreamCalls[0].prompt.at(-1))).not.toContain('<session>');
+
+    h.sqlHook = (q) => (q.includes('left join agent_sessions') ? [{ isDm: true, title: 'Pico question', titleBy: 'user' }] : undefined);
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 48 }), io().io);
+    expect(toolNames(0)).toContain('set_session_title');
+    const prompt = JSON.stringify(h.model.doStreamCalls[0].prompt.at(-1));
+    expect(prompt).toContain('<session>');
+    expect(prompt).toContain('Title: \\"Pico question\\" (chosen by the user');
+  });
+
 });
 
 describe('runFrontTurn: status activity', () => {
@@ -391,5 +423,145 @@ describe('runFrontTurn: status activity', () => {
     const c = ioWithActivity(false);
     await runFrontTurn(turn({ id: 63, isMention: false }), c.io);
     expect([a.activity, b.activity, c.activity]).toEqual([[], [], []]);
+  });
+
+  describe('activity cards (STATUS_ACTIVITY_MODE=tasks)', () => {
+    const exaOk = async () => Response.json({ results: [{ title: 'Pico', url: 'https://example.com/pico', highlights: ['Costs $7.'] }] });
+    const cards = (m: { args: any }) => (m.args.chunks ?? []).filter((c: any) => c.type === 'task_update').map((c: any) => `${c.title}:${c.status}`);
+
+    it('the lookup shows as a task card in the message the reply then streams into; the final message drops it', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      const released: number[] = [];
+      try {
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), replyStep('About $7 at most shops.'), textStep('')]);
+        const a = ioWithActivity(true);
+        await runFrontTurn(turn({ id: 65 }), { ...a.io, sessionReleased: () => void released.push(1) });
+        const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
+        expect([...new Set(chat.map((c) => c.method))]).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.update']);
+        expect(chat.filter((c) => c.method === 'chat.startStream')).toHaveLength(1); // one message for card + reply
+        expect(cards(chat[0]!)).toEqual(['Searching the web…:in_progress']);
+        expect(cards(chat[1]!)).toEqual(['Searching the web…:complete']);
+        expect(chat[1]!.args.chunks.at(-1)).toMatchObject({ type: 'markdown_text' });
+        expect(chat.at(-1)!.args.blocks).toEqual([{ type: 'markdown', text: 'About $7 at most shops.' }]);
+        expect(released).toEqual([1]); // the reply's stopStream set the session active
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('a turn that looks something up and then stays silent leaves nothing behind', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
+        await runFrontTurn(turn({ id: 66 }), ioWithActivity(true).io);
+        // the activity message is gone before the mention fallback is posted
+        expect(h.slack.filter((c) => c.method.startsWith('chat.')).map((c) => c.method)).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.postMessage']);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('unmentioned follow-ups get no cards (no post + delete in the thread), only the lifecycle status', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
+        const a = ioWithActivity(false);
+        await runFrontTurn(turn({ id: 68, isMention: false }), a.io);
+        expect(a.activity).toEqual(['Searching the web…']);
+        expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toEqual([]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('no new activity message once the turn has replied (the status still shows the work)', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.model = mockModel([replyStep('Let me check.'), toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
+        const a = ioWithActivity(true);
+        await runFrontTurn(turn({ id: 69 }), a.io);
+        expect(a.activity).toEqual(['Searching the web…']);
+        const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
+        expect(chat.filter((c) => c.method === 'chat.startStream')).toHaveLength(1); // the reply only
+        expect(chat.flatMap(cards)).toEqual([]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('no activity cards when the pipeline shows no status (no setActivity)', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
+        await runFrontTurn(turn({ id: 67, isMention: false }), io(false).io);
+        expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toEqual([]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+});
+
+describe('scheduled turns (reminders / watch notifications)', () => {
+  it('renders the stored input in place of new messages', async () => {
+    h.sqlHook = (q) => (q.includes('scheduled_turn_inputs') ? [{ source: 'reminder', input: '<reminder id="r_9" owner="<@U1>">check the release</reminder>' }] : undefined);
+    h.model = mockModel([replyStep('<@U1> time to check the release'), textStep('')]);
+    await runFrontTurn(turn({ id: 70, kind: 'scheduled', messageTs: [] }), io(true).io);
+    const prompt = JSON.stringify(h.model.doStreamCalls[0].prompt.filter((m: any) => m.role === 'user'));
+    expect(prompt).toContain('check the release');
+    expect(prompt).not.toContain('<new_messages');
+    expect(h.slack.some((c) => c.method === 'chat.startStream' || c.method === 'chat.postMessage')).toBe(true);
+  });
+});
+
+// Review #2: a confirmation outcome must not depend on the model. Silent, failing or stopped outcome turns post the
+// code-written fallback (never the generic "couldn't come up with a reply" / error texts).
+describe('confirmation outcome turns (send_message / coding-agent launch)', () => {
+  const outcomeRow = (fallback: string | null, source = 'send') => (q: string) =>
+    q.includes('scheduled_turn_inputs') ? [{ source, input: '<send_outcome id="p1" status="sent"/>', fallback }] : undefined;
+  const posts = () => h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text);
+  const failing = () =>
+    new MockLanguageModelV4({
+      doStream: async () => {
+        throw Object.assign(new Error('model down'), { isRetryable: false });
+      },
+    });
+
+  it('a silent outcome turn posts the fallback instead of the generic text', async () => {
+    h.sqlHook = outcomeRow('sent ✓ https://x.slack.com/archives/C9/p1');
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 80, kind: 'scheduled', messageTs: [] }), io(true).io);
+    expect(posts()).toEqual(['sent ✓ https://x.slack.com/archives/C9/p1']);
+    expect(h.events.find((e) => e.type === 'reply')?.payload).toMatchObject({ fallback: true, outcome: true });
+  });
+
+  it('a failing outcome turn posts the fallback and does not throw (no "Something broke")', async () => {
+    h.sqlHook = outcomeRow('sent ✓ https://x.slack.com/archives/C9/p1');
+    h.model = failing();
+    await expect(runFrontTurn(turn({ id: 81, kind: 'scheduled', messageTs: [] }), io(true).io)).resolves.toBeUndefined();
+    expect(posts()).toEqual(['sent ✓ https://x.slack.com/archives/C9/p1']);
+  });
+
+  it('a stopped outcome turn still posts the factual fallback', async () => {
+    h.sqlHook = outcomeRow('sent ✓ https://x.slack.com/archives/C9/p1');
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 84, kind: 'scheduled', messageTs: [] }), { ...io(true).io, stopRequested: async () => true });
+    expect(posts()).toEqual(['sent ✓ https://x.slack.com/archives/C9/p1']);
+  });
+
+  it('no fallback (cancel): silent or failing posts nothing at all', async () => {
+    h.sqlHook = outcomeRow(null);
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 82, kind: 'scheduled', messageTs: [] }), io(true).io);
+    h.model = failing();
+    await expect(runFrontTurn(turn({ id: 83, kind: 'scheduled', messageTs: [] }), io(true).io)).resolves.toBeUndefined();
+    expect(posts()).toEqual([]);
+  });
+
+  it("the agent's own reply means no fallback", async () => {
+    h.sqlHook = outcomeRow('sent ✓ https://x.slack.com/archives/C9/p1');
+    h.model = mockModel([replyStep('sent, here it is: https://x.slack.com/archives/C9/p1'), textStep('')]);
+    await runFrontTurn(turn({ id: 85, kind: 'scheduled', messageTs: [] }), io(true).io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage' && c.args.text?.startsWith('sent ✓'))).toHaveLength(0);
   });
 });

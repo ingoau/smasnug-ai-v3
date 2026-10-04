@@ -12,7 +12,8 @@ Use a separate app in a test workspace for development.
      the installing user; code restricts results to public channels. `channels:history` is used only by
      `read_public_thread` to open public-channel threads found via search (also in channels the bot isn't in); the
      channel is verified public via `conversations.info` first. Without that scope the tool tells the model it
-     can't open other threads yet.
+     can't open other threads yet. `search:read.public` is used only by `slack_semantic_search` (Slack's
+     Real-time Search API, public channels only); without it that tool tells the model to use `slack_search`.
 4. Fill in the rest of `.env`:
    - `ADMIN_USER_ID` — your Slack user id (profile → ⋯ → Copy member ID). The admin approves workspace facts,
      handles reports, can pause the bot from App Home and bypasses pause/suspension.
@@ -35,14 +36,23 @@ scopes.
   bot remembers it for a few minutes and tells the front agent on that user's next DM turn ("User is currently
   viewing #…"), so "summarise this channel" works. Mentions in channel threads work as before.
 - The status indicator uses `agents.sessions.setStatus` (`chat:write`): `processing` while a mention/DM turn runs,
-  `active` when it ends (always, also on errors — unlike the old `assistant.threads.setStatus` it does not clear
-  itself when the bot posts). If it fails unexpectedly, the bot falls back to `assistant.threads.setStatus` once.
+  `active` when it ends (always, also on errors: it does not clear itself when the bot posts). The deprecated
+  `assistant.threads.*` methods are not used. Tool activity ("Searching Slack…") shows as transient task cards in the
+  reply message (`STATUS_ACTIVITY_MODE`, see docs/design.md "Status indicator").
 - **Native stop button**: while a session is `processing`, Slack shows a stop button (because the app subscribes to
   `agent_session_stopped`). Clicking it behaves like saying "stop": the running turn ends at its next step, active
   subagent runs in the thread are cancelled, the user's queued turns are dropped, the thread disengages, and the bot
   confirms with "Stopped.".
-- `agent_session_title_changed` is only logged.
+- DM threads get a session title (`agents.sessions.rename`, `chat:write`) and end `suspended` / `closed` where it
+  fits (docs/design.md "Agent sessions in DMs"). `agent_session_title_changed` records a user's rename so the bot
+  never overwrites it.
 - `/smasnug off|on|status` in a channel: only the channel's creator or the admin can toggle it.
+- **Canvases** need the bot scopes `canvases:read` (`read_canvas`) and `canvases:write` (`create_canvas` /
+  `edit_canvas`, sharing via `canvases.access.set`), both in the manifest; an app installed before they were added
+  must be reinstalled to get them (until then the tools tell the model canvases aren't enabled). Creating standalone
+  canvases needs a paid Slack plan: on a free workspace `canvases.create` fails
+  (`free_teams_cannot_create_standalone_canvases`) and the bot answers in the thread instead (a `.md` file for long
+  content).
 
 ## Dev and production apps (Hack Club workspace)
 

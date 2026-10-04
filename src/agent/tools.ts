@@ -119,7 +119,7 @@ registerTool({
       }),
       execute: async ({ id, text, note }) => {
         const s = turnState(ctx);
-        const r = await messageSubagent({ threadId: s.threadId, turnId: s.turn.id, speakerId: s.turn.authorId, subagentId: id, text, note });
+        const r = await messageSubagent({ threadId: s.threadId, turnId: s.turn.id, turnKind: s.turn.kind, speakerId: s.turn.authorId, subagentId: id, text, note });
         if (r.mode === 'resumed') {
           s.cardId = r.cardId;
           s.delegated = true;
@@ -127,6 +127,11 @@ registerTool({
           return { status: 'resumed', note: 'A follow-up run started; it appears on this turn\'s plan card.' };
         }
         s.visible.add('steer');
+        if (r.queued)
+          return {
+            status: 'queued',
+            note: "Coding agents can't take messages mid-run: this is sent to Cursor as a follow-up as soon as its current run finishes (same branch and PR). Acknowledge briefly (a reaction or a very short reply saying it's queued).",
+          };
         return { status: 'steered', note: 'Delivered; it will see this at its next step. Acknowledge the user visibly with either a reaction or a very short reply (not both).' };
       },
     }),

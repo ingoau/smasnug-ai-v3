@@ -11,7 +11,7 @@ export type DeliveryMode = 'stream' | 'post';
  * - subagents running in the thread → post the reply whole (steers fold into the card);
  * - otherwise → stream.
  */
-export function chooseDelivery(opts: { turnKind: 'user' | 'synthesis'; runningRuns: number }): DeliveryMode {
+export function chooseDelivery(opts: { turnKind: 'user' | 'synthesis' | 'scheduled'; runningRuns: number }): DeliveryMode {
   if (opts.turnKind === 'synthesis') return 'stream';
   return opts.runningRuns > 0 ? 'post' : 'stream';
 }
@@ -83,6 +83,12 @@ function compactValue(v: unknown): string {
 }
 
 /**
+ * Tools whose results must never be persisted: Slack's Real-time Search terms forbid storing or copying its data
+ * (docs.slack.dev/apis/web-api/real-time-search-api#data-privacy), so a persisted history keeps only a placeholder.
+ */
+const UNSTORED_TOOL_RESULTS = new Set(['slack_semantic_search']);
+
+/**
  * Compact a subagent's persisted history at run end: tool results are cut to short summaries, images/files in
  * tool results and user messages are replaced by placeholders, and reasoning parts are dropped, so long-lived
  * subagents don't grow without bound. Assistant text (the results themselves) and the instructions are kept.
@@ -94,6 +100,7 @@ export function compactHistory(messages: ModelMessage[]): ModelMessage[] {
         ...m,
         content: m.content.map((p) => {
           if (p.type !== 'tool-result') return p;
+          if (UNSTORED_TOOL_RESULTS.has(p.toolName)) return { ...p, output: { type: 'text' as const, value: '[search results not stored]' } };
           const out = p.output;
           let value: string;
           switch (out.type) {
@@ -145,6 +152,7 @@ export function describeToolStep(toolName: string, input: unknown): string {
     case 'web_search':
       return q('query') ? `Searching the web for “${q('query')}”` : 'Searching the web';
     case 'slack_search':
+    case 'slack_semantic_search':
       return q('query') ? `Searching Slack for “${q('query')}”` : 'Searching Slack';
     case 'fetch_url':
       return q('url') ? `Reading ${q('url')}` : 'Reading a page';

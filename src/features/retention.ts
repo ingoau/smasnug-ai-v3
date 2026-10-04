@@ -57,6 +57,17 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
     sql`delete from bot_reports where status <> 'pending' and coalesce(reviewed_at, created_at) < ${older(long)} returning id`,
   );
 
+  // Canvases the bot made stay in Slack (user deliverables); the row that makes one editable goes after long disuse.
+  await run('bot_canvases', sql`delete from bot_canvases where last_used_at < ${older(secs(limits.canvasRowExpiryMs))} returning canvas_id`);
+  // Reminders / watches (src/features/schedule): finished ones go after the retention window. Watch snapshots are
+  // already dropped when a watch ends; notifications follow the same window.
+  await run(
+    'reminders',
+    sql`delete from reminders where status not in ('pending', 'firing') and coalesce(fired_at, updated_at) < ${older(long)} returning id`,
+  );
+  await run('watches', sql`delete from watches where status <> 'active' and coalesce(ended_at, created_at) < ${older(long)} returning id`);
+  await run('watch_notifications', sql`delete from watch_notifications where created_at < ${older(long)} returning id`);
+
   await run('pending_sends', sql`delete from pending_sends where created_at < ${older(short)} returning id`);
   await run('idempotency_keys', sql`delete from idempotency_keys where created_at < ${older(short)} returning key`);
   await run('slack_events_seen', sql`delete from slack_events_seen where received_at < ${older(short)} returning event_id`);

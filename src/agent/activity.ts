@@ -19,10 +19,23 @@ const LABELS: Record<string, string> = {
   propose_workspace_fact: 'Noting a workspace fact…',
   send_message: 'Preparing a message…',
   set_card_title: 'Writing up the results…',
+  slack_semantic_search: 'Searching Slack…',
+  read_canvas: 'Reading the canvas…',
+  create_canvas: 'Writing a canvas…',
+  edit_canvas: 'Updating the canvas…',
+  set_reminder: 'Setting a reminder…',
+  list_reminders: 'Checking reminders…',
+  cancel_reminder: 'Cancelling a reminder…',
+  create_watch: 'Setting up a watch…',
+  list_watches: 'Checking watches…',
+  cancel_watch: 'Cancelling a watch…',
+  spawn_coding_agent: 'Preparing a coding agent…',
 };
 
 /** Tools that only respond; they never show or change the indicator. */
 const RESPONDING = new Set(['reply', 'react', 'unreact', 'search_emojis', 'end_turn']);
+/** Bookkeeping (DM session title, leaving / closing the conversation): not work either, no card flashing after a reply. */
+for (const name of ['set_session_title', 'leave_thread']) RESPONDING.add(name);
 /** Tools that must stay invisible in the thread (report_user is never hinted at). */
 const SILENT = new Set(['report_user']);
 
@@ -32,4 +45,15 @@ export const DEFAULT_ACTIVITY = 'Working…';
 export function activityForTool(toolName: string): string | null {
   if (RESPONDING.has(toolName) || SILENT.has(toolName)) return null;
   return LABELS[toolName] ?? DEFAULT_ACTIVITY;
+}
+
+/**
+ * Bookkeeping a turn typically does after it has replied (notes, workspace facts, reminders / watches): once the
+ * reply is visible these change nothing on screen, so the session doesn't flip back to "Working…" for them.
+ */
+const QUIET_AFTER_REPLY = new Set(['remember', 'forget', 'propose_workspace_fact', 'set_reminder', 'list_reminders', 'cancel_reminder', 'create_watch', 'list_watches', 'cancel_watch']);
+
+/** True if this tool, started after the turn's reply became visible, should not touch the status indicator. */
+export function quietAfterReply(toolName: string): boolean {
+  return QUIET_AFTER_REPLY.has(toolName);
 }

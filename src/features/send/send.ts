@@ -1,9 +1,12 @@
 /**
  * send_message: post in the current thread as the bot, or anywhere else on behalf of the speaker after a
  * code-enforced ephemeral confirmation (Send / Cancel). Sends outside the thread are attributed (custom username +
- * avatar + context line) and carry a Report button.
+ * avatar + context line) and carry a Report button. Resolving the preview (Send, Cancel, a definitive failure or
+ * expiry) starts an outcome turn so the agent can confirm or acknowledge it (src/features/outcome-turn.ts); a
+ * successful Send deletes the preview instead of leaving a confirmation in it.
  */
 import { createHash } from 'node:crypto';
+import type { TransactionSql } from 'postgres';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { env, limits } from '../../config.js';
@@ -18,8 +21,21 @@ import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
 import { peekLimit, takeLimit } from '../guard.js';
 import { getState } from '../state.js';
-import { ephemeral, truncate, userProfile } from '../util.js';
-import { CLICK_REPLIES, decideClick, isUuid, parseDestination, sanitizeOutgoing, type PendingSendRow } from './logic.js';
+import { deleteOriginal, ephemeral, respond, truncate, userProfile } from '../util.js';
+import { settleWithOutcome, type OutcomeResult } from '../outcome-turn.js';
+import {
+  CLICK_REPLIES,
+  decideClick,
+  isUuid,
+  parseDestination,
+  renderSendOutcome,
+  sanitizeOutgoing,
+  sendOutcomeFallback,
+  sendOutcomeIsMention,
+  type PendingSendRow,
+  type SendOutcome,
+} from './logic.js';
+import { resumeSuspendedSession } from '../../pipeline/agent-session.js';
 
 export const SEND_TEXT_MAX = 6000;
 
@@ -33,7 +49,9 @@ export function sendMessageTool(ctx: ToolContext) {
       'Send a message. destination: "thread" posts in the current thread as you (the bot). Anything else — a channel ' +
       '("#name", "<#C…>", channel id) or a person ("<@U…>", user id, for a DM) — is sent on behalf of the current speaker, ' +
       'attributed to them, and only after they confirm a preview with a Send button. You will get "awaiting confirmation": ' +
-      "don't claim it was sent. Markdown is supported. Write the text exactly as it should appear.",
+      "nothing is sent yet and they already see the preview, so in THIS turn don't claim it was sent and don't reply about " +
+      'the preview (normally just end the turn). Later a separate outcome turn (<send_outcome>) tells you what happened: ' +
+      'then confirm briefly with the link, or acknowledge. Markdown is supported. Write the text exactly as it should appear.',
     inputSchema: z.object({
       destination: z.string().describe('"thread", "#channel-name", "<#C…>", "<@U…>" or an id'),
       text: z.string().min(1).max(SEND_TEXT_MAX),
@@ -94,7 +112,7 @@ async function prepareSend(ctx: ToolContext, destination: string, rawText: strin
     select id from pending_sends
     where requester_id = ${ctx.speakerId} and destination = ${destId} and text = ${text}
       and status = 'pending' and expires_at > now()`;
-  if (existing) return 'Awaiting confirmation: the speaker already has this preview with Send / Cancel buttons.';
+  if (existing) return `Awaiting confirmation: the speaker already has this preview with Send / Cancel buttons. ${AWAIT_NOTE}`;
 
   const expiresAt = new Date(Date.now() + limits.pendingSendTtlMs);
   const [pending] = await sql<PendingSendRow[]>`
@@ -118,8 +136,13 @@ async function prepareSend(ctx: ToolContext, destination: string, rawText: strin
   await appendEvent(ctx.threadId, 'send_pending', ctx.speakerId, { pendingId: pending!.id, destination: destId }).catch(() => {});
   return `Awaiting confirmation: the speaker sees a private preview for ${label} with Send / Cancel buttons (expires in ${Math.round(
     limits.pendingSendTtlMs / 60_000,
-  )} min). Nothing is sent until they click Send.`;
+  )} min). Nothing is sent until they click Send. ${AWAIT_NOTE}`;
 }
+
+const AWAIT_NOTE =
+  "In this turn: don't reply about the preview (they see it) and don't say it was sent; unless something else in their " +
+  'message needs an answer, just end the turn. A separate outcome turn (<send_outcome>) comes later: when it arrives, ' +
+  'confirm briefly with the link (or acknowledge a cancel / failure).';
 
 export function attributionName(requesterName: string) {
   // Slack truncates usernames at 80 chars.
@@ -237,14 +260,56 @@ async function loadPending(id: string | undefined): Promise<PendingSendRow | und
 
 async function replyDecision(ctx: ActionContext, decision: Exclude<ReturnType<typeof decideClick>, 'ok'>) {
   const r = CLICK_REPLIES[decision];
+  // A second click on a preview that is already gone (deleted after sending): nothing to replace, no new ephemeral.
+  if (decision === 'already_sent') return void (await respond(ctx.responseUrl, { replace_original: true, text: r.text }));
   await ephemeral(ctx, r.text, { replace: r.replace });
+}
+
+/** Conditional status change of a pending send, for settleSend (true = this call changed it). */
+const transitionTo = (id: string, from: 'pending' | 'sending', to: 'sent' | 'cancelled' | 'expired', when: 'live' | 'expired' | 'any' = 'any') =>
+  async (tx: TransactionSql<{}>) => {
+    const expiry = when === 'live' ? sql`and expires_at > now()` : when === 'expired' ? sql`and expires_at <= now()` : sql``;
+    const rows = await tx`update pending_sends set status = ${to} where id = ${id} and status = ${from} ${expiry} returning id`;
+    return rows.length > 0;
+  };
+
+/**
+ * Resolve a pending send and start the agent's outcome turn with it (exactly once; src/features/outcome-turn.ts). A DM
+ * session suspended for this confirmation resumes here, unless a mention outcome turn will set its status itself
+ * (processing, then its final one).
+ */
+async function settleSend(
+  p: PendingSendRow,
+  outcome: SendOutcome,
+  transition: (tx: TransactionSql<{}>) => Promise<boolean>,
+  opts: { isMention?: boolean; skip?: string } = {},
+): Promise<OutcomeResult> {
+  const isMention = opts.isMention ?? sendOutcomeIsMention(outcome);
+  const res = await settleWithOutcome({
+    threadId: p.threadId,
+    speakerId: p.requesterId,
+    source: 'send',
+    sourceRef: p.id,
+    input: renderSendOutcome({ pendingId: p.id, requesterId: p.requesterId, destination: p.destination, text: p.text, outcome }),
+    fallback: sendOutcomeFallback(outcome),
+    isMention,
+    ...(opts.skip ? { skip: opts.skip } : {}),
+    transition,
+  });
+  if (res.settled && (res.turnId == null || !isMention)) await resumeSuspendedSession(p.threadId);
+  return res;
 }
 
 export async function handleSendCancel(ctx: ActionContext) {
   const p = await loadPending(ctx.value);
   const decision = decideClick(p, ctx.userId);
   if (decision !== 'ok') return replyDecision(ctx, decision);
-  await sql`update pending_sends set status = 'cancelled' where id = ${p!.id} and status = 'pending'`;
+  const res = await settleSend(p!, { kind: 'not_sent', reason: 'cancelled' }, transitionTo(p!.id, 'pending', 'cancelled', 'live'));
+  if (!res.settled) {
+    const again = decideClick(await loadPending(p!.id), ctx.userId);
+    return replyDecision(ctx, again === 'ok' ? 'expired' : again);
+  }
+  // Kept (not deleted): instant feedback for the click; the agent's outcome turn acknowledges it in the thread.
   await ephemeral(ctx, 'Cancelled.', { replace: true });
 }
 
@@ -261,37 +326,49 @@ export async function handleSendConfirm(ctx: ActionContext) {
     const again = decideClick(await loadPending(p!.id), ctx.userId);
     return replyDecision(ctx, again === 'ok' ? 'expired' : again);
   }
+  // Definitive "not sent": the preview is replaced with the reason, and the agent hears about it.
+  const notSent = async (reason: 'rate_limited' | 'failed', text: string, detail?: string, skip?: string) => {
+    await settleSend(claimed, { kind: 'not_sent', reason, ...(detail ? { detail } : {}) }, transitionTo(claimed.id, 'sending', 'cancelled'), skip ? { skip } : {});
+    await ephemeral(ctx, text, { replace: true });
+  };
 
+  // A block is told privately only: no outcome turn (the agent would announce it in a possibly public thread).
   const block = (await getState()).blocks.get(claimed.requesterId);
-  if (block?.suspended || block?.sendBlocked) {
-    await sql`update pending_sends set status = 'cancelled' where id = ${claimed.id}`;
-    return ephemeral(ctx, "You're blocked from sending messages through the bot.", { replace: true });
-  }
+  if (block?.suspended || block?.sendBlocked) return notSent('failed', "You're blocked from sending messages through the bot.", undefined, 'send_blocked');
   const limitErr = await takeLimit('send', claimed.requesterId, claimed.threadId ?? undefined);
-  if (limitErr) {
-    await sql`update pending_sends set status = 'cancelled' where id = ${claimed.id}`;
-    return ephemeral(ctx, `Not sent: you've reached the limit of ${limits.userSendsPerHour} messages per hour. Try again later.`, {
-      replace: true,
-    });
-  }
+  if (limitErr) return notSent('rate_limited', `Not sent: you've reached the limit of ${limits.userSendsPerHour} messages per hour. Try again later.`);
 
+  let sent: Awaited<ReturnType<typeof deliver>>;
   try {
-    const sent = await deliver(claimed);
-    await sql`update pending_sends set status = 'sent' where id = ${claimed.id}`;
-    const link = sent.permalink ? ` <${sent.permalink}|View message>` : '';
-    const fileNote = sent.filesFailed ? ' (attachments failed to upload)' : '';
-    await ephemeral(ctx, `Sent ✓${link}${fileNote}`, { replace: true });
+    sent = await deliver(claimed);
   } catch (err) {
-    if (err instanceof UserFacingError) {
-      await sql`update pending_sends set status = 'cancelled' where id = ${claimed.id}`;
-      return ephemeral(ctx, `Not sent: ${err.message}`, { replace: true });
-    }
-    // Unknown failure: allow another click while the preview is still valid.
+    if (err instanceof UserFacingError) return notSent('failed', `Not sent: ${err.message}`, err.message);
+    // Unknown failure: allow another click while the preview is still valid (no outcome yet).
     await sql`update pending_sends set status = 'pending' where id = ${claimed.id} and status = 'sending'`;
     log.error({ err, pendingId: claimed.id }, 'on-behalf send failed');
     await ephemeral(ctx, `Something broke while sending (${slackErrorCode(err) ?? 'error'}). Try clicking Send again.`);
+    return;
   }
+  // Sent: the agent confirms it in the thread (outcome turn, with a code-written "sent ✓ <link>" if the model fails or
+  // stays silent), so the preview just goes away. If no turn will run (paused, thread gone, a DB error), confirm in
+  // the preview instead.
+  const res = await settleSend(claimed, { kind: 'sent', permalink: sent.permalink, filesFailed: sent.filesFailed }, transitionTo(claimed.id, 'sending', 'sent')).catch(
+    (err) => (log.error({ err, pendingId: claimed.id }, 'settling a sent message failed'), null),
+  );
+  if (res?.turnId != null && (await deleteOriginal(ctx))) return;
+  if (!res) {
+    // The row may still say 'sending': the stuck-send sweep must not start a late outcome turn for a send the user
+    // sees confirmed here.
+    await redis.set(confirmedKey(claimed.id), '1', 'EX', 2 * 24 * 3600).catch(() => {});
+    await sql`update pending_sends set status = 'sent' where id = ${claimed.id} and status = 'sending'`.catch(() => {});
+  }
+  const link = sent.permalink ? ` <${sent.permalink}|View message>` : '';
+  const fileNote = sent.filesFailed ? ' (attachments failed to upload)' : '';
+  await ephemeral(ctx, `Sent ✓${link}${fileNote}`, { replace: true });
 }
+
+/** A send whose click path showed the user "Sent ✓" itself (its outcome couldn't be recorded). */
+const confirmedKey = (pendingId: string) => `send:confirmed:${pendingId}`;
 
 /** Post the attributed message, upload files, record it. */
 export async function deliver(p: PendingSendRow): Promise<{ channel: string; ts: string; permalink?: string; sentId: number; filesFailed: boolean }> {
@@ -314,6 +391,12 @@ export async function deliver(p: PendingSendRow): Promise<{ channel: string; ts:
   };
   const posted = await postWithJoin(args, `send:${p.id}`);
   const ts: string = posted.ts;
+  // Recorded right away (permalink added below): if anything after this crashes, the stuck-send sweep still knows
+  // the message went out.
+  await sql`
+    insert into sent_messages (id, channel_id, ts, requester_id, text, permalink, destination, pending_send_id)
+    values (${sentId}, ${channel}, ${ts}, ${p.requesterId}, ${p.text}, null, ${p.destination}, ${p.id})
+    on conflict (channel_id, ts) do nothing`;
 
   let filesFailed = false;
   if (p.files.length) {
@@ -329,10 +412,7 @@ export async function deliver(p: PendingSendRow): Promise<{ channel: string; ts:
     .then((r) => r.permalink)
     .catch(() => undefined);
 
-  await sql`
-    insert into sent_messages (id, channel_id, ts, requester_id, text, permalink, destination, pending_send_id)
-    values (${sentId}, ${channel}, ${ts}, ${p.requesterId}, ${p.text}, ${permalink ?? null}, ${p.destination}, ${p.id})
-    on conflict (channel_id, ts) do nothing`;
+  if (permalink) await sql`update sent_messages set permalink = ${permalink} where channel_id = ${channel} and ts = ${ts}`;
 
   if (p.threadId) {
     await appendEvent(p.threadId, 'send', p.requesterId, {
@@ -369,11 +449,65 @@ async function postWithJoin(args: Record<string, unknown>, idempotencyKey: strin
   }
 }
 
-/** Mark expired pending sends (stale clicks are refused either way; this keeps the table tidy). */
+/** Outcome turns only for previews that expired recently (a sweep after downtime doesn't dig up old ones). */
+const OUTCOME_MAX_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * The message a crashed click posted, if any: sent_messages (written right after chat.postMessage), else the stored
+ * result of the post's idempotency key (`chat.postMessage:send:<id>`, src/core/slack.ts).
+ */
+async function postedMessage(pendingId: string): Promise<{ permalink?: string } | null> {
+  const [sent] = await sql<{ permalink: string | null }[]>`select permalink from sent_messages where pending_send_id = ${pendingId} limit 1`;
+  if (sent) return { permalink: sent.permalink ?? undefined };
+  const [key] = await sql<{ result: any }[]>`
+    select result from idempotency_keys where key = ${`chat.postMessage:send:${pendingId}`} and result is not null`;
+  const channel = key?.result?.channel;
+  const ts = key?.result?.ts;
+  if (!channel || !ts) return null;
+  const permalink: string | undefined = await slackCall<any>('chat.getPermalink', { channel, message_ts: ts })
+    .then((r) => r.permalink)
+    .catch(() => undefined);
+  return { permalink };
+}
+
+/**
+ * Expire unanswered previews (stale clicks are refused either way): each gets its outcome turn, so the agent knows
+ * nothing was sent. Clicks that crashed mid-send stay 'sending'; after the TTL they are settled too: 'sent' when the
+ * message did go out, otherwise expired with an "interrupted" outcome. Those are late, so non-mention turns, and none
+ * at all when the click path already showed the user "Sent ✓".
+ */
 export async function expirePendingSends() {
-  await sql`update pending_sends set status = 'expired' where status = 'pending' and expires_at <= now()`;
-  // Clicks that crashed mid-send stay 'sending'; release them after the TTL so the state is honest.
-  await sql`update pending_sends set status = 'expired' where status = 'sending' and expires_at <= now() - interval '10 minutes'`;
+  const ttlMin = Math.round(limits.pendingSendTtlMs / 60_000);
+  const settle = async (
+    p: PendingSendRow,
+    outcome: SendOutcome,
+    transition: (tx: TransactionSql<{}>) => Promise<boolean>,
+    opts: { isMention?: boolean; skip?: string } = {},
+  ) => {
+    try {
+      if (Date.now() - new Date(p.expiresAt).getTime() < OUTCOME_MAX_AGE_MS) await settleSend(p, outcome, transition, opts);
+      else if (await sql.begin(transition)) await resumeSuspendedSession(p.threadId);
+    } catch (err) {
+      log.warn({ err, pendingId: p.id }, 'expiring a pending send failed');
+    }
+  };
+  const due = await sql<PendingSendRow[]>`
+    select * from pending_sends where status = 'pending' and expires_at <= now() order by expires_at limit 500`;
+  for (const p of due) await settle(p, { kind: 'expired', ttlMin }, transitionTo(p.id, 'pending', 'expired', 'expired'));
+
+  const stuck = await sql<PendingSendRow[]>`
+    select * from pending_sends where status = 'sending' and expires_at <= now() - interval '10 minutes' order by expires_at limit 100`;
+  for (const p of stuck) {
+    try {
+      const sent = await postedMessage(p.id);
+      const confirmed = (await redis.exists(confirmedKey(p.id)).catch(() => 0)) > 0;
+      const opts = { isMention: false, ...(confirmed ? { skip: 'confirmed_in_preview' } : {}) };
+      if (sent) await settle(p, { kind: 'sent', ...(sent.permalink ? { permalink: sent.permalink } : {}) }, transitionTo(p.id, 'sending', 'sent'), opts);
+      else await settle(p, { kind: 'not_sent', reason: 'failed', detail: 'the send was interrupted' }, transitionTo(p.id, 'sending', 'expired'), opts);
+    } catch (err) {
+      log.warn({ err, pendingId: p.id }, 'settling a stuck send failed');
+    }
+  }
 }
 
 export function registerSendTool() {

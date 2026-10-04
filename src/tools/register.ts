@@ -6,10 +6,12 @@ import type { QueueName } from '../core/queues.js';
 import './fetch-url.js';
 import './web-search.js';
 import './slack-search.js';
+import './slack-semantic-search.js';
 import './read-history.js';
 import './public-thread.js';
 import './read-image.js';
 import './emoji.js';
+import './canvases.js';
 import { pruneImageCache } from './read-image.js';
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {};

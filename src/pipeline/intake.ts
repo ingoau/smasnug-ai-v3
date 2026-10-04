@@ -5,6 +5,7 @@
 import { appendEvent, parseThreadId, threadIdOf } from '../core/events.js';
 import { getBotIdentity, markThreadGone, slackCall } from '../core/slack.js';
 import { cancelThreadRuns } from '../agent/subagents.js';
+import { rehomeCodingAgents } from '../agent/cursor/agents.js';
 import { requestThreadStop } from './stop.js';
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
@@ -188,7 +189,8 @@ async function handleDelete(channelId: string, ts: string | undefined, prev?: Sl
 
 /**
  * The thread's root message is gone: Slack would turn any reply into a top-level channel message. Block posting
- * into it, stop the running turn at its next step, drop pending turns and cancel the thread's subagents.
+ * into it, stop the running turn at its next step, drop pending turns and cancel the thread's subagents (running
+ * coding agents move to a DM with the admin instead).
  */
 async function handleRootDeleted(threadId: string): Promise<void> {
   const { channelId, threadTs } = parseThreadId(threadId);
@@ -197,5 +199,7 @@ async function handleRootDeleted(threadId: string): Promise<void> {
   await sql`update threads set root_deleted_at = now(), engaged = false where id = ${threadId}`;
   await sql`update turns set status = 'cancelled', finished_at = now() where thread_id = ${threadId} and status = 'pending'`;
   const cards = await cancelThreadRuns(threadId, 'system').catch((err) => (log.error({ err, threadId }, 'cancelThreadRuns failed'), []));
-  await appendEvent(threadId, 'root_deleted', 'system', { cancelledCards: cards });
+  // Coding agents aren't cancelled (that's the admin's call): they move to a DM thread with the admin.
+  const rehomed = await rehomeCodingAgents(threadId).catch((err) => (log.error({ err, threadId }, 'rehomeCodingAgents failed'), []));
+  await appendEvent(threadId, 'root_deleted', 'system', { cancelledCards: cards, rehomedCodingAgents: rehomed });
 }

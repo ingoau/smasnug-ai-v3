@@ -47,6 +47,9 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
     ...o,
   });
   const callsSince = async (n: number) => (await fakeCalls()).slice(n);
+  /** Outcome turns started for a pending send (src/features/outcome-turn.ts). */
+  const outcomeTurns = (pendingId: string) =>
+    sql<any[]>`select t.*, i.input, i.fallback from scheduled_turn_inputs i join turns t on t.id = i.turn_id where i.source = 'send' and i.source_ref = ${pendingId}`;
   const lastResponse = async (n: number) => (await callsSince(n)).filter((c) => c.method === 'response_url').at(-1)?.args;
 
   beforeAll(async () => {
@@ -141,8 +144,13 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       expect(report).toMatchObject({ action_id: 'report:open', value: String(sent.id) });
       expect(JSON.stringify(post?.args.blocks)).toContain(`Sent by <@${requester}> via ${env.BOT_DISPLAY_NAME}`);
       expect(uploadFiles).toHaveBeenCalledWith(expect.objectContaining({ channelId: 'CGENERAL', threadTs: post?.args && sent.ts }));
-      expect((await lastResponse(m))).toMatchObject({ replace_original: true });
-      expect((await lastResponse(m))?.text).toMatch(/^Sent ✓/);
+      // No "Sent ✓" left behind: the preview is deleted and the agent confirms in an outcome turn.
+      expect(await lastResponse(m)).toEqual({ url: expect.any(String), delete_original: true });
+      const outcome = await outcomeTurns(pending.id);
+      expect(outcome).toHaveLength(1);
+      expect(outcome[0]).toMatchObject({ kind: 'scheduled', authorId: requester, isMention: true, status: 'pending', threadId });
+      expect(outcome[0].input).toContain('status="sent"');
+      expect(outcome[0].input).toContain(sent.permalink);
       const [ev] = await sql<any[]>`select * from thread_events where thread_id = ${threadId} and type = 'send' and actor = ${requester}`;
       expect(ev?.payload.sentMessageId).toBe(Number(sent.id));
       expect(Number((await sql`select count(*)::int as n from usage where user_id = ${requester} and kind = 'send'`)[0]!.n)).toBe(1);
@@ -211,7 +219,195 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       await send.handleSendConfirm(action({ userId: requester, actionId: 'send:confirm', value: p!.id }));
       expect((await lastResponse(m))?.text).toMatch(/blocked/);
       expect((await callsSince(m)).some((c) => c.method === 'chat.postMessage')).toBe(false);
+      // Review #6: told privately only; no outcome turn that would announce the block in the thread.
+      expect(await outcomeTurns(p!.id)).toHaveLength(0);
+      expect((await sql`select status from pending_sends where id = ${p!.id}`)[0]!.status).toBe('cancelled');
       await state.setBlock(requester, { sendBlocked: false });
+    });
+  });
+
+  describe('send outcomes go back to the agent', () => {
+    async function propose(requester: string, text = `hello ${rand()}`, destination = 'CGENERAL') {
+      const res = await exec(send.sendMessageTool(toolCtx(requester)), { destination, text });
+      expect(res).toMatch(/Awaiting confirmation/);
+      const [p] = await sql<any[]>`select * from pending_sends where requester_id = ${requester} and text = ${text}`;
+      return p;
+    }
+    const status = async (id: string) => (await sql<any[]>`select status from pending_sends where id = ${id}`)[0]!.status;
+
+    it('Send: delivered once, preview deleted, exactly one outcome turn even with double clicks', async () => {
+      const requester = uid();
+      const p = await propose(requester, 'see you at 5');
+      const m = (await fakeCalls()).length;
+      await Promise.all([
+        send.handleSendConfirm(action({ userId: requester, actionId: 'send:confirm', value: p.id })),
+        send.handleSendConfirm(action({ userId: requester, actionId: 'send:confirm', value: p.id })),
+      ]);
+      const calls = await callsSince(m);
+      expect(calls.filter((c) => c.method === 'chat.postMessage' && c.args.channel === 'CGENERAL')).toHaveLength(1);
+      expect(calls.some((c) => c.method === 'response_url' && c.args.delete_original === true)).toBe(true);
+      expect(calls.some((c) => c.method === 'response_url' && /Sent ✓/.test(String(c.args.text)))).toBe(false);
+      expect(await status(p.id)).toBe('sent');
+      const [turn, ...rest] = await outcomeTurns(p.id);
+      expect(rest).toHaveLength(0);
+      expect(turn).toMatchObject({ kind: 'scheduled', authorId: requester, isMention: true });
+      expect(turn.input).toContain('<send_outcome');
+      expect(turn.input).toContain('see you at 5');
+      expect(turn.input).toMatch(/Link: https:\/\/fake\.slack\.com\//);
+      expect(turn.fallback).toMatch(/^sent ✓ https:\/\/fake\.slack\.com\//); // posted by code if the model fails or stays silent
+      expect(turn.input).toMatch(/^System notice \(not a message from/m);
+      // A later sweep doesn't add another one.
+      await send.expirePendingSends();
+      expect(await outcomeTurns(p.id)).toHaveLength(1);
+    });
+
+    it('Cancel: "Cancelled." stays, one mention outcome turn; a second click adds nothing', async () => {
+      const requester = uid();
+      const p = await propose(requester);
+      let m = (await fakeCalls()).length;
+      await send.handleSendCancel(action({ userId: requester, actionId: 'send:cancel', value: p.id }));
+      expect(await lastResponse(m)).toMatchObject({ replace_original: true, text: 'Cancelled.' });
+      m = (await fakeCalls()).length;
+      await send.handleSendCancel(action({ userId: requester, actionId: 'send:cancel', value: p.id }));
+      expect((await lastResponse(m))?.text).toBe('Cancelled.');
+      const turns = await outcomeTurns(p.id);
+      expect(turns).toHaveLength(1);
+      expect(turns[0]).toMatchObject({ authorId: requester, isMention: true });
+      expect(turns[0].input).toContain('status="not_sent:cancelled"');
+    });
+
+    it('expiry: one non-mention outcome turn; old expiries and repeated sweeps add none', async () => {
+      const requester = uid();
+      const p = await propose(requester);
+      await sql`update pending_sends set expires_at = now() - interval '1 second' where id = ${p.id}`;
+      const old = await propose(requester);
+      await sql`update pending_sends set expires_at = now() - interval '2 hours' where id = ${old.id}`;
+      await send.expirePendingSends();
+      await send.expirePendingSends();
+      expect(await status(p.id)).toBe('expired');
+      expect(await status(old.id)).toBe('expired');
+      const turns = await outcomeTurns(p.id);
+      expect(turns).toHaveLength(1);
+      expect(turns[0]).toMatchObject({ isMention: false });
+      expect(turns[0].input).toContain('status="expired"');
+      expect(await outcomeTurns(old.id)).toHaveLength(0);
+    });
+
+    it('a click racing expiry: exactly one outcome turn, nothing sent', async () => {
+      const requester = uid();
+      const p = await propose(requester);
+      await sql`update pending_sends set expires_at = now() - interval '1 second' where id = ${p.id}`;
+      const m = (await fakeCalls()).length;
+      await Promise.all([
+        send.handleSendConfirm(action({ userId: requester, actionId: 'send:confirm', value: p.id })),
+        send.handleSendCancel(action({ userId: requester, actionId: 'send:cancel', value: p.id })),
+        send.expirePendingSends(),
+      ]);
+      expect((await callsSince(m)).some((c) => c.method === 'chat.postMessage' && c.args.channel === 'CGENERAL')).toBe(false);
+      expect(await outcomeTurns(p.id)).toHaveLength(1);
+      expect(await status(p.id)).toBe('expired');
+    });
+
+    it('no turn for a suspended requester, while paused, or when the thread is gone; the row still resolves', async () => {
+      const suspended = uid();
+      const p1 = await propose(suspended);
+      await state.setBlock(suspended, { suspended: true, reason: 'test' });
+      await sql`update pending_sends set expires_at = now() - interval '1 second' where id = ${p1.id}`;
+      await send.expirePendingSends();
+      expect(await status(p1.id)).toBe('expired');
+      expect(await outcomeTurns(p1.id)).toHaveLength(0);
+      await state.setBlock(suspended, { suspended: false });
+
+      const p2 = await propose(uid());
+      await sql`update pending_sends set expires_at = now() - interval '1 second' where id = ${p2.id}`;
+      await state.setPaused(true);
+      await send.expirePendingSends();
+      await state.setPaused(false);
+      expect(await status(p2.id)).toBe('expired');
+      expect(await outcomeTurns(p2.id)).toHaveLength(0);
+
+      // Retention removed the thread row (thread_id → null), or its root was deleted.
+      const requester = uid();
+      const p3 = await propose(requester);
+      await sql`update pending_sends set thread_id = null, expires_at = now() - interval '1 second' where id = ${p3.id}`;
+      await send.expirePendingSends();
+      expect(await status(p3.id)).toBe('expired');
+      expect(await outcomeTurns(p3.id)).toHaveLength(0);
+
+      const goneChannel = `CGONE${rand()}`;
+      const gone = `${goneChannel}:1700000000.000200`;
+      await sql`insert into threads (id, channel_id, thread_ts, root_deleted_at) values (${gone}, ${goneChannel}, '1700000000.000200', now())`;
+      const p4 = await propose(requester);
+      await sql`update pending_sends set thread_id = ${gone} where id = ${p4.id}`;
+      await send.handleSendCancel(action({ userId: requester, actionId: 'send:cancel', value: p4.id }));
+      expect(await status(p4.id)).toBe('cancelled');
+      expect(await outcomeTurns(p4.id)).toHaveLength(0);
+      await sql`delete from threads where id = ${gone}`;
+    });
+
+    it('a send that crashed mid-way is settled by the sweep: sent if it went out, else "interrupted"', async () => {
+      const requester = uid();
+      const a = await propose(requester);
+      const b = await propose(requester);
+      await sql`update pending_sends set status = 'sending', expires_at = now() - interval '11 minutes' where id in (${a.id}, ${b.id})`;
+      await sql`insert into sent_messages (channel_id, ts, requester_id, text, permalink, destination, pending_send_id)
+                values ('CGENERAL', ${`1700000123.${rand()}`}, ${requester}, ${a.text}, 'https://fake.slack.com/archives/CGENERAL/p1', 'CGENERAL', ${a.id})`;
+      // Review #3: posted, but the crash came before sent_messages was written: the post's idempotency key result
+      // still shows it went out.
+      const c = await propose(requester);
+      await sql`update pending_sends set status = 'sending', expires_at = now() - interval '11 minutes' where id = ${c.id}`;
+      await sql`insert into idempotency_keys (key, result) values (${`chat.postMessage:send:${c.id}`}, ${sql.json({ ok: true, channel: 'CGENERAL', ts: '1700000999.000100' })})`;
+      await send.expirePendingSends();
+      expect(await status(a.id)).toBe('sent');
+      expect(await status(b.id)).toBe('expired');
+      expect(await status(c.id)).toBe('sent');
+      const [ta] = await outcomeTurns(a.id);
+      expect(ta.input).toContain('https://fake.slack.com/archives/CGENERAL/p1');
+      expect((await outcomeTurns(b.id))[0].input).toContain('status="not_sent:failed"');
+      const [tc] = await outcomeTurns(c.id);
+      expect(tc.input).toContain('status="sent"');
+      expect(tc.input).toContain('https://fake.slack.com/archives/CGENERAL/p1700000999000100');
+      // Review #4: late (sweep) outcomes are not mention turns.
+      for (const t of [ta, tc, (await outcomeTurns(b.id))[0]]) expect(t.isMention).toBe(false);
+    });
+
+    it('deliver records sent_messages right after the post, before uploads and the permalink', async () => {
+      const requester = uid();
+      const p = await propose(requester);
+      let seenDuringUpload: any[] = [];
+      uploadFiles.mockImplementationOnce(async () => {
+        seenDuringUpload = await sql`select * from sent_messages where pending_send_id = ${p.id}`;
+      });
+      await sql`update pending_sends set files = ${sql.json([{ filename: 'a.txt', content: 'x' }])} where id = ${p.id}`;
+      await send.handleSendConfirm(action({ userId: requester, actionId: 'send:confirm', value: p.id }));
+      expect(seenDuringUpload).toHaveLength(1);
+      const [row] = await sql<any[]>`select * from sent_messages where pending_send_id = ${p.id}`;
+      expect(row.permalink).toContain('fake.slack.com'); // filled in afterwards
+    });
+
+    it('settling fails after delivery: "Sent ✓" in the preview, and the sweep starts no late outcome turn', async () => {
+      const requester = uid();
+      const p = await propose(requester, `boom-${rand()}`);
+      // Make the 'sending → sent' update fail for this row only (as a DB error would).
+      await sql.unsafe(`
+        create or replace function test_fail_sent() returns trigger language plpgsql as $$
+        begin if new.status = 'sent' and new.text like 'boom-%' then raise exception 'test: settle failed'; end if; return new; end $$;
+        drop trigger if exists test_fail_sent on pending_sends;
+        create trigger test_fail_sent before update on pending_sends for each row execute function test_fail_sent();`);
+      const m = (await fakeCalls()).length;
+      try {
+        await send.handleSendConfirm(action({ userId: requester, actionId: 'send:confirm', value: p.id }));
+      } finally {
+        await sql.unsafe('drop trigger if exists test_fail_sent on pending_sends; drop function if exists test_fail_sent();');
+      }
+      expect((await callsSince(m)).filter((c) => c.method === 'chat.postMessage' && c.args.channel === 'CGENERAL')).toHaveLength(1);
+      expect((await lastResponse(m))?.text).toMatch(/^Sent ✓ <https:\/\/fake\.slack\.com/);
+      expect(await status(p.id)).toBe('sending');
+      expect(await outcomeTurns(p.id)).toHaveLength(0);
+      await sql`update pending_sends set expires_at = now() - interval '11 minutes' where id = ${p.id}`;
+      await send.expirePendingSends();
+      expect(await status(p.id)).toBe('sent');
+      expect(await outcomeTurns(p.id)).toHaveLength(0);
     });
   });
 

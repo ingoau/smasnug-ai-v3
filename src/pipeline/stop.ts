@@ -14,7 +14,7 @@ import { log } from '../log.js';
 import { clearBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { dropPendingUserTurns } from './scheduler.js';
-import { setSessionStatus } from './session-status.js';
+import { restoreSessionStatus } from './agent-session.js';
 import { getThread } from './store.js';
 
 export const STOPPED_TEXT = 'Stopped.';
@@ -67,7 +67,8 @@ export async function handleAgentSessionStopped(ev: AgentSessionStoppedEvent): P
   }
   log.info({ threadId, user, droppedTurns }, 'agent session stopped');
 
-  await setSessionStatus(channel, threadTs, 'active', user);
+  // Back to `active` — or what a DM session rests in (`suspended` while a send confirmation is pending).
+  await restoreSessionStatus(threadId, user);
   if (!entry.ok) return;
   try {
     await slackCall(
