@@ -83,16 +83,16 @@ async function canvasLink(canvasId: string): Promise<string> {
 }
 
 /** Access check for read_canvas (see decideCanvasAccess); files.info and public checks only when needed. */
-export async function checkReadAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, canvasId: string) {
+export async function checkReadAccess(ctx: Pick<ToolContext, 'channelId'>, canvasId: string) {
   const row = await getBotCanvas(canvasId);
-  const quick = decideCanvasAccess({ row, channelId: ctx.channelId, speakerId: ctx.speakerId, publicIds: new Set() });
+  const quick = decideCanvasAccess({ row, channelId: ctx.channelId, publicIds: new Set() });
   if (quick.ok) return { access: quick, row, file: undefined };
   const file = await canvasFileInfo(canvasId);
   const candidates = [...(row && !row.channelId.startsWith('D') ? [row.channelId] : []), ...(file ? publicCandidates(file) : [])].filter(
     (id) => id !== ctx.channelId,
   );
   const publicIds = candidates.length ? await publicChannelIds(candidates) : new Set<string>();
-  return { access: decideCanvasAccess({ row, file, channelId: ctx.channelId, speakerId: ctx.speakerId, publicIds }), row, file };
+  return { access: decideCanvasAccess({ row, file, channelId: ctx.channelId, publicIds }), row, file };
 }
 
 async function getCanvasMarkdown(canvasId: string): Promise<string> {
@@ -124,12 +124,14 @@ registerTool({
           const raw = await getCanvasMarkdown(canvasId);
           if (row) await touch(canvasId);
           const text = fromCanvasMarkdown(raw);
+          // The title is whatever the canvas's author typed: untrusted like the content, so it goes inside the wrapper.
           const title = row?.title ?? file?.title ?? file?.name;
-          const head = `Canvas${title ? ` "${title}"` : ''} (${canvasId}${row?.permalink || file?.permalink ? `, ${row?.permalink ?? file?.permalink}` : ''}), ${VIA[access.via]}, ${text.length} chars.`;
-          if (!text) return `${head}\nThe canvas is empty.`;
+          const head = `Canvas ${canvasId}${row?.permalink || file?.permalink ? ` (${row?.permalink ?? file?.permalink})` : ''}, ${VIA[access.via]}, ${text.length} chars.`;
+          const titleLine = title ? `Title: ${title.replace(/\s+/g, ' ').trim()}\n\n` : '';
+          if (!text) return `${head}\n${untrusted('slack canvas', `${titleLine}The canvas is empty.`)}`;
           const { body, next } = canvasWindow(text, offset ?? 0, limits.canvasReadMaxChars);
           const tail = next !== undefined ? `\n[${text.length - next} more chars: call read_canvas with offset=${next}]` : '';
-          return `${head}\n${untrusted('slack canvas', (offset ? `[from char ${offset}]\n` : '') + body + tail)}`;
+          return `${head}\n${untrusted('slack canvas', titleLine + (offset ? `[from char ${offset}]\n` : '') + body + tail)}`;
         } catch (err) {
           const code = slackErrorCode(err);
           if (code === 'canvas_not_found' || code === 'canvas_deleted' || code === 'access_denied') return "I can't open that canvas: it doesn't exist or I don't have access to it.";
@@ -141,38 +143,63 @@ registerTool({
     }),
 });
 
-/** Kind of the current conversation for access grants: DM, group DM or channel (public or private). */
-async function conversationKind(channelId: string): Promise<'im' | 'mpim' | 'channel'> {
+/**
+ * Kind of the current conversation for access grants: DM, group DM or channel (public or private); `unknown` when
+ * conversations.info failed (then it isn't guessed: a group DM taken for a channel would get no grant at all).
+ */
+async function conversationKind(channelId: string): Promise<'im' | 'mpim' | 'channel' | 'unknown'> {
   if (channelId.startsWith('D')) return 'im';
   try {
     const res = await slackCall<any>('conversations.info', { channel: channelId });
     if (res?.channel?.is_im) return 'im';
     if (res?.channel?.is_mpim) return 'mpim';
+    return 'channel';
   } catch (err) {
-    log.warn({ err, channelId }, 'conversations.info failed; granting canvas access as for a channel');
+    log.warn({ err, channelId }, 'conversations.info failed; canvas access by channel, else by member ids');
+    return 'unknown';
   }
-  return 'channel';
 }
+
+/**
+ * Read access for the conversation's members by user id (canvases.access.set takes 1-20 user_ids). Returns false
+ * when not everyone could be included (more than 20 others).
+ */
+async function grantMembers(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, canvasId: string, keySuffix: string): Promise<boolean> {
+  const self = await getBotIdentity().catch(() => undefined);
+  const res = await slackCall<any>('conversations.members', { channel: ctx.channelId, limit: 50 });
+  const others = ((res?.members ?? []) as string[]).filter((u) => u !== self?.userId && u !== ctx.speakerId);
+  if (others.length)
+    await slackCall('canvases.access.set', { canvas_id: canvasId, access_level: 'read', user_ids: others.slice(0, 20) }, { idempotencyKey: `canvas-access:${canvasId}:${keySuffix}` });
+  return others.length <= 20 && !res?.response_metadata?.next_cursor;
+}
+
+const channelGrant = (ctx: Pick<ToolContext, 'channelId'>, canvasId: string) =>
+  slackCall('canvases.access.set', { canvas_id: canvasId, access_level: 'read', channel_ids: [ctx.channelId] }, { idempotencyKey: `canvas-access:${canvasId}:channel` });
 
 /**
  * Who sees a new canvas: the current conversation gets read access (channels via channel_ids; group DMs via their
  * members' user ids, since channel ids are invalid there), the speaker gets write access (it's their deliverable).
- * Each grant is idempotent per canvas. Returns a model-facing warning when the speaker may not be able to open it.
+ * If the conversation's kind can't be looked up, the channel grant is tried and member ids are the fallback.
+ * Each grant is idempotent per canvas. Returns a model-facing warning whenever the conversation's grant failed
+ * (others there may not be able to open the link) or the speaker may not be able to open it.
  */
 async function grantAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, canvasId: string): Promise<string | null> {
   const kind = await conversationKind(ctx.channelId);
   let conversationOk = kind === 'im';
   try {
     if (kind === 'channel') {
-      await slackCall('canvases.access.set', { canvas_id: canvasId, access_level: 'read', channel_ids: [ctx.channelId] }, { idempotencyKey: `canvas-access:${canvasId}:channel` });
+      await channelGrant(ctx, canvasId);
       conversationOk = true;
     } else if (kind === 'mpim') {
-      const self = await getBotIdentity().catch(() => undefined);
-      const res = await slackCall<any>('conversations.members', { channel: ctx.channelId, limit: 50 });
-      const members = ((res?.members ?? []) as string[]).filter((u) => u !== self?.userId && u !== ctx.speakerId).slice(0, 20);
-      if (members.length)
-        await slackCall('canvases.access.set', { canvas_id: canvasId, access_level: 'read', user_ids: members }, { idempotencyKey: `canvas-access:${canvasId}:mpim` });
-      conversationOk = true;
+      conversationOk = await grantMembers(ctx, canvasId, 'mpim');
+    } else if (kind === 'unknown') {
+      try {
+        await channelGrant(ctx, canvasId);
+        conversationOk = true;
+      } catch (err) {
+        log.warn({ err, canvasId, channel: ctx.channelId, code: slackErrorCode(err) }, 'canvas channel grant failed; granting by member ids');
+        conversationOk = await grantMembers(ctx, canvasId, 'members');
+      }
     }
   } catch (err) {
     log.warn({ err, canvasId, channel: ctx.channelId, code: slackErrorCode(err) }, 'canvas access for the conversation failed');
@@ -184,8 +211,45 @@ async function grantAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, ca
   } catch (err) {
     log.warn({ err, canvasId, code: slackErrorCode(err) }, 'canvas write access for the speaker failed');
   }
+  // In a DM the speaker's grant is the conversation's grant.
+  if (kind === 'im') conversationOk = speakerOk;
+  if (!conversationOk && !speakerOk) return "Access couldn't be shared automatically: people (the speaker too) may have to request access when they open the link. Say so in your reply.";
+  if (!conversationOk) return "Access for this conversation couldn't be shared automatically: others here may have to request access when they open the link. Say so in your reply.";
   // Without the speaker grant the conversation (incl. the speaker) can still read it; editing then stays with the bot.
-  return speakerOk || conversationOk ? null : "Access couldn't be shared automatically: people may have to request access when they open the link.";
+  return null;
+}
+
+/** Longest intro (`content`) the agent may put above a subagent's result. */
+const MAX_INTRO_CHARS = 3000;
+const FROM_SUBAGENT_DESC =
+  "Publish the finished result of one of this thread's subagents (its id, sa_…) in full, server-side: use this for a long subagent deliverable instead of re-typing it (you may only see it cut short). `content` then is an optional short intro placed above it.";
+
+/**
+ * A long deliverable straight from a subagent's stored result (its latest complete run's `runs.result`), so it
+ * reaches the canvas in full: synthesis turns see results clipped, and re-emitting a whole document as tool args is
+ * slow and lossy. Only subagents of the current thread. The text stays untrusted (written from web/Slack content):
+ * it goes through the same conversion and ping neutralisation as anything else; capped at the canvas write limit.
+ */
+export async function subagentDocument(threadId: string, subagentId: string, intro: string | undefined): Promise<{ content: string; note: string } | { error: string }> {
+  const id = subagentId.trim();
+  const head = intro?.trim() ?? '';
+  if (head.length > MAX_INTRO_CHARS) return { error: `the intro (\`content\`) is too long (${head.length} chars, max ${MAX_INTRO_CHARS}); the subagent's result is the document.` };
+  const [run] = await sql<{ result: string | null }[]>`
+    select r.result from runs r join subagents s on s.id = r.subagent_id
+    where s.id = ${id} and s.thread_id = ${threadId} and r.thread_id = ${threadId} and r.status = 'complete'
+    order by r.id desc limit 1`;
+  if (!run?.result?.trim()) return { error: `no finished result from a subagent "${id}" in this thread. Pass the id (sa_…) of one of this thread's subagents whose run completed, or write the document in \`content\`.` };
+  let body = run.result.trim();
+  let note = '';
+  const room = limits.canvasWriteMaxChars - (head ? head.length + 2 : 0) - 100;
+  if (body.length > room) {
+    let cut = body.slice(0, room);
+    const nl = cut.lastIndexOf('\n');
+    if (nl > room * 0.8) cut = cut.slice(0, nl);
+    body = `${cut}\n\n_(The rest didn't fit in the canvas.)_`;
+    note = ` The result was longer than a canvas allows and was cut at ${limits.canvasWriteMaxChars} chars.`;
+  }
+  return { content: head ? `${head}\n\n${body}` : body, note };
 }
 
 const canvasMarkdownHint =
@@ -200,10 +264,21 @@ registerTool({
         `Create a Slack canvas (a document people can keep, share and edit) for a long-form deliverable: research write-ups, guides, plans, comparison tables, notes. The current conversation can read it and the speaker can edit it. Returns the link: then reply with a short summary plus the link (don't paste the content into the reply). ${canvasMarkdownHint}`,
       inputSchema: z.object({
         title: z.string().describe('Canvas title, short (e.g. "Hosting options compared")'),
-        content: z.string().describe('The full document in markdown. Start with the content, not with the title (the title is shown above it).'),
+        content: z
+          .string()
+          .optional()
+          .describe('The full document in markdown. Start with the content, not with the title (the title is shown above it). With from_subagent: an optional short intro.'),
+        from_subagent: z.string().optional().describe(FROM_SUBAGENT_DESC),
       }),
-      execute: async ({ title, content }) => {
+      execute: async ({ title, content: given, from_subagent }) => {
         const cleanTitle = neutralizeBroadcasts(title.replace(/\s+/g, ' ').trim()).slice(0, 150) || 'Untitled';
+        let content = given ?? '';
+        let note = '';
+        if (from_subagent?.trim()) {
+          const doc = await subagentDocument(ctx.threadId, from_subagent, given);
+          if ('error' in doc) return `Not created: ${doc.error}`;
+          ({ content, note } = doc);
+        }
         if (!content.trim()) return 'Not created: the content is empty.';
         if (content.length > limits.canvasWriteMaxChars) return `Not created: the content is too long (${content.length} chars, max ${limits.canvasWriteMaxChars}). Shorten it.`;
         const key = `${ctx.turnId ?? ctx.runId ?? ctx.threadId}:${hash(`${cleanTitle}\n${content}`)}`;
@@ -228,7 +303,7 @@ registerTool({
             on conflict do nothing`;
           const warning = await grantAccess(ctx, canvasId);
           await appendEvent(ctx.threadId, 'canvas_created', 'bot', { canvasId, title: cleanTitle, speakerId: ctx.speakerId }).catch(() => {});
-          return `Canvas created: ${permalink} (id ${canvasId}).${warning ? ` ${warning}` : ''} Now reply with a short summary and this link; don't paste the content.`;
+          return `Canvas created: ${permalink} (id ${canvasId}).${note}${warning ? ` ${warning}` : ''} Now reply with a short summary and this link; don't paste the content.`;
         } catch (err) {
           const code = slackErrorCode(err);
           log.warn({ err, code }, 'create_canvas failed');
@@ -261,9 +336,11 @@ async function buildChange(
   if (a.action === 'append') return { change: { operation: 'insert_at_end', document_content: md(toCanvasMarkdown(content)) } };
   if (a.action === 'replace_all') return { change: { operation: 'replace', document_content: md(toCanvasMarkdown(content)) } };
   if (!a.heading?.trim()) return { error: 'Pass the `heading` of the section to replace.' };
-  const spliced = spliceSection(await getCanvasMarkdown(canvasId), a.heading, toCanvasMarkdown(content));
+  // A whole-canvas read-modify-write: the bot re-posts every section, so the WHOLE document is converted and
+  // neutralised (group pings anywhere in it, not just in the new section), as if the bot had written all of it.
+  const spliced = spliceSection(await getCanvasMarkdown(canvasId), a.heading, content);
   if ('error' in spliced) return spliced;
-  return { change: { operation: 'replace', document_content: md(spliced.markdown) } };
+  return { change: { operation: 'replace', document_content: md(toCanvasMarkdown(spliced.markdown)) } };
 }
 
 registerTool({
@@ -272,21 +349,30 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        `Edit a canvas YOU created (only those; never someone else's). action: "append" adds content at the end; "replace_section" replaces everything under the heading \`heading\` (the heading stays unless your content starts with a heading); "replace_all" replaces the whole document; "rename" sets a new \`title\`. ${canvasMarkdownHint}`,
+        `Edit a canvas YOU created, only when the speaker is the person who asked for it (never someone else's). action: "append" adds content at the end; "replace_section" replaces everything under the heading \`heading\` (the heading stays unless your content starts with a heading; it rewrites the whole canvas, so edits people make at the same moment can be lost: prefer "append" when adding); "replace_all" replaces the whole document; "rename" sets a new \`title\`. ${canvasMarkdownHint}`,
       inputSchema: z.object({
         canvas: z.string().describe('Canvas link or id (F…)'),
         action: z.enum(EDIT_ACTIONS),
-        content: z.string().optional().describe('Markdown for append / replace_section / replace_all'),
+        content: z.string().optional().describe('Markdown for append / replace_section / replace_all (with from_subagent: an optional short intro)'),
+        from_subagent: z.string().optional().describe(`append / replace_section / replace_all: ${FROM_SUBAGENT_DESC}`),
         heading: z.string().optional().describe('replace_section: the heading text of the section to replace'),
         title: z.string().optional().describe('rename: the new title'),
       }),
-      execute: async (input) => {
+      execute: async (args) => {
+        let input = args;
+        let note = '';
         const canvasId = parseCanvasId(input.canvas);
         if (!canvasId) return NOT_A_CANVAS;
         const row = await getBotCanvas(canvasId);
         if (!row) return "I can only edit canvases I created, and this one isn't mine. I can read it (if it's shared here or in a public channel) and make a new canvas instead.";
-        if (!canEditCanvas(row, ctx.channelId, ctx.speakerId))
-          return 'That canvas was made for someone else in another conversation; I only edit it there or for the person who asked for it.';
+        if (!canEditCanvas(row, ctx.speakerId))
+          return `That canvas belongs to <@${row.creatorId}> (they asked for it); only they can have me edit it. I can make a new canvas instead.`;
+        if (input.from_subagent?.trim() && input.action !== 'rename') {
+          const doc = await subagentDocument(ctx.threadId, input.from_subagent, input.content);
+          if ('error' in doc) return `Not edited: ${doc.error}`;
+          input = { ...input, content: doc.content };
+          note = doc.note;
+        }
         const key = `${ctx.turnId ?? ctx.threadId}:${hash(JSON.stringify([canvasId, input.action, input.heading ?? '', input.title ?? '', input.content ?? '']))}`;
         const over = await takeLimit('canvas_write', ctx.speakerId, ctx.threadId);
         if (over) return over;
@@ -297,7 +383,7 @@ registerTool({
           if (input.action === 'rename') await sql`update bot_canvases set title = ${(built.change.title_content as any).markdown}, last_used_at = now() where canvas_id = ${canvasId}`;
           else await touch(canvasId);
           await appendEvent(ctx.threadId, 'canvas_edited', 'bot', { canvasId, action: input.action, speakerId: ctx.speakerId }).catch(() => {});
-          return `Canvas updated (${input.action}): ${row.permalink ?? canvasId}. Tell the speaker briefly (with the link).`;
+          return `Canvas updated (${input.action}): ${row.permalink ?? canvasId}.${note} Tell the speaker briefly (with the link).`;
         } catch (err) {
           const code = slackErrorCode(err);
           if (code === 'canvas_not_found' || code === 'canvas_deleted') {

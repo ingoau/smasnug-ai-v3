@@ -38,13 +38,13 @@ describe('access rule', () => {
     expect([...canvasConversations(file)].sort()).toEqual(['CPRIVNEW', 'CPUB', 'CSHARED', 'CTAB', 'DSOMEONE', 'GPRIV']);
     expect(publicCandidates(file)).not.toContain('DSOMEONE');
   });
-  const base = { channelId: 'CHERE', speakerId: 'USPEAK', publicIds: new Set<string>() };
-  it('bot-created: same conversation, creator, or created in a public channel', () => {
-    expect(decideCanvasAccess({ ...base, row: { channelId: 'CHERE', creatorId: 'UOTHER' } })).toEqual({ ok: true, via: 'bot_created' });
-    expect(decideCanvasAccess({ ...base, row: { channelId: 'DELSE', creatorId: 'USPEAK' } })).toEqual({ ok: true, via: 'bot_created' });
-    expect(decideCanvasAccess({ ...base, row: { channelId: 'CPUB', creatorId: 'UOTHER' }, publicIds: new Set(['CPUB']) }).ok).toBe(true);
-    // Someone else's DM deliverable stays private.
-    expect(decideCanvasAccess({ ...base, row: { channelId: 'DELSE', creatorId: 'UOTHER' } }).ok).toBe(false);
+  const base = { channelId: 'CHERE', publicIds: new Set<string>() };
+  it('bot-created: same conversation, or created in a verified public channel', () => {
+    expect(decideCanvasAccess({ ...base, row: { channelId: 'CHERE' } })).toEqual({ ok: true, via: 'bot_created' });
+    expect(decideCanvasAccess({ ...base, row: { channelId: 'CPUB' }, publicIds: new Set(['CPUB']) }).ok).toBe(true);
+    // A DM / private-channel deliverable stays there, also for its creator.
+    expect(decideCanvasAccess({ ...base, row: { channelId: 'DELSE' } }).ok).toBe(false);
+    expect(decideCanvasAccess({ ...base, row: { channelId: 'GPRIV' } }).ok).toBe(false);
   });
   it('shared in this conversation', () => {
     expect(decideCanvasAccess({ ...base, channelId: 'GPRIV', file })).toEqual({ ok: true, via: 'this_conversation' });
@@ -56,11 +56,11 @@ describe('access rule', () => {
     expect(decideCanvasAccess({ ...base, file, publicIds: new Set(['CNOTSHARED']) }).ok).toBe(false);
     expect(decideCanvasAccess({ ...base, file: null }).ok).toBe(false);
   });
-  it('edit only bot-created, from its conversation or for its creator', () => {
-    expect(canEditCanvas(null, 'CHERE', 'USPEAK')).toBe(false);
-    expect(canEditCanvas({ channelId: 'CHERE', creatorId: 'UOTHER' }, 'CHERE', 'USPEAK')).toBe(true);
-    expect(canEditCanvas({ channelId: 'CELSE', creatorId: 'USPEAK' }, 'CHERE', 'USPEAK')).toBe(true);
-    expect(canEditCanvas({ channelId: 'CELSE', creatorId: 'UOTHER' }, 'CHERE', 'USPEAK')).toBe(false);
+  it('edit only bot-created, and only for its creator', () => {
+    expect(canEditCanvas(null, 'USPEAK')).toBe(false);
+    expect(canEditCanvas({ creatorId: 'USPEAK' }, 'USPEAK')).toBe(true);
+    // Same channel isn't enough: someone else's canvas stays theirs.
+    expect(canEditCanvas({ creatorId: 'UOTHER' }, 'USPEAK')).toBe(false);
   });
 });
 

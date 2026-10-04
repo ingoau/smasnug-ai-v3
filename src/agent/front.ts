@@ -142,7 +142,7 @@ export async function renderCardResults(cardId: number): Promise<{ text: string;
     const task = `Task: ${oneLine(r.instructions, 300)}`;
     const body =
       r.status === 'complete'
-        ? `Result:\n${clipTokens(r.result ?? '(empty)', per)}`
+        ? `Result:\n${clipTokens(r.result ?? '(empty)', per, 'head', `result truncated here; to publish all of it use create_canvas with from_subagent "${r.subagentId}"`)}`
         : r.status === 'cancelled'
           ? 'Cancelled before finishing.'
           : `Failed: ${r.error ?? 'unknown error'}`;
@@ -481,6 +481,18 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     throw failed;
   }
 
+  // A canvas made this turn with no reply after it: nobody would see its link (create_canvas leaves posting it to
+  // the reply). Post the link instead of the generic fallback.
+  if (!state.visible.has('reply')) {
+    const canvases = await turnCanvases(turnId).catch((err) => (log.warn({ err }, 'turnCanvases failed'), []));
+    if (canvases.length) {
+      const text = canvasLinkText(canvases);
+      await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `canvas-link:${turnId}` });
+      await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, canvasLink: true, text });
+      return;
+    }
+  }
+
   if (state.visible.size === 0 && needsFallback(turn, io, built.allCancelled)) {
     await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(FALLBACK_TEXT) }, { idempotencyKey: `fallback:${turnId}` });
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, text: FALLBACK_TEXT });
@@ -488,6 +500,18 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 }
 
 class TurnStopped extends Error {}
+
+/** Canvases this turn created (create_canvas records them in bot_canvases with the turn id). */
+async function turnCanvases(turnId: number): Promise<{ title: string; permalink: string }[]> {
+  return sql<{ title: string; permalink: string }[]>`
+    select title, permalink from bot_canvases where turn_id = ${turnId} and permalink is not null order by created_at`;
+}
+
+/** The message posted when a turn made canvases but no reply. Titles are model text: no link/mention syntax. */
+export function canvasLinkText(canvases: { title: string; permalink: string }[]): string {
+  const links = canvases.map((c) => `[${c.title.replace(/[[\]<>]/g, '').trim() || 'canvas'}](${c.permalink})`);
+  return links.length === 1 ? `here's the canvas: ${links[0]}` : `here are the canvases: ${links.join(', ')}`;
+}
 
 function needsFallback(turn: TurnRow, io: TurnIO, allCancelled: boolean): boolean {
   // A synthesis where everything was cancelled (user said stop) may stay silent.

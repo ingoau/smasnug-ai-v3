@@ -180,6 +180,22 @@ describe('runFrontTurn (mock model)', () => {
     expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
   });
 
+  it('a turn that made a canvas but posted no reply posts the canvas link instead of the fallback', async () => {
+    h.sqlHook = (q) => (q.includes('from bot_canvases where turn_id') ? [{ title: 'Plan [v1] <@U9>', permalink: 'https://x.slack.com/docs/T1/F123' }] : undefined);
+    h.model = mockModel([textStep('made it')]);
+    await runFrontTurn(turn(), io(true).io);
+    const posts = h.slack.filter((c) => c.method === 'chat.postMessage');
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.args.text).toBe("here's the canvas: [Plan v1 @U9](https://x.slack.com/docs/T1/F123)");
+    expect(h.events.find((e) => e.type === 'reply')!.payload).toMatchObject({ canvasLink: true });
+
+    // With a reply, nothing extra is posted (the reply carries the link).
+    h.slack = [];
+    h.model = mockModel([replyStep('here: https://x.slack.com/docs/T1/F123'), textStep('')]);
+    await runFrontTurn(turn({ id: 9 }), io(true).io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage' && c.args.text?.startsWith("here's the canvas"))).toHaveLength(0);
+  });
+
   it('injects inbox messages before the next model call and updates defaultReactTs', async () => {
     h.model = mockModel([replyStep('first'), textStep('')]);
     const msg = { ts: '100.000009', text: 'one more thing', channelId: 'C1' } as any;
