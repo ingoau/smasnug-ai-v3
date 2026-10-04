@@ -1,0 +1,513 @@
+/**
+ * Coding agents (Cursor) against the test Postgres/Redis with an in-memory fake Cursor API (no real agents launched).
+ * Run: INTEGRATION=1 pnpm vitest run src/agent/cursor/cursor.int.test.ts
+ */
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { CursorAgent, CursorClient, CursorRun } from './api.js';
+
+const INTEGRATION = process.env.INTEGRATION === '1';
+vi.hoisted(() => {
+  if (process.env.INTEGRATION === '1') {
+    try {
+      process.loadEnvFile('.env');
+    } catch {}
+    process.env.SLACK_FAKE = '1';
+    process.env.LOG_LEVEL = 'silent';
+  }
+  process.env.OPENROUTER_KEY ||= 'test';
+  process.env.ADMIN_USER_ID = 'UADMIN';
+  process.env.CURSOR_API_KEY = 'crsr_test';
+  process.env.CURSOR_REPO = 'https://github.com/ingoau/smasnug-ai-v3';
+  process.env.CURSOR_REF = 'main';
+});
+
+const REPO = 'https://github.com/ingoau/smasnug-ai-v3';
+const PR = 'https://github.com/ingoau/smasnug-ai-v3/pull/42';
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** In-memory Cursor API with the documented semantics (409s, one active run per agent). */
+class FakeCursor implements CursorClient {
+  agents = new Map<string, { agent: CursorAgent; runs: CursorRun[]; prompts: string[] }>();
+  calls: string[] = [];
+  failCreate: Error | null = null;
+  delayMs = 0;
+  private n = 0;
+
+  private async tick(call: string) {
+    this.calls.push(call);
+    if (this.delayMs) await sleep(this.delayMs);
+  }
+  private async err(status: number, code: string): Promise<never> {
+    const { CursorApiError } = await import('./api.js');
+    throw new CursorApiError(status, code, `Cursor API ${status} ${code}`);
+  }
+  private newRun(agentId: string): CursorRun {
+    return { id: `run-${++this.n}`, agentId, status: 'CREATING' };
+  }
+  latest(agentId: string): CursorRun {
+    const a = this.agents.get(agentId)!;
+    return a.runs[a.runs.length - 1]!;
+  }
+  set(agentId: string, patch: Partial<CursorRun>) {
+    Object.assign(this.latest(agentId), patch);
+  }
+  only(): string {
+    expect(this.agents.size).toBe(1);
+    return [...this.agents.keys()][0]!;
+  }
+
+  async createAgent(input: Parameters<CursorClient['createAgent']>[0]) {
+    await this.tick('createAgent');
+    if (this.failCreate) throw this.failCreate;
+    if (this.agents.has(input.agentId)) return this.err(409, 'agent_id_conflict');
+    const run = this.newRun(input.agentId);
+    const agent: CursorAgent = { id: input.agentId, status: 'ACTIVE', url: `https://cursor.com/agents/${input.agentId}`, latestRunId: run.id };
+    this.agents.set(input.agentId, { agent, runs: [run], prompts: [input.promptText] });
+    return { agent, run: { ...run } };
+  }
+  async getAgent(agentId: string) {
+    await this.tick('getAgent');
+    const a = this.agents.get(agentId);
+    if (!a) return this.err(404, 'agent_not_found');
+    return a.agent;
+  }
+  async getRun(agentId: string, runId: string) {
+    await this.tick('getRun');
+    const run = this.agents.get(agentId)?.runs.find((r) => r.id === runId);
+    if (!run) return this.err(404, 'run_not_found');
+    return { ...run };
+  }
+  async createRun(agentId: string, promptText: string) {
+    await this.tick('createRun');
+    const a = this.agents.get(agentId);
+    if (!a) return this.err(404, 'agent_not_found');
+    if (a.agent.status === 'ARCHIVED') return this.err(409, 'agent_archived');
+    if (a.runs.some((r) => r.status === 'CREATING' || r.status === 'RUNNING')) return this.err(409, 'agent_busy');
+    const run = this.newRun(agentId);
+    a.runs.push(run);
+    a.prompts.push(promptText);
+    a.agent.latestRunId = run.id;
+    return { ...run };
+  }
+  async cancelRun(agentId: string, runId: string) {
+    await this.tick('cancelRun');
+    const run = this.agents.get(agentId)?.runs.find((r) => r.id === runId);
+    if (!run) return this.err(404, 'run_not_found');
+    if (run.status !== 'CREATING' && run.status !== 'RUNNING') return this.err(409, 'run_not_cancellable');
+    run.status = 'CANCELLED';
+  }
+  async listAgents() {
+    return { items: [...this.agents.values()].map((a) => a.agent) };
+  }
+  async me() {
+    return { apiKeyName: 'fake' };
+  }
+}
+
+describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
+  let sql: typeof import('../../db/index.js').sql;
+  let redis: typeof import('../../core/redis.js').redis;
+  let api: typeof import('./api.js');
+  let agents: typeof import('./agents.js');
+  let sub: typeof import('../subagents.js');
+  let maint: typeof import('../maintenance.js');
+  let fake: FakeCursor;
+  let prFiles: string[] | Error;
+  const threads: string[] = [];
+
+  async function newThread() {
+    const channelId = `CCUR${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const threadTs = `17910${Math.floor(Math.random() * 1e5)}.000100`;
+    const threadId = `${channelId}:${threadTs}`;
+    await sql`insert into threads (id, channel_id, thread_ts) values (${threadId}, ${channelId}, ${threadTs})`;
+    threads.push(threadId);
+    return threadId;
+  }
+  async function newTurn(threadId: string, author = 'UADMIN') {
+    const [t] = await sql<{ id: number }[]>`insert into turns (thread_id, author_id, status) values (${threadId}, ${author}, 'running') returning id::int as id`;
+    return t!.id;
+  }
+  async function spawn(threadId: string, instructions = 'Make reminders accept "tmrw".') {
+    const turnId = await newTurn(threadId);
+    const r = await agents.spawnCodingAgent({ threadId, turnId, ownerId: 'UADMIN', title: 'Fix tmrw parsing', instructions });
+    return { ...r, turnId };
+  }
+  /** Make the run due and poll just that run. */
+  async function poll(runId: number) {
+    await sql`update cursor_runs set next_poll_at = now() where run_id = ${runId}`;
+    return agents.pollCursorRuns({ runId });
+  }
+  const runRow = async (id: number) => (await sql<any[]>`select * from runs where id = ${id}`)[0];
+  const subRow = async (id: string) => (await sql<any[]>`select * from subagents where id = ${id}`)[0];
+  const synthTurns = async (cardId: number) => sql<any[]>`select * from turns where card_id = ${cardId} and kind = 'synthesis'`;
+
+  beforeAll(async () => {
+    ({ sql } = await import('../../db/index.js'));
+    ({ redis } = await import('../../core/redis.js'));
+    const { migrate } = await import('../../db/migrate.js');
+    await migrate();
+    api = await import('./api.js');
+    agents = await import('./agents.js');
+    sub = await import('../subagents.js');
+    maint = await import('../maintenance.js');
+    // Earlier runs' leftovers must not be polled by this run.
+    await sql`delete from cursor_runs`;
+  });
+
+  beforeEach(async () => {
+    // Coding agents earlier tests left running would count against the global cap.
+    await sql`update runs set status = 'error', finished_at = now() where status = 'running' and id in (select run_id from cursor_runs)`;
+    fake = new FakeCursor();
+    api.setCursorClientForTests(fake);
+    prFiles = ['src/features/schedule/time.ts', 'src/features/schedule/time.test.ts'];
+    agents.setPrFilesForTests(async () => (prFiles instanceof Error ? { error: prFiles.message } : { files: prFiles }));
+  });
+
+  afterAll(async () => {
+    if (!sql) return;
+    api.setCursorClientForTests(null);
+    agents.setPrFilesForTests(null);
+    if (threads.length) await sql`delete from threads where id in ${sql(threads)}`;
+    const { closeQueues } = await import('../../core/queues.js');
+    await closeQueues();
+    await sql.end();
+    redis.disconnect();
+  });
+
+  it('spawn → RUNNING → FINISHED with a PR → run complete → one synthesis turn with the PR link', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    expect(agentId).toMatch(/^bc-[0-9a-f-]{36}$/);
+    const prompt = fake.agents.get(agentId)!.prompts[0]!;
+    expect(prompt).toContain('.github/workflows/');
+    expect(prompt).toContain('<task>\nMake reminders accept "tmrw".\n</task>');
+
+    expect(await subRow(s.subagentId)).toMatchObject({ kind: 'cursor', cursorAgentId: agentId, status: 'running', cursorAgentUrl: `https://cursor.com/agents/${agentId}` });
+    let run = await runRow(s.runId);
+    expect(run).toMatchObject({ status: 'running', workerId: null, details: 'Starting the Cursor agent…' });
+    expect(Number(run.cardId)).toBe(s.cardId);
+    expect(run.sources).toEqual([{ url: `https://cursor.com/agents/${agentId}`, title: 'Cursor agent' }]);
+
+    // Not due yet: the poller leaves it alone.
+    expect(await agents.pollCursorRuns({ runId: s.runId })).toBe(0);
+
+    fake.set(agentId, { status: 'RUNNING' });
+    expect(await poll(s.runId)).toBe(1);
+    run = await runRow(s.runId);
+    expect(run.status).toBe('running');
+    expect(run.details).toBe('Coding in Cursor…');
+    const cr = (await sql<any[]>`select * from cursor_runs where run_id = ${s.runId}`)[0];
+    expect(cr).toMatchObject({ cursorStatus: 'RUNNING', claimId: null, pollErrors: 0 });
+    expect(cr.nextPollAt.getTime()).toBeGreaterThan(Date.now() + 20_000);
+
+    fake.set(agentId, {
+      status: 'FINISHED',
+      result: 'Added "tmrw" to the duration parser, with tests. typecheck + test pass. Review found nothing else.',
+      git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', branch: 'cursor/tmrw-a1b2', prUrl: PR }] },
+    });
+    await poll(s.runId);
+    run = await runRow(s.runId);
+    expect(run.status).toBe('complete');
+    expect(run.output).toBe('Opened PR #42');
+    expect(run.result).toContain(`Pull request (open, not merged): ${PR} (branch cursor/tmrw-a1b2)`);
+    expect(run.result).toContain('Changed files: 2 (no CI configuration touched).');
+    expect(run.result).toContain('Added "tmrw" to the duration parser');
+    expect(run.sources.map((x: any) => x.url)).toEqual([PR, `https://cursor.com/agents/${agentId}`]);
+    expect((await subRow(s.subagentId)).status).toBe('idle');
+    expect((await sql<any[]>`select pr_url from cursor_runs where run_id = ${s.runId}`)[0].prUrl).toBe(PR);
+
+    const turns = await synthTurns(s.cardId);
+    expect(turns).toHaveLength(1);
+    expect(turns[0].authorId).toBe('UADMIN');
+    // The synthesis turn renders the card's results: the PR link reaches the front agent.
+    const { renderCardResults } = await import('../front.js');
+    expect((await renderCardResults(s.cardId)).text).toContain(PR);
+
+    // Polling again does nothing (the run is terminal).
+    expect(await poll(s.runId)).toBe(0);
+    expect(await synthTurns(s.cardId)).toHaveLength(1);
+  });
+
+  it('flags a PR that touches .github/workflows/ loudly', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    prFiles = ['src/a.ts', '.github/workflows/container.yml'];
+    fake.set(agentId, { status: 'FINISHED', result: 'done', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    await poll(s.runId);
+    const run = await runRow(s.runId);
+    expect(run.status).toBe('complete');
+    expect(run.output).toBe('Opened PR #42 ⚠️ touches CI config');
+    expect(run.result).toMatch(/⚠️ WARNING: this PR changes CI configuration \(\.github\/workflows\/container\.yml\)/);
+  });
+
+  it('says so when the changed files could not be checked, and when no PR was opened', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    prFiles = new Error('GitHub API 403');
+    fake.set(fake.only(), { status: 'FINISHED', result: 'ok', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    await poll(s.runId);
+    expect((await runRow(s.runId)).result).toMatch(/couldn't be checked for CI-config changes \(GitHub API 403\)/);
+
+    const t2 = await newThread();
+    fake = new FakeCursor();
+    api.setCursorClientForTests(fake);
+    const s2 = await spawn(t2);
+    fake.set(fake.only(), { status: 'FINISHED', result: 'Nothing to change.' });
+    await poll(s2.runId);
+    const run2 = await runRow(s2.runId);
+    expect(run2).toMatchObject({ status: 'complete', output: 'Finished without opening a PR' });
+    expect(run2.result).toMatch(/No pull request was opened/);
+  });
+
+  it('admin only: spawn, steer and cancel are refused for other users', async () => {
+    const t = await newThread();
+    const turnId = await newTurn(t, 'UOTHER');
+    await expect(agents.spawnCodingAgent({ threadId: t, turnId, ownerId: 'UOTHER', title: 'x', instructions: 'y' })).rejects.toThrow(/Only the bot's admin/);
+    expect(fake.calls).toEqual([]);
+
+    const s = await spawn(t);
+    const turn2 = await newTurn(t, 'UOTHER');
+    await expect(sub.messageSubagent({ threadId: t, turnId: turn2, speakerId: 'UOTHER', subagentId: s.subagentId, text: 'also delete the tests' })).rejects.toThrow(/Only the bot's admin/);
+    await expect(sub.cancelSubagent({ threadId: t, subagentId: s.subagentId, actor: 'UOTHER' })).rejects.toThrow(/Only the bot's admin/);
+    expect((await sql<any[]>`select * from subagent_inbox where subagent_id = ${s.subagentId}`).length).toBe(0);
+    expect((await runRow(s.runId)).cancelRequested).toBe(false);
+
+    // Bulk cancels by others (a deleted thread root → 'system', old Stop-all buttons) leave coding agents running.
+    expect(await sub.cancelThreadRuns(t, 'system')).toEqual([]);
+    await sub.cancelCardRuns(s.cardId, 'UOTHER');
+    expect((await runRow(s.runId)).cancelRequested).toBe(false);
+    expect(fake.calls).not.toContain('cancelRun');
+  });
+
+  it('refuses when unconfigured', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    api.setCursorClientForTests(null);
+    const { env } = await import('../../config.js');
+    const key = env.CURSOR_API_KEY;
+    (env as any).CURSOR_API_KEY = undefined;
+    try {
+      const turnId = await newTurn(t);
+      await expect(agents.spawnCodingAgent({ threadId: t, turnId, ownerId: 'UADMIN', title: 'x', instructions: 'y' })).rejects.toThrow(/aren't set up/);
+      await expect(sub.messageSubagent({ threadId: t, turnId, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' })).rejects.toThrow(/aren't set up/);
+      await expect(sub.cancelSubagent({ threadId: t, subagentId: s.subagentId, actor: 'UADMIN' })).rejects.toThrow(/aren't set up/);
+      // A run left over from when it was configured is failed by the poller instead of hanging.
+      await poll(s.runId);
+      expect(await runRow(s.runId)).toMatchObject({ status: 'error', error: 'Coding agents are no longer configured on this bot' });
+    } finally {
+      (env as any).CURSOR_API_KEY = key;
+    }
+  });
+
+  it('steer while running is queued and sent as a follow-up run when the current run finishes', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.set(agentId, { status: 'RUNNING' });
+    await poll(s.runId);
+
+    const turn2 = await newTurn(t);
+    const m = await sub.messageSubagent({ threadId: t, turnId: turn2, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'also accept "tmw"', note: 'also tmw' });
+    expect(m).toMatchObject({ mode: 'steered', runId: s.runId, queued: true, note: 'next: also tmw' });
+    expect((await runRow(s.runId)).steerNotes).toEqual(['next: also tmw']);
+    expect(fake.calls).not.toContain('createRun'); // never sent mid-run (Cursor would answer 409 agent_busy)
+
+    fake.set(agentId, { status: 'FINISHED', result: 'first pass', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    await poll(s.runId);
+    let run = await runRow(s.runId);
+    expect(run.status).toBe('running'); // continues with the follow-up instead of finishing
+    expect(run.details).toBe('Sending the follow-up to Cursor…');
+    const a = fake.agents.get(agentId)!;
+    expect(a.runs).toHaveLength(2);
+    expect(a.prompts[1]).toContain('<follow_up>\nalso accept "tmw"\n</follow_up>');
+    expect(a.prompts[1]).toContain('.github/workflows/');
+    const cr = (await sql<any[]>`select * from cursor_runs where run_id = ${s.runId}`)[0];
+    expect(cr).toMatchObject({ cursorRunId: a.runs[1]!.id, followUps: 1 });
+    expect((await sql<any[]>`select * from subagent_inbox where subagent_id = ${s.subagentId} and consumed_at is null`).length).toBe(0);
+    expect(await synthTurns(s.cardId)).toHaveLength(0);
+
+    fake.set(agentId, { status: 'RUNNING' });
+    await poll(s.runId);
+    expect((await runRow(s.runId)).details).toBe('Coding in Cursor (follow-up)…');
+    fake.set(agentId, { status: 'FINISHED', result: 'tmw too', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    await poll(s.runId);
+    run = await runRow(s.runId);
+    expect(run.status).toBe('complete');
+    expect(run.result).toContain('tmw too');
+    expect(await synthTurns(s.cardId)).toHaveLength(1);
+  });
+
+  it('message_subagent on an idle coding agent resumes it: a new run backed by a Cursor follow-up', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.set(agentId, { status: 'FINISHED', result: 'v1', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    await poll(s.runId);
+    expect((await subRow(s.subagentId)).status).toBe('idle');
+
+    const turn2 = await newTurn(t);
+    const m = await sub.messageSubagent({ threadId: t, turnId: turn2, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'rename the helper to parseWhen' });
+    expect(m.mode).toBe('resumed');
+    expect(m.cardId).not.toBe(s.cardId);
+    const run = await runRow(m.runId);
+    expect(run).toMatchObject({ status: 'running', isResume: true, instructions: 'rename the helper to parseWhen' });
+    expect(fake.agents.get(agentId)!.prompts[1]).toContain('rename the helper to parseWhen');
+    expect((await subRow(s.subagentId)).status).toBe('running');
+    // The PR from before is already on the card row.
+    expect(run.sources.map((x: any) => x.url)).toContain(PR);
+
+    fake.set(agentId, { status: 'FINISHED', result: 'renamed', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    await poll(m.runId);
+    expect(await runRow(m.runId)).toMatchObject({ status: 'complete', output: 'Opened PR #42' });
+    expect(await synthTurns(m.cardId!)).toHaveLength(1);
+
+    // An archived Cursor agent can't be resumed: clear error, nothing left behind.
+    fake.agents.get(agentId)!.agent.status = 'ARCHIVED';
+    const turn3 = await newTurn(t);
+    await expect(sub.messageSubagent({ threadId: t, turnId: turn3, speakerId: 'UADMIN', subagentId: s.subagentId, text: 'more' })).rejects.toThrow(/archived or expired/);
+    expect((await subRow(s.subagentId)).status).toBe('idle');
+    expect((await sql<any[]>`select count(*)::int as n from runs where subagent_id = ${s.subagentId}`)[0].n).toBe(2);
+  });
+
+  it('cancel_subagent by the admin stops the Cursor run right away', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.set(agentId, { status: 'RUNNING' });
+    const msg = await sub.cancelSubagent({ threadId: t, subagentId: s.subagentId, actor: 'UADMIN' });
+    expect(msg).toMatch(/Cancellation requested/);
+    expect(fake.calls).toContain('cancelRun');
+    expect(fake.latest(agentId).status).toBe('CANCELLED');
+    expect((await runRow(s.runId)).status).toBe('cancelled');
+    expect((await subRow(s.subagentId)).status).toBe('cancelled');
+    expect(await synthTurns(s.cardId)).toHaveLength(1);
+  });
+
+  it('ERROR / EXPIRED / cancelled elsewhere → error runs, reported honestly', async () => {
+    for (const [status, expected] of [
+      ['ERROR', /^Cursor run error: Tests failed to install/],
+      ['EXPIRED', /^Cursor run expired$/],
+      ['CANCELLED', /^Cancelled in Cursor$/],
+    ] as const) {
+      fake = new FakeCursor();
+      api.setCursorClientForTests(fake);
+      const t = await newThread();
+      const s = await spawn(t);
+      fake.set(fake.only(), { status, result: status === 'ERROR' ? 'Tests failed to install' : undefined });
+      await poll(s.runId);
+      const run = await runRow(s.runId);
+      expect(run.status).toBe('error');
+      expect(run.error).toMatch(expected);
+      expect(await synthTurns(s.cardId)).toHaveLength(1);
+    }
+  });
+
+  it('at most limits.cursorMaxActive coding agents run at once', async () => {
+    const { limits } = await import('../../config.js');
+    const t = await newThread();
+    for (let i = 0; i < limits.cursorMaxActive; i++) await spawn(t);
+    await expect(spawn(t)).rejects.toThrow(/coding agents are already running/);
+    expect(fake.agents.size).toBe(limits.cursorMaxActive);
+  });
+
+  it('a failed launch leaves nothing behind and tells the model', async () => {
+    const t = await newThread();
+    const { CursorApiError } = await import('./api.js');
+    fake.failCreate = new CursorApiError(403, 'repository_access', 'Cursor API 403 repository_access: no access');
+    const turnId = await newTurn(t);
+    await expect(agents.spawnCodingAgent({ threadId: t, turnId, ownerId: 'UADMIN', title: 'x', instructions: 'y' })).rejects.toThrow(/Couldn't start the coding agent: .*repository_access/);
+    expect((await sql<any[]>`select count(*)::int as n from subagents where thread_id = ${t}`)[0].n).toBe(0);
+  });
+
+  it('launch is idempotent: a retried create with the same agent id reuses the agent', async () => {
+    const t = await newThread();
+    const { CursorApiError } = await import('./api.js');
+    // First attempt: a network error after Cursor already created the agent; the retry gets 409 agent_id_conflict.
+    const orig = fake.createAgent.bind(fake);
+    let first = true;
+    fake.createAgent = async (input) => {
+      const r = await orig(input);
+      if (first) {
+        first = false;
+        throw new CursorApiError(0, 'network_error', 'timeout');
+      }
+      return r;
+    };
+    const s = await spawn(t);
+    expect(fake.agents.size).toBe(1);
+    const cr = (await sql<any[]>`select * from cursor_runs where run_id = ${s.runId}`)[0];
+    expect(cr.cursorRunId).toBe(fake.latest(fake.only()).id);
+  });
+
+  it('exactly-once: two concurrent pollers handle a finished run once', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    fake.set(fake.only(), { status: 'FINISHED', result: 'done', git: { branches: [{ repoUrl: 'github.com/ingoau/smasnug-ai-v3', prUrl: PR }] } });
+    fake.delayMs = 50;
+    fake.calls = [];
+    await sql`update cursor_runs set next_poll_at = now() where run_id = ${s.runId}`;
+    const counts = await Promise.all([agents.pollCursorRuns({ runId: s.runId }), agents.pollCursorRuns({ runId: s.runId }), agents.pollCursorRuns({ runId: s.runId })]);
+    expect(counts.reduce((a, b) => a + b, 0)).toBe(1);
+    expect(fake.calls.filter((c) => c === 'getRun')).toHaveLength(1);
+    expect(await synthTurns(s.cardId)).toHaveLength(1);
+    const finished = await sql<any[]>`select * from thread_events where thread_id = ${t} and type = 'run_finished'`;
+    expect(finished).toHaveLength(1);
+  });
+
+  it('an expired lease is taken over; a live one is not', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    fake.set(fake.only(), { status: 'RUNNING' });
+    await sql`update cursor_runs set next_poll_at = now(), claim_id = gen_random_uuid(), claimed_until = now() + interval '1 minute' where run_id = ${s.runId}`;
+    expect(await agents.pollCursorRuns({ runId: s.runId })).toBe(0);
+    await sql`update cursor_runs set claimed_until = now() - interval '1 second' where run_id = ${s.runId}`;
+    expect(await agents.pollCursorRuns({ runId: s.runId })).toBe(1);
+    expect((await sql<any[]>`select claim_id from cursor_runs where run_id = ${s.runId}`)[0].claimId).toBeNull();
+  });
+
+  it('the stale-heartbeat sweeper and the 10-min subagent limit never kill a coding agent; its own 3h timeout does', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    fake.set(agentId, { status: 'RUNNING' });
+    await sql`update runs set heartbeat_at = now() - interval '2 hours', started_at = now() - interval '2 hours' where id = ${s.runId}`;
+    await maint.sweepStaleRuns();
+    expect((await runRow(s.runId)).status).toBe('running');
+    await poll(s.runId);
+    expect((await runRow(s.runId)).status).toBe('running');
+
+    await sql`update runs set started_at = now() - interval '3 hours 1 minute' where id = ${s.runId}`;
+    await poll(s.runId);
+    expect(fake.latest(agentId).status).toBe('CANCELLED');
+    expect(await runRow(s.runId)).toMatchObject({ status: 'error', error: 'Timed out after 3h (the Cursor run was cancelled)' });
+  });
+
+  it('transient API errors back off; a vanished agent fails the run', async () => {
+    const t = await newThread();
+    const s = await spawn(t);
+    const agentId = fake.only();
+    const { CursorApiError } = await import('./api.js');
+    const orig = fake.getRun.bind(fake);
+    fake.getRun = async () => {
+      throw new CursorApiError(429, 'rate_limit_exceeded', 'slow', 90_000);
+    };
+    await poll(s.runId);
+    let cr = (await sql<any[]>`select * from cursor_runs where run_id = ${s.runId}`)[0];
+    expect(cr.pollErrors).toBe(1);
+    expect(cr.nextPollAt.getTime()).toBeGreaterThan(Date.now() + 80_000);
+    expect((await runRow(s.runId)).status).toBe('running');
+
+    fake.getRun = orig;
+    fake.set(agentId, { status: 'RUNNING' });
+    await poll(s.runId);
+    cr = (await sql<any[]>`select * from cursor_runs where run_id = ${s.runId}`)[0];
+    expect(cr.pollErrors).toBe(0);
+
+    fake.agents.delete(agentId);
+    await poll(s.runId);
+    expect((await runRow(s.runId)).status).toBe('error');
+    expect((await runRow(s.runId)).error).toMatch(/Cursor agent gone/);
+  });
+});
