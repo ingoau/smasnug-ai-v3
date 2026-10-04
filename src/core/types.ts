@@ -3,7 +3,8 @@ export interface TurnRow {
   id: number;
   threadId: string;
   authorId: string;
-  kind: 'user' | 'synthesis';
+  /** 'scheduled': a fired reminder or watch notification (input in scheduled_turn_inputs, src/features/schedule). */
+  kind: 'user' | 'synthesis' | 'scheduled';
   isMention: boolean;
   messageTs: string[];
   cardId: number | null;

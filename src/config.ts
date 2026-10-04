@@ -75,4 +75,14 @@ export const limits = {
   webSearchDefaultResults: 5,
   webSearchMaxResults: 10,
   webSearchTimeoutMs: 10_000,
+  // reminders and watches (src/features/schedule)
+  userPendingReminders: 20,
+  reminderMaxAheadMs: 365 * 24 * 60 * 60 * 1000,
+  reminderTextMaxChars: 1000,
+  userActiveWatches: 5,
+  watchDefaultIntervalMs: 6 * 60 * 60 * 1000,
+  watchMinIntervalMs: 60 * 60 * 1000,
+  watchMaxLifetimeMs: 30 * 24 * 60 * 60 * 1000,
+  watchNotificationsPerDay: 3,
+  scheduleTickMs: 60_000,
 } as const;

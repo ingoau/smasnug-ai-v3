@@ -393,3 +393,15 @@ describe('runFrontTurn: status activity', () => {
     expect([a.activity, b.activity, c.activity]).toEqual([[], [], []]);
   });
 });
+
+describe('scheduled turns (reminders / watch notifications)', () => {
+  it('renders the stored input in place of new messages', async () => {
+    h.sqlHook = (q) => (q.includes('scheduled_turn_inputs') ? [{ source: 'reminder', input: '<reminder id="r_9" owner="<@U1>">check the release</reminder>' }] : undefined);
+    h.model = mockModel([replyStep('<@U1> time to check the release'), textStep('')]);
+    await runFrontTurn(turn({ id: 70, kind: 'scheduled', messageTs: [] }), io(true).io);
+    const prompt = JSON.stringify(h.model.doStreamCalls[0].prompt.filter((m: any) => m.role === 'user'));
+    expect(prompt).toContain('check the release');
+    expect(prompt).not.toContain('<new_messages');
+    expect(h.slack.some((c) => c.method === 'chat.startStream' || c.method === 'chat.postMessage')).toBe(true);
+  });
+});

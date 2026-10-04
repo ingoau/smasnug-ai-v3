@@ -40,7 +40,7 @@ export interface ReplyTarget {
   channelId: string;
   threadTs: string;
   turnId: number;
-  turnKind: 'user' | 'synthesis';
+  turnKind: 'user' | 'synthesis' | 'scheduled';
   /** Recipient for streams outside DMs. */
   recipientUserId: string;
   /** Count of queued/running runs in the thread right now. */

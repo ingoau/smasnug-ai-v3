@@ -96,6 +96,11 @@ export async function markThreadGone(channel: string, threadTs: string): Promise
   await redis.set(threadGoneKey(channel, threadTs), '1', 'EX', 30 * 24 * 60 * 60);
 }
 
+/** True if the thread's root was deleted (markThreadGone): posting into it would throw ThreadGoneError. */
+export async function isThreadGone(channel: string, threadTs: string): Promise<boolean> {
+  return (await redis.exists(threadGoneKey(channel, threadTs))) > 0;
+}
+
 async function assertThreadExists(method: string, args: Record<string, unknown>): Promise<void> {
   if (!POSTING_METHODS.has(method)) return;
   const channel = (args.channel ?? args.channel_id) as string | undefined;

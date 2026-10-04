@@ -19,6 +19,12 @@ const LABELS: Record<string, string> = {
   propose_workspace_fact: 'Noting a workspace fact…',
   send_message: 'Preparing a message…',
   set_card_title: 'Writing up the results…',
+  set_reminder: 'Setting a reminder…',
+  list_reminders: 'Checking reminders…',
+  cancel_reminder: 'Cancelling a reminder…',
+  create_watch: 'Setting up a watch…',
+  list_watches: 'Checking watches…',
+  cancel_watch: 'Cancelling a watch…',
 };
 
 /** Tools that only respond; they never show or change the indicator. */
