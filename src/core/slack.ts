@@ -100,8 +100,14 @@ async function acquire(key: string, perMin: number, deadline = Infinity) {
   throw new Error(`rate limiter timeout for ${key}`);
 }
 
-async function pauseFor(method: string, deadline = Infinity) {
-  const until = Number(await redis.get(`slack:429:${method}`));
+/**
+ * Redis key of a 429 pause. Scoped by token kind like the limiter keys (Slack's limits are per token: a 429 on the
+ * user token's conversations.replies must not pause the bot token's reads). The kind, never the token, is in the key.
+ */
+export const pauseKey = (token: TokenKind, method: string) => `slack:429:${token}:${method}`;
+
+async function pauseFor(token: TokenKind, method: string, deadline = Infinity) {
+  const until = Number(await redis.get(pauseKey(token, method)));
   if (until && until > deadline) throw new SlackBusyError(method, until - Date.now());
   if (until && until > Date.now()) await sleep(until - Date.now());
 }
@@ -165,22 +171,19 @@ export async function slackCall<T extends WebAPICallResult = WebAPICallResult & 
 async function rawCall<T>(method: string, args: Record<string, unknown>, token: TokenKind, maxWaitMs?: number): Promise<T> {
   const channel = typeof args.channel === 'string' ? args.channel : undefined;
   const deadline = maxWaitMs === undefined ? Infinity : Date.now() + maxWaitMs;
-  if (FAKE) {
-    // Benchmarks can include the shared rate limiter's overhead (SLACK_FAKE_LIMITER=1).
-    if (process.env.SLACK_FAKE_LIMITER === '1') await throttle(method, token, channel, deadline);
-    return (await fakeCall(method, args, token)) as T;
-  }
+  // Benchmarks and tests can run the fake through the shared rate limiter and 429 handling (SLACK_FAKE_LIMITER=1).
+  if (FAKE && process.env.SLACK_FAKE_LIMITER !== '1') return (await fakeCall(method, args, token)) as T;
   for (let attempt = 0; ; attempt++) {
-    await pauseFor(method, deadline);
+    await pauseFor(token, method, deadline);
     await throttle(method, token, channel, deadline);
     try {
-      return (await clients[token].apiCall(method, args)) as T;
+      return (FAKE ? await fakeCall(method, args, token) : await clients[token].apiCall(method, args)) as T;
     } catch (err: any) {
       const retryAfter = err?.retryAfter ?? err?.data?.retryAfter;
       if (err?.code === 'slack_webapi_rate_limited_error' && attempt < 5) {
         const ms = (Number(retryAfter) || 1) * 1000;
-        await redis.set(`slack:429:${method}`, String(Date.now() + ms), 'PX', ms);
-        log.warn({ method, ms }, 'slack 429, backing off');
+        await redis.set(pauseKey(token, method), String(Date.now() + ms), 'PX', ms);
+        log.warn({ method, token, ms }, 'slack 429, backing off');
         if (Date.now() + ms > deadline) throw new SlackBusyError(method, ms);
         continue;
       }
