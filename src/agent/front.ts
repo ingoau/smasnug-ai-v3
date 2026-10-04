@@ -187,7 +187,7 @@ function section(tag: string, body: string, attrs = ''): string {
   return body.trim() ? `<${tag}${attrs}>\n${body.trim()}\n</${tag}>` : '';
 }
 
-async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: string | undefined }, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean }> {
+async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: string | undefined }, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean; outcome?: { fallback: string | null } }> {
   const [memory, snapshot, ctx] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId)).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
@@ -216,6 +216,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: stri
   );
   let synthesisRunIds: number[] = [];
   let allCancelled = false;
+  let outcome: { fallback: string | null } | undefined;
   if (turn.kind === 'synthesis' && turn.cardId) {
     const res = await renderCardResults(turn.cardId);
     synthesisRunIds = res.runIds;
@@ -232,6 +233,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: stri
     // coding-agent launch, src/features/outcome-turn.ts): its stored input replaces new messages.
     const sched = await scheduledTurnInput(turn.id).catch((err) => (log.warn({ err }, 'scheduledTurnInput failed'), null));
     parts.push(sched ? sched.input : 'A scheduled turn whose details are missing. Do nothing: call end_turn.');
+    if (sched && (sched.source === 'send' || sched.source === 'coding_launch')) outcome = { fallback: sched.fallback };
   } else {
     parts.push(section('new_messages', clipTokens(ctx.newMessages, BUDGET.newMessages), ` from="<@${turn.authorId}>" note="The message(s) you are responding to now."`));
     const barePing = turn.isMention && (await isBarePing(turn).catch(() => false));
@@ -243,7 +245,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: stri
           : 'This is an unmentioned follow-up: respond only if it is addressed to you or you clearly add something; otherwise do nothing.',
     );
   }
-  return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, allCancelled };
+  return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, allCancelled, ...(outcome ? { outcome } : {}) };
 }
 
 /** DM threads: the conversation's sidebar title, so the model knows whether to (re)title it. */
@@ -471,11 +473,23 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     }
   }
 
+  // Confirmation outcome turns (src/features/outcome-turn.ts): never the generic fallback / error texts; when the
+  // turn shows nothing (silent, failed, stopped), the code-written outcome (e.g. "sent ✓ <link>") is posted instead,
+  // so a send is never left unconfirmed.
+  const outcome = built.outcome;
+  const postOutcomeFallback = async () => {
+    if (!outcome?.fallback || replies.anyVisible || state.visible.has('reply')) return;
+    await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(outcome.fallback) }, { idempotencyKey: `outcome-fallback:${turnId}` });
+    await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, outcome: true, text: outcome.fallback });
+  };
+
   if (stopped || (await checkStop())) {
     // The user pressed stop: the pipeline confirms ("Stopped."). Close anything still open quietly; no error note,
-    // no fallback. Streams Slack already halted just make stopStream fail, which is fine.
+    // no fallback (except an outcome turn's factual confirmation). Streams Slack already halted just make
+    // stopStream fail, which is fine.
     await replies.abortOpenStreams().catch(() => {});
     await appendEvent(turn.threadId, 'turn_stopped', 'system', { turnId, ...(failed ? { error: String((failed as any)?.message ?? failed) } : {}) }).catch(() => {});
+    await postOutcomeFallback().catch((err) => log.warn({ err, turnId }, 'outcome fallback failed'));
     return;
   }
 
@@ -483,12 +497,14 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     log.error({ err: failed, turnId }, 'front turn failed');
     await appendEvent(turn.threadId, 'error', 'bot', { turnId, error: String((failed as any)?.message ?? failed) }).catch(() => {});
     // Already visible (stream open or reply posted): close it out ourselves instead of letting the pipeline post.
-    const closed = await replies.abortOpenStreams(ERROR_NOTE);
+    const note = outcome?.fallback ?? ERROR_NOTE;
+    const closed = await replies.abortOpenStreams(note);
     if (closed) return;
     if (replies.anyVisible) {
-      await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(ERROR_NOTE) }, { idempotencyKey: `error:${turnId}` });
+      await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(note) }, { idempotencyKey: `error:${turnId}` });
       return;
     }
+    if (outcome) return void (await postOutcomeFallback());
     throw failed;
   }
 
@@ -506,7 +522,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     }
   }
 
-  if (state.visible.size === 0 && needsFallback(turn, io, built.allCancelled)) {
+  if (state.visible.size === 0 && outcome) await postOutcomeFallback();
+  else if (state.visible.size === 0 && needsFallback(turn, io, built.allCancelled)) {
     await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(FALLBACK_TEXT) }, { idempotencyKey: `fallback:${turnId}` });
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, text: FALLBACK_TEXT });
   }

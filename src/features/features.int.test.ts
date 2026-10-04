@@ -49,7 +49,7 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
   const callsSince = async (n: number) => (await fakeCalls()).slice(n);
   /** Outcome turns started for a pending send (src/features/outcome-turn.ts). */
   const outcomeTurns = (pendingId: string) =>
-    sql<any[]>`select t.*, i.input from scheduled_turn_inputs i join turns t on t.id = i.turn_id where i.source = 'send' and i.source_ref = ${pendingId}`;
+    sql<any[]>`select t.*, i.input, i.fallback from scheduled_turn_inputs i join turns t on t.id = i.turn_id where i.source = 'send' and i.source_ref = ${pendingId}`;
   const lastResponse = async (n: number) => (await callsSince(n)).filter((c) => c.method === 'response_url').at(-1)?.args;
 
   beforeAll(async () => {
@@ -219,10 +219,9 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       await send.handleSendConfirm(action({ userId: requester, actionId: 'send:confirm', value: p!.id }));
       expect((await lastResponse(m))?.text).toMatch(/blocked/);
       expect((await callsSince(m)).some((c) => c.method === 'chat.postMessage')).toBe(false);
-      // The agent hears about it (a send block is not a suspension: the turn runs).
-      const outcome = await outcomeTurns(p!.id);
-      expect(outcome).toHaveLength(1);
-      expect(outcome[0].input).toContain('status="not_sent:blocked"');
+      // Review #6: told privately only; no outcome turn that would announce the block in the thread.
+      expect(await outcomeTurns(p!.id)).toHaveLength(0);
+      expect((await sql`select status from pending_sends where id = ${p!.id}`)[0]!.status).toBe('cancelled');
       await state.setBlock(requester, { sendBlocked: false });
     });
   });
@@ -255,6 +254,7 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       expect(turn.input).toContain('<send_outcome');
       expect(turn.input).toContain('see you at 5');
       expect(turn.input).toMatch(/Link: https:\/\/fake\.slack\.com\//);
+      expect(turn.fallback).toMatch(/^sent ✓ https:\/\/fake\.slack\.com\//); // posted by code if the model fails or stays silent
       expect(turn.input).toMatch(/^System notice \(not a message from/m);
       // A later sweep doesn't add another one.
       await send.expirePendingSends();
@@ -352,11 +352,62 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       await sql`update pending_sends set status = 'sending', expires_at = now() - interval '11 minutes' where id in (${a.id}, ${b.id})`;
       await sql`insert into sent_messages (channel_id, ts, requester_id, text, permalink, destination, pending_send_id)
                 values ('CGENERAL', ${`1700000123.${rand()}`}, ${requester}, ${a.text}, 'https://fake.slack.com/archives/CGENERAL/p1', 'CGENERAL', ${a.id})`;
+      // Review #3: posted, but the crash came before sent_messages was written: the post's idempotency key result
+      // still shows it went out.
+      const c = await propose(requester);
+      await sql`update pending_sends set status = 'sending', expires_at = now() - interval '11 minutes' where id = ${c.id}`;
+      await sql`insert into idempotency_keys (key, result) values (${`chat.postMessage:send:${c.id}`}, ${sql.json({ ok: true, channel: 'CGENERAL', ts: '1700000999.000100' })})`;
       await send.expirePendingSends();
       expect(await status(a.id)).toBe('sent');
       expect(await status(b.id)).toBe('expired');
-      expect((await outcomeTurns(a.id))[0].input).toContain('https://fake.slack.com/archives/CGENERAL/p1');
+      expect(await status(c.id)).toBe('sent');
+      const [ta] = await outcomeTurns(a.id);
+      expect(ta.input).toContain('https://fake.slack.com/archives/CGENERAL/p1');
       expect((await outcomeTurns(b.id))[0].input).toContain('status="not_sent:failed"');
+      const [tc] = await outcomeTurns(c.id);
+      expect(tc.input).toContain('status="sent"');
+      expect(tc.input).toContain('https://fake.slack.com/archives/CGENERAL/p1700000999000100');
+      // Review #4: late (sweep) outcomes are not mention turns.
+      for (const t of [ta, tc, (await outcomeTurns(b.id))[0]]) expect(t.isMention).toBe(false);
+    });
+
+    it('deliver records sent_messages right after the post, before uploads and the permalink', async () => {
+      const requester = uid();
+      const p = await propose(requester);
+      let seenDuringUpload: any[] = [];
+      uploadFiles.mockImplementationOnce(async () => {
+        seenDuringUpload = await sql`select * from sent_messages where pending_send_id = ${p.id}`;
+      });
+      await sql`update pending_sends set files = ${sql.json([{ filename: 'a.txt', content: 'x' }])} where id = ${p.id}`;
+      await send.handleSendConfirm(action({ userId: requester, actionId: 'send:confirm', value: p.id }));
+      expect(seenDuringUpload).toHaveLength(1);
+      const [row] = await sql<any[]>`select * from sent_messages where pending_send_id = ${p.id}`;
+      expect(row.permalink).toContain('fake.slack.com'); // filled in afterwards
+    });
+
+    it('settling fails after delivery: "Sent ✓" in the preview, and the sweep starts no late outcome turn', async () => {
+      const requester = uid();
+      const p = await propose(requester, `boom-${rand()}`);
+      // Make the 'sending → sent' update fail for this row only (as a DB error would).
+      await sql.unsafe(`
+        create or replace function test_fail_sent() returns trigger language plpgsql as $$
+        begin if new.status = 'sent' and new.text like 'boom-%' then raise exception 'test: settle failed'; end if; return new; end $$;
+        drop trigger if exists test_fail_sent on pending_sends;
+        create trigger test_fail_sent before update on pending_sends for each row execute function test_fail_sent();`);
+      const m = (await fakeCalls()).length;
+      try {
+        await send.handleSendConfirm(action({ userId: requester, actionId: 'send:confirm', value: p.id }));
+      } finally {
+        await sql.unsafe('drop trigger if exists test_fail_sent on pending_sends; drop function if exists test_fail_sent();');
+      }
+      expect((await callsSince(m)).filter((c) => c.method === 'chat.postMessage' && c.args.channel === 'CGENERAL')).toHaveLength(1);
+      expect((await lastResponse(m))?.text).toMatch(/^Sent ✓ <https:\/\/fake\.slack\.com/);
+      expect(await status(p.id)).toBe('sending');
+      expect(await outcomeTurns(p.id)).toHaveLength(0);
+      await sql`update pending_sends set expires_at = now() - interval '11 minutes' where id = ${p.id}`;
+      await send.expirePendingSends();
+      expect(await status(p.id)).toBe('sent');
+      expect(await outcomeTurns(p.id)).toHaveLength(0);
     });
   });
 

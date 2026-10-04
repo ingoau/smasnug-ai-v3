@@ -49,6 +49,9 @@ export type LaunchOutcome = { kind: 'cancelled' } | { kind: 'failed'; error: str
 /** The admin acted (Cancel, a failed Launch): treat it like a mention. Expiry: the agent may stay silent. */
 export const launchOutcomeIsMention = (o: LaunchOutcome) => o.kind !== 'expired';
 
+/** Posted by code if the outcome turn ends with nothing visible or fails (Cancel already showed its ephemeral). */
+export const launchOutcomeFallback = (o: LaunchOutcome): string | null => (o.kind === 'failed' ? `not launched: ${o.error}` : null);
+
 /** The input of the outcome turn: a system notice, not the admin's words. */
 export function renderLaunchOutcome(o: { pendingId: string; ownerId: string; title: string; outcome: LaunchOutcome }): string {
   const who = `<@${o.ownerId}>`;

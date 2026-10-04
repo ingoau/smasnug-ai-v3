@@ -140,14 +140,16 @@ export async function createScheduledTurnTx(
     sourceId: number | null;
     sourceRef?: string;
     input: string;
+    /** Outcome turns: posted by code when the turn ends with nothing visible or fails (src/features/outcome-turn.ts). */
+    fallback?: string | null;
     isMention: boolean;
     /** Default true. False: only bump last_activity_at (e.g. an expired confirmation nobody acted on). */
     markAddressed?: boolean;
   },
 ): Promise<number> {
   const turnId = await insertTurnTx(tx, { threadId: opts.threadId, authorId: opts.ownerId, kind: 'scheduled', isMention: opts.isMention });
-  await tx`insert into scheduled_turn_inputs (turn_id, source, source_id, source_ref, input)
-           values (${turnId}, ${opts.source}, ${opts.sourceId}, ${opts.sourceRef ?? null}, ${opts.input})`;
+  await tx`insert into scheduled_turn_inputs (turn_id, source, source_id, source_ref, input, fallback)
+           values (${turnId}, ${opts.source}, ${opts.sourceId}, ${opts.sourceRef ?? null}, ${opts.input}, ${opts.fallback ?? null})`;
   if (opts.markAddressed === false) await tx`update threads set last_activity_at = now() where id = ${opts.threadId}`;
   else
     await tx`update threads set engaged = true, last_addressed_at = now(), messages_since_addressed = 0, last_activity_at = now()
@@ -155,9 +157,10 @@ export async function createScheduledTurnTx(
   return turnId;
 }
 
-/** The input of a scheduled turn (front agent: rendered in place of new messages). */
-export async function scheduledTurnInput(turnId: number): Promise<{ source: string; input: string } | null> {
-  const [row] = await sql<{ source: string; input: string }[]>`select source, input from scheduled_turn_inputs where turn_id = ${turnId}`;
+/** The input of a scheduled turn (front agent: rendered in place of new messages), and an outcome turn's fallback. */
+export async function scheduledTurnInput(turnId: number): Promise<{ source: string; input: string; fallback: string | null } | null> {
+  const [row] = await sql<{ source: string; input: string; fallback: string | null }[]>`
+    select source, input, fallback from scheduled_turn_inputs where turn_id = ${turnId}`;
   return row ?? null;
 }
 

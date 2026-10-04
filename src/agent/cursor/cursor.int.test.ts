@@ -731,7 +731,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     const responses = async (value: string) => (await responseCalls(value)).filter((c) => !c.args.delete_original).map((c) => c.args.text as string);
     const pendingRow = async (id: string) => (await sql<any[]>`select * from pending_coding_agents where id = ${id}`)[0];
     const outcomeTurns = (pendingId: string) =>
-      sql<any[]>`select t.*, i.input from scheduled_turn_inputs i join turns t on t.id = i.turn_id where i.source = 'coding_launch' and i.source_ref = ${pendingId}`;
+      sql<any[]>`select t.*, i.input, i.fallback from scheduled_turn_inputs i join turns t on t.id = i.turn_id where i.source = 'coding_launch' and i.source_ref = ${pendingId}`;
 
     it('spawn_coding_agent only proposes: an ephemeral preview with the exact task, nothing sent to Cursor', async () => {
       const t = await newThread();
@@ -824,6 +824,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
       expect(c).toHaveLength(1);
       expect(c[0]).toMatchObject({ kind: 'scheduled', authorId: 'UADMIN', isMention: true, threadId: t1 });
       expect(c[0].input).toContain('status="cancelled"');
+      expect(c[0].fallback).toBeNull(); // Cancel already showed its ephemeral
       expect(c[0].input).toContain('Fix tmrw parsing');
       expect(c[0].input).toMatch(/^System notice \(not a message from <@UADMIN>\)/m);
 
@@ -842,6 +843,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
       expect(f).toHaveLength(1);
       expect(f[0]).toMatchObject({ isMention: true });
       expect(f[0].input).toContain('status="failed"');
+      expect(f[0].fallback).toMatch(/^not launched: Couldn't start the coding agent/);
 
       // Expiry racing a click: one outcome, nothing launched; old expiries get none.
       const t3 = await newThread();

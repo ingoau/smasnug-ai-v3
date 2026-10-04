@@ -30,6 +30,7 @@ import {
   CODING_INSTRUCTIONS_MAX,
   decideLaunchClick,
   LAUNCH_CLICK_REPLIES,
+  launchOutcomeFallback,
   launchOutcomeIsMention,
   launchPreviewBlocks,
   renderLaunchOutcome,
@@ -127,6 +128,7 @@ async function settleLaunch(p: PendingLaunchRow, outcome: LaunchOutcome, transit
     source: 'coding_launch',
     sourceRef: p.id,
     input: renderLaunchOutcome({ pendingId: p.id, ownerId: p.ownerId, title: p.title, outcome }),
+    fallback: launchOutcomeFallback(outcome),
     isMention,
     transition,
   });

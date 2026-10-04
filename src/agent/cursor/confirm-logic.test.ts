@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CODING_AGENTS_PROMPT, frontSystemPrompt } from '../prompts/front.js';
-import { chunkText, CODING_INSTRUCTIONS_MAX, decideLaunchClick, launchOutcomeIsMention, launchPreviewBlocks, renderLaunchOutcome } from './confirm-logic.js';
+import { chunkText, CODING_INSTRUCTIONS_MAX, decideLaunchClick, launchOutcomeFallback, launchOutcomeIsMention, launchPreviewBlocks, renderLaunchOutcome } from './confirm-logic.js';
 
 const future = new Date(Date.now() + 60_000);
 
@@ -57,6 +57,11 @@ describe('renderLaunchOutcome', () => {
     expect(r({ kind: 'expired', ttlMin: 15 })).toContain('within 15 min');
     expect(r({ kind: 'expired', ttlMin: 15 })).toContain('stay silent');
     for (const o of [{ kind: 'cancelled' as const }, { kind: 'expired' as const, ttlMin: 1 }]) expect(r(o)).toContain("Don't propose it again unless they ask.");
+  });
+  it('fallback only for a failed launch', () => {
+    expect(launchOutcomeFallback({ kind: 'failed', error: 'no access' })).toBe('not launched: no access');
+    expect(launchOutcomeFallback({ kind: 'cancelled' })).toBeNull();
+    expect(launchOutcomeFallback({ kind: 'expired', ttlMin: 1 })).toBeNull();
   });
   it('only expiry may stay silent', () => {
     expect(launchOutcomeIsMention({ kind: 'cancelled' })).toBe(true);

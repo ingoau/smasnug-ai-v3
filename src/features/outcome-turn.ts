@@ -14,6 +14,11 @@
  * insert commit in one transaction, so a double click, a retried job or expiry racing a click can only win once; a
  * unique index on (source, source_ref) is the backstop. Entry checks (pause, channel disabled, suspension) and a gone
  * thread skip the turn quietly; the transition still happens.
+ *
+ * A confirmation must not depend on the model: an outcome turn may carry a code-written `fallback` (e.g. "sent ✓
+ * <link>") that front.ts posts when the turn ends with nothing visible or fails; outcome turns never get the generic
+ * "couldn't come up with a reply" / error texts. If ensureThreadRun is lost after the commit, the pipeline's
+ * recoverOrphanedTurns (src/pipeline/maintenance.ts, every 30 s) re-enqueues threads with old pending turns of any kind.
  */
 import type { TransactionSql } from 'postgres';
 import { appendEvent, parseThreadId } from '../core/events.js';
@@ -60,11 +65,15 @@ export async function settleWithOutcome(o: {
   source: OutcomeSource;
   sourceRef: string;
   input: string;
-  /** The user just acted: status from the start, a reply is expected (fallback if the agent stays silent). */
+  /** The user just acted: status from the start, a reply is expected. */
   isMention: boolean;
+  /** Posted by code if the turn ends with nothing visible or fails (null: nothing). */
+  fallback?: string | null;
+  /** Resolve without a turn (e.g. the user was already told privately); logged as the skip reason. */
+  skip?: string;
   transition: (tx: Tx) => Promise<boolean>;
 }): Promise<OutcomeResult> {
-  let skipped = await outcomeSkipReason(o.threadId, o.speakerId);
+  let skipped = o.skip ?? (await outcomeSkipReason(o.threadId, o.speakerId));
   let turnId: number | null = null;
   const settled = await sql.begin(async (tx) => {
     if (!(await o.transition(tx))) return false;
@@ -86,6 +95,7 @@ export async function settleWithOutcome(o: {
       sourceId: null,
       sourceRef: o.sourceRef,
       input: o.input,
+      fallback: o.fallback ?? null,
       isMention: o.isMention,
       markAddressed: o.isMention,
     });

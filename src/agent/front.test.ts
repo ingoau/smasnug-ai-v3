@@ -513,3 +513,55 @@ describe('scheduled turns (reminders / watch notifications)', () => {
     expect(h.slack.some((c) => c.method === 'chat.startStream' || c.method === 'chat.postMessage')).toBe(true);
   });
 });
+
+// Review #2: a confirmation outcome must not depend on the model. Silent, failing or stopped outcome turns post the
+// code-written fallback (never the generic "couldn't come up with a reply" / error texts).
+describe('confirmation outcome turns (send_message / coding-agent launch)', () => {
+  const outcomeRow = (fallback: string | null, source = 'send') => (q: string) =>
+    q.includes('scheduled_turn_inputs') ? [{ source, input: '<send_outcome id="p1" status="sent"/>', fallback }] : undefined;
+  const posts = () => h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text);
+  const failing = () =>
+    new MockLanguageModelV4({
+      doStream: async () => {
+        throw Object.assign(new Error('model down'), { isRetryable: false });
+      },
+    });
+
+  it('a silent outcome turn posts the fallback instead of the generic text', async () => {
+    h.sqlHook = outcomeRow('sent ✓ https://x.slack.com/archives/C9/p1');
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 80, kind: 'scheduled', messageTs: [] }), io(true).io);
+    expect(posts()).toEqual(['sent ✓ https://x.slack.com/archives/C9/p1']);
+    expect(h.events.find((e) => e.type === 'reply')?.payload).toMatchObject({ fallback: true, outcome: true });
+  });
+
+  it('a failing outcome turn posts the fallback and does not throw (no "Something broke")', async () => {
+    h.sqlHook = outcomeRow('sent ✓ https://x.slack.com/archives/C9/p1');
+    h.model = failing();
+    await expect(runFrontTurn(turn({ id: 81, kind: 'scheduled', messageTs: [] }), io(true).io)).resolves.toBeUndefined();
+    expect(posts()).toEqual(['sent ✓ https://x.slack.com/archives/C9/p1']);
+  });
+
+  it('a stopped outcome turn still posts the factual fallback', async () => {
+    h.sqlHook = outcomeRow('sent ✓ https://x.slack.com/archives/C9/p1');
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 84, kind: 'scheduled', messageTs: [] }), { ...io(true).io, stopRequested: async () => true });
+    expect(posts()).toEqual(['sent ✓ https://x.slack.com/archives/C9/p1']);
+  });
+
+  it('no fallback (cancel): silent or failing posts nothing at all', async () => {
+    h.sqlHook = outcomeRow(null);
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 82, kind: 'scheduled', messageTs: [] }), io(true).io);
+    h.model = failing();
+    await expect(runFrontTurn(turn({ id: 83, kind: 'scheduled', messageTs: [] }), io(true).io)).resolves.toBeUndefined();
+    expect(posts()).toEqual([]);
+  });
+
+  it("the agent's own reply means no fallback", async () => {
+    h.sqlHook = outcomeRow('sent ✓ https://x.slack.com/archives/C9/p1');
+    h.model = mockModel([replyStep('sent, here it is: https://x.slack.com/archives/C9/p1'), textStep('')]);
+    await runFrontTurn(turn({ id: 85, kind: 'scheduled', messageTs: [] }), io(true).io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage' && c.args.text?.startsWith('sent ✓'))).toHaveLength(0);
+  });
+});
