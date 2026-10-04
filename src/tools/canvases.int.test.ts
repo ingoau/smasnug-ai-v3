@@ -244,10 +244,16 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
     expect(await exec('front', here, 'read_canvas', { canvas: 'https://example.com/docs/T1/F1234567' })).toBe(C.NOT_A_CANVAS);
   });
 
-  it("read: the bot's canvas from someone's DM stays private elsewhere", async () => {
+  it("read: the bot's canvas from a DM / private channel stays there, also for its creator", async () => {
     const id = linkOf(await exec('front', await ctx(DM, 'UDMOWNER'), 'create_canvas', { title: 'Diary', content: 'private' }))![2]!;
     expect(await exec('front', await ctx(PUB, 'UOTHER'), 'read_canvas', { canvas: id })).toBe(C.READ_REFUSED);
-    expect(await exec('front', await ctx(PUB, 'UDMOWNER'), 'read_canvas', { canvas: id })).toContain('private');
+    expect(await exec('front', await ctx(PUB, 'UDMOWNER'), 'read_canvas', { canvas: id })).toBe(C.READ_REFUSED);
+    expect(await exec('front', await ctx(DM, 'UDMOWNER'), 'read_canvas', { canvas: id })).toContain('private');
+    const priv = linkOf(await exec('front', await ctx(PRIV, 'UPRIVOWNER'), 'create_canvas', { title: 'Staff', content: 'staff only' }))![2]!;
+    expect(await exec('front', await ctx(PUB, 'UPRIVOWNER'), 'read_canvas', { canvas: priv })).toBe(C.READ_REFUSED);
+    // One made in a public channel can be read anywhere.
+    const pub = linkOf(await exec('front', await ctx(PUB, 'UPUBOWNER'), 'create_canvas', { title: 'Open', content: 'open notes' }))![2]!;
+    expect(await exec('front', await ctx(OTHERPUB, 'UOTHER'), 'read_canvas', { canvas: pub })).toContain('open notes');
   });
 
   it('read: long canvases page with offset', async () => {

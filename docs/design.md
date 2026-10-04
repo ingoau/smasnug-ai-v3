@@ -87,7 +87,7 @@ Fetch URL (no local addresses)
 
 ✓
 
-`read_canvas` (canvases shared in this conversation or a verified public channel, or the bot's own; see Canvases and artifacts)
+`read_canvas` (canvases shared in this conversation or a verified public channel, or the bot's own made here or in a public channel; see Canvases and artifacts)
 
 ✓
 ✓
@@ -240,7 +240,7 @@ The `reply` and `send_message` tools accept file attachments, uploaded via `file
 ### Canvases and artifacts
 Long-form deliverables (research write-ups, guides, plans, comparison tables) go into a Slack canvas instead of a wall of text: the front agent calls `create_canvas(title, content)` and replies with a short summary plus the link. Subagents only read canvases; for long deliverables they return the full markdown and the front agent publishes it. Code, scripts and HTML prototypes are attached as files through `reply(files)` (any text file; Slack picks the type from the extension).
 - 
-**read_canvas(canvas, offset?)** (front + children): link (`https://<ws>.slack.com/docs/T…/F…`, also `app.slack.com/docs/…` and `/files/U…/F…` permalinks) or `F…` id. Fail closed, allowed only when: the bot created it in this conversation, for the speaker, or in a verified public channel; or it is shared in / linked to the current conversation; or it is shared in / linked to a channel verified public via cached `conversations.info` (same check as Slack search). Where it is shared comes from `files.info` with the bot token (`channels`, `groups`, `ims`, `shares`, `linked_channel_id`), so canvases the bot can't see are refused. Content from `canvases.getContent` (markdown; canvas mentions `![](@U…)` turned back into `<@U…>`), wrapped as untrusted, 24k chars per call with `offset` paging. Counted against an hourly per-user limit.
+**read_canvas(canvas, offset?)** (front + children): link (`https://<ws>.slack.com/docs/T…/F…`, also `app.slack.com/docs/…` and `/files/U…/F…` permalinks) or `F…` id. Fail closed, allowed only when: the bot created it in this conversation or in a verified public channel (not "anywhere for its creator": a canvas made in a private channel, group DM or DM may hold others' private messages or the creator's memories); or it is shared in / linked to the current conversation; or it is shared in / linked to a channel verified public via cached `conversations.info` (same check as Slack search). Where it is shared comes from `files.info` with the bot token (`channels`, `groups`, `ims`, `shares`, `linked_channel_id`), so canvases the bot can't see are refused. Content from `canvases.getContent` (markdown; canvas mentions `![](@U…)` turned back into `<@U…>`), wrapped as untrusted, 24k chars per call with `offset` paging. Counted against an hourly per-user limit.
 - 
 **create_canvas(title, content)** (front only): `canvases.create` (standalone, owned by the bot) with the markdown converted to canvas syntax (`<@U…>` → `![](@U…)`, `<#C…>` → `![](#C…)`, `<url|text>` → `[text](url)`) and group pings neutralised (also the canvas forms). Access via `canvases.access.set`: the current channel gets read (`channel_ids`), a group DM's members get read by user id (channel ids are invalid there), the speaker gets write. Recorded in `bot_canvases` (canvas, channel, thread, creator = speaker, turn, title, link). Idempotent per turn + title/content hash (DB row + Slack idempotency key), so a retried turn or a repeated call returns the same canvas.
 - 

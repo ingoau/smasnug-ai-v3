@@ -38,13 +38,13 @@ describe('access rule', () => {
     expect([...canvasConversations(file)].sort()).toEqual(['CPRIVNEW', 'CPUB', 'CSHARED', 'CTAB', 'DSOMEONE', 'GPRIV']);
     expect(publicCandidates(file)).not.toContain('DSOMEONE');
   });
-  const base = { channelId: 'CHERE', speakerId: 'USPEAK', publicIds: new Set<string>() };
-  it('bot-created: same conversation, creator, or created in a public channel', () => {
-    expect(decideCanvasAccess({ ...base, row: { channelId: 'CHERE', creatorId: 'UOTHER' } })).toEqual({ ok: true, via: 'bot_created' });
-    expect(decideCanvasAccess({ ...base, row: { channelId: 'DELSE', creatorId: 'USPEAK' } })).toEqual({ ok: true, via: 'bot_created' });
-    expect(decideCanvasAccess({ ...base, row: { channelId: 'CPUB', creatorId: 'UOTHER' }, publicIds: new Set(['CPUB']) }).ok).toBe(true);
-    // Someone else's DM deliverable stays private.
-    expect(decideCanvasAccess({ ...base, row: { channelId: 'DELSE', creatorId: 'UOTHER' } }).ok).toBe(false);
+  const base = { channelId: 'CHERE', publicIds: new Set<string>() };
+  it('bot-created: same conversation, or created in a verified public channel', () => {
+    expect(decideCanvasAccess({ ...base, row: { channelId: 'CHERE' } })).toEqual({ ok: true, via: 'bot_created' });
+    expect(decideCanvasAccess({ ...base, row: { channelId: 'CPUB' }, publicIds: new Set(['CPUB']) }).ok).toBe(true);
+    // A DM / private-channel deliverable stays there, also for its creator.
+    expect(decideCanvasAccess({ ...base, row: { channelId: 'DELSE' } }).ok).toBe(false);
+    expect(decideCanvasAccess({ ...base, row: { channelId: 'GPRIV' } }).ok).toBe(false);
   });
   it('shared in this conversation', () => {
     expect(decideCanvasAccess({ ...base, channelId: 'GPRIV', file })).toEqual({ ok: true, via: 'this_conversation' });

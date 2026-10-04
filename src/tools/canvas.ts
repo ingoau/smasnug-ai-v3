@@ -77,19 +77,20 @@ export type CanvasAccess = { ok: true; via: 'bot_created' | 'this_conversation' 
 
 /**
  * read_canvas access rule (fail closed). Allowed when:
- * - the bot created it and it was created in this conversation, or for the speaker, or in a verified public channel;
+ * - the bot created it in this conversation, or in a verified public channel. Not "anywhere for its creator": a
+ *   canvas made in a private channel, group DM or DM can hold other people's messages or the creator's memories,
+ *   which must not be read out into another (e.g. public) conversation;
  * - it is shared in / linked to the current conversation (files.info as seen by the bot token);
  * - it is shared in / linked to a verified public channel.
  * `publicIds` holds the ids verified public via conversations.info; anything unverified counts as private.
  */
 export function decideCanvasAccess(o: {
-  row?: Pick<BotCanvasRow, 'channelId' | 'creatorId'> | null;
+  row?: Pick<BotCanvasRow, 'channelId'> | null;
   file?: CanvasFileInfo | null;
   channelId: string;
-  speakerId: string;
   publicIds: Set<string>;
 }): CanvasAccess {
-  if (o.row && (o.row.channelId === o.channelId || o.row.creatorId === o.speakerId || o.publicIds.has(o.row.channelId))) {
+  if (o.row && (o.row.channelId === o.channelId || o.publicIds.has(o.row.channelId))) {
     return { ok: true, via: 'bot_created' };
   }
   if (!o.file) return { ok: false };

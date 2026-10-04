@@ -83,16 +83,16 @@ async function canvasLink(canvasId: string): Promise<string> {
 }
 
 /** Access check for read_canvas (see decideCanvasAccess); files.info and public checks only when needed. */
-export async function checkReadAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, canvasId: string) {
+export async function checkReadAccess(ctx: Pick<ToolContext, 'channelId'>, canvasId: string) {
   const row = await getBotCanvas(canvasId);
-  const quick = decideCanvasAccess({ row, channelId: ctx.channelId, speakerId: ctx.speakerId, publicIds: new Set() });
+  const quick = decideCanvasAccess({ row, channelId: ctx.channelId, publicIds: new Set() });
   if (quick.ok) return { access: quick, row, file: undefined };
   const file = await canvasFileInfo(canvasId);
   const candidates = [...(row && !row.channelId.startsWith('D') ? [row.channelId] : []), ...(file ? publicCandidates(file) : [])].filter(
     (id) => id !== ctx.channelId,
   );
   const publicIds = candidates.length ? await publicChannelIds(candidates) : new Set<string>();
-  return { access: decideCanvasAccess({ row, file, channelId: ctx.channelId, speakerId: ctx.speakerId, publicIds }), row, file };
+  return { access: decideCanvasAccess({ row, file, channelId: ctx.channelId, publicIds }), row, file };
 }
 
 async function getCanvasMarkdown(canvasId: string): Promise<string> {
