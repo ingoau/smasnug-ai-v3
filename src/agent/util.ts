@@ -11,7 +11,7 @@ export type DeliveryMode = 'stream' | 'post';
  * - subagents running in the thread → post the reply whole (steers fold into the card);
  * - otherwise → stream.
  */
-export function chooseDelivery(opts: { turnKind: 'user' | 'synthesis'; runningRuns: number }): DeliveryMode {
+export function chooseDelivery(opts: { turnKind: 'user' | 'synthesis' | 'scheduled'; runningRuns: number }): DeliveryMode {
   if (opts.turnKind === 'synthesis') return 'stream';
   return opts.runningRuns > 0 ? 'post' : 'stream';
 }

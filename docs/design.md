@@ -91,6 +91,10 @@ Fetch URL (no local addresses)
 
 ✓
 
+`set_reminder`, `list_reminders`, `cancel_reminder`, `create_watch`, `list_watches`, `cancel_watch` (owner = speaker)
+
+✓
+
 Plain text output from the front agent is never shown to users; everything visible goes through tools. Discarded text is logged for debugging.
 ## When the bot responds
 The bot always runs on a mention or DM. In threads where it has been mentioned, follow-ups pass through three layers so it replies when it is useful and stays quiet otherwise.
@@ -323,6 +327,16 @@ Facts about other people are stored in the speaker's own memory, attributed: `In
 Facts about the Slack itself (what channels are for, recurring events). The front agent calls `propose_workspace_fact(fact)`, which sends the fact to the moderation channel for approval. Each fact keeps its source thread and proposer. Approved facts are injected into every turn; only Ingo can delete them. Subagent findings reach this through the front agent.
 ### User control
 An App Home tab lists each user's own facts with delete buttons and a "forget everything" option. "Forget X" in conversation uses `forget`. Deletion is a hard delete, including embeddings.
+## Reminders and watches
+Users can ask the bot to come back later (`src/features/schedule/`, tables in `120_reminders_watches.sql`). All six tools are front-only and take no user id: the owner is always the current speaker, and list/cancel only see the speaker's own items. Listing outside a DM hides the text of items created in other conversations.
+- 
+**Reminders.** `set_reminder(text, at | in)`: `at` is ISO-8601 (with an offset, or local wall time read in the speaker's Slack time zone, DST-correct), `in` a duration (`2h30m`, `3 days`, `PT2H`). Must be in the future and at most a year out; the tool result echoes the resolved time in the speaker's zone so the reply can confirm it ("ok, fri 9am"). The turn input already carries the speaker's local time. Caps: 20 pending per user.
+- 
+**Firing.** Postgres is the source of truth; a 1-minute maintenance task polls it (~1 minute precision; no delayed queue jobs to keep in sync with cancels, restarts or Redis loss). A poller claims one due row with `for update skip locked` (status `firing`, a claim id and a 5-minute lease), runs the entry checks and resolves the target, then inserts the turn and marks the row `fired` in one transaction that re-checks its claim: concurrent pollers or a crashed one never fire a row twice. The turn is a `scheduled` turn (kind `scheduled`, input in `scheduled_turn_inputs`) in the original thread with the owner as speaker, so the bot @mentions them in its own voice and can do any work the reminder asks for. At fire time: global pause, channel disable, owner suspended or deactivated, bot removed from the channel or channel archived → skipped quietly (status `skipped` + reason). Thread root deleted → a DM thread with the owner (rooted at a short bot note, idempotent per reminder). A thread row removed by retention is recreated. Five failed attempts → `failed`.
+- 
+**Watches.** `create_watch(source, target, criteria, check_every_hours?, expires_in_days?)` checks a web page (SSRF-safe fetch; normalized text snapshot + hash, line diff), a web search query (new result URLs) or a Slack search query (public channels only, verified and fail-closed, `##` dropped; only matches newer than the last seen ts, excluding the owner's own messages, bots and the watch's own thread) every 6 hours by default (min 1h). The baseline is taken at creation. When a background check finds candidate changes, a cheap no-tools Luna call (reasoning off, usage recorded for the owner) judges them against the owner's criteria; only a "yes" starts a `scheduled` turn in the watch's thread (not a mention: the agent may still stay silent) with the findings as untrusted data. At most one notification per check (unique per check number), at most 3 per watch per day (the baseline is kept while capped), entry checks every check, and every check counts against the owner's hourly fetch/search limits. Watches expire after 30 days at most (said when created); the snapshot is dropped as soon as a watch ends. Caps: 5 active per user.
+- 
+**App Home** lists the viewer's pending reminders and active watches with Cancel buttons. **Retention:** fired/skipped/cancelled reminders and ended watches (with their notifications) are deleted 30 days after they finish.
 ## Safety, limits and reliability
 ### Limits
 Per user: messages per hour, concurrent subagents, searches and fetches, and on-behalf-of sends. Per thread: max concurrent subagents. Per run: max duration and a token cap. At GPT-6 Luna's prices these exist mainly to stop abuse and runaway loops, not to control budget.

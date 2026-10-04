@@ -23,6 +23,12 @@ const LABELS: Record<string, string> = {
   read_canvas: 'Reading the canvas…',
   create_canvas: 'Writing a canvas…',
   edit_canvas: 'Updating the canvas…',
+  set_reminder: 'Setting a reminder…',
+  list_reminders: 'Checking reminders…',
+  cancel_reminder: 'Cancelling a reminder…',
+  create_watch: 'Setting up a watch…',
+  list_watches: 'Checking watches…',
+  cancel_watch: 'Cancelling a watch…',
 };
 
 /** Tools that only respond; they never show or change the indicator. */

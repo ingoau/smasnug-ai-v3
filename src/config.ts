@@ -87,4 +87,14 @@ export const limits = {
   canvasWriteMaxChars: 100_000,
   /** bot_canvases rows (what makes a canvas editable) are dropped after this long without use. */
   canvasRowExpiryMs: 180 * 24 * 60 * 60 * 1000,
+  // reminders and watches (src/features/schedule)
+  userPendingReminders: 20,
+  reminderMaxAheadMs: 365 * 24 * 60 * 60 * 1000,
+  reminderTextMaxChars: 1000,
+  userActiveWatches: 5,
+  watchDefaultIntervalMs: 6 * 60 * 60 * 1000,
+  watchMinIntervalMs: 60 * 60 * 1000,
+  watchMaxLifetimeMs: 30 * 24 * 60 * 60 * 1000,
+  watchNotificationsPerDay: 3,
+  scheduleTickMs: 60_000,
 } as const;
