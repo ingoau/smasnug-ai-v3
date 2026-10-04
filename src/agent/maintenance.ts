@@ -8,7 +8,9 @@ import { failRuns, maybeSynthesize } from './subagents.js';
 export async function sweepStaleRuns(): Promise<number> {
   const stale = await sql<{ id: number }[]>`
     select id from runs where status = 'running'
-      and coalesce(heartbeat_at, started_at, created_at) < now() - ${limits.staleHeartbeatMs / 1000} * interval '1 second'`;
+      and coalesce(heartbeat_at, started_at, created_at) < now() - ${limits.staleHeartbeatMs / 1000} * interval '1 second'
+      -- Coding agents (Cursor) have no worker loop to heartbeat: the Cursor poller and its own timeout handle them.
+      and not exists (select 1 from cursor_runs c where c.run_id = runs.id)`;
   // Queued runs whose job never started (e.g. lost enqueue) are failed after the max run duration.
   const lost = await sql<{ id: number }[]>`
     select id from runs where status = 'queued' and created_at < now() - ${limits.runMaxDurationMs / 1000} * interval '1 second'`;

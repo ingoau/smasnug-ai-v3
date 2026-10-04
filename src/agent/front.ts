@@ -19,6 +19,7 @@ import { freezeCard, postCard } from './cards.js';
 import { frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
+import { cursorRefusal } from './cursor/agents.js';
 import { activityForTool } from './activity.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
 ;
@@ -117,15 +118,15 @@ export function formatLocalTime(now: Date, tz: string | undefined): string {
 
 /** The thread's subagents (running + idle; expired/cancelled excluded) for the front agent. */
 export async function renderSnapshot(threadId: string): Promise<string> {
-  const rows = await sql<{ id: string; ownerId: string; title: string; status: string; summary: string | null; current: string | null; runStatus: string | null }[]>`
-    select s.id, s.owner_id, s.title, s.status, s.summary,
+  const rows = await sql<{ id: string; ownerId: string; title: string; status: string; summary: string | null; current: string | null; runStatus: string | null; kind: string }[]>`
+    select s.id, s.owner_id, s.title, s.status, s.summary, s.kind,
       (select coalesce(r.details, r.status) from runs r where r.subagent_id = s.id and r.status in ('queued', 'running') order by r.id desc limit 1) as current
     from subagents s where s.thread_id = ${threadId} and s.status in ('running', 'idle') order by s.created_at`;
   if (rows.length === 0) return '';
   return rows
     .map((r) => {
       const state = r.status === 'running' ? `running${r.current ? `: ${oneLine(r.current, 80)}` : ''}` : `idle${r.summary ? `: ${oneLine(r.summary, 120)}` : ''}`;
-      return `- ${r.id} "${r.title}" (owner <@${r.ownerId}>) — ${state}`;
+      return `- ${r.id} "${r.title}"${r.kind === 'cursor' ? ' [coding agent, Cursor]' : ''} (owner <@${r.ownerId}>) — ${state}`;
     })
     .join('\n');
 }
@@ -323,6 +324,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, extras });
   // Naming a card only makes sense when writing up its results.
   if (turn.kind !== 'synthesis') delete tools.set_card_title;
+  // Coding agents change the bot's own code: only offered in the admin's turns when configured (re-checked on use).
+  if (cursorRefusal(turn.authorId)) delete tools.spawn_coding_agent;
 
   const timing = io.timing ?? new TurnTiming();
   timing.mark('context_start');
