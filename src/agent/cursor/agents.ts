@@ -429,10 +429,10 @@ export async function composeResult(run: CursorRun, opts: { repoUrl: string; age
       ciFiles = [...new Set(files.files.filter(isCiPath))];
       if (ciFiles.length)
         lines.push(
-          `⚠️ WARNING: this PR changes CI configuration (${ciFiles.slice(0, 5).join(', ')}), which coding agents must never touch. Tell the admin prominently not to merge it as is (GitHub should reject it anyway).`,
+          `⚠️ WARNING: this PR changes CI / repository-policy configuration (${ciFiles.slice(0, 5).join(', ')}), which coding agents must never touch. Tell the admin prominently not to merge it as is (GitHub should reject it anyway).`,
         );
       else lines.push(`Changed files: ${files.files.length} (no CI configuration touched).`);
-    } else lines.push(`Changed files couldn't be checked for CI-config changes (${files.error}); ask the admin to check the PR doesn't touch .github/workflows/.`);
+    } else lines.push(`Changed files couldn't be checked for CI-config changes (${files.error}); ask the admin to check the PR doesn't touch CI or repository-policy config (anything under .github/, other CI config files).`);
   } else {
     lines.push(`No pull request was opened${b?.branch ? ` (branch ${b.branch})` : ''}; maybe nothing needed changing. See the summary.`);
   }

@@ -239,7 +239,7 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     const run = await runRow(s.runId);
     expect(run.status).toBe('complete');
     expect(run.output).toBe('Opened PR #42 ⚠️ touches CI config');
-    expect(run.result).toMatch(/⚠️ WARNING: this PR changes CI configuration \(\.github\/workflows\/container\.yml\)/);
+    expect(run.result).toMatch(/⚠️ WARNING: this PR changes CI \/ repository-policy configuration \(\.github\/workflows\/container\.yml\)/);
   });
 
   it('says so when the changed files could not be checked, and when no PR was opened', async () => {

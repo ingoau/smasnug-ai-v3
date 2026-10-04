@@ -14,7 +14,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        "Admin only. Start a Cursor cloud coding agent that changes THIS bot's own code (its GitHub repo) and opens a pull request; it takes 10-60 minutes. It cannot see this conversation: give complete, self-contained instructions (what to change and why, relevant behaviour, error messages, files if known, how to verify). Fixed rules (CLAUDE.md, never touching CI workflows, tests, self-review, PR only) are added automatically. Shows on the plan card; you get the PR link and summary in a later turn. Steer or follow up with message_subagent, stop with cancel_subagent.",
+        "Admin only. Start a Cursor cloud coding agent that changes THIS bot's own code (its GitHub repo) and opens a pull request; it takes 10-60 minutes. It cannot see this conversation: give complete, self-contained instructions (what to change and why, relevant behaviour, error messages, files if known, how to verify). Fixed rules (CLAUDE.md, never touching CI or repo-policy config, tests, self-review, PR only) are added automatically. Shows on the plan card; you get the PR link and summary in a later turn. Steer or follow up with message_subagent, stop with cancel_subagent.",
       inputSchema: z.object({
         title: z.string().describe('Short task title for the plan card, e.g. "Fix reminder time zones" (≤ 6 words)'),
         instructions: z.string().describe('Complete, self-contained task for the coding agent'),

@@ -209,10 +209,37 @@ export function describeRunStatus(status: string, followUps: number): string {
 
 // ---------- CI-config check (GitHub REST) ----------
 
-/** Paths a coding agent must never touch (CI config). */
+/** Root-level CI/CD config files of common CI systems (case-insensitive). Keep prompt.ts CI_PATHS_TEXT in line. */
+const CI_FILES = new Set([
+  '.gitlab-ci.yml',
+  '.gitlab-ci.yaml',
+  '.travis.yml',
+  '.drone.yml',
+  '.woodpecker.yml',
+  '.woodpecker.yaml',
+  'azure-pipelines.yml',
+  'azure-pipelines.yaml',
+  'bitbucket-pipelines.yml',
+  'appveyor.yml',
+  '.appveyor.yml',
+  'jenkinsfile',
+  'codeowners',
+  'cloudbuild.yaml',
+  'cloudbuild.yml',
+]);
+/** Directories of CI/CD config (case-insensitive). */
+const CI_DIRS = ['.github/', '.circleci/', '.buildkite/', '.woodpecker/', '.gitlab/', '.azure-pipelines/'];
+
+/**
+ * Paths a coding agent must never touch: CI and repo-policy config. Anything under `.github/` (workflows, actions,
+ * CODEOWNERS, dependabot.yml, rulesets…), other CI systems' config (.gitlab-ci.yml, .circleci/, Jenkinsfile…) and
+ * CODEOWNERS wherever GitHub reads it.
+ */
 export function isCiPath(path: string): boolean {
-  const p = path.replace(/^\/+/, '');
-  return p.startsWith('.github/workflows/') || p.startsWith('.github/actions/');
+  const p = path.replace(/^\/+/, '').toLowerCase();
+  if (CI_DIRS.some((d) => p.startsWith(d))) return true;
+  if (CI_FILES.has(p)) return true;
+  return p === 'docs/codeowners';
 }
 
 /** "https://github.com/o/r/pull/12" → { owner, repo, number } (only github.com PRs). */
