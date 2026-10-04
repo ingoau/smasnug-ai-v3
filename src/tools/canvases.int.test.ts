@@ -28,7 +28,7 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
   // Fake Slack state: canvases' markdown, files.info objects, conversation kinds; every canvas-related call.
   const content = new Map<string, string>();
   const files = new Map<string, any>();
-  const convs = new Map<string, { is_private?: boolean; is_im?: boolean; is_mpim?: boolean; members?: string[] }>();
+  const convs = new Map<string, { is_private?: boolean; is_im?: boolean; is_mpim?: boolean; members?: string[]; infoFails?: boolean; grantFails?: boolean }>();
   let calls: { method: string; args: any }[] = [];
   const callsOf = (m: string) => calls.filter((c) => c.method === m);
 
@@ -37,6 +37,8 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
   const OTHERPUB = `CPUB2${rand()}`;
   const DM = `D${rand()}`;
   const MPIM = `GMP${rand()}`;
+  const MPIM_NOINFO = `GMPX${rand()}`; // conversations.info fails for it
+  const NOGRANT = `CNOGRANT${rand()}`; // the channel grant fails for it
 
   async function thread(channelId: string) {
     const threadTs = `1790000${String(Math.floor(Math.random() * 1000)).padStart(3, '0')}.${String(Math.floor(Math.random() * 1e6)).padStart(6, '0')}`;
@@ -64,6 +66,8 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
     convs.set(OTHERPUB, { is_private: false });
     convs.set(PRIV, { is_private: true });
     convs.set(MPIM, { is_private: true, is_mpim: true, members: ['USPEAK', 'UFRIEND', 'UBOT'] });
+    convs.set(MPIM_NOINFO, { is_private: true, is_mpim: true, members: ['USPEAK', 'UPAL', 'UBOT'], infoFails: true });
+    convs.set(NOGRANT, { is_private: false, grantFails: true });
     removers.push(
       fake.addFakeHandler((method, args) => {
         if (!method.startsWith('canvases.') && method !== 'files.info' && method !== 'conversations.info' && method !== 'conversations.members') return undefined;
@@ -93,9 +97,16 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
             if (!f) throw fakeSlackError('file_not_found');
             return { ok: true, file: f };
           }
+          case 'canvases.access.set': {
+            // Channel ids are invalid for group DMs (docs.slack.dev/reference/methods/canvases.access.set).
+            const ids = (args.channel_ids as string[] | undefined) ?? [];
+            if (ids.some((id) => convs.get(id)?.is_mpim || convs.get(id)?.grantFails)) throw fakeSlackError('channel_not_found');
+            return { ok: true };
+          }
           case 'conversations.info': {
             const c = convs.get(String(args.channel));
             if (!c) return undefined;
+            if (c.infoFails) throw fakeSlackError('internal_error');
             return { ok: true, channel: { id: args.channel, name: 'x', is_private: !!c.is_private, is_im: !!c.is_im, is_mpim: !!c.is_mpim } };
           }
           case 'conversations.members':
@@ -162,6 +173,23 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
       ['read', undefined, ['UFRIEND']],
       ['write', undefined, ['USPEAK']],
     ]);
+  });
+
+  it("access: a failed conversations.info doesn't misclassify a group DM; a failed conversation grant is reported", async () => {
+    const out = await exec('front', await ctx(MPIM_NOINFO), 'create_canvas', { title: 'Notes', content: 'z' });
+    expect(callsOf('canvases.access.set').map((a) => [a.args.access_level, a.args.channel_ids, a.args.user_ids])).toEqual([
+      ['read', [MPIM_NOINFO], undefined], // tried as a channel, refused
+      ['read', undefined, ['UPAL']], // then by member ids
+      ['write', undefined, ['USPEAK']],
+    ]);
+    expect(out).not.toMatch(/request access/);
+
+    calls = [];
+    const failed = await exec('front', await ctx(NOGRANT), 'create_canvas', { title: 'Notes', content: 'w' });
+    expect(callsOf('canvases.access.set').map((a) => a.args.access_level)).toEqual(['read', 'write']);
+    // The speaker's grant worked, but others in the channel may not be able to open it: the agent is told.
+    expect(failed).toMatch(/Canvas created/);
+    expect(failed).toMatch(/others here may have to request access/);
   });
 
   it('edit: allowed on own canvas (append, replace_section, rename), idempotent', async () => {

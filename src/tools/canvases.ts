@@ -143,38 +143,63 @@ registerTool({
     }),
 });
 
-/** Kind of the current conversation for access grants: DM, group DM or channel (public or private). */
-async function conversationKind(channelId: string): Promise<'im' | 'mpim' | 'channel'> {
+/**
+ * Kind of the current conversation for access grants: DM, group DM or channel (public or private); `unknown` when
+ * conversations.info failed (then it isn't guessed: a group DM taken for a channel would get no grant at all).
+ */
+async function conversationKind(channelId: string): Promise<'im' | 'mpim' | 'channel' | 'unknown'> {
   if (channelId.startsWith('D')) return 'im';
   try {
     const res = await slackCall<any>('conversations.info', { channel: channelId });
     if (res?.channel?.is_im) return 'im';
     if (res?.channel?.is_mpim) return 'mpim';
+    return 'channel';
   } catch (err) {
-    log.warn({ err, channelId }, 'conversations.info failed; granting canvas access as for a channel');
+    log.warn({ err, channelId }, 'conversations.info failed; canvas access by channel, else by member ids');
+    return 'unknown';
   }
-  return 'channel';
 }
+
+/**
+ * Read access for the conversation's members by user id (canvases.access.set takes 1-20 user_ids). Returns false
+ * when not everyone could be included (more than 20 others).
+ */
+async function grantMembers(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, canvasId: string, keySuffix: string): Promise<boolean> {
+  const self = await getBotIdentity().catch(() => undefined);
+  const res = await slackCall<any>('conversations.members', { channel: ctx.channelId, limit: 50 });
+  const others = ((res?.members ?? []) as string[]).filter((u) => u !== self?.userId && u !== ctx.speakerId);
+  if (others.length)
+    await slackCall('canvases.access.set', { canvas_id: canvasId, access_level: 'read', user_ids: others.slice(0, 20) }, { idempotencyKey: `canvas-access:${canvasId}:${keySuffix}` });
+  return others.length <= 20 && !res?.response_metadata?.next_cursor;
+}
+
+const channelGrant = (ctx: Pick<ToolContext, 'channelId'>, canvasId: string) =>
+  slackCall('canvases.access.set', { canvas_id: canvasId, access_level: 'read', channel_ids: [ctx.channelId] }, { idempotencyKey: `canvas-access:${canvasId}:channel` });
 
 /**
  * Who sees a new canvas: the current conversation gets read access (channels via channel_ids; group DMs via their
  * members' user ids, since channel ids are invalid there), the speaker gets write access (it's their deliverable).
- * Each grant is idempotent per canvas. Returns a model-facing warning when the speaker may not be able to open it.
+ * If the conversation's kind can't be looked up, the channel grant is tried and member ids are the fallback.
+ * Each grant is idempotent per canvas. Returns a model-facing warning whenever the conversation's grant failed
+ * (others there may not be able to open the link) or the speaker may not be able to open it.
  */
 async function grantAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, canvasId: string): Promise<string | null> {
   const kind = await conversationKind(ctx.channelId);
   let conversationOk = kind === 'im';
   try {
     if (kind === 'channel') {
-      await slackCall('canvases.access.set', { canvas_id: canvasId, access_level: 'read', channel_ids: [ctx.channelId] }, { idempotencyKey: `canvas-access:${canvasId}:channel` });
+      await channelGrant(ctx, canvasId);
       conversationOk = true;
     } else if (kind === 'mpim') {
-      const self = await getBotIdentity().catch(() => undefined);
-      const res = await slackCall<any>('conversations.members', { channel: ctx.channelId, limit: 50 });
-      const members = ((res?.members ?? []) as string[]).filter((u) => u !== self?.userId && u !== ctx.speakerId).slice(0, 20);
-      if (members.length)
-        await slackCall('canvases.access.set', { canvas_id: canvasId, access_level: 'read', user_ids: members }, { idempotencyKey: `canvas-access:${canvasId}:mpim` });
-      conversationOk = true;
+      conversationOk = await grantMembers(ctx, canvasId, 'mpim');
+    } else if (kind === 'unknown') {
+      try {
+        await channelGrant(ctx, canvasId);
+        conversationOk = true;
+      } catch (err) {
+        log.warn({ err, canvasId, channel: ctx.channelId, code: slackErrorCode(err) }, 'canvas channel grant failed; granting by member ids');
+        conversationOk = await grantMembers(ctx, canvasId, 'members');
+      }
     }
   } catch (err) {
     log.warn({ err, canvasId, channel: ctx.channelId, code: slackErrorCode(err) }, 'canvas access for the conversation failed');
@@ -186,8 +211,12 @@ async function grantAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, ca
   } catch (err) {
     log.warn({ err, canvasId, code: slackErrorCode(err) }, 'canvas write access for the speaker failed');
   }
+  // In a DM the speaker's grant is the conversation's grant.
+  if (kind === 'im') conversationOk = speakerOk;
+  if (!conversationOk && !speakerOk) return "Access couldn't be shared automatically: people (the speaker too) may have to request access when they open the link. Say so in your reply.";
+  if (!conversationOk) return "Access for this conversation couldn't be shared automatically: others here may have to request access when they open the link (the speaker can share it from the canvas). Say so in your reply.";
   // Without the speaker grant the conversation (incl. the speaker) can still read it; editing then stays with the bot.
-  return speakerOk || conversationOk ? null : "Access couldn't be shared automatically: people may have to request access when they open the link.";
+  return null;
 }
 
 const canvasMarkdownHint =
