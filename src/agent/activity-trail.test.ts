@@ -89,7 +89,7 @@ describe('ActivityTrail', () => {
     t.activity('Searching Slack…');
     await sleep(10);
     const a = await t.adopt();
-    expect(a).toEqual({ ts: expect.stringMatching(/^1700000000\./), chunks: [{ type: 'task_update', id: 'activity-1', title: 'Searching Slack…', status: 'complete' }], cards: 1 });
+    expect(a).toEqual({ ts: expect.stringMatching(/^1700000000\./), chunks: [{ type: 'task_update', id: 'activity-1', title: 'Searching Slack…', status: 'complete' }], cards: 1, stopKey: 'activity:7:0:stop' });
     expect(t.isOpen).toBe(false);
     t.activity('Starting a subagent…');
     await sleep(10);
@@ -212,6 +212,42 @@ describe('ReplyManager with activity cards', () => {
     expect(await rm.abortOpenStreams('_Something broke_')).toBe(true);
     const update = calls.find((c) => c.method === 'chat.update')!;
     expect(update.args.text).toBe('Partial answer so far\n\n_Something broke_');
+  });
+
+  it('an adopted activity stream Slack already ended is replaced by a fresh stream: the reply is delivered', async () => {
+    n = 0; // the activity message gets ts …001
+    const dead = '1700000000.000001';
+    const rm = new ReplyManager(target(0, { stopRequested: async () => false }));
+    rm.activity('Searching the web…');
+    await sleep(10);
+    failOn = (m, a) => (m === 'chat.appendStream' && a.ts === dead ? 'message_not_in_streaming_state' : null);
+    const text = 'Here is the answer you asked for, with details.';
+    rm.start('c1');
+    rm.delta('c1', JSON.stringify({ text }).slice(0, -2));
+    await sleep(200);
+    expect(await rm.finish('c1', text)).toMatch(/^Replied \(streamed\)/);
+    await rm.closeActivity();
+    // The dead activity message is stopped and deleted; the reply streams into a new message of its own.
+    expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.delete', 'chat.startStream', 'chat.stopStream']);
+    expect(calls[3]!.args.ts).toBe(dead);
+    const replyTs = calls.at(-1)!.args.ts;
+    expect(replyTs).not.toBe(dead);
+    expect(rm.lastDelivered).toMatchObject({ ts: replyTs, text, streamed: true });
+  });
+
+  it('an adopted activity stream halted by a user stop: nothing delivered, the message is removed', async () => {
+    let checks = 0;
+    // false for the activity and the reply's pre-send check, true once the append into the adopted message failed
+    const rm = new ReplyManager(target(0, { stopRequested: async () => ++checks >= 3 }));
+    rm.activity('Searching the web…');
+    await sleep(10);
+    failOn = (m) => (m === 'chat.appendStream' ? 'message_not_in_streaming_state' : null);
+    const text = 'Here is the answer you asked for, with details.';
+    rm.delta('c1', JSON.stringify({ text }).slice(0, -2));
+    await sleep(200);
+    expect(await rm.finish('c1', text)).toMatch(/^Not delivered: the user pressed stop/);
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.delete']);
   });
 
   it('without activityCards nothing is shown', async () => {

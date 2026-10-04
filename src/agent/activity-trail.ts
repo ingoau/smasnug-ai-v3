@@ -56,6 +56,8 @@ export interface AdoptedActivity {
   ts: string;
   chunks: TaskUpdateChunk[];
   cards: number;
+  /** Idempotency key for stopping it, should the reply not be able to use it after all (dropAdopted). */
+  stopKey: string;
 }
 
 const card = (id: string, title: string, status: TaskUpdateChunk['status']): TaskUpdateChunk => ({ type: 'task_update', id, title, status });
@@ -117,10 +119,18 @@ export class ActivityTrail {
       }
       if (this.broken) return null; // close() deletes it
       const last = this.cards.at(-1);
-      const adopted: AdoptedActivity = { ts: this.ts, chunks: last ? [card(last.id, last.title, 'complete')] : [], cards: this.cards.length };
+      const adopted: AdoptedActivity = { ts: this.ts, chunks: last ? [card(last.id, last.title, 'complete')] : [], cards: this.cards.length, stopKey: this.key(':stop') };
       this.reset();
       return adopted;
     });
+  }
+
+  /**
+   * A reply adopted the message but can't use it (Slack already ended its stream, or the thread moved on below it):
+   * stop and delete it, so the reply opens a fresh message instead. Never throws.
+   */
+  dropAdopted(a: AdoptedActivity): Promise<void> {
+    return this.enqueue(() => this.removeMessage(a.ts, a.stopKey));
   }
 
   /** The reply was posted as a message of its own: remove the activity message. */
@@ -214,7 +224,10 @@ export class ActivityTrail {
     const ts = this.ts;
     const key = this.key(':stop');
     this.reset();
-    if (!ts) return;
+    if (ts) await this.removeMessage(ts, key);
+  }
+
+  private async removeMessage(ts: string, key: string): Promise<void> {
     try {
       await slackCall('chat.stopStream', { channel: this.t.channelId, ts }, { idempotencyKey: key });
       this.t.onSessionReleased?.();

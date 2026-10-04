@@ -24,7 +24,7 @@ import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type ButtonsActionsBlock } from './reply-buttons.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
-import { ActivityTrail } from './activity-trail.js';
+import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
 
 /** Coalescing interval for appends once the stream is open. */
 const FLUSH_MS = 250;
@@ -277,14 +277,11 @@ export class ReplyManager {
         return;
       }
       const adopted = !e.streamTs && this.trail ? await this.trail.adopt() : null;
-      if (adopted) {
-        // The activity message is open: the reply streams into it, below its cards (marked complete now).
+      if (adopted && (await this.streamInto(e, adopted, chunks))) {
+        // The activity message was open: the reply streams into it, below its cards (marked complete now).
         e.streamTs = adopted.ts;
         e.activityCards = adopted.cards;
         st.blockCount += adopted.cards;
-        this.t.timing?.mark('stream_open_call');
-        await slackCall('chat.appendStream', { channel: this.t.channelId, ts: e.streamTs, chunks: [...adopted.chunks, ...chunks] });
-        this.t.timing?.mark('stream_started');
       } else if (!e.streamTs) {
         const team = await teamId();
         this.t.timing?.mark('stream_open_call');
@@ -311,10 +308,35 @@ export class ReplyManager {
     e.streamed = base.slice(0, e.rawSent);
   }
 
-  private onStreamError(e: ReplyEntry, err: unknown) {
+  /**
+   * Open the reply in the adopted activity message. False when it can't take the reply (Slack already ended its
+   * stream, e.g. after a long tool call): the message is deleted and the reply opens a fresh stream. A user stop is
+   * re-thrown (the entry then counts as halted, and finish() removes the message).
+   */
+  private async streamInto(e: ReplyEntry, adopted: AdoptedActivity, chunks: unknown[]): Promise<boolean> {
+    try {
+      this.t.timing?.mark('stream_open_call');
+      await slackCall('chat.appendStream', { channel: this.t.channelId, ts: adopted.ts, chunks: [...adopted.chunks, ...chunks] });
+      this.t.timing?.mark('stream_started');
+      return true;
+    } catch (err) {
+      if (await this.isStopped()) {
+        e.streamTs = adopted.ts;
+        e.activityCards = adopted.cards;
+        throw err;
+      }
+      log.info({ code: slackErrorCode(err), turnId: this.t.turnId }, 'the activity message cannot take the reply; opening a fresh one');
+      await this.trail?.dropAdopted(adopted);
+      return false;
+    }
+  }
+
+  private async onStreamError(e: ReplyEntry, err: unknown) {
     e.failed = true;
     const code = slackErrorCode(err);
-    if (e.streamTs && isHalted(code)) {
+    // Only a confirmed user stop counts as halted: Slack also ends streams by itself (e.g. one left idle while a
+    // tool ran), and then the reply must still be delivered (recoverStream / post).
+    if (e.streamTs && isHalted(code) && (await this.isStopped())) {
       e.halted = true;
       log.info({ code, index: e.index }, 'reply stream halted by Slack (stop button?)');
     } else {
