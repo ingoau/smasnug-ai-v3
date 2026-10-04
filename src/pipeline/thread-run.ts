@@ -12,9 +12,9 @@ import { log } from '../log.js';
 import { loadMessageMarks, timingReport, TurnTiming } from '../core/timing.js';
 import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from './lock.js';
 import { claimNextPending, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
-import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, setSessionStatus, trackTurnStatus, TurnStatus } from './session-status.js';
+import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, setSessionStatus, trackTurnStatus, TurnStatus, type FinalSessionStatus } from './session-status.js';
 import { removeOpenActivity } from '../agent/activity-registry.js';
-import { finalSessionStatus } from './agent-session.js';
+import { finalSessionStatus, noteSessionSuspended, resumeSuspendedSession } from './agent-session.js';
 import { stopRequestedSince } from './stop.js';
 import { currentlyViewing } from './view-context.js';
 
@@ -35,6 +35,7 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
   if (!lock) return;
   const lockedAt = Date.now();
   let first = true;
+  let lastFinal: FinalSessionStatus | null = null;
   try {
     // We hold the lock, so nothing else is running here: any 'running' turn is left over from a crash.
     for (const id of await runningTurnIds(threadId)) {
@@ -56,7 +57,7 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
       const entry: { threadId: string; lock: HeldLock; turn: TurnRow; status?: TurnStatus } = { threadId, lock, turn };
       inFlight.set(turn.id, entry);
       try {
-        await runTurn(turn, (status) => (entry.status = status), timing);
+        lastFinal = await runTurn(turn, (status) => (entry.status = status), timing);
       } finally {
         inFlight.delete(turn.id);
       }
@@ -64,10 +65,14 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
   } finally {
     await lock.release();
   }
+  // A Send / Cancel click between the last turn's final status and the release skipped resuming (lock held): the
+  // session may still say `suspended` with nothing pending. Re-check now.
+  if (lastFinal === 'suspended') await resumeSuspendedSession(threadId);
   if (await hasPendingTurns(threadId)) await ensureThreadRun(threadId);
 }
 
-export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => void, timing = new TurnTiming()) {
+/** Runs one turn under the thread lock; returns the status it left the session in. */
+export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => void, timing = new TurnTiming()): Promise<FinalSessionStatus> {
   const { channelId, threadTs } = parseThreadId(turn.threadId);
   const started = Date.now();
   const stopRequested = () => stopRequestedSince(turn.threadId, started);
@@ -97,6 +102,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
   };
   let status: 'done' | 'error' | 'cancelled' = 'done';
   let error: string | undefined;
+  let final: FinalSessionStatus = 'active';
   try {
     await runFrontTurn(turn, io);
   } catch (err) {
@@ -116,9 +122,11 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     }
   } finally {
     // DMs may end `suspended` (a send confirmation is pending) or `closed` (leave_thread); else `active`.
-    const final = await finalSessionStatus(turn.threadId, Number(turn.id)).catch((err) => (log.warn({ err }, 'finalSessionStatus failed'), 'active' as const));
+    final = await finalSessionStatus(turn.threadId, Number(turn.id)).catch((err) => (log.warn({ err }, 'finalSessionStatus failed'), 'active' as const));
     await indicator.finish(final);
     untrack();
+    // Resume promptly when the confirmation expires (not only at the next expiry sweep).
+    if (final === 'suspended') await noteSessionSuspended(turn.threadId);
     // This turn cleared the indicator (any intake status with it); a turn that never showed one still takes back an
     // intake status left for messages that ended up in its inbox.
     if (indicator.isShown) await noteStatusCleared(turn.threadId);
@@ -134,6 +142,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     timing.mark('turn_end');
     await reportTiming(turn, timing).catch((err) => log.debug({ err }, 'turn timing report failed'));
   }
+  return final;
 }
 
 /** One `turn_timing` event + log line per turn: pipeline marks of its first message plus the turn's own marks. */

@@ -21,6 +21,7 @@
  */
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { getBotIdentity, slackCall, slackErrorCode } from '../core/slack.js';
+import { redis } from '../core/redis.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { isLocked, threadLockKey } from './lock.js';
@@ -190,9 +191,35 @@ export async function restoreSessionStatus(threadId: string, userId?: string): P
   await setSessionStatus(channelId, threadTs, status, userId);
 }
 
+/** Suspended DM sessions by the time their earliest pending confirmation expires (ms): resumed by the sweep below. */
+const SUSPENDED_KEY = 'sessions:suspended';
+
+/**
+ * A turn left a DM session `suspended`: remember when its confirmation expires, so the session resumes then (the
+ * pending-send expiry sweep runs only every few minutes). Never throws.
+ */
+export async function noteSessionSuspended(threadId: string): Promise<void> {
+  try {
+    const [row] = await sql<{ at: Date | null }[]>`
+      select min(expires_at) as at from pending_sends where thread_id = ${threadId} and status = 'pending' and expires_at > now()`;
+    if (row?.at) await redis.zadd(SUSPENDED_KEY, new Date(row.at).getTime(), threadId);
+  } catch (err) {
+    log.warn({ err, threadId }, 'noting a suspended session failed');
+  }
+}
+
+/** Maintenance (every few seconds): resume suspended sessions whose confirmation has expired. */
+export async function resumeExpiredSuspensions(): Promise<void> {
+  const due = await redis.zrangebyscore(SUSPENDED_KEY, 0, Date.now());
+  for (const threadId of due) {
+    if (await redis.zrem(SUSPENDED_KEY, threadId)) await resumeSuspendedSession(threadId);
+  }
+}
+
 /**
  * A send confirmation was resolved (Send, Cancel or expiry): a DM session suspended for it goes back to `active`,
- * unless another confirmation is still pending or a turn is running (that turn sets the final status). Never throws.
+ * unless another confirmation is still pending or a turn is running (that turn sets the final status; the thread run
+ * re-checks after releasing the lock). Never throws.
  */
 export async function resumeSuspendedSession(threadId: string | null | undefined): Promise<void> {
   if (!threadId) return;
@@ -200,8 +227,10 @@ export async function resumeSuspendedSession(threadId: string | null | undefined
     const [row] = await sql<{ isDm: boolean; pendingSend: boolean }[]>`
       select t.is_dm, exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now()) as pending_send
       from threads t where t.id = ${threadId}`;
-    if (!row?.isDm || row.pendingSend) return;
+    if (!row?.isDm) return;
+    if (row.pendingSend) return void (await noteSessionSuspended(threadId)); // resume when the next one expires
     if (await isLocked(threadLockKey(threadId))) return;
+    await redis.zrem(SUSPENDED_KEY, threadId);
     await restoreSessionStatus(threadId); // `active` (or `closed` if the conversation was closed meanwhile)
   } catch (err) {
     log.warn({ err, threadId }, 'resuming a suspended session failed');

@@ -255,6 +255,46 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       expect((await statuses(c.channelId)).at(-1)).toBe('suspended');
     });
 
+    it('a Send / Cancel click while the turn still holds the lock: resumed once the lock is released', async () => {
+      const dm = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${dm.channelId}, '1.1', ${dm.id}, 'U1', 'send hi to #general')`;
+      await scheduler.scheduleMessages(dm.id, 'U1', ['1.1'], true);
+      run.mockImplementationOnce(async () => {
+        await sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${dm.id}, 'C1', 'hi', now() + interval '10 minutes')`;
+      });
+      const remove = fake.addFakeHandler(async (method, args) => {
+        if (method !== 'agents.sessions.setStatus' || args.channel_id !== dm.channelId || args.status !== 'suspended') return undefined;
+        // The user clicks Cancel right after the turn computed `suspended`: the lock is still held, resume skips.
+        await sql`update pending_sends set status = 'cancelled' where thread_id = ${dm.id}`;
+        await s.resumeSuspendedSession(dm.id);
+        return undefined;
+      });
+      try {
+        await processThreadRun(job({ threadId: dm.id }));
+      } finally {
+        remove();
+      }
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended', 'active']);
+    });
+
+    it('a suspended session resumes when its confirmation expires (not only at the 5-minute expiry sweep)', async () => {
+      const dm = await thread(true);
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${dm.channelId}, '1.1', ${dm.id}, 'U1', 'send hi to #general')`;
+      await scheduler.scheduleMessages(dm.id, 'U1', ['1.1'], true);
+      run.mockImplementationOnce(async () => {
+        await sql`insert into pending_sends (requester_id, thread_id, destination, text, expires_at) values ('U1', ${dm.id}, 'C1', 'hi', now() + interval '1 second')`;
+      });
+      await processThreadRun(job({ threadId: dm.id }));
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended']);
+      await s.resumeExpiredSuspensions();
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended']); // not expired yet
+      await new Promise((r) => setTimeout(r, 1100));
+      await s.resumeExpiredSuspensions();
+      expect(await statuses(dm.channelId)).toEqual(['processing', 'suspended', 'active']);
+      await s.resumeExpiredSuspensions(); // once
+      expect(await statuses(dm.channelId)).toHaveLength(3);
+    });
+
     it('channel threads keep processing / active even if the turn asked to close', async () => {
       const ch = await thread(false);
       await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${ch.channelId}, '1.1', ${ch.id}, 'U1', 'go away')`;
