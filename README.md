@@ -41,7 +41,7 @@ Models ([GPT-6 Luna](https://openrouter.ai/openai/gpt-6-luna)) go through [Hack 
 
 ```bash
 docker compose up -d          # Postgres :5433, Redis :6380
-cp .env.example .env          # HACKCLUB_AI_KEY and/or OPENROUTER_KEY, Slack tokens, ADMIN_USER_ID, MOD_CHANNEL_ID
+cp .env.example .env          # OPENROUTER_KEY (required), optional HACKCLUB_AI_KEY, Slack tokens, ADMIN_USER_ID, MOD_CHANNEL_ID
 pnpm install
 pnpm migrate
 ```
@@ -68,8 +68,8 @@ docker run --env-file .env ghcr.io/ingoau/smasnug-ai-v3                         
 ## Tests
 
 ```bash
-pnpm test                                                             # unit + integration (fake Slack)
-LIVE=1 INTEGRATION=1 pnpm vitest run --no-file-parallelism            # + live model/API calls
+pnpm test                                                             # unit (+ a few pipeline suites if Postgres/Redis are up)
+LIVE=1 INTEGRATION=1 pnpm vitest run --no-file-parallelism            # full suite: gated integration + live APIs
 ```
 
 Tests never use the dev database or Redis from `.env`: they run against `TEST_DATABASE_URL` / `TEST_REDIS_URL` (default: database `smasnug_test`, Redis db 9 on the same servers), with `SLACK_FAKE=1` forced. The test database is created and migrated automatically (`src/testing/`). Vitest refuses to run if the test target equals the dev one.
