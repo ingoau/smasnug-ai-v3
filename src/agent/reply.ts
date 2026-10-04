@@ -56,6 +56,8 @@ export interface ReplyTarget {
   activityCards?: boolean;
   /** chat.stopStream set the session `active` (its default): the pipeline re-sets `processing` on the next activity. */
   onSessionReleased?: () => void;
+  /** True if a message was posted in the thread after `ts` (then a reply doesn't stream into that activity message). */
+  postedSince?: (ts: string) => Promise<boolean>;
 }
 
 /** Stream errors meaning Slack is no longer streaming this message (e.g. the user pressed stop). */
@@ -276,7 +278,12 @@ export class ReplyManager {
         e.failed = true;
         return;
       }
-      const adopted = !e.streamTs && this.trail ? await this.trail.adopt() : null;
+      let adopted = !e.streamTs && this.trail ? await this.trail.adopt() : null;
+      if (adopted && (await this.postedSince(adopted.ts))) {
+        // Messages arrived below the activity message: the reply goes below them, in a message of its own.
+        await this.trail!.dropAdopted(adopted);
+        adopted = null;
+      }
       if (adopted && (await this.streamInto(e, adopted, chunks))) {
         // The activity message was open: the reply streams into it, below its cards (marked complete now).
         e.streamTs = adopted.ts;
@@ -342,6 +349,15 @@ export class ReplyManager {
     } else {
       log.warn({ err, index: e.index }, 'reply stream failed; will fall back to posting');
     }
+  }
+
+  private async postedSince(ts: string): Promise<boolean> {
+    return this.t.postedSince ? this.t.postedSince(ts).catch((err) => (log.warn({ err }, 'postedSince check failed'), false)) : false;
+  }
+
+  /** The turn posted something else in the thread (send_message): an open activity message can't take a reply now. */
+  notePostedInThread(): void {
+    this.trail?.notePostBelow();
   }
 
   private async isStopped(): Promise<boolean> {

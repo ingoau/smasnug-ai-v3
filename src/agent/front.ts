@@ -286,6 +286,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     stopRequested: checkStop,
     timing: io.timing,
     activityCards: Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks',
+    // A reply only streams into the activity message if nothing was posted below it meanwhile.
+    postedSince: async (ts) =>
+      Boolean((await sql<{ moved: boolean }[]>`select exists (select 1 from messages where thread_id = ${turn.threadId} and not deleted and ts::numeric > ${ts}::numeric) as moved`)[0]?.moved),
     onSessionReleased: () => {
       try {
         io.sessionReleased?.();
@@ -410,6 +413,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
         case 'tool-result': {
           const v = VISIBLE_TOOLS[part.toolName];
           if (v) state.visible.add(v);
+          if (v === 'send') replies.notePostedInThread(); // posted below any open activity message
           break;
         }
         case 'tool-error':

@@ -250,6 +250,31 @@ describe('ReplyManager with activity cards', () => {
     expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.delete']);
   });
 
+  it('a message posted after the activity message (postedSince): the reply gets a message of its own below it', async () => {
+    const seen: string[] = [];
+    const rm = new ReplyManager(target(0, { postedSince: async (ts: string) => (seen.push(ts), true) }));
+    rm.activity('Searching the web…');
+    await sleep(10);
+    const activityTs = calls[0]!.args && '1700000000.00000' + n;
+    await rm.finish('tc1', 'The answer.');
+    await rm.closeActivity();
+    expect(seen).toEqual([activityTs]);
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.startStream', 'chat.stopStream']);
+    expect(calls[2]!.args.ts).toBe(activityTs);
+    expect(calls[3]!.args.chunks.every((c: any) => c.type !== 'task_update')).toBe(true);
+    expect(rm.lastDelivered!.ts).not.toBe(activityTs);
+  });
+
+  it('the turn posting in the thread itself (send_message) also keeps the reply out of the activity message', async () => {
+    const rm = new ReplyManager(target(0, { postedSince: async () => false }));
+    rm.activity('Preparing a message…');
+    await sleep(10);
+    rm.notePostedInThread();
+    await rm.finish('tc1', 'Sent it.');
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.startStream', 'chat.stopStream']);
+  });
+
   it('without activityCards nothing is shown', async () => {
     const rm = new ReplyManager({ ...target(), activityCards: false });
     rm.activity('Searching Slack…');
