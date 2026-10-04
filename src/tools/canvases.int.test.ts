@@ -177,6 +177,10 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
     await exec('front', c, 'edit_canvas', { canvas: `https://fake.slack.com/docs/TFAKE/${id}`, action: 'replace_section', heading: 'budget', content: '250' });
     expect(content.get(id)).toBe('## Budget\n\n250\n\n## Venue\nhall\n## Notes\nbring ![](@U1)');
     expect(await exec('front', c, 'edit_canvas', { canvas: id, action: 'replace_section', heading: 'nope', content: 'x' })).toMatch(/No heading matching/);
+    // replace_section rewrites the whole canvas: group pings anywhere in it are neutralised, not just in the new part.
+    content.set(id, `${content.get(id)}\n## Ping\nhey ![](!here) and ![](@S123ABC) <!channel>`);
+    await exec('front', c, 'edit_canvas', { canvas: id, action: 'replace_section', heading: 'Venue', content: 'park <@U2>' });
+    expect(content.get(id)).toBe('## Budget\n\n250\n\n## Venue\n\npark ![](@U2)\n\n## Notes\nbring ![](@U1)\n## Ping\nhey @\u200bhere and @\u200bgroup @\u200bchannel');
 
     await exec('front', c, 'edit_canvas', { canvas: id, action: 'rename', title: 'Trip v2' });
     expect(callsOf('canvases.edit').at(-1)!.args.changes[0]).toEqual({ operation: 'rename', title_content: { type: 'markdown', markdown: 'Trip v2' } });
@@ -215,8 +219,11 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
     const id = linkOf(await exec('front', c, 'create_canvas', { title: 'Doc', content: 'hello <@U77>' }))![2]!;
     calls = [];
     const out = await exec('child', c, 'read_canvas', { canvas: id });
-    expect(out).toContain('Canvas "Doc"');
-    expect(out).toContain('<untrusted_content source="slack canvas">');
+    // The title (typed by whoever made the canvas) is inside the untrusted wrapper, not in the trusted header.
+    const [head, wrapped] = out.split('<untrusted_content source="slack canvas">');
+    expect(head).toContain(`Canvas ${id}`);
+    expect(head).not.toContain('Doc');
+    expect(wrapped).toContain('Title: Doc');
     expect(out).toContain('hello <@U77>');
     expect(callsOf('files.info')).toHaveLength(0); // no lookup needed
   });

@@ -124,12 +124,14 @@ registerTool({
           const raw = await getCanvasMarkdown(canvasId);
           if (row) await touch(canvasId);
           const text = fromCanvasMarkdown(raw);
+          // The title is whatever the canvas's author typed: untrusted like the content, so it goes inside the wrapper.
           const title = row?.title ?? file?.title ?? file?.name;
-          const head = `Canvas${title ? ` "${title}"` : ''} (${canvasId}${row?.permalink || file?.permalink ? `, ${row?.permalink ?? file?.permalink}` : ''}), ${VIA[access.via]}, ${text.length} chars.`;
-          if (!text) return `${head}\nThe canvas is empty.`;
+          const head = `Canvas ${canvasId}${row?.permalink || file?.permalink ? ` (${row?.permalink ?? file?.permalink})` : ''}, ${VIA[access.via]}, ${text.length} chars.`;
+          const titleLine = title ? `Title: ${title.replace(/\s+/g, ' ').trim()}\n\n` : '';
+          if (!text) return `${head}\n${untrusted('slack canvas', `${titleLine}The canvas is empty.`)}`;
           const { body, next } = canvasWindow(text, offset ?? 0, limits.canvasReadMaxChars);
           const tail = next !== undefined ? `\n[${text.length - next} more chars: call read_canvas with offset=${next}]` : '';
-          return `${head}\n${untrusted('slack canvas', (offset ? `[from char ${offset}]\n` : '') + body + tail)}`;
+          return `${head}\n${untrusted('slack canvas', titleLine + (offset ? `[from char ${offset}]\n` : '') + body + tail)}`;
         } catch (err) {
           const code = slackErrorCode(err);
           if (code === 'canvas_not_found' || code === 'canvas_deleted' || code === 'access_denied') return "I can't open that canvas: it doesn't exist or I don't have access to it.";
@@ -261,9 +263,11 @@ async function buildChange(
   if (a.action === 'append') return { change: { operation: 'insert_at_end', document_content: md(toCanvasMarkdown(content)) } };
   if (a.action === 'replace_all') return { change: { operation: 'replace', document_content: md(toCanvasMarkdown(content)) } };
   if (!a.heading?.trim()) return { error: 'Pass the `heading` of the section to replace.' };
-  const spliced = spliceSection(await getCanvasMarkdown(canvasId), a.heading, toCanvasMarkdown(content));
+  // A whole-canvas read-modify-write: the bot re-posts every section, so the WHOLE document is converted and
+  // neutralised (group pings anywhere in it, not just in the new section), as if the bot had written all of it.
+  const spliced = spliceSection(await getCanvasMarkdown(canvasId), a.heading, content);
   if ('error' in spliced) return spliced;
-  return { change: { operation: 'replace', document_content: md(spliced.markdown) } };
+  return { change: { operation: 'replace', document_content: md(toCanvasMarkdown(spliced.markdown)) } };
 }
 
 registerTool({
@@ -272,7 +276,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        `Edit a canvas YOU created, only when the speaker is the person who asked for it (never someone else's). action: "append" adds content at the end; "replace_section" replaces everything under the heading \`heading\` (the heading stays unless your content starts with a heading); "replace_all" replaces the whole document; "rename" sets a new \`title\`. ${canvasMarkdownHint}`,
+        `Edit a canvas YOU created, only when the speaker is the person who asked for it (never someone else's). action: "append" adds content at the end; "replace_section" replaces everything under the heading \`heading\` (the heading stays unless your content starts with a heading; it rewrites the whole canvas, so edits people make at the same moment can be lost: prefer "append" when adding); "replace_all" replaces the whole document; "rename" sets a new \`title\`. ${canvasMarkdownHint}`,
       inputSchema: z.object({
         canvas: z.string().describe('Canvas link or id (F…)'),
         action: z.enum(EDIT_ACTIONS),
