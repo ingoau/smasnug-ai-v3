@@ -12,6 +12,7 @@ import { runRetention } from './retention.js';
 import { expirePendingSends, handleSendCancel, handleSendConfirm, registerSendTool } from './send/send.js';
 import { handleFactAction } from './workspace.js';
 import { registerScheduleTools, scheduleMaintenance } from './schedule/register.js';
+import { handleScheduleAction } from './schedule/home.js';
 
 // Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user
 registerMemoryTools();
@@ -33,6 +34,7 @@ registerAction('fact:', (ctx) => handleFactAction(ctx, publishHome));
 registerAction('mem:', handleMemoryAction);
 registerAction('admin:', handleAdminAction);
 registerAction('slash:/smasnug', handleSlash);
+registerAction('sched:', (ctx) => handleScheduleAction(ctx, publishHome));
 registerAppHome(publishHome);
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {};

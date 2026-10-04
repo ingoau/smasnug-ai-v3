@@ -437,6 +437,27 @@ describe.skipIf(!INTEGRATION)('reminders and watches', () => {
     });
   });
 
+  it('App Home lists own items and cancel buttons only touch the clicker\'s own', async () => {
+    const t = await newThread();
+    const owner = uid();
+    const home = await import('./home.js');
+    const res = await reminders.setReminder(ctxFor(t, owner), { text: 'water plants', in: '3h' });
+    const id = Number(/r_(\d+)/.exec(res)![1]);
+    const blocks = JSON.stringify(await home.scheduleHomeBlocks(owner));
+    expect(blocks).toContain('water plants');
+    expect(blocks).toContain('sched:cancel_reminder');
+    expect(await home.scheduleHomeBlocks(uid())).toEqual([]);
+    const published: string[] = [];
+    const click = (userId: string) =>
+      home.handleScheduleAction({ userId, actionId: 'sched:cancel_reminder', value: String(id), body: {} } as any, async (u) => void published.push(u));
+    const intruder = uid();
+    await click(intruder);
+    expect((await reminderRow(id)).status).toBe('pending');
+    await click(owner);
+    expect((await reminderRow(id)).status).toBe('cancelled');
+    expect(published).toEqual([intruder, owner]);
+  });
+
   it('retention deletes finished reminders and ended watches after the window', async () => {
     const t = await newThread();
     const owner = uid();

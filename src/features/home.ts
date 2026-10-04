@@ -9,6 +9,7 @@ import { confirmDialog, pendingReportsCount } from './reports.js';
 import { getState, listBlocks, setPaused } from './state.js';
 import { isAdmin, mrkdwnEscape, requireAdmin, truncate } from './util.js';
 import { listWorkspaceFacts } from './workspace.js';
+import { scheduleHomeBlocks } from './schedule/home.js';
 
 const MAX_BLOCKS = 100;
 const USER_FACTS_SHOWN = 25;
@@ -55,6 +56,7 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
     });
   }
 
+  blocks.push(...(await scheduleHomeBlocks(userId).catch((err) => (log.warn({ err }, 'schedule home blocks failed'), []))));
   if (isAdmin(userId)) blocks.push(...(await adminBlocks()));
   return blocks.slice(0, MAX_BLOCKS);
 }
