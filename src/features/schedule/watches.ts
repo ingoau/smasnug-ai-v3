@@ -176,11 +176,25 @@ export async function createWatch(
 
   const { intervalMs, lifetimeMs } = watchTiming(input);
   const now = Date.now();
-  const [row] = await sql<{ id: number; expiresAt: Date }[]>`
-    insert into watches (owner_id, thread_id, channel_id, source, target, criteria, interval_s, state, next_check_at, expires_at)
-    values (${ctx.speakerId}, ${ctx.threadId}, ${ctx.channelId}, ${input.source}, ${target}, ${criteria}, ${Math.round(intervalMs / 1000)},
-            ${sql.json(state as any)}, ${new Date(now + intervalMs)}, ${new Date(now + lifetimeMs)})
-    returning id::int as id, expires_at`;
+  // The checks above ran before the (slow) baseline; repeat them under a per-owner lock, atomically with the insert.
+  const res = await sql.begin(async (tx): Promise<{ dupe: number } | { full: number } | { row: { id: number; expiresAt: Date } }> => {
+    await tx`select pg_advisory_xact_lock(hashtext('watches:owner'), hashtext(${ctx.speakerId}))`;
+    const [again] = await tx<{ id: number }[]>`
+      select id::int as id from watches where owner_id = ${ctx.speakerId} and source = ${input.source} and target = ${target} and status = 'active'`;
+    if (again) return { dupe: again.id };
+    const [{ n: active } = { n: 0 }] = await tx<{ n: number }[]>`select count(*)::int as n from watches where owner_id = ${ctx.speakerId} and status = 'active'`;
+    if (active >= limits.userActiveWatches) return { full: active };
+    const [ins] = await tx<{ id: number; expiresAt: Date }[]>`
+      insert into watches (owner_id, thread_id, channel_id, source, target, criteria, interval_s, state, next_check_at, expires_at)
+      values (${ctx.speakerId}, ${ctx.threadId}, ${ctx.channelId}, ${input.source}, ${target}, ${criteria}, ${Math.round(intervalMs / 1000)},
+              ${sql.json(state as any)}, ${new Date(now + intervalMs)}, ${new Date(now + lifetimeMs)})
+      returning id::int as id, expires_at`;
+    return { row: ins! };
+  });
+  if ('dupe' in res) return `Already watching that: ${watchLabel(res.dupe)}. Cancel it first to change the criteria.`;
+  if ('full' in res)
+    return `Limit reached: this user already has ${res.full} active watches (max ${limits.userActiveWatches}). They can cancel one first (list_watches).`;
+  const row = res.row;
   await logScheduled(ctx.threadId, 'watch_created', ctx.speakerId, { watchId: row!.id, source: input.source, turnId: ctx.turnId ?? null });
   const tz = (await getUserInfo(ctx.speakerId).catch(() => null))?.tz;
   return (

@@ -102,8 +102,10 @@ function sourcesFor(agentUrl: string | null | undefined, prUrl?: string | null):
   return list;
 }
 
-async function activeCodingRuns(): Promise<number> {
-  const [r] = await sql<{ n: number }[]>`
+/** Active coding-agent runs. With `tx`: takes the cap's advisory lock first (held until that transaction ends). */
+async function activeCodingRuns(tx?: TransactionSql<{}>): Promise<number> {
+  if (tx) await tx`select pg_advisory_xact_lock(hashtext('cursor:max-active'))`;
+  const [r] = await (tx ?? sql)<{ n: number }[]>`
     select count(*)::int as n from runs r join subagents s on s.id = r.subagent_id where s.kind = 'cursor' and r.status in ('queued', 'running')`;
   return r?.n ?? 0;
 }
@@ -139,14 +141,16 @@ export async function spawnCodingAgent(opts: {
   const c = client();
   const limited = await takeLimit('subagent', opts.ownerId, opts.threadId);
   if (limited) throw new ToolError(limited);
-  if ((await activeCodingRuns()) >= limits.cursorMaxActive)
-    throw new ToolError(`${limits.cursorMaxActive} coding agents are already running. Wait for one to finish (or cancel one) first.`);
+  const busy = `${limits.cursorMaxActive} coding agents are already running. Wait for one to finish (or cancel one) first.`;
+  if ((await activeCodingRuns()) >= limits.cursorMaxActive) throw new ToolError(busy);
 
   const subagentId = shortId('sa');
   const agentId = `bc-${randomUUID()}`;
   const title = oneLine(opts.title, 80) || 'Coding agent';
   const cardId = await ensureTurnCard({ threadId: opts.threadId, turnId: opts.turnId });
   const runId = await sql.begin(async (tx) => {
+    // The global cap, checked again under a lock so two concurrent launches can't both take the last slot.
+    if ((await activeCodingRuns(tx)) >= limits.cursorMaxActive) throw new ToolError(busy);
     await tx`insert into subagents (id, thread_id, owner_id, title, status, kind, cursor_agent_id)
              values (${subagentId}, ${opts.threadId}, ${opts.ownerId}, ${title}, 'running', 'cursor', ${agentId})`;
     const [run] = await tx<{ id: number }[]>`
@@ -237,6 +241,7 @@ export async function messageCodingAgent(
   if ((await activeCodingRuns()) >= limits.cursorMaxActive) throw new ToolError(`${limits.cursorMaxActive} coding agents are already running. Try again later.`);
   const cardId = await ensureTurnCard({ threadId: opts.threadId, turnId: opts.turnId });
   const runId = await sql.begin(async (tx) => {
+    if ((await activeCodingRuns(tx)) >= limits.cursorMaxActive) throw new ToolError(`${limits.cursorMaxActive} coding agents are already running. Try again later.`);
     const [sa] = await tx<{ status: string }[]>`select status from subagents where id = ${pre.id} for update`;
     if (sa?.status !== 'idle') return null;
     const [last] = await tx<{ model: string | null }[]>`select model from runs where subagent_id = ${pre.id} order by id desc limit 1`;

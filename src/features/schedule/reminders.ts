@@ -58,27 +58,31 @@ export function canShowText(currentChannel: string, itemChannel: string): boolea
 export async function setReminder(ctx: ToolContext, input: { text: string; at?: string; in?: string }): Promise<string> {
   const text = input.text.trim();
   if (!text) return 'The reminder text is empty.';
-  const [{ n } = { n: 0 }] = await sql<{ n: number }[]>`
-    select count(*)::int as n from reminders where owner_id = ${ctx.speakerId} and status in ('pending', 'firing')`;
-  if (n >= limits.userPendingReminders)
-    return `Limit reached: this user already has ${n} pending reminders (max ${limits.userPendingReminders}). They can cancel some first (list_reminders).`;
   const tz = (await getUserInfo(ctx.speakerId).catch(() => null))?.tz;
   const now = Date.now();
   const when = resolveWhen(input, { now, tz, maxAheadMs: limits.reminderMaxAheadMs });
   if (!when.ok) return when.error;
 
-  // A retried / repeated call in the same thread for the same text and time reuses the reminder.
-  const [dupe] = await sql<{ id: number }[]>`
-    select id::int as id from reminders where owner_id = ${ctx.speakerId} and thread_id = ${ctx.threadId} and text = ${text}
-      and due_at = ${when.due} and status = 'pending'`;
-  const id =
-    dupe?.id ??
-    (
-      await sql<{ id: number }[]>`
-        insert into reminders (owner_id, thread_id, channel_id, text, due_at, tz)
-        values (${ctx.speakerId}, ${ctx.threadId}, ${ctx.channelId}, ${text}, ${when.due}, ${tz ?? null})
-        returning id::int as id`
-    )[0]!.id;
+  // Cap check, duplicate check and insert under a per-owner lock: concurrent calls can't exceed the cap.
+  const res = await sql.begin(async (tx): Promise<{ id: number; dupe: boolean } | { full: number }> => {
+    await tx`select pg_advisory_xact_lock(hashtext('reminders:owner'), hashtext(${ctx.speakerId}))`;
+    // A retried / repeated call in the same thread for the same text and time reuses the reminder.
+    const [dupe] = await tx<{ id: number }[]>`
+      select id::int as id from reminders where owner_id = ${ctx.speakerId} and thread_id = ${ctx.threadId} and text = ${text}
+        and due_at = ${when.due} and status = 'pending'`;
+    if (dupe) return { id: dupe.id, dupe: true };
+    const [{ n } = { n: 0 }] = await tx<{ n: number }[]>`
+      select count(*)::int as n from reminders where owner_id = ${ctx.speakerId} and status in ('pending', 'firing')`;
+    if (n >= limits.userPendingReminders) return { full: n };
+    const [row] = await tx<{ id: number }[]>`
+      insert into reminders (owner_id, thread_id, channel_id, text, due_at, tz)
+      values (${ctx.speakerId}, ${ctx.threadId}, ${ctx.channelId}, ${text}, ${when.due}, ${tz ?? null})
+      returning id::int as id`;
+    return { id: row!.id, dupe: false };
+  });
+  if ('full' in res)
+    return `Limit reached: this user already has ${res.full} pending reminders (max ${limits.userPendingReminders}). They can cancel some first (list_reminders).`;
+  const { id, dupe } = res;
   if (!dupe) await logScheduled(ctx.threadId, 'reminder_set', ctx.speakerId, { reminderId: id, dueAt: when.due.toISOString(), turnId: ctx.turnId ?? null });
   const zoneNote = tz ? '' : ' (their time zone is unknown, so times without an offset were read as UTC)';
   const where = ctx.channelId.startsWith('D') ? 'in this DM' : 'in this thread';

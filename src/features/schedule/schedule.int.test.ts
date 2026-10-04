@@ -152,6 +152,21 @@ describe.skipIf(!INTEGRATION)('reminders and watches', () => {
       expect(res).toMatch(/Limit reached/);
       await sql`update reminders set status = 'cancelled' where owner_id = ${owner}`;
     });
+
+    // Regression (review #9): the cap check and the insert are atomic (per-owner advisory lock).
+    it('the pending cap holds under concurrent calls', async () => {
+      const t = await newThread();
+      const owner = uid();
+      const { limits } = await import('../../config.js');
+      for (let i = 0; i < limits.userPendingReminders - 1; i++)
+        await sql`insert into reminders (owner_id, thread_id, channel_id, text, due_at) values (${owner}, ${t.threadId}, ${t.channelId}, ${`r${i}`}, now() + interval '1 day')`;
+      const results = await Promise.all([1, 2, 3, 4, 5].map((i) => reminders.setReminder(ctxFor(t, owner), { text: `race ${i}`, in: '1h' })));
+      expect(results.filter((r) => r.startsWith('Reminder set'))).toHaveLength(1);
+      expect(results.filter((r) => /Limit reached/.test(r))).toHaveLength(4);
+      const [{ n }] = await sql<any[]>`select count(*)::int as n from reminders where owner_id = ${owner} and status = 'pending'`;
+      expect(n).toBe(limits.userPendingReminders);
+      await sql`update reminders set status = 'cancelled' where owner_id = ${owner}`;
+    });
   });
 
   describe('firing', () => {
@@ -428,6 +443,29 @@ describe.skipIf(!INTEGRATION)('reminders and watches', () => {
       expect(await watches.expireWatches()).toBeGreaterThanOrEqual(1);
       expect(await watchRow(ids[2]!)).toMatchObject({ status: 'expired', state: {} });
       await sql`update watches set status = 'cancelled' where id in ${sql(ids)}`;
+    });
+
+    // Regression (review #9): the active-watch cap is re-checked atomically with the insert.
+    it('the active-watch cap holds under concurrent calls', async () => {
+      const t = await newThread();
+      const owner = uid();
+      const { deps } = makeDeps();
+      const { limits } = await import('../../config.js');
+      for (let i = 0; i < limits.userActiveWatches - 1; i++)
+        await sql`insert into watches (owner_id, thread_id, channel_id, source, target, criteria, interval_s, next_check_at, expires_at)
+                  values (${owner}, ${t.threadId}, ${t.channelId}, 'url', ${`https://pre${i}.dev/`}, 'x', 3600, now() + interval '1 hour', now() + interval '1 day')`;
+      const results = await Promise.all(
+        [1, 2, 3, 4].map((i) => watches.createWatch(ctxFor(t, owner), { source: 'url', target: `https://race${i}.dev`, criteria: 'x' }, deps)),
+      );
+      expect(results.filter((r) => /created/.test(r))).toHaveLength(1);
+      const [{ n }] = await sql<any[]>`select count(*)::int as n from watches where owner_id = ${owner} and status = 'active'`;
+      expect(n).toBe(limits.userActiveWatches);
+      // The same target twice at once: one watch.
+      const other = uid();
+      const same = await Promise.all([1, 2].map(() => watches.createWatch(ctxFor(t, other), { source: 'url', target: 'https://same.dev', criteria: 'x' }, deps)));
+      expect(same.filter((r) => /created/.test(r))).toHaveLength(1);
+      expect(same.filter((r) => /Already watching/.test(r))).toHaveLength(1);
+      await sql`update watches set status = 'cancelled' where owner_id in ${sql([owner, other])}`;
     });
 
     it('expires_in_days is capped at 30', () => {

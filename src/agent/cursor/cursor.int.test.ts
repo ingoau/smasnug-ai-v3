@@ -412,6 +412,16 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     expect(fake.agents.size).toBe(limits.cursorMaxActive);
   });
 
+  // Regression (review #9): concurrent launches can't both take the last slot.
+  it('the cursorMaxActive cap holds under concurrent launches', async () => {
+    const { limits } = await import('../../config.js');
+    const t = await newThread();
+    for (let i = 0; i < limits.cursorMaxActive - 1; i++) await spawn(t);
+    const results = await Promise.allSettled([1, 2, 3].map(async () => spawn(await newThread())));
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+    expect(fake.agents.size).toBe(limits.cursorMaxActive);
+  });
+
   it('a failed launch leaves nothing behind and tells the model', async () => {
     const t = await newThread();
     const { CursorApiError } = await import('./api.js');
