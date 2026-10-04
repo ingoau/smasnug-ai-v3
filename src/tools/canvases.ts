@@ -214,7 +214,7 @@ async function grantAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, ca
   // In a DM the speaker's grant is the conversation's grant.
   if (kind === 'im') conversationOk = speakerOk;
   if (!conversationOk && !speakerOk) return "Access couldn't be shared automatically: people (the speaker too) may have to request access when they open the link. Say so in your reply.";
-  if (!conversationOk) return "Access for this conversation couldn't be shared automatically: others here may have to request access when they open the link (the speaker can share it from the canvas). Say so in your reply.";
+  if (!conversationOk) return "Access for this conversation couldn't be shared automatically: others here may have to request access when they open the link. Say so in your reply.";
   // Without the speaker grant the conversation (incl. the speaker) can still read it; editing then stays with the bot.
   return null;
 }
