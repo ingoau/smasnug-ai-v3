@@ -21,8 +21,10 @@ const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
 /** Over-fetch so joins / `##` / tombstones filtered out still leave a full page. */
 const OVERFETCH = 15;
-/** Time window when paging forward or centering (Slack returns newest-first without a bound). */
+/** Initial forward window; expanded on empty gaps (Slack returns newest-first without a bound). */
 const TIME_WINDOW_S = 14 * 24 * 3600;
+const MAX_WINDOW_S = 365 * 24 * 3600;
+const MAX_AFTER_WALKS = 20;
 
 export const MISSING_SCOPE_MESSAGE =
   "Can't open other channels yet: the Slack app needs the channels:history user scope (an admin has to add it and reinstall). Work with the search results you have, and say the channel couldn't be read.";
@@ -67,8 +69,11 @@ export function resolveChannelTarget(input: {
   if (input.before_ts && !before) return { error: `Invalid before_ts "${input.before_ts}" — use a message ts like 1727950000.123456.` };
   if (input.after_ts && !after) return { error: `Invalid after_ts "${input.after_ts}" — use a message ts like 1727950000.123456.` };
 
+  const modes = [around && 'around_ts', before && 'before_ts', after && 'after_ts'].filter(Boolean);
+  if (modes.length > 1) {
+    return { error: `Pass only one of around_ts, before_ts, or after_ts (got ${modes.join(' and ')}).` };
+  }
   if (around) return { channel, mode: 'around', ts: around };
-  if (before && after) return { error: 'Pass only one of before_ts or after_ts (or around_ts to center on a message).' };
   if (before) return { channel, mode: 'before', ts: before };
   if (after) return { channel, mode: 'after', ts: after };
   return { channel, mode: 'latest' };
@@ -105,9 +110,37 @@ async function fetchHistory(
 }
 
 /**
+ * Messages strictly after `oldestTs`, closest first. Slack's history API returns the newest N in a window, so a
+ * naive fetch skips ahead in busy channels; walk `latest` backward (and widen empty gaps) until the page starts
+ * right after `oldestTs`.
+ */
+export async function fetchHistoryAfterClosest(channel: string, oldestTs: string, limit: number): Promise<any[]> {
+  let windowS = TIME_WINDOW_S;
+  let hi = addSeconds(oldestTs, windowS);
+  let bestFull: any[] | null = null;
+
+  for (let walk = 0; walk < MAX_AFTER_WALKS; walk++) {
+    const raws = await fetchHistory(channel, { oldest: oldestTs, latest: hi, inclusive: false, limit: 100 });
+    if (!raws.length) {
+      if (bestFull) return bestFull; // previous full page started at the first message after oldestTs
+      if (windowS >= MAX_WINDOW_S) return [];
+      windowS = Math.min(MAX_WINDOW_S, windowS * 2);
+      hi = addSeconds(oldestTs, windowS);
+      continue;
+    }
+    if (raws.length < 100) return raws; // complete coverage of (oldestTs, hi), oldest first
+    bestFull = raws;
+    const pageOldest = raws[0]!.ts;
+    if (compareTs(pageOldest, hi) >= 0) return raws; // stuck
+    hi = pageOldest;
+  }
+  return bestFull ?? [];
+}
+
+/**
  * Build a page of channel messages for the requested mode. `around` centers on `ts` (inclusive);
  * `before`/`latest` take the newest messages at or before the bound; `after` takes the oldest after `ts`
- * within the time window (Slack's newest-first default would otherwise skip ahead).
+ * (walking Slack's newest-first pages so busy channels don't skip ahead).
  */
 export async function fetchChannelPage(
   channel: string,
@@ -125,16 +158,11 @@ export async function fetchChannelPage(
   }
 
   if (target.mode === 'after') {
-    const raws = await fetchHistory(channel, {
-      oldest: target.ts,
-      latest: addSeconds(target.ts, TIME_WINDOW_S),
-      inclusive: false,
-      limit: 100,
-    });
+    const raws = await fetchHistoryAfterClosest(channel, target.ts, need);
     return { msgs: visible(raws).slice(0, limit), hasCenter: false };
   }
 
-  // around: messages before + the linked message + messages after
+  // around: newest messages before + the linked message + oldest messages after
   const aroundTs = target.ts;
   const beforeN = Math.floor((limit - 1) / 2);
   const afterN = limit - 1 - beforeN;
@@ -145,12 +173,7 @@ export async function fetchChannelPage(
       inclusive: true,
       limit: Math.min(beforeN + 1 + OVERFETCH, 100),
     }),
-    fetchHistory(channel, {
-      oldest: aroundTs,
-      latest: addSeconds(aroundTs, TIME_WINDOW_S),
-      inclusive: false,
-      limit: Math.min(afterN + OVERFETCH, 100),
-    }),
+    fetchHistoryAfterClosest(channel, aroundTs, afterN + OVERFETCH),
   ]);
   const beforeVis = visible(beforeRaws);
   const afterVis = visible(afterRaws);
@@ -193,7 +216,7 @@ registerTool({
           const { msgs, hasCenter } = await fetchChannelPage(channel, target, n);
           if (!msgs.length) {
             if (target.mode === 'before') return `No channel messages before ${target.ts} in ${chLabel}.`;
-            if (target.mode === 'after') return `No channel messages after ${target.ts} in ${chLabel} (within ~14 days).`;
+            if (target.mode === 'after') return `No channel messages after ${target.ts} in ${chLabel}.`;
             if (target.mode === 'around') {
               const replyHint = target.linkedIsReply
                 ? ` That link is a thread reply — use read_public_thread to open the thread.`
@@ -214,7 +237,8 @@ registerTool({
             self: { ...self, name: env.BOT_DISPLAY_NAME },
             maxChars: limits.messageTruncateTokens * 4,
           };
-          const aroundTs = target.mode === 'around' ? target.ts : undefined;
+          const markLinked = target.mode === 'around' && !target.linkedIsReply;
+          const aroundTs = markLinked ? target.ts : undefined;
           const mark = (m: RenderMsg) =>
             formatMessage(m, fenv) + (aroundTs && m.ts === aroundTs ? '  ← linked message' : '');
 

@@ -98,7 +98,8 @@ describe('resolveChannelTarget', () => {
       ts: '1790100000.000100',
     });
     expect(resolveChannelTarget({ channel: HAVEN.channel })).toEqual({ channel: HAVEN.channel, mode: 'latest' });
-    expect(resolveChannelTarget({ channel: HAVEN.channel, before_ts: '1', after_ts: '2' })).toHaveProperty('error');
+    expect(resolveChannelTarget({ channel: HAVEN.channel, before_ts: '1790100000.000100', after_ts: '1790110000.000100' })).toHaveProperty('error');
+    expect(resolveChannelTarget({ channel: HAVEN.channel, around_ts: '1790100000.000100', before_ts: '1790090000.000100' })).toHaveProperty('error');
     expect(resolveChannelTarget({ permalink: 'https://example.com' })).toHaveProperty('error');
     expect(resolveChannelTarget({})).toHaveProperty('error');
   });
@@ -174,7 +175,85 @@ describe('read_public_channel', () => {
     });
     expect(replyLink).toContain('permalink was a thread reply');
     expect(replyLink).toContain('read_public_thread');
-    expect(replyLink).toContain('← linked message');
+    // Parent is context, not the linked reply — don't mark it as the linked message.
+    expect(replyLink).not.toContain('← linked message');
+  });
+
+  it('walks newest-first pages so after_ts returns messages right after the cursor in a busy channel', async () => {
+    const dense = `C0PCDENSE`;
+    const base = 1_790_200_000;
+    // 250 messages after the cursor inside the initial 14-day window; Slack returns newest-first.
+    const all = Array.from({ length: 250 }, (_, i) => ({
+      type: 'message',
+      user: 'U0HVNKAI',
+      ts: `${base + i + 1}.000100`,
+      text: `dense-${i + 1}`,
+    }));
+    const off = addFakeHandler((method, args) => {
+      if (method === 'conversations.info' && args.channel === dense) {
+        return { ok: true, channel: { id: dense, name: 'busy', is_channel: true, is_private: false } };
+      }
+      if (method === 'conversations.history' && args.channel === dense) {
+        const lo = args.oldest !== undefined ? Number(args.oldest) : -Infinity;
+        const hi = args.latest !== undefined ? Number(args.latest) : Infinity;
+        const inclusive = args.inclusive === true;
+        const inRange = all.filter((m) => {
+          const t = Number(m.ts);
+          return inclusive ? t >= lo && t <= hi : t > lo && t < hi;
+        });
+        const newestFirst = [...inRange].sort((a, b) => Number(b.ts) - Number(a.ts));
+        const limit = Number(args.limit ?? 100);
+        return { ok: true, messages: newestFirst.slice(0, limit), has_more: newestFirst.length > limit };
+      }
+      return undefined;
+    });
+    try {
+      const keys = await redis.keys(`slack:chanvis:${dense}`);
+      if (keys.length) await redis.del(...keys);
+      const out: string = await exec(toolsFor('child', ctx()).read_public_channel, {
+        channel: dense,
+        after_ts: `${base}.000100`,
+        limit: 5,
+      });
+      expect(out).toContain('dense-1');
+      expect(out).toContain('dense-5');
+      expect(out).not.toContain('dense-250');
+      expect(out).not.toContain('dense-200');
+    } finally {
+      off();
+    }
+  });
+
+  it('widens the forward window across quiet gaps when paging after_ts', async () => {
+    const gappy = `C0PCGAPPY`;
+    const cursor = '1790300000.000100';
+    // Next message is ~30 days later (beyond the initial 14-day window).
+    const later = { type: 'message', user: 'U0HVNMIA', ts: '1792900000.000100', text: 'after the quiet spell' };
+    const off = addFakeHandler((method, args) => {
+      if (method === 'conversations.info' && args.channel === gappy) {
+        return { ok: true, channel: { id: gappy, name: 'quiet', is_channel: true, is_private: false } };
+      }
+      if (method === 'conversations.history' && args.channel === gappy) {
+        const lo = args.oldest !== undefined ? Number(args.oldest) : -Infinity;
+        const hi = args.latest !== undefined ? Number(args.latest) : Infinity;
+        const t = Number(later.ts);
+        const inRange = t > lo && t < hi ? [later] : [];
+        return { ok: true, messages: inRange, has_more: false };
+      }
+      return undefined;
+    });
+    try {
+      const keys = await redis.keys(`slack:chanvis:${gappy}`);
+      if (keys.length) await redis.del(...keys);
+      const out: string = await exec(toolsFor('front', ctx()).read_public_channel, {
+        channel: gappy,
+        after_ts: cursor,
+        limit: 5,
+      });
+      expect(out).toContain('after the quiet spell');
+    } finally {
+      off();
+    }
   });
 
   it('fails closed: private, unknown and non-C channels are refused without reading', async () => {
