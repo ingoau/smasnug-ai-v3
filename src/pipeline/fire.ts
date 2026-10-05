@@ -16,6 +16,7 @@ import { runGate, type GateResult } from './gate.js';
 import { batchIsMention, batchNeedsGate } from './rules.js';
 import { pushToRunningTurn, scheduleMessages } from './scheduler.js';
 import { getThread, loadMessages, recentMessages } from './store.js';
+import { djGateNote } from '../features/huddlefm/render.js';
 
 /** Swappable for tests. */
 export const gateImpl: { run: typeof runGate } = { run: runGate };
@@ -55,8 +56,8 @@ export async function processDebounce(job: Job<DebounceJob>) {
     const thread = await getThread(threadId);
     if (!thread?.engaged) return; // disengaged while the window was open
     const bot = await getBotIdentity();
-    const context = await recentMessages(threadId, ts[0]!, limits.gateContextMessages);
-    const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId });
+    const [context, note] = await Promise.all([recentMessages(threadId, ts[0]!, limits.gateContextMessages), djGateNote({ channelId, threadId })]);
+    const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId, ...(note ? { note } : {}) });
     await appendEvent(threadId, 'gate_decision', 'system', {
       messageTs: ts,
       authorId,

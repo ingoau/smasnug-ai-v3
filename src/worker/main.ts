@@ -23,6 +23,7 @@ const CONCURRENCY: Record<QueueName, number> = {
   [QUEUE.threadRun]: 50,
   [QUEUE.subagentRun]: 50,
   [QUEUE.cardRender]: 20,
+  [QUEUE.huddlefm]: 10,
   [QUEUE.maintenance]: 4,
 };
 

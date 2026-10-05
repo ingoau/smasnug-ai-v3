@@ -135,7 +135,7 @@ export async function createScheduledTurnTx(
   opts: {
     threadId: string;
     ownerId: string;
-    source: 'reminder' | 'watch' | 'send' | 'coding_launch';
+    source: 'reminder' | 'watch' | 'send' | 'coding_launch' | 'huddlefm';
     /** reminder / watch id; outcome turns use `sourceRef` (a uuid) instead. */
     sourceId: number | null;
     sourceRef?: string;

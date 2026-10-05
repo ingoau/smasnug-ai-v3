@@ -49,6 +49,11 @@ const Env = z.object({
   CURSOR_API_URL: z.string().default('https://api.cursor.com'),
   /** Optional read-only GitHub token: lets the post-run check list a private repo's PR files (public repos need none). */
   CURSOR_GITHUB_TOKEN: z.string().optional(),
+  /**
+   * HuddleFM DJ mode (src/features/huddlefm): the Slack user id of the HuddleFM bot user. The bot talks to it through
+   * HuddleFM's bot API (JSON DMs); its own user id must be in HuddleFM's INTEGRATION_USER_IDS. Unset → no DJ tools.
+   */
+  HUDDLEFM_USER_ID: z.string().optional(),
 });
 
 export const env = Env.parse(process.env);
@@ -133,4 +138,40 @@ export const limits = {
   cursorMaxPollErrors: 30,
   /** How long the admin's Launch / Cancel confirmation for a new coding agent stays valid. */
   cursorConfirmTtlMs: 15 * 60_000,
+  // HuddleFM DJ mode (src/features/huddlefm)
+  /** How long a command waits for HuddleFM's threaded reply. */
+  djReplyTimeoutMs: 20_000,
+  /** request_control only answers right away on failure: silence for this long means it's waiting on the host. */
+  djRequestGraceMs: 4_000,
+  /** HuddleFM expires a pending request after 5 minutes, but stays silent if it restarted: drop ours after this. */
+  djPendingTimeoutMs: 6 * 60_000,
+  /** `huddle_dj` tool calls per user per hour. */
+  userDjCommandsPerHour: 120,
+  djMaxCommandsPerCall: 8,
+  /** Songs per search/add batch, and skips per skip command. */
+  djMaxBatch: 10,
+  djMaxSkip: 10,
+  /** Up-next entries kept in the playback snapshot shown to the agent. */
+  djSnapshotQueue: 10,
+  /** Events within this window collapse into one status sync / top-up. */
+  djSyncDelayMs: 2_000,
+  /** Auto DJ: top up when fewer than this many songs people (or the bot) queued are waiting. */
+  djAutoMinQueue: 2,
+  /** Auto DJ: songs added per top-up at most (fewer when the queue is near HuddleFM's limit). */
+  djAutoBatch: 3,
+  /** Auto DJ: candidates asked from the model per top-up beyond the room (misses and repeats get skipped). */
+  djAutoExtraCandidates: 2,
+  /** Auto DJ: wait after a top-up that added nothing, doubling per consecutive miss up to djAutoMaxBackoffMs. */
+  djAutoBackoffMs: 60_000,
+  djAutoMaxBackoffMs: 15 * 60_000,
+  /** History kept per session (picks, requested, skipped, played). */
+  djHistory: 40,
+  /** Chatter: at most one line per this long. */
+  djChatterCooldownMs: 4 * 60_000,
+  /** Other notices (failed downloads): at most one per this long. */
+  djNoticeCooldownMs: 2 * 60_000,
+  /** An active session with no HuddleFM event for this long gets a status probe (a restarted HuddleFM drops grants). */
+  djProbeAfterMs: 10 * 60_000,
+  /** An active session HuddleFM hasn't answered for this long is ended (it was probed every few minutes). */
+  djGiveUpAfterMs: 60 * 60_000,
 } as const;

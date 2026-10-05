@@ -54,6 +54,12 @@ scopes.
   (`free_teams_cannot_create_standalone_canvases`) and the bot answers in the thread instead (a `.md` file for long
   content).
 
+- **HuddleFM DJ mode** (optional): set `HUDDLEFM_USER_ID` to the HuddleFM bot user's id, and add this app's bot user
+  id to HuddleFM's `INTEGRATION_USER_IDS` (HuddleFM ignores everyone else). It uses scopes the manifest already has:
+  `im:write` (open the DM with HuddleFM), `chat:write`, `im:history` + the `message.im` event (HuddleFM's replies and
+  events), `channels:read` / `groups:read` (membership check when someone controls a huddle in another channel).
+  Grants don't survive a HuddleFM restart: the bot notices (lost-grant error or no answer) and says DJ mode is off.
+
 ## Dev and production apps (Hack Club workspace)
 
 - **smasnug ai v3** (`A0C6K5WK0KW`) — production, created from `slack-manifest.yml` as-is.
