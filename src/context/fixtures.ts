@@ -231,14 +231,52 @@ export function havenThread() {
   ];
 }
 
+export function havenChannelHistory() {
+  // Top-level channel messages around the Haven planning thread (## dropped by readers).
+  const base = { type: 'message', team: 'T0FIX' };
+  return [
+    { ...base, user: 'U0HVNMIA', ts: '1790080000.000100', text: 'anyone free to help with haven canberra logistics?' },
+    { ...base, user: 'U0HVNKAI', ts: '1790085000.000100', text: '## ignore this channel noise' },
+    { ...base, user: 'U0HVNKAI', ts: '1790090000.000100', text: 'kicking off haven canberra bts planning here :tada: budget doc and venue shortlist coming soon' },
+    {
+      ...base,
+      user: 'U0HVNMIA',
+      ts: HAVEN.rootTs,
+      text: 'fwd from the ANU CSSA server: a different jam, not ours. could be a good place to promote haven though',
+      thread_ts: HAVEN.rootTs,
+      reply_count: 4,
+    },
+    { ...base, user: 'U0HVNJO', ts: '1790102000.000100', text: 'poster looks good, shipping to print tomorrow' },
+    { ...base, user: 'U0HVNMIA', ts: '1790105000.000100', text: 'venue shortlist updated in the drive' },
+    { ...base, user: 'U0HVNKAI', ts: '1790110000.000100', text: 'reminder: haven is mid-november, not the CSSA jam dates' },
+  ];
+}
+
 /** Fake handler for the Haven scenario: search (any query mentioning haven/canberra/jam), channel info, user-token thread reads. */
-export function havenFixtureHandler(opts: { onRepliesCall?: (token: string, args: any) => void } = {}): FakeHandler {
+export function havenFixtureHandler(opts: { onRepliesCall?: (token: string, args: any) => void; onHistoryCall?: (token: string, args: any) => void } = {}): FakeHandler {
   return (method, args, token) => {
     if (method === 'search.messages' && /haven|canberra|jam|day 1|november|october/i.test(String(args.query))) {
       return { ok: true, query: args.query, messages: { total: 2, matches: havenSearchMatches() } };
     }
     if (args.channel !== HAVEN.channel) return undefined;
     if (method === 'conversations.info') return { ok: true, channel: { id: HAVEN.channel, name: HAVEN.channelName, is_channel: true, is_private: false, is_member: false } };
+    if (method === 'conversations.history') {
+      opts.onHistoryCall?.(token, args);
+      if (token !== 'user') throw Object.assign(new Error('An API error occurred: not_in_channel'), { code: 'slack_webapi_platform_error', data: { ok: false, error: 'not_in_channel' } });
+      const all = havenChannelHistory();
+      const lo = args.oldest !== undefined ? Number(args.oldest) : -Infinity;
+      const hi = args.latest !== undefined ? Number(args.latest) : Infinity;
+      const inclusive = args.inclusive === true;
+      const inRange = all.filter((m) => {
+        const t = Number(m.ts);
+        if (inclusive) return t >= lo && t <= hi;
+        return t > lo && t < hi;
+      });
+      // Slack returns newest first.
+      const newestFirst = [...inRange].sort((a, b) => Number(b.ts) - Number(a.ts));
+      const limit = Number(args.limit ?? 100);
+      return { ok: true, messages: newestFirst.slice(0, limit), has_more: newestFirst.length > limit };
+    }
     if (method === 'conversations.replies') {
       opts.onRepliesCall?.(token, args);
       // The bot isn't in the channel: only the user token can read it.

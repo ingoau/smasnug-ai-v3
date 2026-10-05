@@ -9,10 +9,11 @@ Use a separate app in a test workspace for development.
 3. **Install App** → install to the workspace. Copy:
    - **Bot User OAuth Token** (`xoxb-…`) → `SLACK_BOT_TOKEN`
    - **User OAuth Token** (`xoxp-…`, has `search:read` and `channels:history`) → `SLACK_USER_TOKEN`. It searches as
-     the installing user; code restricts results to public channels. `channels:history` is used only by
-     `read_public_thread` to open public-channel threads found via search (also in channels the bot isn't in); the
-     channel is verified public via `conversations.info` first. Without that scope the tool tells the model it
-     can't open other threads yet. `search:read.public` is used only by `slack_semantic_search` (Slack's
+     the installing user; code restricts results to public channels. `channels:history` is used by
+     `read_public_thread` (public-channel threads found via search, also in channels the bot isn't in) and
+     `read_public_channel` (top-level history / surrounding context in any public channel); the channel is verified
+     public via `conversations.info` first. Without that scope those tools tell the model they can't open other
+     channels/threads yet. `search:read.public` is used only by `slack_semantic_search` (Slack's
      Real-time Search API, public channels only); without it that tool tells the model to use `slack_search`.
 4. Fill in the rest of `.env`:
    - `ADMIN_USER_ID` — your Slack user id (profile → ⋯ → Copy member ID). The admin approves workspace facts,
