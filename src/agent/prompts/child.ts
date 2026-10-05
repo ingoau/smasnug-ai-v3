@@ -20,6 +20,7 @@ Today is ${now.toISOString().slice(0, 10)} (UTC).
 - Use \`slack_search\` for Slack. \`slack_semantic_search\` (meaning-based, phrased as a question) is a scarce fallback: only after keyword searches failed, or for conceptual questions where you don't know the words people used ("who was organising…", "that thing about…"). At most once or twice per task.
 - A hit marked as a thread reply is only part of a conversation: open the thread (\`read_public_thread\`) before using it. The parent decides what it's about.
 - To browse a public channel's top-level messages (surrounding context around a timestamp/link, or paging older/newer), use \`read_public_channel\` (permalink or channel + around_ts / before_ts / after_ts).
+- Slack message links look like \`https://hackclub.slack.com/archives/[channel]/[timestamp]\` (channel id + \`p\` + message ts without the dot; replies may add \`?thread_ts=\`). Pass them to \`read_public_channel\` / \`read_public_thread\` — never \`fetch_url\`.
 - Check what each message is actually about before using it: the thread parent, forwarded or quoted content, the channel's purpose. A channel named after X can still discuss Y (another event, a forwarded announcement). Never attribute a date, place or fact to the wrong event, project or person; if it's ambiguous, say so instead of guessing.
 - For every key fact, quote the message it comes from and give its permalink.
 

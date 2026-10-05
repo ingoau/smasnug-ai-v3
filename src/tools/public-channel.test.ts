@@ -100,7 +100,9 @@ describe('resolveChannelTarget', () => {
     expect(resolveChannelTarget({ channel: HAVEN.channel })).toEqual({ channel: HAVEN.channel, mode: 'latest' });
     expect(resolveChannelTarget({ channel: HAVEN.channel, before_ts: '1790100000.000100', after_ts: '1790110000.000100' })).toHaveProperty('error');
     expect(resolveChannelTarget({ channel: HAVEN.channel, around_ts: '1790100000.000100', before_ts: '1790090000.000100' })).toHaveProperty('error');
-    expect(resolveChannelTarget({ permalink: 'https://example.com' })).toHaveProperty('error');
+    expect(resolveChannelTarget({ permalink: 'https://example.com' })).toMatchObject({
+      error: expect.stringContaining('https://hackclub.slack.com/archives/[channel]/[timestamp]'),
+    });
     expect(resolveChannelTarget({})).toHaveProperty('error');
   });
 });
@@ -124,6 +126,7 @@ describe('read_public_channel', () => {
     expect(out).toContain('kicking off haven canberra bts planning');
     expect(out).toContain('← linked message');
     expect(out).toContain('[thread: 4 replies]');
+    expect(out).toContain('Slack links look like https://fixture.slack.com/archives/[channel]/[timestamp]');
     expect(out).not.toContain('ignore this channel noise');
     expect(out).toContain('older: read_public_channel with before_ts=');
     expect(out).toContain('newer: after_ts=');
