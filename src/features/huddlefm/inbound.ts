@@ -9,12 +9,12 @@
 import { env, limits } from '../../config.js';
 import { redis } from '../../core/redis.js';
 import { log } from '../../log.js';
-import { scheduleSync, toppingUpKey } from './autodj.js';
+import { noteTopupMiss, scheduleSync, toppingUpKey } from './autodj.js';
 import { sendCommand, storeReply } from './client.js';
 import { deleteSessionTx } from './lifecycle.js';
 import { announce } from './notices.js';
 import { decodeMessage, isGrantType, trackLabel, type GrantType, type HfmMessage, type HfmTrack } from './protocol.js';
-import { appendHistory, findByRequestTs, getSession, playbackFromStatus, touchEvent, type DjSession } from './store.js';
+import { appendHistory, findByRequestTs, getSession, playbackFromStatus, resetTopupMisses, touchEvent, type DjSession } from './store.js';
 
 export interface HuddleFmMessageEvent {
   channel: string;
@@ -33,6 +33,16 @@ export function isFromHuddleFm(ev: { user?: string; channel_type?: string; messa
 }
 
 const abandonedKey = (requestTs: string) => `hfm:abandoned:${requestTs}`;
+const requestKey = (requestTs: string) => `hfm:request:${requestTs}`;
+
+/**
+ * Remember which channel a request_control was for, before anything else can go wrong: HuddleFM's grant replies don't
+ * name the channel, and a grant for a request whose row is gone (cancelled, or the tool failed after posting) must
+ * still be released.
+ */
+export async function rememberRequest(requestTs: string, channelId: string): Promise<void> {
+  await redis.set(requestKey(requestTs), channelId, 'EX', 60 * 60);
+}
 
 /** A pending request the user cancelled: if the host approves it later, the grant is released right away. */
 export async function markAbandoned(requestTs: string, channelId: string): Promise<void> {
@@ -48,6 +58,29 @@ export async function handleHuddleFmMessage(ev: HuddleFmMessageEvent): Promise<v
   if (!replyTo) return;
   if (isGrantType(msg.type)) return handleGrant(msg.type, msg, replyTo);
   await storeReply(replyTo, msg);
+  if (msg.ok === false) await lateRequestFailure(replyTo, msg);
+}
+
+/**
+ * request_control fails with a reply (no_host, host_unreachable, …), sometimes only after the tool stopped waiting
+ * (djRequestGraceMs) and told people it's waiting on the host. Then nobody would hear about it: announce it.
+ */
+async function lateRequestFailure(replyTo: string, msg: HfmMessage): Promise<void> {
+  const session = await findByRequestTs(replyTo);
+  if (session?.status !== 'pending') return;
+  // Within the grace the tool itself reads this reply, deletes the row and tells the agent.
+  if (Date.now() - session.updatedAt.getTime() < limits.djRequestGraceMs + 2_000) return;
+  const where = `<#${session.channelId}>`;
+  const why = [msg.error, msg.message].filter(Boolean).join(': ') || 'unknown error';
+  await announce({
+    threadId: session.originThreadId,
+    speakerId: session.requestedBy,
+    ref: `request_failed:${session.id}`,
+    what: `Your request to DJ in ${where} failed after all: HuddleFM answered "${why}". DJ mode is off there.`,
+    fallback: `couldn't get on the aux in ${where} after all (huddlefm said ${msg.error ?? 'no'}), so dj mode is off`,
+    important: true,
+    transition: (tx) => deleteSessionTx(tx, session, 'pending'),
+  });
 }
 
 /** The request's session row. Its request_ts is written right after the post returns: allow that a moment. */
@@ -74,8 +107,9 @@ const GRANT_TEXT: Record<Exclude<GrantType, 'grant_accepted'>, { what: (where: s
     fallback: (w) => `the host said no to me djing in ${w}`,
   },
   grant_expired: {
-    what: (w) => `Nobody approved your request to DJ in ${w} within 5 minutes, so it expired. DJ mode is off there.`,
-    fallback: (w) => `nobody approved my dj request in ${w}, so it expired. ask again when the host is around`,
+    // Also sent when the HuddleFM session stops while the request is pending.
+    what: (w) => `Your request to DJ in ${w} expired: nobody approved it in time, or the HuddleFM session stopped. DJ mode is off there.`,
+    fallback: (w) => `my dj request in ${w} expired (nobody approved it, or the huddlefm session stopped). ask again when the host is around`,
   },
   grant_revoked: {
     what: (w) => `The huddle host took DJ control away from you in ${w}. DJ mode is off there.`,
@@ -87,7 +121,8 @@ async function handleGrant(type: GrantType, msg: HfmMessage, requestTs: string):
   const abandonedChannel = await redis.get(abandonedKey(requestTs));
   const session = abandonedChannel ? null : await sessionForRequest(requestTs);
   if (!session) {
-    const channelId = abandonedChannel ?? (typeof msg.channel === 'string' ? msg.channel : null);
+    // Nobody wants this grant (cancelled while pending, or the request's row is gone): give it back.
+    const channelId = abandonedChannel ?? (await redis.get(requestKey(requestTs)));
     if (type === 'grant_accepted' && channelId) await releaseUnwanted(channelId, requestTs);
     return;
   }
@@ -163,6 +198,7 @@ async function handleEvent(msg: HfmMessage, eventTs: string): Promise<void> {
       return;
     case 'track.started':
       if (label) await appendHistory(channelId, 'played', [label]);
+      if (ours) await resetTopupMisses(channelId); // the auto DJ's picks play: no more backoff
       if (session.chatter && label) await chatter(session, label, ours, eventTs);
       break;
     case 'track.skipped':
@@ -174,8 +210,14 @@ async function handleEvent(msg: HfmMessage, eventTs: string): Promise<void> {
       // while a top-up runs, additions are the auto DJ's own.)
       if (label && !track.automatic && !ours && !(await redis.exists(toppingUpKey(channelId)))) await appendHistory(channelId, 'requested', [label]);
       break;
+    case 'track.failed':
+      if (ours) await noteTopupMiss(channelId);
+      break;
     case 'queue.removed':
-      if (track.reason === 'failed' && label && !ours) await failedNotice(session, label, eventTs);
+      if (track.reason !== 'failed' || !label) break;
+      // The auto DJ's own pick failed to download: a miss (back off, or a broken downloader loops forever).
+      if (ours) await noteTopupMiss(channelId);
+      else await failedNotice(session, label, eventTs);
       break;
   }
   if (event.startsWith('track.') || event.startsWith('queue.')) await scheduleSync(channelId, event);

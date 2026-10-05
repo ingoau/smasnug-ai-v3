@@ -39,14 +39,18 @@ const fm = {
   catalog: [] as { label: string; reference: string; track: Omit<Track, 'id'> }[],
   /** Next reply for a command type (overrides the default behaviour once). */
   override: new Map<string, Record<string, unknown>>(),
+  /** Command types HuddleFM doesn't answer (down / restarting). */
+  silent: new Set<string>(),
   commands: [] as Record<string, any>[],
   seq: 0,
   reset(channel: string) {
     Object.assign(fm, { channel, granted: false, nowPlaying: null, queue: [], catalog: [], commands: [] });
     fm.override.clear();
+    fm.silent.clear();
   },
   respond(cmd: Record<string, any>): Record<string, unknown> | null {
     fm.commands.push(cmd);
+    if (fm.silent.has(cmd.type)) return null;
     const o = fm.override.get(cmd.type);
     if (o) {
       fm.override.delete(cmd.type);
@@ -336,6 +340,70 @@ describe.skipIf(!INTEGRATION)('huddlefm DJ mode', () => {
     await event('track.started', { id: 'q', title: 'Late', artist: 'Event' });
     expect(await noticeTurns('chatter:')).toHaveLength(1);
   }, 30_000);
+
+  it("auto DJ: picks that fail to download back off (and only a pick that plays resets it)", async () => {
+    await activate({ autoDj: true });
+    await store.appendHistory(channelId, 'picks', ['Mine - Bot']);
+    await event('queue.removed', { id: 'm', title: 'Mine', artist: 'Bot', reason: 'failed' });
+    expect((await store.getSession(channelId))!.topupFailures).toBe(1);
+    expect(await redis.pttl(`hfm:topup-backoff:${channelId}`)).toBeGreaterThan(50_000);
+    expect(await noticeTurns('failed:')).toHaveLength(0); // our own pick: no notice
+    await event('track.failed', { id: 'm2', title: 'Mine', artist: 'Bot' });
+    expect((await store.getSession(channelId))!.topupFailures).toBe(2);
+    expect(await redis.pttl(`hfm:topup-backoff:${channelId}`)).toBeGreaterThan(110_000);
+    await event('track.started', { id: 'm3', title: 'Mine', artist: 'Bot' });
+    expect((await store.getSession(channelId))!.topupFailures).toBe(0);
+  }, 20_000);
+
+  it('auto DJ: a top-up that throws backs off too', async () => {
+    await activate({ autoDj: true });
+    generateText.mockRejectedValue(new Error('provider down'));
+    await autodj.processDjSync({ id: 'j1', data: { channelId, reason: 'test' } } as Job);
+    expect((await store.getSession(channelId))!.topupFailures).toBe(1);
+    expect(await redis.exists(`hfm:topup-backoff:${channelId}`)).toBe(1);
+    expect(await redis.exists(autodj.toppingUpKey(channelId))).toBe(0);
+  }, 20_000);
+
+  it("huddle_dj: stops the whole call when HuddleFM doesn't answer", async () => {
+    const { limits } = await import('../../config.js');
+    const saved = limits.djReplyTimeoutMs;
+    (limits as any).djReplyTimeoutMs = 300;
+    try {
+      await activate();
+      fm.catalog = [song('One', 'A'), song('Two', 'B'), song('Three', 'C')];
+      fm.silent.add('search');
+      const before = fm.commands.length;
+      const out = JSON.parse(
+        await exec(tools.djTools(ctx()).huddle_dj, { commands: [{ command: 'add', queries: ['one a', 'two b', 'three c'] }, { command: 'volume', percent: 20 }] }),
+      );
+      expect(out.results).toHaveLength(1);
+      expect(out.results[0]).toMatchObject({ ok: false, unreachable: true });
+      expect(fm.commands.slice(before).map((c) => c.type)).toEqual(['search']); // no more waiting per query / step
+      expect((await store.getSession(channelId))?.status).toBe('active'); // not a lost grant
+    } finally {
+      (limits as any).djReplyTimeoutMs = saved;
+    }
+  }, 20_000);
+
+  it('a request that fails after the grace period is announced', async () => {
+    fm.silent.add('request_control');
+    expect(await exec(tools.djTools(ctx()).huddle_dj_mode, { enabled: true })).toMatch(/Request sent/);
+    const ts = await requestTs();
+    await sql`update dj_sessions set updated_at = now() - interval '30 seconds' where channel_id = ${channelId}`;
+    await fromHfm({ ok: false, replyTo: ts, error: 'host_unreachable' }, ts);
+    expect(await store.getSession(channelId)).toBeNull();
+    const [t] = await noticeTurns('request_failed:');
+    expect(t.input).toContain('host_unreachable');
+  }, 20_000);
+
+  it("a grant for a request whose row is gone is released (grant replies don't name the channel)", async () => {
+    await exec(tools.djTools(ctx()).huddle_dj_mode, { enabled: true });
+    const ts = await requestTs();
+    await sql`delete from dj_sessions where channel_id = ${channelId}`; // e.g. the tool failed after posting
+    fm.granted = true;
+    await fromHfm({ type: 'grant_accepted', ok: true, replyTo: ts });
+    await vi.waitFor(() => expect(fm.commands.at(-1)).toMatchObject({ type: 'release_control', channel: channelId }));
+  }, 20_000);
 
   it('the per-turn state shows this channel’s session only', async () => {
     await activate();

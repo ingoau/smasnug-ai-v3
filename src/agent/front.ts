@@ -14,6 +14,7 @@ import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/re
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
 import { HUDDLE_DJ_PROMPT, renderDjState } from '../features/huddlefm/render.js';
 import { huddleFmConfigured } from '../features/huddlefm/client.js';
+import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chatModel, MODELS } from '../models.js';
 import { log } from '../log.js';
 import { TurnTiming } from '../core/timing.js';
@@ -504,8 +505,10 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const outcome = built.outcome;
   const postOutcomeFallback = async () => {
     if (!outcome?.fallback || replies.anyVisible || state.visible.has('reply')) return;
-    await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(outcome.fallback) }, { idempotencyKey: `outcome-fallback:${turnId}` });
-    await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, outcome: true, text: outcome.fallback });
+    // Code-written, but it can carry outside text (e.g. a HuddleFM track title): never a group ping.
+    const text = neutralizeBroadcasts(outcome.fallback);
+    await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `outcome-fallback:${turnId}` });
+    await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, outcome: true, text });
   };
 
   if (stopped || (await checkStop())) {

@@ -29,7 +29,7 @@ import { sendCommand } from './client.js';
 import { grantLost } from './lifecycle.js';
 import { isDuplicateSong, pickResult, type SearchResult } from './match.js';
 import { LOST_GRANT_ERRORS, replyError, trackLabel, type HfmMessage, type HfmTrack } from './protocol.js';
-import { activeSessions, appendHistory, getSession, playbackFromStatus, recordTopup, savePlayback, type DjSession } from './store.js';
+import { activeSessions, appendHistory, getSession, playbackFromStatus, recordTopupMiss, savePlayback, type DjSession } from './store.js';
 
 export interface DjSyncJob {
   channelId: string;
@@ -95,18 +95,29 @@ async function maybeTopUp(session: DjSession, status: HfmMessage, jobKey: string
   const entry = await checkEntry(session.requestedBy, session.channelId, { countMessage: false });
   if (!entry.ok) return void log.info({ channelId: session.channelId, reason: entry.reason }, 'auto dj skipped (entry check)');
 
-  await redis.set(toppingUpKey(session.channelId), '1', 'PX', 3 * 60_000);
+  // Longer than a worst-case top-up (60 s model call + 20 s per command), so late queue.added events still count as ours.
+  await redis.set(toppingUpKey(session.channelId), '1', 'PX', 8 * 60_000);
   let added: string[] = [];
   try {
     added = await topUp(session, status, room, jobKey);
+  } catch (err) {
+    // A failed model call or HuddleFM error is a miss too: back off instead of retrying on every event / sweep.
+    log.warn({ err, channelId: session.channelId }, 'auto dj top-up failed');
   } finally {
     await redis.del(toppingUpKey(session.channelId));
   }
-  await recordTopup(session.channelId, added.length);
-  // After a miss, wait before trying again (the sweep or the next event retries; a delayed job here would hold the
-  // dedup id and swallow every sync until then).
-  if (!added.length) await redis.set(backoffKey(session.channelId), '1', 'PX', backoffMs(session.topupFailures + 1));
-  else await scheduleSync(session.channelId, 'auto-dj refresh');
+  if (added.length) await scheduleSync(session.channelId, 'auto-dj refresh');
+  else await noteTopupMiss(session.channelId);
+}
+
+/**
+ * A top-up that added nothing, or one whose picks HuddleFM then dropped (failed downloads): wait before trying again,
+ * doubling per consecutive miss. The sweep or the next event retries afterwards (a delayed job here would hold the
+ * dedup id and swallow every sync until then).
+ */
+export async function noteTopupMiss(channelId: string): Promise<void> {
+  const misses = await recordTopupMiss(channelId);
+  await redis.set(backoffKey(channelId), '1', 'PX', backoffMs(Math.max(1, misses)));
 }
 
 const PickSchema = z.object({

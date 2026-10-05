@@ -133,6 +133,16 @@ export async function touchEvent(channelId: string) {
   await sql`update dj_sessions set last_event_at = now() where channel_id = ${channelId}`;
 }
 
-export async function recordTopup(channelId: string, added: number) {
-  await sql`update dj_sessions set topup_failures = case when ${added}::int > 0 then 0 else topup_failures + 1 end where channel_id = ${channelId}`;
+/**
+ * Auto DJ misses (a top-up that added nothing, or picks HuddleFM dropped): returns the new count. Only a pick that
+ * actually starts playing resets it (resetTopupMisses), so a broken downloader keeps backing off instead of looping.
+ */
+export async function recordTopupMiss(channelId: string): Promise<number> {
+  const [row] = await sql<{ topupFailures: number }[]>`
+    update dj_sessions set topup_failures = topup_failures + 1 where channel_id = ${channelId} returning topup_failures`;
+  return row?.topupFailures ?? 1;
+}
+
+export async function resetTopupMisses(channelId: string): Promise<void> {
+  await sql`update dj_sessions set topup_failures = 0 where channel_id = ${channelId} and topup_failures <> 0`;
 }

@@ -151,5 +151,9 @@ describe('playback snapshot + rendering', () => {
     expect(active).toContain('now playing: Now - Artist');
     expect(active).toContain('1. Next - A [trackId t1]');
     expect(renderSession({ ...base, status: 'pending' }, { channelId: 'C2' })).toContain('waiting for the huddle host');
+    // Another channel's huddle (e.g. seen from the thread DJ mode was asked in): no queue details.
+    const hidden = renderSession({ ...base, status: 'active' }, { channelId: 'C2' }, false);
+    expect(hidden).toContain("<#C1>: you're the DJ");
+    expect(hidden).not.toContain('Now - Artist');
   });
 });

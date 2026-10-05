@@ -15,13 +15,14 @@ You can DJ Slack huddles that run HuddleFM (the huddle music player). <huddle_dj
 - A turn with <huddle_dj_notice> is a system notice about the huddle (the host answered, the session ended, a song started with chatter on): follow its instructions.
 - Never DM HuddleFM yourself or paste HuddleFM JSON anywhere; the huddle_dj tools are the only way to talk to it.`;
 
-export function renderSession(s: DjSession, here: { channelId: string }): string {
+/** `detail`: now playing and up next. Only for the huddle's own channel or its requester's DM (private channels). */
+export function renderSession(s: DjSession, here: { channelId: string }, detail = true): string {
   const where = `<#${s.channelId}>${s.channelId === here.channelId ? ' (this channel)' : ''}`;
   if (s.status === 'pending') return `- ${where}: you asked to DJ (asked by <@${s.requestedBy}>), waiting for the huddle host to approve.`;
   const lines = [
     `- ${where}: you're the DJ (HuddleFM). auto DJ ${s.autoDj ? `on${s.vibe ? `, vibe "${s.vibe}"` : ''}` : 'off'}, chatter ${s.chatter ? 'on' : 'off'}.`,
   ];
-  const p = s.playback;
+  const p = detail ? s.playback : null;
   if (p) {
     lines.push(`  now playing: ${p.nowPlaying ?? 'nothing'}`);
     if (p.queue.length) {
@@ -39,7 +40,7 @@ export async function renderDjState(opts: { channelId: string; threadId: string;
     const sessions = await sessionsForTurn(opts);
     if (!sessions.length) return '';
     return [
-      ...sessions.map((s) => renderSession(s, opts)),
+      ...sessions.map((s) => renderSession(s, opts, s.channelId === opts.channelId || (opts.channelId.startsWith('D') && s.requestedBy === opts.speakerId))),
       'Messages about the music in these huddles (skip this, turn it up, play X) are aimed at you.',
     ].join('\n');
   } catch (err) {

@@ -17,7 +17,7 @@ import { log } from '../../log.js';
 import { takeLimit } from '../guard.js';
 import { clearBackoff, scheduleSync } from './autodj.js';
 import { sendCommand } from './client.js';
-import { markAbandoned } from './inbound.js';
+import { markAbandoned, rememberRequest } from './inbound.js';
 import { deleteSession } from './lifecycle.js';
 import { pickResult, type SearchResult } from './match.js';
 import { LOST_GRANT_ERRORS, parseChannelArg, REQUESTED_EVENTS, REQUESTED_PERMISSIONS, replyError, trackLabel, type HfmMessage, type HfmTrack } from './protocol.js';
@@ -108,7 +108,7 @@ export async function djMode(
   try {
     ({ reply } = await sendCommand(
       { type: 'request_control', channel: channelId, permissions: [...REQUESTED_PERMISSIONS], events: [...REQUESTED_EVENTS] },
-      { idempotencyKey: `dj-request:${session.id}:${callId}`, timeoutMs: limits.djRequestGraceMs, onSent: (ts) => setRequestTs(session.id, ts) },
+      { idempotencyKey: `dj-request:${session.id}:${callId}`, timeoutMs: limits.djRequestGraceMs, onSent: async (ts) => (await rememberRequest(ts, channelId), await setRequestTs(session.id, ts)) },
     ));
   } catch (err) {
     await deleteSession(session);
@@ -156,6 +156,8 @@ interface StepResult {
   ok: boolean;
   /** The grant is gone: stop, DJ mode ended. */
   lost?: boolean;
+  /** HuddleFM didn't answer in time: stop the whole call instead of waiting again for every remaining command. */
+  unreachable?: boolean;
   [k: string]: unknown;
 }
 
@@ -166,6 +168,7 @@ function data(reply: HfmMessage): Record<string, unknown> {
 }
 
 function failure(command: string, reply: HfmMessage | null): StepResult {
+  if (!reply) return { command, ok: false, unreachable: true, error: "HuddleFM didn't answer in time; it may be down or restarting. Stopped here, nothing after this ran." };
   const lost = LOST_GRANT_ERRORS.has(reply?.error ?? '');
   return { command, ok: false, ...(lost ? { lost } : {}), error: lost ? `${reply!.error}: the grant is gone, DJ mode is off now` : replyError(reply) };
 }
@@ -203,7 +206,7 @@ export async function runStep(session: DjSession, step: Step, keyBase: string): 
         const reply = await send({ type: 'search', query: q });
         if (!reply?.ok) {
           const f = failure(command, reply);
-          if (f.lost) return f;
+          if (f.lost || f.unreachable) return f;
           results.push({ query: q, error: f.error });
           continue;
         }
@@ -228,6 +231,7 @@ export async function runStep(session: DjSession, step: Step, keyBase: string): 
         skipped,
         nowPlaying: last?.ok ? trackLabel(last.nowPlaying as HfmTrack) || null : undefined,
         ...(skipped.length < (step.count ?? 1) ? { stoppedEarly: replyError(last) } : {}),
+        ...(last === null ? { unreachable: true } : {}),
       };
     }
     case 'remove':
@@ -273,13 +277,18 @@ async function addSongs(
   const addedIds: string[] = [];
   const addedLabels: string[] = [];
   let n = 0;
+  /** Lost grant / no answer: stop, but still report (and remember) what was added before. */
+  let stop: StepResult | null = null;
   for (const item of items) {
     let reference: string;
     if ('query' in item) {
       const search = await send({ type: 'search', query: item.query });
       if (!search?.ok) {
         const f = failure('add', search);
-        if (f.lost) return f;
+        if (f.lost || f.unreachable) {
+          stop = f;
+          break;
+        }
         results.push({ query: item.query, error: f.error });
         continue;
       }
@@ -293,7 +302,10 @@ async function addSongs(
     const reply = await send({ type: 'add', reference }, n++);
     if (!reply?.ok) {
       const f = failure('add', reply);
-      if (f.lost) return f;
+      if (f.lost || f.unreachable) {
+        stop = f;
+        break;
+      }
       results.push({ ...item, error: f.error });
       if (reply?.error === 'queue_full') break;
       continue;
@@ -305,6 +317,7 @@ async function addSongs(
   }
   // People asked for these: the auto DJ's best signal of taste.
   await appendHistory(session.channelId, 'requested', addedLabels.slice(0, limits.djMaxBatch));
+  if (stop) return { ...stop, ok: addedLabels.length > 0, results };
   if (step.play_next && addedIds.length) {
     // Moving each to "play next" in reverse keeps their order at the front.
     for (const [i, id] of [...addedIds].reverse().entries()) {
@@ -336,6 +349,7 @@ export async function runDj(ctx: ToolContext, input: { channel?: string; command
       await deleteSession(session);
       break;
     }
+    if (res.unreachable) break;
   }
   if (input.commands.some((s) => !READ_ONLY.has(s.command)) && !results.some((r) => r.lost)) await scheduleSync(session.channelId, 'dj tool');
   log.info({ channelId: session.channelId, commands: input.commands.map((c) => c.command), ok: results.map((r) => r.ok) }, 'huddle dj commands');
