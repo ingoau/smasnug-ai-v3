@@ -31,7 +31,8 @@ import { createScheduledTurnTx } from './schedule/deliver.js';
 
 type Tx = TransactionSql<{}>;
 
-export type OutcomeSource = 'send' | 'coding_launch';
+/** `huddlefm`: DJ mode notices (grant answered, session ended, chatter; src/features/huddlefm/notices.ts). */
+export type OutcomeSource = 'send' | 'coding_launch' | 'huddlefm';
 
 /** Why no outcome turn may run for `speakerId` in `threadId` (null = ok). */
 export async function outcomeSkipReason(threadId: string | null, speakerId: string): Promise<string | null> {

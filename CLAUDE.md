@@ -46,7 +46,7 @@ TEST_REDIS_URL are set, `<test db>_<name>` + the test Redis db plus an offset (s
 | pipeline | `src/ingress/**`, `src/worker/**`, `src/pipeline/**` | event intake, message storage, rules, gate, disengagement, debounce, thread lock + turn scheduling, inbox push, status indicator, interaction dispatch, process lifecycle |
 | tools | `src/tools/**`, `src/context/**` | fetch_url, web search, slack search, read_thread/read_channel/read_image, search_emojis, react, thread context rendering, images |
 | agent | `src/agent/**` | front agent loop, reply tool + streaming, subagents/runs/inbox, plan cards, set_card_title, sweeper, expiry, compaction, synthesis |
-| features | `src/features/**`, `slack-manifest.yml` | memory + extraction + memory tools, workspace facts, App Home, send_message + confirmation + attribution, reports/suspension/moderation, report_user (bot reports, `bot-reports.ts`), limits/guard, kill switches, retention |
+| features | `src/features/**`, `slack-manifest.yml` | memory + extraction + memory tools, workspace facts, App Home, send_message + confirmation + attribution, reports/suspension/moderation, report_user (bot reports, `bot-reports.ts`), limits/guard, kill switches, retention, HuddleFM DJ mode (`huddlefm/`) |
 
 Cross-module contracts are stub files with final signatures — implement yours, call others', don't change a
 signature without coordinating: `src/pipeline/scheduler.ts` (requestTurn), `src/agent/front.ts` (runFrontTurn,

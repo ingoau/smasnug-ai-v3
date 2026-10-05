@@ -17,6 +17,7 @@ import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
 import { decide, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
 import { removeMessageFromTurns } from './scheduler.js';
+import { handleHuddleFmMessage, isFromHuddleFm } from '../features/huddlefm/inbound.js';
 import { showIntakeStatus } from './session-status.js';
 import { applyDelete, applyEdit, getThread, insertTombstone, isBotMessage, isTwoPartyThread, storeMessage, upsertThread, type SlackMessage, type ThreadRow } from './store.js';
 
@@ -34,6 +35,8 @@ interface MessageEvent extends SlackMessage {
 
 export async function handleMessageEvent(ev: MessageEvent) {
   if (!ev.channel) return;
+  // HuddleFM's replies and events in the bot's DM with it (DJ mode): protocol traffic, never a conversation.
+  if (isFromHuddleFm(ev)) return handleHuddleFmMessage(ev);
   if (ev.subtype === 'message_changed') return handleEdit(ev);
   if (ev.subtype === 'message_deleted') return handleDelete(ev.channel, ev.deleted_ts, ev.previous_message);
   if (ev.hidden || !NEW_MESSAGE_SUBTYPES.has(ev.subtype)) return;

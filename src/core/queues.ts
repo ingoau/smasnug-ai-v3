@@ -16,6 +16,11 @@ export const QUEUE = {
   subagentRun: 'subagent-run',
   /** Coalesced plan-card re-render: { cardId } */
   cardRender: 'card-render',
+  /**
+   * HuddleFM DJ mode (src/features/huddlefm): status sync + auto DJ top-up per huddle channel: { channelId, reason }.
+   * Its own queue: these jobs wait on HuddleFM replies that arrive through slack-events.
+   */
+  huddlefm: 'huddlefm',
   /** Repeatable maintenance: sweeper, expiry, memory extraction, retention */
   maintenance: 'maintenance',
 } as const;
