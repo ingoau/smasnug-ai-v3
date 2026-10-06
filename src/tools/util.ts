@@ -46,8 +46,12 @@ export interface SlackPermalink {
 }
 
 /**
- * Parse a Slack message permalink (`https://x.slack.com/archives/C123/p1790000000000100?thread_ts=1790000000.000100`).
- * Returns undefined for anything that isn't one.
+ * Parse a Slack message permalink.
+ * Shape: `https://<workspace>.slack.com/archives/[channel]/[timestamp]`
+ * e.g. `https://hackclub.slack.com/archives/C123ABC456/p1790000000000100`
+ * - `[channel]` is the channel id (`C…`, or `G…`/`D…` which we refuse for public reads)
+ * - `[timestamp]` is `p` + the message ts with the decimal removed (`1790000000.000100` → `p1790000000000100`)
+ * Thread replies may add `?thread_ts=<root ts>`. Returns undefined for anything that isn't one.
  */
 export function parseSlackPermalink(url: string | undefined | null): SlackPermalink | undefined {
   if (!url) return undefined;
@@ -65,6 +69,9 @@ export function parseSlackPermalink(url: string | undefined | null): SlackPermal
   const threadTs = normalizeTs(u.searchParams.get('thread_ts'));
   return { channel: m[1]!, ts, ...(threadTs && threadTs !== ts ? { threadTs } : {}) };
 }
+
+/** Example pattern shown in tool errors / hints (workspace host is illustrative). */
+export const SLACK_PERMALINK_PATTERN = 'https://hackclub.slack.com/archives/[channel]/[timestamp]';
 
 /** A channel id from what the model passes: 'C123', '<#C123|name>', '<#C123>'. */
 export function parseChannelId(s: string | undefined | null): string | undefined {

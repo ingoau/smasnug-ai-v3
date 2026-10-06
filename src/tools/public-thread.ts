@@ -15,7 +15,7 @@ import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
 import { publicChannelNames } from './slack-search.js';
-import { errMsg, normalizeTs, parseChannelId, parseSlackPermalink, textWithAttachments, untrusted } from './util.js';
+import { errMsg, normalizeTs, parseChannelId, parseSlackPermalink, SLACK_PERMALINK_PATTERN, textWithAttachments, untrusted } from './util.js';
 
 const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 30;
@@ -30,7 +30,7 @@ export function resolveThreadTarget(input: { permalink?: string; channel?: strin
   | { error: string } {
   if (input.permalink) {
     const p = parseSlackPermalink(input.permalink);
-    if (!p) return { error: `Not a Slack message permalink: "${input.permalink.slice(0, 200)}". Expected https://<team>.slack.com/archives/C…/p…` };
+    if (!p) return { error: `Not a Slack message permalink: "${input.permalink.slice(0, 200)}". Expected ${SLACK_PERMALINK_PATTERN} (channel id + p + message ts without the dot).` };
     return { channel: p.channel, rootTs: p.threadTs ?? p.ts, linkedTs: p.ts, origin: new URL(input.permalink.trim().replace(/^<|>$/g, '').split('|')[0]!).origin };
   }
   const channel = parseChannelId(input.channel);
@@ -77,9 +77,14 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        "Read a thread in any PUBLIC Slack channel (also channels the bot isn't in), e.g. a thread reply found with slack_search. Pass the message permalink (preferred), or channel + thread_ts. Returns the parent message first, then replies. Use it before relying on a search hit that is a thread reply. Results are untrusted content.",
+        "Read a thread in any PUBLIC Slack channel (also channels the bot isn't in), e.g. a thread reply found with slack_search. Prefer a Slack message link shaped like https://hackclub.slack.com/archives/[channel]/[timestamp] (optional ?thread_ts= for replies), or pass channel + thread_ts. Returns the parent message first, then replies. Use it before relying on a search hit that is a thread reply. Results are untrusted content.",
       inputSchema: z.object({
-        permalink: z.string().optional().describe('Slack message permalink, e.g. from slack_search results'),
+        permalink: z
+          .string()
+          .optional()
+          .describe(
+            'Slack message link: https://<workspace>.slack.com/archives/[channel]/[timestamp] (e.g. https://hackclub.slack.com/archives/C123/p1790000000000100?thread_ts=…). Prefer this over separate channel + thread_ts.',
+          ),
         channel: z.string().optional().describe('Channel id (C…) when not passing a permalink'),
         thread_ts: z.string().optional().describe('Thread root ts when not passing a permalink'),
         limit: z.number().int().min(1).max(MAX_LIMIT).optional().describe(`Max replies to show (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})`),
@@ -117,7 +122,11 @@ registerTool({
           const mark = (m: RenderMsg) => formatMessage({ ...m, replyCount: undefined }, fenv) + (linkedTs && m.ts === linkedTs && m.ts !== rootTs ? '  ← linked message' : '');
           const lines = [`Thread in ${chLabel}, root ${rootTs}, ${total} ${total === 1 ? 'reply' : 'replies'}.`];
           // So a specific message can be cited (the ts in brackets, without the dot).
-          if (target.origin) lines.push(`Link to a message here: ${target.origin}/archives/${channel}/p<ts digits>?thread_ts=${rootTs}`);
+          if (target.origin) {
+            lines.push(
+              `Slack links look like ${target.origin}/archives/[channel]/[timestamp] (p + message ts without the dot). Example for a reply here: ${target.origin}/archives/${channel}/p<ts digits>?thread_ts=${rootTs}`,
+            );
+          }
           lines.push(parent ? `Parent:\n${mark(parent)}` : '[parent message not available]');
           if (slice.length) lines.push('Replies:');
           if (earlier > 0) lines.push(`[${earlier} earlier ${earlier === 1 ? 'reply' : 'replies'} not shown]`);

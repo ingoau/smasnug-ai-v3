@@ -57,7 +57,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        "Read top-level messages of the current Slack channel (not thread replies). Returns up to `limit` messages before `before_ts` (oldest first). Only works in channels the bot is in.",
+        "Read top-level messages of the current Slack channel (not thread replies). Returns up to `limit` messages before `before_ts` (oldest first). Only works in channels the bot is in. To read any other public channel, use read_public_channel.",
       inputSchema,
       execute: async ({ before_ts, limit }) => {
         const before = normalizeTs(before_ts);

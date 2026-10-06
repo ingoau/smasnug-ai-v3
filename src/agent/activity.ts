@@ -9,6 +9,7 @@ const LABELS: Record<string, string> = {
   fetch_url: 'Reading the page…',
   read_thread: 'Reading the thread…',
   read_public_thread: 'Reading a Slack thread…',
+  read_public_channel: 'Reading a Slack channel…',
   read_channel: 'Reading the channel…',
   read_image: 'Looking at the image…',
   spawn_subagent: 'Starting a subagent…',

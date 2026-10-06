@@ -160,6 +160,8 @@ export function describeToolStep(toolName: string, input: unknown): string {
       return 'Reading the thread';
     case 'read_public_thread':
       return 'Reading a Slack thread';
+    case 'read_public_channel':
+      return 'Reading a Slack channel';
     case 'read_channel':
       return 'Reading the channel';
     case 'read_image':
