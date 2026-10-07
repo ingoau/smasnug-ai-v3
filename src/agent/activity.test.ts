@@ -8,6 +8,7 @@ describe('activityForTool', () => {
     expect(activityForTool('slack_semantic_search')).toBe('Searching Slack…');
     expect(activityForTool('fetch_url')).toBe('Reading the page…');
     expect(activityForTool('read_thread')).toBe('Reading the thread…');
+    expect(activityForTool('ask_thread')).toBe('Reading the thread…');
     expect(activityForTool('read_public_thread')).toBe('Reading a Slack thread…');
     expect(activityForTool('read_public_channel')).toBe('Reading a Slack channel…');
     expect(activityForTool('read_channel')).toBe('Reading the channel…');

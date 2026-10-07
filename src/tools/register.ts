@@ -9,6 +9,7 @@ import './slack-search.js';
 import './slack-semantic-search.js';
 import './read-history.js';
 import './public-thread.js';
+import './ask-thread.js';
 import './public-channel.js';
 import './read-image.js';
 import './emoji.js';

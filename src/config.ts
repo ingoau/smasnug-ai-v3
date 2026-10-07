@@ -77,6 +77,11 @@ export const limits = {
   readMessageTruncateTokens: 2000,
   /** Page size cap (≈tokens) for read_thread / read_channel: a page stops before it would exceed this (≥ 1 message). */
   readPageTokens: 6000,
+  /** ask_thread: per-message cut and the whole transcript's cap (≈tokens; over it: parent + newest messages). */
+  askThreadMessageTokens: 4000,
+  askThreadMaxTokens: 80_000,
+  /** ask_thread: the answering model call's timeout. */
+  askThreadTimeoutMs: 90_000,
   disengageAfterMessages: 25,
   disengageAfterMs: 3 * 60 * 60 * 1000,
   gateContextMessages: 6,
