@@ -37,7 +37,6 @@ import { formatDuration, formatInZone } from './time.js';
 export type WatchSource = 'url' | 'web_search' | 'slack_search';
 const SOURCE_LABEL: Record<WatchSource, string> = { url: 'web page', web_search: 'web search', slack_search: 'Slack search (public channels)' };
 const FINDINGS_MAX_CHARS = 6000;
-const SLACK_SEARCH_MAX_WAIT_MS = 5_000;
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 
@@ -108,12 +107,13 @@ export const defaultDeps: WatchDeps = {
   fetchPage: (url) => fetchPage(url),
   webSearch: (ctx, query) => runWebSearch(ctx, { query, num_results: limits.webSearchMaxResults }),
   async slackSearch(query) {
-    // Background work must not hold up interactive slack_search on the shared user-token limiter (20/min): fail fast
-    // (SlackBusyError) and check again next interval instead.
+    // Background work must not hold up interactive slack_search on the shared user-token limiter (~20/min): queued
+    // as background (behind interactive calls, outside their reserve), failing fast (SlackBusyError) so the check
+    // is retried shortly (checkWatch) instead of blocking. Not cached: a watch wants fresh results.
     const res = await slackCall<any>(
       'search.messages',
       { query, count: 30, highlight: false, sort: 'timestamp', sort_dir: 'desc' },
-      { token: 'user', maxWaitMs: SLACK_SEARCH_MAX_WAIT_MS },
+      { token: 'user', maxWaitMs: limits.slackSearchMaxWaitMs, priority: 'background' },
     );
     return filterPublicMatches(res.messages?.matches ?? []);
   },
@@ -382,6 +382,13 @@ export async function checkWatch(w: WatchRow, deps: WatchDeps = defaultDeps): Pr
   if (n >= limits.watchNotificationsPerDay) return noteResult(w, 'daily_cap');
 
   const g = await gather(w, deps);
+  if ('result' in g && g.result === 'busy') {
+    // The shared search limiter was full (interactive searches go first): retry soon rather than a whole interval
+    // later, and without having blocked this maintenance pass. Baseline kept.
+    await sql`update watches set next_check_at = least(now() + make_interval(secs => ${limits.watchBusyRetryMs / 1000}), next_check_at)
+              where id = ${w.id} and status = 'active' and checks = ${w.checks}`;
+    return noteResult(w, 'busy');
+  }
   if ('result' in g) return noteResult(w, g.result);
   if (!g.findings) return noteResult(w, 'unchanged', g.state);
 

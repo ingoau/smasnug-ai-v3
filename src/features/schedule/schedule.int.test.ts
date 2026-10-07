@@ -559,8 +559,9 @@ describe.skipIf(!INTEGRATION)('reminders and watches', () => {
       expect(at).toBeLessThan(end);
     });
 
-    // Regression (review #13): a rate-limited background Slack search is skipped, not waited for or failed.
-    it('slack_search watch: a busy rate limiter means "check again next interval"', async () => {
+    // Regression (review #13): a rate-limited background Slack search is skipped, not waited for or failed, and
+    // retried after limits.watchBusyRetryMs (not a whole interval later).
+    it('slack_search watch: a busy rate limiter means "check again shortly"', async () => {
       const t = await newThread();
       const owner = uid();
       const { SlackBusyError } = await import('../../core/slack.js');
@@ -578,7 +579,9 @@ describe.skipIf(!INTEGRATION)('reminders and watches', () => {
       const row = await watchRow(id);
       expect(row).toMatchObject({ status: 'active', lastResult: 'busy' });
       expect(row.state.sinceTs).toBe(since);
-      expect(row.nextCheckAt.getTime()).toBeGreaterThan(Date.now() + 3000_000);
+      const { limits } = await import('../../config.js');
+      expect(row.nextCheckAt.getTime()).toBeGreaterThan(Date.now() + limits.watchBusyRetryMs - 60_000);
+      expect(row.nextCheckAt.getTime()).toBeLessThan(Date.now() + limits.watchBusyRetryMs + 60_000);
       await sql`update watches set status = 'cancelled' where id = ${id}`;
     });
 

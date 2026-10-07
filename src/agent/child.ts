@@ -16,6 +16,8 @@ import { scheduleCardRender } from './cards.js';
 import { childSystemPrompt } from './prompts/child.js';
 import { failRuns, finishRun, type RunRow, type SubagentRow } from './subagents.js';
 import { WEB_SEARCH_TOOL, webSearchSources } from '../tools/web-search.js';
+import { SLACK_WAIT_EXTRA } from '../tools/slack-search.js';
+import type { SlackWaitEvent } from '../core/slack.js';
 import { addSource, compactHistory, describeToolStep, oneLine, splitResult, urlsInText, type RunSource } from './util.js';
 import { onSandboxRunFinished } from '../sandbox/hooks.js';
 import { sandboxChildPrompt } from '../sandbox/prompts.js';
@@ -38,6 +40,12 @@ export const ELAPSED_TICK_MS = 15_000;
 export function withElapsed(details: string, ms: number): string {
   return `${details} (${Math.round(ms / 1000)}s)`;
 }
+
+/** Card label while a slack_search waits for the shared search rate limiter. */
+export const SLACK_WAIT_LABEL = "Waiting for Slack's search rate limit";
+/** Shorter waits don't change the label (no flicker). */
+const SLACK_WAIT_LABEL_MIN_MS = 1000;
+export const slackWaitLabel = (ms: number) => `${SLACK_WAIT_LABEL} (${Math.max(1, Math.ceil(ms / 1000))}s)`;
 
 /** Runs executing in this process, for shutdown. */
 const active = new Map<number, AbortController>();
@@ -103,7 +111,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
     runId: run.id,
     abortSignal: controller.signal,
     // queueUserImage deliberately unset: Luna accepts images in tool results.
-    extras: {},
+    extras: { [SLACK_WAIT_EXTRA]: (ev: SlackWaitEvent) => onSlackWait(ev) },
   });
   if (!sandbox) for (const name of SANDBOX_TOOL_NAMES) delete tools[name];
   const instructions = sandbox ? `${childSystemPrompt()}\n\n${sandboxChildPrompt({ previews: previewsConfigured() })}` : childSystemPrompt();
@@ -145,6 +153,25 @@ export async function processSubagentRun(runId: number): Promise<void> {
       await appendEvent(run.threadId, 'run_progress', `subagent:${run.subagentId}`, { runId: run.id, details });
     }
   };
+  // A slack_search waiting for the shared search rate limiter shows that on the card (instead of a search that looks
+  // slow), then the label goes back to what it was. Waits are added up per step for run_step.
+  let slackWaits = 0;
+  let labelBeforeWait = '';
+  let stepSlackWaitMs = 0;
+  const onSlackWait = (ev: SlackWaitEvent) => {
+    if (ev.done) stepSlackWaitMs += ev.waitedMs;
+    if (ev.estimateMs < SLACK_WAIT_LABEL_MIN_MS) return;
+    if (!ev.done) {
+      if (slackWaits++ === 0) labelBeforeWait = lastDetails;
+      void setDetails(slackWaitLabel(ev.estimateMs)).catch((err) => log.debug({ err, runId: run.id }, 'wait label failed'));
+      return;
+    }
+    if (--slackWaits > 0 || !lastDetails.startsWith(SLACK_WAIT_LABEL)) return;
+    lastDetails = labelBeforeWait;
+    sql`update runs set details = ${labelBeforeWait} where id = ${run.id} and status = 'running'`
+      .then(() => scheduleCardRender(run.cardId))
+      .catch((err) => log.debug({ err, runId: run.id }, 'wait label restore failed'));
+  };
   // Long steps (deep web searches, long generations) produce no events: show the elapsed time instead of a
   // card that looks stuck. Goes through the coalesced card render, at most every ELAPSED_TICK_MS.
   const elapsedTicker = setInterval(() => {
@@ -175,6 +202,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
       else if (!lastDetails || lastDetails === FIRST_STEP_DETAILS) await setDetails('Thinking');
 
       const stepStart = Date.now();
+      stepSlackWaitMs = 0;
       let firstChunkAt = 0;
       let stepTools: string[] = [];
       const result = streamText({
@@ -209,6 +237,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
             ms: Date.now() - stepStart,
             firstChunkMs: firstChunkAt ? firstChunkAt - stepStart : null,
             tools: stepTools,
+            ...(stepSlackWaitMs ? { slackWaitMs: stepSlackWaitMs } : {}),
             sources: sources.length,
             inputTokens: part.usage.inputTokens,
             outputTokens: part.usage.outputTokens,
