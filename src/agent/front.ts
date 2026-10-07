@@ -374,9 +374,10 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
   } else {
     parts.push(section('new_messages', clipTokens(ctx.newMessages, BUDGET.newMessages), ` from="<@${turn.authorId}>" note="The message(s) you are responding to now."`));
     const barePing = turn.isMention && (await isBarePing(turn).catch(() => false));
+    const unanswered = barePing ? await unansweredEarlierRequest(turn, self?.userId).catch((err) => (log.warn({ err }, 'unansweredEarlierRequest failed'), null)) : null;
     parts.push(
       barePing
-        ? 'The speaker just pinged you, with no request in the message. Do not answer messages from <channel_background>; they belong to other conversations. If <thread_history> makes it clear what they want from you, help with that; otherwise reply briefly and casually asking what they need.'
+        ? barePingInstruction(unanswered)
         : turn.isMention
           ? 'You were mentioned / messaged directly: respond to <new_messages> using your tools.'
           : turn.addressed
@@ -392,6 +393,38 @@ export function renderSessionNote(s: SessionInfo): string {
   if (s.titleBy === 'user') return `Title: "${s.title ?? ''}" (chosen by the user; don't change it).`;
   if (s.title) return `Title: "${s.title}" (set by you; change it only if the topic clearly changed).`;
   return 'Untitled. Once the request is clear, title it with set_session_title alongside your reply.';
+}
+
+/** The turn instruction for a bare ping: act on the speaker's own unanswered request if there is one, else ask. */
+export function barePingInstruction(unanswered: { ts: string } | null): string {
+  const bg = 'Do not answer messages from <channel_background>; they belong to other conversations.';
+  if (unanswered)
+    return `The speaker just pinged you again, with no new request in the message. Their earlier message [${unanswered.ts}] in <thread_history> got no answer from you. If it asks for something, that is what they want: do it now instead of asking what they need. ${bg}`;
+  return `The speaker just pinged you, with no request in the message. ${bg} If <thread_history> makes it clear what they want from you, help with that; otherwise reply briefly and casually asking what they need.`;
+}
+
+const ONLY_MENTIONS = /<@[UW][A-Z0-9]+(?:\|[^>]*)?>/g;
+
+/**
+ * The speaker's most recent earlier message in this thread (before the turn's messages), when it has content (not
+ * itself a bare ping) and no message from the bot came after it: a request the bot left unanswered.
+ */
+export async function unansweredEarlierRequest(turn: TurnRow, botUserId: string | undefined): Promise<{ ts: string } | null> {
+  const first = [...turn.messageTs].sort((a, b) => Number(a) - Number(b))[0];
+  if (!first || !botUserId) return null;
+  const [prev] = await sql<{ ts: string; text: string; files: unknown[] }[]>`
+    select ts, text, files from messages
+    where thread_id = ${turn.threadId} and user_id = ${turn.authorId} and bot_id is null and not deleted and ts::numeric < ${first}::numeric
+    order by ts::numeric desc limit 1`;
+  if (!prev) return null;
+  const hasContent = (Array.isArray(prev.files) && prev.files.length > 0) || Boolean(prev.text.replace(ONLY_MENTIONS, '').replace(/[\s.,!?]+/g, ''));
+  if (!hasContent) return null;
+  const [answered] = await sql<{ answered: boolean }[]>`
+    select exists (
+      select 1 from messages where thread_id = ${turn.threadId} and user_id = ${botUserId} and not deleted
+        and ts::numeric > ${prev.ts}::numeric and ts::numeric < ${first}::numeric
+    ) as answered`;
+  return answered?.answered ? null : { ts: prev.ts };
 }
 
 /** True when the turn's messages are nothing but @mentions (a bare ping with no request). */

@@ -502,6 +502,34 @@ describe('runFrontTurn: conversation state', () => {
   });
 });
 
+describe('runFrontTurn: bare ping', () => {
+  const pingRows = (q: string) => (q.includes('from messages where channel_id') && q.includes('and ts in') ? [{ text: '<@UBOT>', files: [] }] : undefined);
+
+  it("acts on the speaker's own unanswered earlier request instead of asking what they need", async () => {
+    h.sqlHook = (q) => {
+      if (q.includes('order by ts::numeric desc limit 1') && q.includes('bot_id is null')) return [{ ts: '100.000001', text: 'can you check the pico w price', files: [] }];
+      if (q.includes('as answered')) return [{ answered: false }];
+      return pingRows(q);
+    };
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 110 }), io().io);
+    expect(turnText()).toContain('Their earlier message [100.000001] in <thread_history> got no answer from you');
+    expect(turnText()).not.toContain('casually asking');
+  });
+
+  it('asks what they need when the earlier request was answered (or there is none)', async () => {
+    h.sqlHook = (q) => {
+      if (q.includes('order by ts::numeric desc limit 1') && q.includes('bot_id is null')) return [{ ts: '100.000001', text: 'can you check the pico w price', files: [] }];
+      if (q.includes('as answered')) return [{ answered: true }];
+      return pingRows(q);
+    };
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 111 }), io().io);
+    expect(turnText()).toContain('otherwise reply briefly and casually asking what they need');
+    expect(turnText()).not.toContain('got no answer from you');
+  });
+});
+
 describe('runFrontTurn: spawn_subagent fan-out', () => {
   it('one call with several tasks starts one subagent per task on the same card; a failed one is reported, not fatal', async () => {
     const tasks = [
