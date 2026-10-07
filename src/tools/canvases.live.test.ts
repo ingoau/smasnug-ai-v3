@@ -27,7 +27,9 @@ describe.skipIf(!LIVE)('canvases (LIVE front agent)', () => {
   let redis: typeof import('../core/redis.js').redis;
   let fakeCalls: typeof import('../core/slack-fake.js').fakeCalls;
   const user = `U_CNV${Date.now().toString(36).toUpperCase()}`;
-  const channel = `D_CNV${Date.now().toString(36).toUpperCase()}`;
+  // A real-shaped DM id (letters and digits only): canvasConversations ignores anything else in files.info, so an
+  // id like `D_CNV…` would never count as "shared in this conversation" and read_canvas would refuse.
+  const channel = `DCNV${Date.now().toString(36).toUpperCase()}`;
   const foreign = `FLIVE${Date.now().toString(36).toUpperCase()}`;
   const threads: string[] = [];
   let remove: (() => void) | undefined;
