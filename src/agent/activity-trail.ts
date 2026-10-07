@@ -1,32 +1,33 @@
 /**
- * Activity trail: the per-tool activity text ("Searching Slack…", "Reading the page…") as transient task cards in
- * the turn's reply message (`STATUS_ACTIVITY_MODE=tasks`).
+ * Activity trail: the per-tool activity text ("Searching Slack…", "Reading the page…") as live tasks of the plan card
+ * in the turn's reply message (`STATUS_ACTIVITY_MODE=tasks`).
  *
  * Why here: the only free-text status method, `assistant.threads.setStatus`, is deprecated (removal February 2027,
  * https://docs.slack.dev/changelog/2026/08/20/agent-updates/), and its replacement `agents.sessions.setStatus`
  * "does not accept a custom loading message" (https://docs.slack.dev/ai/agent-sessions/). The non-deprecated
  * progress surface is the streaming API: `task_update` chunks (`{ type, id, title, status }`, ≤ 256 chars,
- * https://docs.slack.dev/reference/methods/chat.startStream#task_update-chunks) render as task cards in the default
- * `timeline` display mode, interleaved with streamed text.
+ * https://docs.slack.dev/reference/methods/chat.startStream#task_update-chunks). The stream is opened with
+ * `task_display_mode: 'plan'` ("task updates render together in a plan block") and a `plan_update` title, so the
+ * tasks are the message's one plan card; if Slack refuses that, it falls back to `timeline` (task cards).
  *
- * How it stays transient (the UX of the old status line):
- * - The first activity of a turn opens a stream that holds only a task card (in progress); later activities add a
- *   new card, coalesced to at most one update per second (latest text wins, unchanged text is skipped). Nothing is
- *   shown before the turn commits to work (same rule as the status).
- * - A card is finished when its tool calls return (`toolDone`): `complete`, or `error` only when a call really
- *   failed (the tool threw). A card without tracked calls is completed when the next card replaces it. A tool that
- *   returns before its card went out never shows one (e.g. an instant spawn_subagent).
- * - A card is never left `in_progress` when its stream stops: Slack renders a task that is still pending /
+ * How it works:
+ * - The first activity of a turn opens a stream that holds only the plan with one task (in progress); later
+ *   activities add tasks, coalesced to at most one update per second (latest text wins, unchanged text is skipped).
+ *   Nothing is shown before the turn commits to work (same rule as the status).
+ * - A task is finished when its tool calls return (`toolDone`): `complete`, or `error` only when a call really
+ *   failed (the tool threw). A task without tracked calls is completed when the next one replaces it. A tool that
+ *   returns before its task went out never shows one (e.g. an instant spawn_subagent).
+ * - A task is never left `in_progress` when its stream stops: Slack renders a task that is still pending /
  *   in_progress when the stream ends as failed (a warning icon; Slack's docs don't say, observed on the dev app and
  *   by others, e.g. https://github.com/openclaw/openclaw/issues/146221). Adoption and every removal carry the
- *   chunks that finish all open cards (`complete`, or `error` for a failed call), on chat.appendStream /
+ *   chunks that finish all open tasks (`complete`, or `error` for a failed call), on chat.appendStream /
  *   chat.stopStream (which accepts `chunks`, https://docs.slack.dev/reference/methods/chat.stopStream).
- * - When the turn's next reply starts streaming, it adopts this message (ReplyManager): the reply text streams in
- *   below the cards, and the finished reply is re-rendered with chat.update without them, so the final message is
- *   exactly the posted reply. A reply that is posted whole (subagents running) deletes the activity message before
- *   it is posted, so the cards never sit above the reply (no flash). The activity message is also deleted for a
- *   reply when anything was posted in the thread after the activity message (a user message, send_message, …):
- *   adopting it would put the reply above that post; the reply opens a message of its own instead.
+ * - The turn's next reply adopts this message (ReplyManager): a streamed reply's text streams in below the plan, a
+ *   reply posted whole is written into it (chat.update). The final layout renders the turn's plan card from the DB
+ *   (turn-card.ts, card-render.ts: the steps and runs, collapsed once done) above the reply, or no card at all for a
+ *   turn without lookups or subagents. When anything was posted in the thread after the activity message (a user
+ *   message, send_message, …), adopting it would put the reply above that post: it is deleted and the reply opens a
+ *   message of its own.
  * - At the end of the turn, an activity message no reply adopted (silent turn, error, stop) is deleted, so it
  *   leaves nothing behind.
  * Best-effort: any failure only drops the activity text for the rest of the turn; nothing here throws.
@@ -40,6 +41,8 @@ export const ACTIVITY_MIN_INTERVAL_MS = 1000;
 const MAX_CARDS = 10;
 /** Slack's limit for task_update chunks. */
 const MAX_TITLE = 250;
+/** The live plan's title (plan_update chunk) while the turn works; the reply's final layout renders the card. */
+export const PLAN_TITLE = 'Working…';
 
 /**
  * Slack task statuses (https://docs.slack.dev/reference/methods/chat.startStream#task_update-chunks): `in_progress`,
@@ -293,17 +296,29 @@ export class ActivityTrail {
       if (!this.ts) {
         this.started = true;
         const team = await this.t.teamId();
-        const res = await slackCall<any>(
-          'chat.startStream',
-          {
-            channel: this.t.channelId,
-            thread_ts: this.t.threadTs,
-            chunks,
-            recipient_user_id: this.t.recipientUserId,
-            ...(team ? { recipient_team_id: team } : {}),
-          },
-          { idempotencyKey: this.key() },
-        );
+        const open = (plan: boolean) =>
+          slackCall<any>(
+            'chat.startStream',
+            {
+              channel: this.t.channelId,
+              thread_ts: this.t.threadTs,
+              // Plan mode: the tasks render together in one plan block, the message's plan card (titled by plan_update).
+              chunks: plan ? [{ type: 'plan_update', title: PLAN_TITLE }, ...chunks] : chunks,
+              ...(plan ? { task_display_mode: 'plan' } : {}),
+              recipient_user_id: this.t.recipientUserId,
+              ...(team ? { recipient_team_id: team } : {}),
+            },
+            { idempotencyKey: this.key(plan ? '' : ':timeline') },
+          );
+        let res: any;
+        try {
+          res = await open(true);
+        } catch (err) {
+          if (!slackErrorCode(err)) throw err;
+          // Slack refused the plan display: the same tasks as individual task cards (timeline, the default).
+          log.info({ code: slackErrorCode(err), turnId: this.t.turnId }, 'plan-mode activity stream refused; opening it in timeline mode');
+          res = await open(false);
+        }
         if (!res?.ts) throw new Error('chat.startStream returned no ts');
         this.ts = res.ts;
         await this.hook(() => this.t.onOpened?.(res.ts));

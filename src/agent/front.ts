@@ -23,7 +23,8 @@ import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chatModel, MODELS } from '../models.js';
 import { log } from '../log.js';
 import { TurnTiming } from '../core/timing.js';
-import { freezeCard, postCard } from './cards.js';
+import { freezeCard } from './cards.js';
+import { TurnCard } from './turn-card.js';
 import { CODING_AGENTS_PROMPT, frontSystemPrompt } from './prompts/front.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
@@ -602,6 +603,11 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (!stopped && io.stopRequested) stopped = await io.stopRequested().catch((err) => (log.warn({ err }, 'stopRequested check failed'), false));
     return stopped;
   };
+  // Cards only where a reply is expected (DMs, mentions, reminder turns, write-ups): a silent unmentioned turn
+  // would otherwise post and delete a message in the thread, which can notify its followers.
+  const activityCards = Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks' && (io.isMention || Boolean(turn.addressed) || turn.kind === 'synthesis');
+  // The turn's plan card (one per message): its own steps and the runs it starts.
+  const turnCard = new TurnCard({ threadId: turn.threadId, turnId, enabled: activityCards });
   const replies = new ReplyManager({
     threadId: turn.threadId,
     channelId,
@@ -612,9 +618,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     activeRuns: () => activeRunsInThread(turn.threadId),
     stopRequested: checkStop,
     timing: io.timing,
-    // Cards only where a reply is expected (DMs, mentions, reminder turns, write-ups): a silent unmentioned turn
-    // would otherwise post and delete a message in the thread, which can notify its followers.
-    activityCards: Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks' && (io.isMention || Boolean(turn.addressed) || turn.kind === 'synthesis'),
+    activityCards,
+    card: { block: () => turnCard.block(), attached: (ts, text) => turnCard.attached(ts, text) },
     // A reply only streams into the activity message if nothing was posted below it meanwhile.
     postedSince: async (ts) =>
       Boolean((await sql<{ moved: boolean }[]>`select exists (select 1 from messages where thread_id = ${turn.threadId} and not deleted and ts::numeric > ${ts}::numeric) as moved`)[0]?.moved),
@@ -688,6 +693,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const announce = (toolCallId: string, toolName: string) => {
     if (!io.setActivity || announced.has(toolCallId)) return;
     announced.add(toolCallId);
+    turnCard.started(toolCallId, toolName);
     const text = activityForTool(toolName);
     if (!text) return;
     if (replies.anyVisible && quietAfterReply(toolName)) return; // bookkeeping after the reply: no "Working…" flash
@@ -765,6 +771,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           break;
         case 'tool-result': {
           replies.activityDone(part.toolCallId); // its activity card is finished (never left in progress)
+          turnCard.done(part.toolCallId);
           stepResults.push({ toolCallId: part.toolCallId, toolName: part.toolName, output: part.output });
           const v = VISIBLE_TOOLS[part.toolName];
           if (v) state.visible.add(v);
@@ -773,6 +780,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
         }
         case 'tool-error':
           replies.activityDone(part.toolCallId, false); // a real failure: its card shows as failed
+          turnCard.done(part.toolCallId, false);
           log.warn({ tool: part.toolName, error: String((part as any).error) }, 'front tool error');
           break;
         case 'finish-step': {
@@ -815,9 +823,10 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (reported.length) await appendEvent(turn.threadId, 'turn_tools', 'bot', { turnId, calls: reported }).catch((err) => log.warn({ err }, 'turn_tools event failed'));
     // An activity message no reply took over (silent turn, error, stop) leaves nothing behind.
     await replies.closeActivity();
-    // The card goes in right after this turn's replies (or alone if there was no reply). Not when the turn cancelled
-    // every subagent it started (then it is no longer delegating anything).
-    if (state.cardId && state.delegated) await postCard(state.cardId, replies.lastDelivered).catch((err) => log.error({ err }, 'postCard failed'));
+    // The turn's card (its steps and runs) in its reply message, re-rendered with the final state; runs without a
+    // reply get a message of their own. Runs only count while the turn still delegates (not when it cancelled every
+    // subagent it started).
+    await turnCard.finish(replies.lastDelivered, Boolean(state.cardId && state.delegated));
     if (turn.kind === 'synthesis' && turn.cardId) {
       await sql`update runs set reported = true where id = any(${built.synthesisRunIds}::bigint[])`.catch(() => {});
       await freezeCard(turn.cardId).catch((err) => log.error({ err }, 'freezeCard failed'));

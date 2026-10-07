@@ -23,6 +23,10 @@ const h = vi.hoisted(() => ({
   /** Overrides for the mocked renderThreadContext result. */
   ctx: {} as Record<string, unknown>,
   spawns: [] as any[],
+  /** The turn card's steps as saved, the block a reply gets for it, and the messages it was attached to. */
+  cardSteps: [] as any[],
+  cardBlock: undefined as undefined | (() => any),
+  cardAttached: [] as string[],
 }));
 
 vi.mock('../db/index.js', () => {
@@ -62,7 +66,17 @@ vi.mock('./subagents.js', () => ({
   cancelSubagent: async (o: any) => `Subagent ${o.subagentId} cancelled.`,
   messageSubagent: async () => ({ mode: 'steered', runId: 1, cardId: 5, note: 'n' }),
 }));
-vi.mock('./cards.js', () => ({ postCard: async (id: number) => void h.postedCards.push(id), freezeCard: async () => {}, scheduleCardRender: async () => {} }));
+vi.mock('./cards.js', () => ({
+  postCard: async (id: number) => void h.postedCards.push(id),
+  freezeCard: async () => {},
+  scheduleCardRender: async () => {},
+  // The turn's card (turn-card.ts): card 5 once a spawn made one or a step needs one; rendered as h.cardBlock.
+  turnCardId: async () => (h.spawns.length || h.cardSteps.length ? 5 : null),
+  ensureTurnCard: async () => 5,
+  saveCardSteps: async (_id: number, steps: any[]) => void (h.cardSteps = steps),
+  cardBlockFor: async () => h.cardBlock?.(),
+  attachCard: async (_id: number, ts: string) => void h.cardAttached.push(ts),
+}));
 vi.mock('../context/thread.js', () => ({
   renderThreadContext: async () => ({ history: '<@U1> Tess: earlier', channelContext: '', newMessages: '<@U1> Tess: hi bot', participantIds: ['U2', 'U1', 'UBOT', 'U404'], ...h.ctx }),
   renderMessages: async (_t: string, ts: string[]) => `<@U1> Tess: INBOX ${ts.join(',')}`,
@@ -169,6 +183,9 @@ beforeEach(() => {
   h.postedCards = [];
   h.ctx = {};
   h.spawns = [];
+  h.cardSteps = [];
+  h.cardBlock = undefined;
+  h.cardAttached = [];
 });
 
 describe('runFrontTurn (mock model)', () => {
@@ -999,17 +1016,24 @@ describe('runFrontTurn: status activity', () => {
       return status;
     }
 
-    it('reply + spawn in one step, posted whole (subagents running): the card is finished and gone before the reply posts', async () => {
+    it('reply + spawn in one step, posted whole (subagents running): the live plan becomes the reply message with its card', async () => {
       h.activeRuns = 1;
+      h.cardBlock = () => ({ type: 'plan', block_id: 'card_5_plan', title: 'Running 1 subagent', tasks: [] });
       h.model = mockModel([spawnAndReplyStep('On it, I started a subagent.'), textStep('never reached')], 2);
       await runFrontTurn(turn({ id: 71 }), ioWithActivity(true).io);
       expect(h.model.doStreamCalls).toHaveLength(1); // the step ended the turn
       const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
-      expect(chat.map((c) => c.method)).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.postMessage']);
+      expect(chat.map((c) => c.method)).toEqual(['chat.startStream', 'chat.stopStream', 'chat.update']);
+      expect(chat[0]!.args.task_display_mode).toBe('plan');
       expect(cards(chat[0]!)).toEqual(['Starting a subagent…:in_progress']);
-      // the stop finishes the card (Slack shows a task still in progress at the stop as failed), no error status
+      // the stop finishes the task (Slack shows a task still in progress at the stop as failed), no error status
       expect(cards(chat[1]!)).toEqual(['Starting a subagent…:complete']);
       expect(chat.flatMap(cards).some((c) => c.endsWith(':error'))).toBe(false);
+      // the message is rewritten as [card, reply]; the card lives there
+      expect(chat[2]!.args.ts).toBe(chat[1]!.args.ts);
+      expect(chat[2]!.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown']);
+      expect(h.cardAttached).toEqual([chat[1]!.args.ts]);
+      expect(h.postedCards).toEqual([5]); // re-rendered with the final state at the end of the turn
     });
 
     it('reply + spawn in one step, streamed: the reply adopts the card, finished before the stop', async () => {
@@ -1021,6 +1045,42 @@ describe('runFrontTurn: status activity', () => {
       expect(statusesAtStop(ts)).toEqual({ 'Starting a subagent…': 'complete' });
       expect(chat.flatMap(cards).some((c) => c.endsWith(':error'))).toBe(false);
       expect(chat.at(-1)).toMatchObject({ method: 'chat.update', args: { blocks: [{ type: 'markdown', text: 'On it, I started a subagent.' }] } });
+    });
+
+    it('a lookup is a step on the turn card: saved, rendered above the streamed reply, attached', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.cardBlock = () => (h.cardSteps.length ? { type: 'context', block_id: 'card_5_plan', elements: [{ type: 'mrkdwn', text: '✓ *Searched the web*' }] } : null);
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), replyStep('About $7 at most shops.'), textStep('')]);
+        await runFrontTurn(turn({ id: 74 }), ioWithActivity(true).io);
+        expect(h.cardSteps).toEqual([{ tool: 'web_search', status: 'complete' }]);
+        const update = h.slack.filter((c) => c.method === 'chat.update').at(-1)!;
+        expect(update.args.blocks.map((b: any) => b.type)).toEqual(['context', 'markdown']);
+        expect(h.cardAttached).toEqual([update.args.ts]);
+        expect(h.postedCards).toEqual([5]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it('a turn without lookups or subagents gets no card', async () => {
+      h.model = mockModel([replyStep('Sure thing.'), textStep('')]);
+      await runFrontTurn(turn({ id: 75 }), ioWithActivity(true).io);
+      expect(h.cardSteps).toEqual([]);
+      expect(h.postedCards).toEqual([]);
+      expect(h.cardAttached).toEqual([]);
+    });
+
+    it('unmentioned follow-ups record no steps (card-free)', async () => {
+      vi.stubGlobal('fetch', exaOk);
+      try {
+        h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), replyStep('About $7.'), textStep('')]);
+        await runFrontTurn(turn({ id: 76, isMention: false }), ioWithActivity(false).io);
+        expect(h.cardSteps).toEqual([]);
+        expect(h.postedCards).toEqual([]);
+      } finally {
+        vi.unstubAllGlobals();
+      }
     });
 
     it('no activity cards when the pipeline shows no status (no setActivity)', async () => {

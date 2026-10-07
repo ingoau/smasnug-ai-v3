@@ -52,13 +52,16 @@ beforeEach(() => {
 });
 
 describe('ActivityTrail', () => {
-  it('first activity opens a stream holding one in-progress task card; updates are coalesced, unchanged text skipped', async () => {
+  it('first activity opens a plan-mode stream holding one in-progress task; updates are coalesced, unchanged text skipped', async () => {
     const t = trail();
     t.activity('Searching the web…');
     await sleep(10);
     expect(methods()).toEqual(['chat.startStream']);
-    expect(calls[0]!.args).toMatchObject({ channel: 'D1', thread_ts: '1.1', recipient_user_id: 'U1', recipient_team_id: 'T1' });
-    expect(calls[0]!.args.chunks).toEqual([{ type: 'task_update', id: 'activity-1', title: 'Searching the web…', status: 'in_progress' }]);
+    expect(calls[0]!.args).toMatchObject({ channel: 'D1', thread_ts: '1.1', recipient_user_id: 'U1', recipient_team_id: 'T1', task_display_mode: 'plan' });
+    expect(calls[0]!.args.chunks).toEqual([
+      { type: 'plan_update', title: 'Working…' },
+      { type: 'task_update', id: 'activity-1', title: 'Searching the web…', status: 'in_progress' },
+    ]);
     t.activity('Reading the page…'); // superseded within the window
     t.activity('Searching Slack…');
     t.activity('Searching Slack…');
@@ -184,10 +187,21 @@ describe('ActivityTrail', () => {
     await sleep(10);
     t.activity('Reading the page…');
     await sleep(150);
-    expect(methods()).toEqual(['chat.startStream']);
+    expect(methods()).toEqual(['chat.startStream', 'chat.startStream']); // plan mode, then timeline
     expect(await t.adopt()).toBeNull();
     await t.close();
-    expect(methods()).toEqual(['chat.startStream']);
+    expect(methods()).toEqual(['chat.startStream', 'chat.startStream']);
+  });
+
+  it('a refused plan display falls back to timeline task cards', async () => {
+    failOn = (m, a) => (m === 'chat.startStream' && a.task_display_mode ? 'invalid_arguments' : null);
+    const t = trail();
+    t.activity('Searching Slack…');
+    await sleep(10);
+    expect(methods()).toEqual(['chat.startStream', 'chat.startStream']);
+    expect(calls[1]!.args.task_display_mode).toBeUndefined();
+    expect(calls[1]!.args.chunks).toEqual([{ type: 'task_update', id: 'activity-1', title: 'Searching Slack…', status: 'in_progress' }]);
+    expect(t.isOpen).toBe(true);
   });
 
   it('after a native stop nothing new is opened', async () => {
@@ -289,15 +303,53 @@ describe('ReplyManager with activity cards', () => {
     expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.update']);
   });
 
-  it('a posted reply (subagents running) deletes the activity message first, its card finished at the stop', async () => {
+  it('a posted reply (subagents running) is written into the activity message, its task finished at the stop', async () => {
     const rm = new ReplyManager(target(1));
     rm.activity('Updating a subagent…');
     await sleep(10);
     await rm.finish('tc1', 'Told the subagent.');
     await rm.closeActivity();
-    // removed before the post: the card never sits above the reply
-    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.postMessage']);
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.update']);
     expect(cardsOf('chat.stopStream')).toEqual([['Updating a subagent…:complete']]);
+    const ts = calls[1]!.args.ts;
+    expect(calls[2]!.args).toMatchObject({ ts, text: 'Told the subagent.', blocks: [{ type: 'markdown', text: 'Told the subagent.' }] });
+    expect(rm.lastDelivered).toEqual({ ts, text: 'Told the subagent.', streamed: false });
+  });
+
+  it('…and when the activity message cannot take it, it is deleted before the reply is posted (never above it)', async () => {
+    const rm = new ReplyManager(target(1));
+    rm.activity('Updating a subagent…');
+    await sleep(10);
+    failOn = (m) => (m === 'chat.update' ? 'cant_update_message' : null);
+    await rm.finish('tc1', 'Told the subagent.');
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.update', 'chat.stopStream', 'chat.delete', 'chat.postMessage']);
+    expect(finalStatuses()).toEqual({ 'activity-1': 'complete' });
+  });
+
+  it('the turn card goes above a posted reply and is recorded with its message', async () => {
+    const attached: string[] = [];
+    const card = { type: 'plan', block_id: 'card_5_plan', title: 'Running 1 subagent', tasks: [] } as const;
+    const rm = new ReplyManager(target(1, { card: { block: async () => card, attached: async (ts: string) => void attached.push(ts) } }));
+    await rm.finish('tc1', 'On it.');
+    const post = calls.find((c) => c.method === 'chat.postMessage')!;
+    expect(post.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown']);
+    expect(attached).toEqual([rm.lastDelivered!.ts]);
+  });
+
+  it('the final layout of a streamed reply keeps the turn card above it', async () => {
+    const attached: string[] = [];
+    const card = { type: 'context', block_id: 'card_5_plan', elements: [{ type: 'mrkdwn', text: '✓ *Searched the web*' }] };
+    const rm = new ReplyManager(target(0, { card: { block: async () => card, attached: async (ts: string) => void attached.push(ts) } }));
+    rm.activity('Searching the web…', 'w1');
+    await sleep(10);
+    rm.activityDone('w1');
+    const text = 'Found it: the answer is 42, according to the docs.';
+    await streamIn(rm, text);
+    await rm.finish('tc1', text);
+    const update = calls.find((c) => c.method === 'chat.update')!;
+    expect(update.args.blocks).toEqual([card, { type: 'markdown', text }]);
+    expect(attached).toEqual([update.args.ts]);
   });
 
   it('reply + spawn in one step (posted whole): the spawn card completes on its result; nothing in progress or failed at the stop', async () => {
@@ -307,7 +359,7 @@ describe('ReplyManager with activity cards', () => {
     rm.activityDone('s1');
     await rm.finish('tc1', 'On it.');
     await rm.closeActivity();
-    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.postMessage']);
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.update']);
     expect(finalStatuses()).toEqual({ 'activity-1': 'complete' });
     expect(cardsOf('chat.stopStream')).toEqual([['Starting a subagent…:complete']]);
   });

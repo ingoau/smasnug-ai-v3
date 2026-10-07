@@ -10,9 +10,11 @@
  * Quick-reply buttons (reply-buttons.ts) go into the same message: an actions block in the post, or `blocks` on
  * chat.stopStream ("rendered at the bottom of the finalized message"); if that fails, chat.update adds them, and as
  * a last resort they are posted as a small follow-up message.
- * Tool activity ("Searching Slack…") shows as transient task cards (activity-trail.ts): a reply's stream adopts the
- * open activity message and its final layout (chat.update) drops the cards; a posted reply deletes it first. No
- * card is ever left in progress when a stream stops (Slack would show it as failed).
+ * Tool activity ("Searching Slack…") shows live as the tasks of a plan in an activity message (activity-trail.ts). A
+ * reply adopts that message: a streamed reply streams into it, a posted one is written into it (chat.update). The
+ * final layout is [plan card, reply, buttons]: the turn's card (turn-card.ts; its steps and runs, collapsed once
+ * done) or none for a turn without lookups or subagents. One card per message. No task is ever left in progress
+ * when a stream stops (Slack would show it as failed).
  */
 import { appendEvent } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
@@ -62,7 +64,15 @@ export interface ReplyTarget {
   postedSince?: (ts: string) => Promise<boolean>;
   /** A reply was delivered (its last message's ts, the text, whether it carries quick-reply buttons). Awaited, must not throw. */
   onDelivered?: (r: { ts: string | null; text: string; buttons: boolean }) => Promise<void>;
+  /**
+   * The turn's plan card (one per message, turn-card.ts): `block` gives the card to show above a reply that is about
+   * to go out (null: no card, or it already lives in another message); `attached` records the message it went into.
+   */
+  card?: { block(): Promise<CardBlock | null>; attached(ts: string, text: string): Promise<void> };
 }
+
+/** The plan card as one block (a plan, or its collapsed line). */
+export type CardBlock = { type: 'plan' | 'context'; block_id?: string };
 
 /**
  * Stream errors meaning Slack is no longer streaming this message (e.g. stopped by the user). `stopped_by_user` too:
@@ -151,6 +161,12 @@ async function teamId(): Promise<string | undefined> {
 /** A reply as a message payload (one block kept free for the quick-reply buttons). */
 export function markdownMessage(text: string) {
   return replyMessage(text, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 });
+}
+
+/** A reply message's final layout: [plan card, reply, buttons] (card and buttons when given). */
+function replyLayout(text: string, actions?: ButtonsActionsBlock, card?: CardBlock | null): { text: string; blocks: unknown[] } {
+  const msg = replyMessage(text, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - (card ? 1 : 0) });
+  return { text: msg.text, blocks: [...(card ? [card] : []), ...msg.blocks, ...(actions ? [actions] : [])] };
 }
 
 export class ReplyManager {
@@ -477,7 +493,14 @@ export class ReplyManager {
             }
           } else {
             if (await this.stopStreamWithButtons(e, actions)) buttonsTs = e.streamTs;
-            if (e.blocksChunks > 0 || e.activityCards > 0) await this.finalLayout(e, text, buttonsTs ? actions : undefined);
+            // The final layout keeps the turn's plan card above the reply (the live plan's tasks become the card).
+            const card = await this.cardBlock();
+            if (card || e.blocksChunks > 0 || e.activityCards > 0) {
+              if (await this.finalLayout(e, text, actions, card)) {
+                if (actions) buttonsTs = e.streamTs;
+                if (card) await this.attachCard(e.streamTs!, text);
+              }
+            }
             last = { ts: e.streamTs, text };
           }
         } else {
@@ -531,31 +554,68 @@ export class ReplyManager {
     return `Replied (${delivered})${btnRow ? ` with buttons: ${btnRow.labels.join(' | ')}` : ''}.`;
   }
 
-  private async post(e: ReplyEntry, text: string, suffix = '', actions?: ButtonsActionsBlock): Promise<string | null> {
-    const msg = markdownMessage(text);
+  private async post(e: ReplyEntry, text: string, suffix = '', actions?: ButtonsActionsBlock, card?: CardBlock | null): Promise<string | null> {
+    const msg = replyLayout(text, actions, card);
     const res = await slackCall<any>(
       'chat.postMessage',
-      { channel: this.t.channelId, thread_ts: this.t.threadTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks, unfurl_links: false },
+      { channel: this.t.channelId, thread_ts: this.t.threadTs, text: msg.text, blocks: msg.blocks, unfurl_links: false },
       { idempotencyKey: this.key(e, suffix) },
     );
     this.t.timing?.mark('reply_posted');
     return res?.ts ?? null;
   }
 
+  /** The turn's card for a reply about to go out (null: none). Never throws. */
+  private async cardBlock(): Promise<CardBlock | null> {
+    if (!this.t.card) return null;
+    return this.t.card.block().catch((err) => (log.warn({ err }, 'rendering the plan card for the reply failed'), null));
+  }
+
+  private async attachCard(ts: string, text: string): Promise<void> {
+    await this.t.card?.attached(ts, text).catch((err) => log.warn({ err }, 'recording the plan card message failed'));
+  }
+
   /**
-   * Post the reply whole as a message of its own (e.g. subagents running). An open activity message is removed
-   * first (its cards finished, see activity-trail.ts): removed after the post, it would sit above the reply for a
-   * moment. No new activity message opens from here on (`posting` counts as visible).
+   * Post the reply whole (e.g. subagents running), with the turn's plan card above it. An open activity message
+   * becomes the reply (its live plan turns into the card): its stream is stopped with every task finished and the
+   * message rewritten (chat.update). If it can't take the reply (something was posted below it, Slack refused the
+   * update), it is deleted first and the reply posted as a new message, so the cards never sit above it for a moment.
+   * No new activity message opens from here on (`posting` counts as visible).
    */
   private async postWhole(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock): Promise<string | null> {
     e.posting = true;
     try {
-      await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
-      return await this.post(e, text, '', actions);
+      const card = await this.cardBlock();
+      const ts = (await this.postIntoActivity(text, actions, card)) ?? (await this.post(e, text, '', actions, card));
+      if (ts && card) await this.attachCard(ts, text);
+      return ts;
     } catch (err) {
       e.posting = false;
       throw err;
     }
+  }
+
+  /** The reply rewritten into the open activity message (see postWhole); null when there is none or it had to go. */
+  private async postIntoActivity(text: string, actions: ButtonsActionsBlock | undefined, card: CardBlock | null): Promise<string | null> {
+    if (!this.trail?.isOpen) {
+      await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
+      return null;
+    }
+    const a = await this.trail.adopt();
+    if (!a) return null;
+    if (!(await this.postedSince(a.ts))) {
+      try {
+        await slackCall('chat.stopStream', { channel: this.t.channelId, ts: a.ts, ...(a.chunks.length ? { chunks: a.chunks } : {}) }, { idempotencyKey: a.stopKey });
+        this.t.onSessionReleased?.();
+        await editMessage('chat.update', { channel: this.t.channelId, ts: a.ts, ...replyLayout(text, actions, card) });
+        this.t.timing?.mark('reply_posted');
+        return a.ts;
+      } catch (err) {
+        log.info({ code: slackErrorCode(err), turnId: this.t.turnId }, 'the activity message cannot take the posted reply; posting a new one');
+      }
+    }
+    await this.trail.dropAdopted(a);
+    return null;
   }
 
   /**
@@ -578,15 +638,17 @@ export class ReplyManager {
   }
 
   /**
-   * After a stream that carried blocks chunks: re-render the finished message with the posted layout (prose as
-   * markdown, code as rich_text, in order), so it ends up exactly like a posted reply. Never throws.
+   * After a stream that carried blocks chunks, activity tasks or gets the turn's card: re-render the finished message
+   * with the posted layout ([card], prose as markdown, code as rich_text, in order, [buttons]), so it ends up exactly
+   * like a posted reply. Returns false (logged) when Slack refused it. Never throws.
    */
-  private async finalLayout(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock) {
+  private async finalLayout(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock, card?: CardBlock | null): Promise<boolean> {
     try {
-      const msg = markdownMessage(text);
-      await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, text: msg.text, blocks: actions ? [...msg.blocks, actions] : msg.blocks });
+      await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, ...replyLayout(text, actions, card) });
+      return true;
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), index: e.index }, 'final layout update of a streamed reply failed; keeping the streamed layout');
+      return false;
     }
   }
 
