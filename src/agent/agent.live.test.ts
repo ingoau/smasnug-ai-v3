@@ -374,7 +374,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     };
   }
 
-  it('the Pico research request delegates once: one spawn, at most one ack, no reaction, no cancel', async () => {
+  it('the Pico research request delegates once: one spawn call, at most one ack, no reaction, no cancel', async () => {
     const { runFrontTurn } = await import('./front.js');
     const before = (await fakeCalls()).length;
     const { tid, turn } = await dmTurn(
@@ -385,8 +385,12 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     await runFrontTurn(turn, io());
     const o = await outcome(tid, before);
     // eslint-disable-next-line no-console
-    console.log('pico:', JSON.stringify(o));
-    expect(o.spawns).toBe(1);
+    const spawnCalls = (await turnToolNames(tid)).filter((t) => t === 'spawn_subagent').length;
+    console.log('pico:', JSON.stringify({ ...o, spawnCalls }));
+    // One call; one task, or two (the latest model and the original researched side by side, compared on return).
+    expect(spawnCalls).toBe(1);
+    expect(o.spawns).toBeGreaterThanOrEqual(1);
+    expect(o.spawns).toBeLessThanOrEqual(2);
     expect(o.replies.length).toBeLessThanOrEqual(1);
     expect(o.reactionsAdded).toBe(0);
     expect(o.cancels).toBe(0);
@@ -727,6 +731,46 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(total).toBeGreaterThanOrEqual(560);
     await sql`delete from files where thread_id = ${tid}`;
   }, 180_000);
+
+  it('comparing three named libraries fans out too: one spawn_subagent call with a task per library', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn('LIBS', '', 'zustand vs jotai vs redux toolkit for a mid-size react app? compare bundle size, API style, devtools and how actively each is maintained');
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    const spawnCalls = (await turnToolNames(tid)).filter((t) => t === 'spawn_subagent').length;
+    // eslint-disable-next-line no-console
+    console.log('libs:', JSON.stringify({ spawns: o.spawns, spawnCalls }));
+    expect(spawnCalls).toBe(1);
+    expect(o.spawns).toBeGreaterThanOrEqual(3);
+  }, 120_000);
+
+  it('"what can you do" mentions running code when sandboxes are configured', async () => {
+    const { sandboxConfigured } = await import('../sandbox/settings.js');
+    if (!sandboxConfigured()) return;
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn('CAPS', '', 'what all can you do?');
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    // eslint-disable-next-line no-console
+    console.log('caps:', JSON.stringify(o.replies));
+    expect(o.replies.join(' ')).toMatch(/run(ning)? (code|python|scripts)|sandbox|execute/i);
+  }, 90_000);
+
+  it('a capability that is not available here is declined plainly, without setup questions', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    // Not the admin: coding agents aren't offered to this speaker.
+    const { tid, turn } = await dmTurn('NOCAP', '', 'can you spin up a coding agent to open a PR on your own code that makes your replies shorter?');
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    const tools = await turnToolNames(tid);
+    // eslint-disable-next-line no-console
+    console.log('no capability:', JSON.stringify(o.replies), JSON.stringify(tools));
+    expect(tools).not.toContain('spawn_coding_agent');
+    expect(o.replies.join(' ')).not.toMatch(/which repo|what repo|repo (url|link)|link (to )?(the|your) repo|github (url|link)/i);
+  }, 90_000);
 
   it('an admin musing about the bot gets a brief acknowledgement, not a coding agent proposal', async () => {
     const { runFrontTurn } = await import('./front.js');

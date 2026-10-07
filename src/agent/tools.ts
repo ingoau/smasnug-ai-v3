@@ -103,7 +103,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        `Start background subagents for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels). Each task in \`tasks\` becomes its own subagent and they all run in parallel: when the request names several items that each need research (products, frameworks, people, channels, options, cities, questions), pass one task per item in this ONE call (up to ${MAX_SPAWN_TASKS}), also for "compare A, B and C" (you compare when the results are back). One task for a single question, trivially small items, or a step whose finding the rest needs ("find the top 3 X" first; one task per item in the next round). A subagent cannot see this conversation: give each complete, self-contained instructions. Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer.`,
+        `Start background subagents for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels). Each task in \`tasks\` becomes its own subagent and they all run in parallel: when the request names several items that each need research (products, libraries, frameworks, people, channels, options, cities, questions), pass one task per item in this ONE call (up to ${MAX_SPAWN_TASKS}), also for "A vs B vs C" or "compare A, B and C" (you compare when the results are back). One task for a single question, trivially small items, or a step whose finding the rest needs ("find the top 3 X" first; one task per item in the next round). A subagent cannot see this conversation: give each complete, self-contained instructions. Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer.`,
       inputSchema: z.object({
         tasks: z
           .array(
@@ -118,7 +118,7 @@ registerTool({
           )
           .min(1)
           .max(MAX_SPAWN_TASKS)
-          .describe('One entry per subagent: one per named item that needs its own research (each product, framework, person, channel…); a single entry for one question, including its steps (find X, then compare it)'),
+          .describe('One entry per subagent: one per named item that needs its own research (each product, framework, person, channel…); a single entry when the items must be found first ("the top 3 X"; one entry per item in the next round). Never one entry that compares several named items'),
       }),
       execute: async ({ tasks }) => {
         const s = turnState(ctx);

@@ -53,9 +53,9 @@ describe('frontSystemPrompt delegation and scope rules', () => {
   const p = frontSystemPrompt('smasnug ai');
 
   it('fans named independent items out, also for comparisons; dependent steps stay one task / a later round', () => {
-    expect(p).toMatch(/Several named items that each need their own research \([^)]*frameworks[^)]*\) get one task per item in ONE spawn_subagent call, also when the ask is to compare them/);
-    expect(p).toMatch(/Bundle only trivially small items or steps that need each other's results/);
-    expect(p).toMatch(/the first round only finds the list \("the top 3 X"\), then one subagent per item/);
+    expect(p).toMatch(/Several named items that each need their own research \([^)]*frameworks[^)]*\) get one task per item in ONE spawn_subagent call: "A vs B vs C" or "compare A, B and C" is a task per item, never one "compare" task/);
+    expect(p).toMatch(/Keep one task only for trivially small items/);
+    expect(p).toMatch(/When the items must be found first \("the top 3 X"\), that's rounds: the first round only finds the list \(one task\), then one subagent per item/);
   });
 
   it('"one speaker" is about identity and permissions, not about whose request the work serves', () => {
@@ -73,6 +73,10 @@ describe('frontSystemPrompt delegation and scope rules', () => {
     expect(p).toMatch(/the speaker's explicit requirements \(length, structure, format, tone, sources\) always win, and brevity is a default, not a cap/);
     expect(p).toMatch(/Deliverables \(essays, reports, exam or quiz answers, write-ups, documents\) use proper prose in the requested form/);
     expect(p).toMatch(/Never squeeze a long one into a short message: canvas or file, plus a short reply/);
+  });
+
+  it('says plainly when a capability is not available here instead of asking setup questions', () => {
+    expect(p).toMatch(/Asked for something your tools don't support here: say so plainly\. Don't ask setup questions/);
   });
 
   it('single-file deliverables are written with create_file', () => {
