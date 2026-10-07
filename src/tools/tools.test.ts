@@ -140,9 +140,23 @@ describe('read_thread / read_channel', () => {
     expect(out).toContain('alice: lunch?');
     expect(out).toContain('Bob Builder: after the parent');
     expect(out).not.toContain('morning all');
-    expect(out).toContain('before_ts=1789999900.000100');
+    expect(out).toContain('[2 top-level messages, oldest first, 1789999900.000100 to 1790000050.000200; older: read_channel before_ts=1789999900.000100; newest message]');
     const bad: string = await exec(toolsFor('child', baseCtx()).read_channel, { before_ts: 'yesterday' });
     expect(bad).toMatch(/Invalid before_ts/);
+    expect(await exec(toolsFor('child', baseCtx()).read_channel, { before_ts: '1789999900.000100', after_ts: '1789999700.000100' })).toMatch(/only one of/);
+  });
+
+  it('pages channel history forwards (after_ts) and says where the start is', async () => {
+    const fwd: string = await exec(toolsFor('front', baseCtx()).read_channel, { after_ts: '1789999700.000100', limit: 2 });
+    expect(fwd).toContain('Bob Builder: deploy went out');
+    expect(fwd).toContain('alice: lunch?');
+    expect(fwd).not.toContain('morning all');
+    expect(fwd).not.toContain('has joined');
+    expect(fwd).toContain('[2 top-level messages, oldest first, 1789999800.000100 to 1789999900.000100; older: read_channel before_ts=1789999800.000100; newer: read_channel after_ts=1789999900.000100]');
+    const start: string = await exec(toolsFor('front', baseCtx()).read_channel, { before_ts: '1789999800.000100' });
+    expect(start).toContain('alice: morning all');
+    expect(start).toContain('start of channel; newer: read_channel after_ts=1789999700.000100]');
+    expect(await exec(toolsFor('front', baseCtx()).read_channel, { after_ts: '1790000060.000000' })).toBe('No channel messages after 1790000060.000000.');
   });
 });
 

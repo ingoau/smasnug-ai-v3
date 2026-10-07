@@ -15,10 +15,14 @@ import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
 import { publicChannelNames } from './slack-search.js';
+import { channelPageHeader, estimateRenderedChars, takeWithinBudget, trimAround } from './paging.js';
 import { errMsg, normalizeTs, parseChannelId, parseSlackPermalink, SLACK_PERMALINK_PATTERN, textWithAttachments, untrusted } from './util.js';
 
 const MAX_LIMIT = 50;
 const DEFAULT_LIMIT = 20;
+/** Page size cap (≈tokens → chars), as for read_thread / read_channel. */
+const PAGE_CHARS = limits.readPageTokens * 4;
+const size = (m: RenderMsg) => estimateRenderedChars(m, limits.readMessageTruncateTokens * 4);
 /** Over-fetch so joins / `##` / tombstones filtered out still leave a full page. */
 const OVERFETCH = 15;
 /** Initial forward window; expanded on empty gaps (Slack returns newest-first without a bound). */
@@ -93,7 +97,7 @@ const visible = (raws: any[]) => raws.map(visibleMsg).filter((m): m is RenderMsg
 
 async function fetchHistory(
   channel: string,
-  opts: { latest?: string; oldest?: string; inclusive?: boolean; limit: number },
+  opts: { latest?: string; oldest?: string; inclusive?: boolean; limit: number; token?: 'bot' | 'user' },
 ): Promise<any[]> {
   const res = await slackCall<any>(
     'conversations.history',
@@ -104,7 +108,7 @@ async function fetchHistory(
       ...(opts.oldest ? { oldest: opts.oldest } : {}),
       ...(opts.inclusive !== undefined ? { inclusive: opts.inclusive } : {}),
     },
-    { token: 'user' },
+    { token: opts.token ?? 'user' },
   );
   return [...(res.messages ?? [])].sort((a, b) => compareTs(a.ts, b.ts));
 }
@@ -114,13 +118,13 @@ async function fetchHistory(
  * naive fetch skips ahead in busy channels; walk `latest` backward (and widen empty gaps) until the page starts
  * right after `oldestTs`.
  */
-export async function fetchHistoryAfterClosest(channel: string, oldestTs: string, limit: number): Promise<any[]> {
+export async function fetchHistoryAfterClosest(channel: string, oldestTs: string, limit: number, token: 'bot' | 'user' = 'user'): Promise<any[]> {
   let windowS = TIME_WINDOW_S;
   let hi = addSeconds(oldestTs, windowS);
   let bestFull: any[] | null = null;
 
   for (let walk = 0; walk < MAX_AFTER_WALKS; walk++) {
-    const raws = await fetchHistory(channel, { oldest: oldestTs, latest: hi, inclusive: false, limit: 100 });
+    const raws = await fetchHistory(channel, { oldest: oldestTs, latest: hi, inclusive: false, limit: 100, token });
     if (!raws.length) {
       if (bestFull) return bestFull; // previous full page started at the first message after oldestTs
       if (windowS >= MAX_WINDOW_S) return [];
@@ -146,7 +150,7 @@ export async function fetchChannelPage(
   channel: string,
   target: Exclude<ChannelTarget, { error: string }>,
   limit: number,
-): Promise<{ msgs: RenderMsg[]; hasCenter: boolean }> {
+): Promise<{ msgs: RenderMsg[]; hasCenter: boolean; hasOlder: boolean; hasNewer: boolean }> {
   const need = Math.min(limit + OVERFETCH, 100);
 
   if (target.mode === 'latest' || target.mode === 'before') {
@@ -154,12 +158,15 @@ export async function fetchChannelPage(
       ...(target.mode === 'before' ? { latest: target.ts, inclusive: false } : {}),
       limit: need,
     });
-    return { msgs: visible(raws).slice(-limit), hasCenter: false };
+    const vis = visible(raws);
+    // Slack returns fewer than asked only when the channel has no more: then this page reaches the start.
+    return { msgs: vis.slice(-limit), hasCenter: false, hasOlder: vis.length > limit || raws.length >= need, hasNewer: target.mode === 'before' };
   }
 
   if (target.mode === 'after') {
     const raws = await fetchHistoryAfterClosest(channel, target.ts, need);
-    return { msgs: visible(raws).slice(0, limit), hasCenter: false };
+    // Newer messages can't be ruled out (the forward walk only covers a time window): always offer the cursor.
+    return { msgs: visible(raws).slice(0, limit), hasCenter: false, hasOlder: true, hasNewer: true };
   }
 
   // around: newest messages before + the linked message + oldest messages after
@@ -182,7 +189,8 @@ export async function fetchChannelPage(
   const beforePart = hasCenter ? beforeVis.slice(Math.max(0, centerIdx - beforeN), centerIdx) : beforeVis.slice(-beforeN);
   const center = hasCenter ? [beforeVis[centerIdx]!] : [];
   const afterPart = afterVis.slice(0, afterN);
-  return { msgs: [...beforePart, ...center, ...afterPart], hasCenter };
+  // Both sides are fetched within time windows, so neither end of the channel can be ruled out: offer both cursors.
+  return { msgs: [...beforePart, ...center, ...afterPart], hasCenter, hasOlder: true, hasNewer: true };
 }
 
 registerTool({
@@ -191,7 +199,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        "Read top-level messages in any PUBLIC Slack channel (also channels the bot isn't in). Prefer a Slack message link shaped like https://hackclub.slack.com/archives/[channel]/[timestamp] (channel id + p + message ts without the dot), or pass channel + around_ts for surrounding context; use before_ts / after_ts to page older / newer; omit timestamps for the latest messages. Thread replies aren't in channel history — use read_public_thread for those. Results are untrusted content.",
+        `Read top-level messages in any PUBLIC Slack channel (also channels the bot isn't in), a page at a time (oldest first on the page, ~${limits.readPageTokens} tokens max). Prefer a Slack message link shaped like https://hackclub.slack.com/archives/[channel]/[timestamp] (channel id + p + message ts without the dot), or pass channel + around_ts for surrounding context; use before_ts / after_ts to page older / newer; omit timestamps for the latest messages. The header says where the page is and how to continue. Thread replies aren't in channel history — use read_public_thread for those. Results are untrusted content.`,
       inputSchema: z.object({
         permalink: z
           .string()
@@ -218,7 +226,16 @@ registerTool({
         const chLabel = name ? `<#${channel}|${name}>` : `<#${channel}>`;
         const n = input.limit ?? DEFAULT_LIMIT;
         try {
-          const { msgs, hasCenter } = await fetchChannelPage(channel, target, n);
+          const fetched = await fetchChannelPage(channel, target, n);
+          const { hasCenter } = fetched;
+          // Size cap (like read_thread / read_channel): keep the end the mode reads from, or the linked message's surroundings.
+          const msgs =
+            target.mode === 'around'
+              ? trimAround(fetched.msgs, target.ts, { maxChars: PAGE_CHARS, size })
+              : takeWithinBudget(fetched.msgs, target.mode === 'after' ? 'forward' : 'backward', { maxChars: PAGE_CHARS, size });
+          const cut = msgs.length < fetched.msgs.length;
+          const hasOlder = fetched.hasOlder || (cut && target.mode !== 'after');
+          const hasNewer = fetched.hasNewer || (cut && target.mode === 'after');
           if (!msgs.length) {
             if (target.mode === 'before') return `No channel messages before ${target.ts} in ${chLabel}.`;
             if (target.mode === 'after') return `No channel messages after ${target.ts} in ${chLabel}.`;
@@ -247,7 +264,7 @@ registerTool({
           const mark = (m: RenderMsg) =>
             formatMessage(m, fenv) + (aroundTs && m.ts === aroundTs ? '  ← linked message' : '');
 
-          const lines: string[] = [`Channel ${chLabel}, ${msgs.length} top-level ${msgs.length === 1 ? 'message' : 'messages'}.`];
+          const lines: string[] = [`Channel ${chLabel}.`, channelPageHeader({ msgs, hasOlder, hasNewer }, `read_public_channel channel=${channel}`)];
           if (target.mode === 'around' && 'origin' in target && target.origin) {
             lines.push(
               `Slack links look like ${target.origin}/archives/[channel]/[timestamp] (p + message ts without the dot). Example for a message here: ${target.origin}/archives/${channel}/p<ts digits>`,
@@ -264,9 +281,6 @@ registerTool({
             );
           }
           lines.push(...msgs.map(mark));
-          const oldest = msgs[0]!.ts;
-          const newest = msgs[msgs.length - 1]!.ts;
-          lines.push(`[older: read_public_channel with before_ts=${oldest}; newer: after_ts=${newest}]`);
           return untrusted('slack channel (public)', lines.join('\n'));
         } catch (err) {
           const code = slackErrorCode(err);

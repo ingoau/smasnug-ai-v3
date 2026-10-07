@@ -128,8 +128,7 @@ describe('read_public_channel', () => {
     expect(out).toContain('[thread: 4 replies]');
     expect(out).toContain('Slack links look like https://fixture.slack.com/archives/[channel]/[timestamp]');
     expect(out).not.toContain('ignore this channel noise');
-    expect(out).toContain('older: read_public_channel with before_ts=');
-    expect(out).toContain('newer: after_ts=');
+    expect(out).toMatch(new RegExp(`older: read_public_channel channel=${HAVEN.channel} before_ts=\\d+\\.\\d+; newer: read_public_channel channel=${HAVEN.channel} after_ts=\\d+\\.\\d+\\]`));
     const after = (await sql`select count(*)::int as n from usage where user_id = ${speaker} and kind = 'search'`)[0]!.n;
     expect(after).toBe(before + 1);
   });
@@ -159,6 +158,7 @@ describe('read_public_channel', () => {
       limit: 3,
     });
     expect(latest).toContain('haven is mid-november');
+    expect(latest).toMatch(new RegExp(`\\[3 top-level messages, oldest first, [\\d.]+ to [\\d.]+; older: read_public_channel channel=${HAVEN.channel} before_ts=[\\d.]+; newest message\\]`));
     // Fixture's last three visible messages (## already filtered).
     const visible = havenChannelHistory().filter((m) => !String(m.text).trimStart().startsWith('##'));
     expect(latest).toContain(visible[visible.length - 1]!.text);

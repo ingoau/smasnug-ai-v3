@@ -1,11 +1,12 @@
-/** read_thread / read_channel: pages of the CURRENT thread/channel (bot token), in the context format, capped by size. */
+/** read_thread / read_channel: pages of the CURRENT thread/channel (bot token), in the context format, capped by size, both directions. */
 import { tool } from 'ai';
 import { z } from 'zod';
 import { registerTool } from '../core/tools.js';
 import { renderRawMessages } from '../context/thread.js';
 import { fetchHistoryBefore, fetchReplies, fromSlack } from '../context/slack-messages.js';
 import { limits } from '../config.js';
-import { estimateRenderedChars, pageThread, takeWithinBudget, threadPageHeader } from './paging.js';
+import { channelPageHeader, estimateRenderedChars, pageThread, takeWithinBudget, threadPageHeader } from './paging.js';
+import { fetchHistoryAfterClosest } from './public-channel.js';
 import type { RenderMsg } from '../context/format.js';
 import { log } from '../log.js';
 import { errMsg, normalizeTs, untrusted } from './util.js';
@@ -59,23 +60,45 @@ registerTool({
   roles: ['front', 'child'],
   build: (ctx) =>
     tool({
-      description:
-        `Read top-level messages of the current Slack channel (not thread replies). Returns up to \`limit\` messages before \`before_ts\` (oldest first, ~${limits.readPageTokens} tokens max). Only works in channels the bot is in. To read any other public channel, use read_public_channel.`,
+      description: `Read top-level messages of the current Slack channel (not thread replies), a page at a time (oldest first on the page, ~${limits.readPageTokens} tokens max). Default: the latest messages. \`before_ts\` pages backwards (older), \`after_ts\` pages forwards (newer). The header says where the page is and how to continue. Only works in channels the bot is in. To read any other public channel, use read_public_channel.`,
       inputSchema: z.object({
-        before_ts: z.string().optional().describe('Only messages strictly older than this message ts (the bracketed number in context). Omit for the latest.'),
+        before_ts: z.string().optional().describe('Only messages strictly older than this message ts (the bracketed number in context): pages backwards. Omit for the latest.'),
+        after_ts: z.string().optional().describe('Only messages strictly newer than this ts: pages forwards.'),
         limit: z.number().int().min(1).max(CHANNEL_MAX_LIMIT).optional().describe(`How many messages (default ${CHANNEL_DEFAULT_LIMIT}, max ${CHANNEL_MAX_LIMIT}); pages are also capped by size`),
       }),
-      execute: async ({ before_ts, limit }) => {
+      execute: async ({ before_ts, after_ts, limit }) => {
         const before = normalizeTs(before_ts);
         if (before_ts && !before) return badTs('before_ts', before_ts);
+        const after = normalizeTs(after_ts);
+        if (after_ts && !after) return badTs('after_ts', after_ts);
+        if (before && after) return 'Pass only one of before_ts (older) or after_ts (newer).';
         const n = limit ?? CHANNEL_DEFAULT_LIMIT;
+        // Over-fetch a little: joins/leaves and `##` messages are filtered out.
+        const need = Math.min(n + 10, 100);
         try {
-          // Over-fetch a little: joins/leaves are filtered out.
-          const raws = await fetchHistoryBefore(ctx.channelId, { latest: before, limit: Math.min(n + 10, 100) });
-          const shown = takeWithinBudget(visible(raws), 'backward', { maxChars: PAGE_CHARS, maxCount: n, size });
-          if (!shown.length) return before ? `No channel messages before ${before}.` : 'No messages in this channel.';
+          let shown: RenderMsg[];
+          let hasOlder: boolean;
+          let hasNewer: boolean;
+          if (after) {
+            // Walks Slack's newest-first pages so a busy channel doesn't skip ahead (shared with read_public_channel).
+            const vis = visible(await fetchHistoryAfterClosest(ctx.channelId, after, need, 'bot'));
+            shown = takeWithinBudget(vis, 'forward', { maxChars: PAGE_CHARS, maxCount: n, size });
+            hasOlder = true;
+            hasNewer = true; // the forward walk covers a time window: newer messages can't be ruled out
+          } else {
+            const raws = await fetchHistoryBefore(ctx.channelId, { latest: before, limit: need });
+            const vis = visible(raws);
+            shown = takeWithinBudget(vis, 'backward', { maxChars: PAGE_CHARS, maxCount: n, size });
+            // Slack returns fewer than asked only when the channel has no more.
+            hasOlder = vis.length > shown.length || raws.length >= need;
+            hasNewer = Boolean(before);
+          }
+          if (!shown.length) {
+            if (after) return `No channel messages after ${after}.`;
+            return before ? `No channel messages before ${before}.` : 'No messages in this channel.';
+          }
           const body = await renderRawMessages(ctx.threadId, shown);
-          return untrusted('slack channel', `${body}\n[older messages: call read_channel with before_ts=${shown[0]!.ts}]`);
+          return untrusted('slack channel', `${channelPageHeader({ msgs: shown, hasOlder, hasNewer }, 'read_channel')}\n${body}`);
         } catch (err) {
           log.warn({ err, channel: ctx.channelId }, 'read_channel failed');
           return `Could not read the channel: ${errMsg(err)}`;

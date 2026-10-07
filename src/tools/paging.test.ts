@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { RenderMsg } from '../context/format.js';
-import { estimateRenderedChars, pageThread, takeWithinBudget, threadPageHeader } from './paging.js';
+import { channelPageHeader, estimateRenderedChars, pageThread, takeWithinBudget, threadPageHeader, trimAround } from './paging.js';
 
 const ROOT = '1790000000.000100';
 const msg = (i: number, text = `reply ${i}`): RenderMsg => ({ ts: `${1790000000 + i}.000100`, userId: 'U1', botId: null, username: null, text, files: [] });
@@ -78,5 +78,26 @@ describe('pageThread', () => {
     expect(none.replies).toEqual([]);
     expect(none.parent).toBeUndefined();
     expect(threadPageHeader(none)).toBe('[no replies in that range (5 replies in total)]');
+  });
+});
+
+describe('channel pages', () => {
+  const m = (i: number) => ({ ts: `${1790000000 + i}.000100` });
+  it('header gives the ts range and both continue hints, or the ends', () => {
+    expect(channelPageHeader({ msgs: [m(1), m(2), m(3)], hasOlder: true, hasNewer: true }, 'read_channel')).toBe(
+      '[3 top-level messages, oldest first, 1790000001.000100 to 1790000003.000100; older: read_channel before_ts=1790000001.000100; newer: read_channel after_ts=1790000003.000100]',
+    );
+    expect(channelPageHeader({ msgs: [m(1)], hasOlder: false, hasNewer: false }, 'read_public_channel channel=C1')).toBe(
+      '[1 top-level message, oldest first, 1790000001.000100; start of channel; newest message]',
+    );
+    expect(channelPageHeader({ msgs: [], hasOlder: true, hasNewer: true }, 'read_channel')).toBe('[no messages on this page]');
+  });
+
+  it('trimAround keeps the centre and trims the longer side first', () => {
+    const msgs = Array.from({ length: 9 }, (_, i) => m(i));
+    const out = trimAround(msgs, m(2).ts, { maxChars: 5, size: () => 1 });
+    expect(out.map((x) => x.ts)).toEqual([0, 1, 2, 3, 4].map((i) => m(i).ts));
+    expect(trimAround(msgs, m(4).ts, { maxChars: 1, size: () => 1 })).toEqual([m(4)]);
+    expect(trimAround(msgs, m(4).ts, { maxChars: 100, size: () => 1 })).toHaveLength(9);
   });
 });

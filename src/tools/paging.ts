@@ -94,3 +94,45 @@ export function threadPageHeader(p: ThreadPage, tool = 'read_thread'): string {
   ].filter(Boolean);
   return `[${[pos, ...nav].join('; ')}]`;
 }
+
+/**
+ * Trim a window centred on `centerTs` to the size budget: drop messages from whichever side has more left until it
+ * fits (the centre message always stays).
+ */
+export function trimAround<T extends { ts: string }>(msgs: T[], centerTs: string, opts: { maxChars: number; size: (m: T) => number }): T[] {
+  let out = [...msgs];
+  let total = out.reduce((n, m) => n + opts.size(m), 0);
+  while (out.length > 1 && total > opts.maxChars) {
+    const c = out.findIndex((m) => m.ts === centerTs);
+    const center = c >= 0 ? c : Math.floor(out.length / 2);
+    const before = center;
+    const after = out.length - 1 - center;
+    const drop = after > before ? out.length - 1 : 0;
+    total -= opts.size(out[drop]!);
+    out = out.filter((_, i) => i !== drop);
+  }
+  return out;
+}
+
+export interface ChannelPageInfo {
+  /** Messages on the page, oldest first. */
+  msgs: { ts: string }[];
+  /** Whether older / newer messages may exist beyond the page (false: start of channel / newest message). */
+  hasOlder: boolean;
+  hasNewer: boolean;
+}
+
+/**
+ * Header for a page of top-level channel messages (channel totals aren't known, so the position is the ts range),
+ * with how to continue in both directions. `call` is how to call the tool again, e.g. `read_channel` or
+ * `read_public_channel channel=C123`.
+ */
+export function channelPageHeader(p: ChannelPageInfo, call: string): string {
+  if (!p.msgs.length) return '[no messages on this page]';
+  const n = p.msgs.length;
+  const first = p.msgs[0]!.ts;
+  const last = p.msgs[n - 1]!.ts;
+  const pos = `${n} top-level ${n === 1 ? 'message' : 'messages'}, oldest first, ${n === 1 ? first : `${first} to ${last}`}`;
+  const nav = [p.hasOlder ? `older: ${call} before_ts=${first}` : 'start of channel', p.hasNewer ? `newer: ${call} after_ts=${last}` : 'newest message'];
+  return `[${[pos, ...nav].join('; ')}]`;
+}
