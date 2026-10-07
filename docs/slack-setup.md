@@ -13,8 +13,8 @@ Use a separate app in a test workspace for development.
      `read_public_thread` (public-channel threads found via search, also in channels the bot isn't in) and
      `read_public_channel` (top-level history / surrounding context in any public channel); the channel is verified
      public via `conversations.info` first. Without that scope those tools tell the model they can't open other
-     channels/threads yet. `search:read.public` is used only by `slack_semantic_search` (Slack's
-     Real-time Search API, public channels only); without it that tool tells the model to use `slack_search`.
+     channels/threads yet. `search:read.public` (still in the manifest) is unused since `slack_semantic_search`
+     was removed; removing the scope needs a reinstall, so it is the owner's call.
 4. Fill in the rest of `.env`:
    - `ADMIN_USER_ID` — your Slack user id (profile → ⋯ → Copy member ID). The admin approves workspace facts,
      handles reports, can pause the bot from App Home and bypasses pause/suspension.
