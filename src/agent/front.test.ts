@@ -67,7 +67,8 @@ vi.mock('../context/thread.js', () => ({
   renderThreadContext: async () => ({ history: '<@U1> Tess: earlier', channelContext: '', newMessages: '<@U1> Tess: hi bot', participantIds: ['U2', 'U1', 'UBOT', 'U404'], ...h.ctx }),
   renderMessages: async (_t: string, ts: string[]) => `<@U1> Tess: INBOX ${ts.join(',')}`,
 }));
-vi.mock('../models.js', () => ({
+vi.mock('../models.js', async (orig) => ({
+  ...(await orig<typeof import('../models.js')>()),
   MODELS: { gate: 'm', front: 'm', child: 'm' },
   chatModel: () => h.model,
 }));
