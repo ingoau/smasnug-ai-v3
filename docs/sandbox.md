@@ -1,7 +1,8 @@
 # Code sandboxes
 
-2026-10-07 · **built** (phases 0a–7; module `src/sandbox/`, migration `250_sandbox.sql`). The Cloudflare spike
-(Phase 0b) is prepared but not run yet, so the preview deploy's output parsing is unverified (§10). Written as the
+2026-10-07 · **built** (phases 0a–7; module `src/sandbox/`, migration `250_sandbox.sql`). A live
+`wrangler deploy --temporary` run (Phase 0b, partial) confirmed the deploy and the output parsing (§9); whether
+browsers get past Cloudflare's challenge on a fresh preview is still open (§10). Written as the
 plan; "Built:" notes and §0 record where the implementation differs. `docs/design.md` "Code sandboxes" is the summary.
 
 ## 0. Implementation status and deviations
@@ -95,7 +96,7 @@ Deviations from the plan below (all decided 2026-10-07 unless noted):
 | D14 | **The claim URL is a bearer credential.** It never reaches the model, thread events or logs. Only the requester's own button press shows it, ephemerally. Stored encrypted and cleared at expiry. | Anyone holding it can claim the account into their own Cloudflare account permanently. |
 | D15 | **The requester accepts Cloudflare's Terms and Privacy Policy before account creation:** an ephemeral Accept/Cancel on first use, recorded per user. | Account creation happens on the user's behalf. |
 | D16 | **Deploying is a code step after the subagent finishes, not a model tool.** Preferred: from a **fresh** Modal sandbox with no Cloudflare credentials, a fresh `HOME`/`XDG_CONFIG_HOME` per deploy and a pinned wrangler version. Alternative: the REST API from the worker, with the proof-of-work in a worker thread. | Wrangler caches the temporary account for 60 min, so a shared HOME would put a second requester into the first one's account. A fresh sandbox also keeps the subagent's own sandbox, which holds untrusted content, away from the deploy. |
-| D17 | **Phishing mitigations:**<br>• injected banner "Preview built by smasnug for @user, expires HH:MM";<br>• `X-Robots-Tag: noindex`;<br>• builds with password or card forms are refused;<br>• per-user rate limits;<br>• admin takedown (delete via the temporary token while it's valid; unverified). | The bot would otherwise be a free, anonymous phishing host. |
+| D17 | **Phishing mitigations:**<br>• injected banner "Preview built by smasnug for @user, expires HH:MM";<br>• `X-Robots-Tag: noindex`;<br>• builds with password or card forms are refused;<br>• per-user rate limits;<br>• admin takedown (delete via the temporary token while it's valid; works before a claim, §9.2). | The bot would otherwise be a free, anonymous phishing host. |
 
 ## 3. Architecture
 
@@ -320,7 +321,7 @@ the sandbox busy past `lifetimeMs` loses unsaved state, and the tool says so.
   - others get "Only <@owner> can claim this preview."
   - The click is logged without the URL.
 - **Takedown** (admin only: the mod-channel report post and the App Home "Live previews" list): delete the script
-  via the temporary token (`DELETE /accounts/{id}/workers/scripts/{name}`, unverified), status `taken_down`,
+  via the temporary token (`DELETE /accounts/{id}/workers/scripts/{name}`, verified before a claim, §9.2), status `taken_down`,
   secrets nulled, message updated. If the delete fails, the preview still expires in < 60 min, and the admin is told
   so.
 - **The front agent** sees, via the child's result, that a preview was requested. The prompt says the system posts
@@ -711,7 +712,9 @@ Budget *accounting* starts in Phase 1, so admin testing counts too.
 - `docs/slack-setup.md` if App Home or the manifest change;
 - update this doc's open questions with the spike results.
 
-## 9. Phase 0 results (Modal spike, 2026-10-07)
+## 9. Phase 0 results (2026-10-07)
+
+### 9.1 Modal spike
 
 Run with `scripts/spikes/modal-spike.ts` (`basic`, `image`, `billing`, `cleanup` stages) against the `smasnug-ai-dev`
 environment with `modal@0.11.0`. Everything it created was terminated and its snapshot images deleted.
@@ -740,9 +743,24 @@ environment with `modal@0.11.0`. Everything it created was terminated and its sn
 **Decision: Modal stays.** Nothing essential is missing from the JS SDK; the gaps (exec kill, exec timeout, non-root,
 IPv6 egress) have workarounds in `src/sandbox/modal.ts`.
 
+### 9.2 Cloudflare temporary deploy (live run, partial Phase 0b)
+
+One `wrangler deploy --temporary` run, approved by Ingo. Not yet covered: claiming, deleting after a claim, rate
+limits, the REST flow, and the terms review.
+
+| Need | Result | Notes / what the code does |
+|---|---|---|
+| Worker (code) + assets with `--temporary` | **works** | Our headers/banner Worker + assets deployed; the assets-only fallback isn't needed. |
+| ND-JSON output (`WRANGLER_OUTPUT_FILE_PATH`) | **works** | One `wrangler-session` record, then one `deploy` record with keys `type, version, worker_name, worker_tag, version_id, targets, worker_name_overridden, bundle_size, timestamp`. The URL is in `targets`: `https://<worker>.<account-subdomain>.workers.dev`. `parseDeployRecord` takes the last `deploy` record, prefers the workers.dev target and uses its `worker_name` for the takedown. |
+| Temporary account file | **found** | `$XDG_CONFIG_HOME/.wrangler/wrangler-temporary-account.toml` (a copy is also written next to wrangler's `metrics.json`). Keys: `account.id`, `account.name`, `account.apiToken`, `account.expiresAt`, `claim.url`, `claim.expiresAt`. `deploy.ts` reads exactly that file (falling back to the first file of that name under the deploy HOME, never other TOML) and exactly those keys. |
+| Expiry | **60 min** | `account.expiresAt` = `claim.expiresAt` = creation + 60 min. `pickTemporaryAccount` falls back to the account expiry if the claim one is missing. |
+| Console output | **contains secrets** | Wrangler prints a "Temporary account ready … Claim URL" block. The output still only leaves the sandbox as a `redact`ed tail on failure; `redact` now removes every URL except a plain workers.dev one, plus token-like strings. |
+| Takedown with the temporary token | **works** (before a claim) | `DELETE https://api.cloudflare.com/client/v4/accounts/{id}/workers/scripts/{name}` → 200 `success: true`. |
+| Server-side fetch of the preview | **403 challenge** | A `fetch()` from the server got a Cloudflare challenge page (Turnstile CSP), both before and after the delete. So the banner and headers were **not verified**, and whether real browsers see the site is unknown (§10 q21). Nothing in the deploy path fetches the preview (no health check), so this can't fail a deploy. |
+
 ## 10. Open questions / to verify
 
-**Modal (Phase 0a)** — answered by the spike (§9) unless noted.
+**Modal (Phase 0a)** — answered by the spike (§9.1) unless noted.
 1. ~~JS SDK coverage~~: all there; kill, timeout and non-root via workarounds. Parameter: `outboundCidrAllowlist`.
 2. ~~Rates~~: $0.1419 / core-hour, $0.024 / GiB-hour for sandboxes; billing month = calendar month UTC. Still open:
    snapshot storage and image build costs (small; they show up in Modal's metered cost, which the budget uses).
@@ -754,21 +772,27 @@ IPv6 egress) have workarounds in `src/sandbox/modal.ts`.
 6. ~~Latency~~: create ~0.3–1 s + first exec ~4 s; resume about the same; first image build ~13 min (prebuild).
 7. Open: Modal's acceptable-use terms for third-party, user-directed code (Ingo).
 
-**Cloudflare (Phase 0b)** — prepared, not run (it creates a temporary Cloudflare account and accepts Cloudflare's
-terms; it needs the user's go-ahead). The spike script deploys one hello page from a fresh deploy sandbox, reads the
-URL and temporary-account file, fetches the page, tries the takedown and prints only names, booleans and redacted
-text. Until it has run, `preview/deploy.ts`'s parsing of wrangler's output (questions 16–17) is a best guess.
+**Cloudflare (Phase 0b)** — one live deploy run so far (§9.2); the parsing in `preview/deploy.ts` now matches it.
+Claiming, deleting after a claim, rate limits and the REST flow are still untested.
 8. The 2025 general terms vs. this platform flow ("on behalf of a third party", automated multi-account clauses).
 9. Age rules for teen claimers: Cloudflare enforces its own at claim / sign-up (decided).
 10. Does the URL change on claim?
-11. Does delete work with the temporary token (takedown)?
+11. Partly answered: delete with the temporary token works before a claim (200 `success: true`). Open: after a claim.
 12. Rate-limit numbers for temporary account creation.
-13. Non-interactive workers.dev subdomain registration.
+13. Probably answered: the temporary account came with its own `<account-subdomain>.workers.dev` and the deploy
+    returned a URL with no separate subdomain step.
 14. Proof-of-work time (REST path; not built).
 15. `--no-autoconfig` behaviour (not passed: we ship our own `wrangler.jsonc`).
-16. Does `--temporary` accept a Worker with code + assets (our headers Worker), or only assets? (`PREVIEW_ASSETS_ONLY=1`
-    switches to the assets-only fallback.)
-17. Where exactly does wrangler write the temporary-account file under a custom HOME/XDG, and its keys?
+16. ~~Worker with code + assets~~: works with `--temporary`; the assets-only fallback (`PREVIEW_ASSETS_ONLY=1`) stays
+    as a switch but isn't needed.
+17. ~~Temporary-account file and keys~~: `$XDG_CONFIG_HOME/.wrangler/wrangler-temporary-account.toml` (also next to
+    `metrics.json`), keys `account.{id,name,apiToken,expiresAt}`, `claim.{url,expiresAt}`; ND-JSON `deploy` record
+    with the URL in `targets` (§9.2).
+21. New: a server-side `fetch()` of a fresh preview URL returned a **403 Cloudflare challenge page** (Turnstile CSP),
+    before and after the delete. Do real browsers get the site, or a challenge (and can they pass it)? Is it only
+    server/datacenter traffic, only the first minutes after deploy, or all temporary-account sites? Until answered,
+    the banner, `X-Robots-Tag` and CSP headers are unverified; check from a normal browser, then with `curl` from a
+    residential IP. The deploy path doesn't depend on fetching the preview.
 
 **HCA**
 18. Partly answered: `GET /api/external/check?slack_id=` returns HTTP 200 with `{"result": "…", "note": "…"}`, also

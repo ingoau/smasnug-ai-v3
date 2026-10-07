@@ -5,7 +5,11 @@ vi.hoisted(() => {
 });
 import { bannerHtml, checkLimits, HEADERS_FILE, injectBanner, normalizeEntries, prepareBundle, scanForms, wranglerConfig } from './bundle.js';
 import { decryptSecret, encryptSecret, previewKey } from './crypto.js';
-import { parseDeployUrl, parseSimpleToml, pickTemporaryAccount, redact } from './deploy.js';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { parseDeployRecord, parseDeployUrl, parseSimpleToml, pickTemporaryAccount, readDeployOutputScript, redact, TEMP_ACCOUNT_FILE } from './deploy.js';
 import { readTar, writeTar } from './tar.js';
 import { previewMessage, termsBlocks } from './flow.js';
 
@@ -150,36 +154,108 @@ describe('secrets', () => {
 });
 
 describe('wrangler output parsing', () => {
-  it('finds the URL in the ND-JSON output', () => {
-    const nd = ['{"type":"wrangler-session","version":1}', '{"type":"deploy","version":1,"worker_name":"smasnug-p-x","targets":["https://smasnug-p-x.tmp-abc.workers.dev"]}'].join('\n');
-    expect(parseDeployUrl(nd)).toBe('https://smasnug-p-x.tmp-abc.workers.dev');
-    expect(parseDeployUrl('garbage https://a.b.workers.dev/ more')).toBe('https://a.b.workers.dev');
+  // Shaped like the spike's WRANGLER_OUTPUT_FILE_PATH output (docs/sandbox.md §9); values invented.
+  const ND_FIXTURE = [
+    '{"type":"wrangler-session","version":1,"wrangler_version":"4.99.0","command_line_args":["deploy","--temporary"],"log_file_path":"/tmp/h-pv_x/.config/.wrangler/logs/wrangler.log","timestamp":"2026-10-07T12:00:00.000Z"}',
+    '{"type":"deploy","version":1,"worker_name":"smasnug-p-k3j9","worker_tag":"0f1e2d3c4b5a69788796a5b4c3d2e1f0","version_id":"7d1c2b3a-0000-4000-8000-123456789abc","targets":["https://smasnug-p-k3j9.tmp-quiet-river-42.workers.dev"],"worker_name_overridden":false,"bundle_size":2048,"timestamp":"2026-10-07T12:00:05.000Z"}',
+    '',
+  ].join('\n');
+  const TOML_FIXTURE = `[account]
+id = "0a1b2c3d4e5f60718293a4b5c6d7e8f9"
+name = "Temporary account 1234"
+apiToken = "tmpTok_EXAMPLE_0123456789abcdefghijklmnopqrstuv"
+expiresAt = "2026-10-07T13:00:00.000Z"
+
+[claim]
+url = "https://dash.cloudflare.com/claim-temporary-account?token=EXAMPLEclaimTOKEN0123456789abcdef"
+expiresAt = "2026-10-07T13:00:00.000Z"
+`;
+
+  it('reads the URL and worker name from the deploy record, skipping the session record', () => {
+    expect(parseDeployRecord(ND_FIXTURE)).toEqual({ url: 'https://smasnug-p-k3j9.tmp-quiet-river-42.workers.dev', workerName: 'smasnug-p-k3j9' });
+    expect(parseDeployUrl(ND_FIXTURE)).toBe('https://smasnug-p-k3j9.tmp-quiet-river-42.workers.dev');
+    // The workers.dev target wins over other https targets; object targets are accepted.
+    const multi = '{"type":"deploy","worker_name":"w","targets":["https://example.com/app","https://w.sub.workers.dev"]}';
+    expect(parseDeployUrl(multi)).toBe('https://w.sub.workers.dev');
+    expect(parseDeployUrl('{"type":"deploy","targets":[{"url":"https://w.sub.workers.dev"}]}')).toBe('https://w.sub.workers.dev');
+    expect(parseDeployUrl('{"type":"deploy","targets":["example.com/*"]}')).toBeNull();
+    expect(parseDeployUrl('{"type":"wrangler-session","version":1}')).toBeNull();
+    expect(parseDeployRecord('garbage https://a.b.workers.dev/ more')).toEqual({ url: 'https://a.b.workers.dev', workerName: null });
     expect(parseDeployUrl('{}')).toBeNull();
   });
 
-  it('reads the temporary account file', () => {
-    const toml = `# generated
-[account]
-id = "acc123"
-api_token = "tok_secret"
-expires_at = "2026-10-07T13:00:00Z"
-
-[claim]
-url = "https://dash.cloudflare.com/claim/xyz"
-expires_at = "2026-10-07T13:00:00Z"
-`;
-    const kv = parseSimpleToml(toml);
-    expect(kv['account.id']).toBe('acc123');
+  it('reads the temporary account file (exact keys)', () => {
+    const kv = parseSimpleToml(TOML_FIXTURE);
+    expect(kv['account.id']).toBe('0a1b2c3d4e5f60718293a4b5c6d7e8f9');
     const a = pickTemporaryAccount(kv);
-    expect(a).toMatchObject({ accountId: 'acc123', apiToken: 'tok_secret', claimUrl: 'https://dash.cloudflare.com/claim/xyz' });
-    expect(a.accountExpiresAt?.toISOString()).toBe('2026-10-07T13:00:00.000Z');
-    expect(a.claimExpiresAt?.toISOString()).toBe('2026-10-07T13:00:00.000Z');
+    expect(a).toEqual({
+      accountId: '0a1b2c3d4e5f60718293a4b5c6d7e8f9',
+      apiToken: 'tmpTok_EXAMPLE_0123456789abcdefghijklmnopqrstuv',
+      accountExpiresAt: new Date('2026-10-07T13:00:00.000Z'),
+      claimUrl: 'https://dash.cloudflare.com/claim-temporary-account?token=EXAMPLEclaimTOKEN0123456789abcdef',
+      claimExpiresAt: new Date('2026-10-07T13:00:00.000Z'),
+    });
+    // Dotted keys and an unquoted TOML datetime read the same; the claim shares the account's expiry when missing.
+    const dotted = pickTemporaryAccount(parseSimpleToml('account.id = "acc"\naccount.apiToken = "tok"\naccount.expiresAt = 2026-10-07T13:00:00Z\nclaim.url = "https://c.example/x"'));
+    expect(dotted).toMatchObject({ accountId: 'acc', apiToken: 'tok', claimUrl: 'https://c.example/x' });
+    expect(dotted.claimExpiresAt?.toISOString()).toBe('2026-10-07T13:00:00.000Z');
+    // Other spellings are not guessed at; a non-https claim URL is dropped.
+    expect(pickTemporaryAccount(parseSimpleToml('[account]\naccount_id = "x"\napi_token = "y"\n[claim]\nurl = "javascript:x"'))).toEqual({
+      accountId: null,
+      apiToken: null,
+      accountExpiresAt: null,
+      claimUrl: null,
+      claimExpiresAt: null,
+    });
+  });
+
+  it('reads exactly the temporary account file, from XDG_CONFIG_HOME or elsewhere under HOME', () => {
+    const root = mkdtempSync(join(tmpdir(), 'wr-'));
+    try {
+      const home = join(root, 'h');
+      const xdg = join(home, '.config');
+      const outFile = join(root, 'out.ndjson');
+      const split = '\n----SPLIT----\n';
+      writeFileSync(outFile, ND_FIXTURE);
+      mkdirSync(join(xdg, '.wrangler'), { recursive: true });
+      writeFileSync(join(xdg, '.wrangler', 'default.toml'), 'oauth_token = "not-this"\n');
+      const run = () => execFileSync('bash', ['-c', readDeployOutputScript({ outFile, home, xdgConfigHome: xdg, split })]).toString('utf8');
+      expect(run().split(split)).toEqual([ND_FIXTURE, '']);
+      mkdirSync(join(home, 'elsewhere'), { recursive: true });
+      writeFileSync(join(home, 'elsewhere', TEMP_ACCOUNT_FILE), TOML_FIXTURE.replace('Temporary account 1234', 'copy'));
+      expect(run().split(split)[1]).toContain('name = "copy"');
+      writeFileSync(join(xdg, '.wrangler', TEMP_ACCOUNT_FILE), TOML_FIXTURE);
+      const [nd, acct] = run().split(split);
+      expect(nd).toBe(ND_FIXTURE);
+      expect(acct).toBe(TOML_FIXTURE);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('redacts claim links and tokens', () => {
     const r = redact('Claim it at https://dash.cloudflare.com/claim/abcdefg?x=1 token=supersecretvalue1234 and AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA done');
     expect(r).not.toMatch(/claim\/abc|supersecret|AAAAAAAA/);
     expect(r).toContain('done');
+  });
+
+  it("redacts wrangler's temporary account block and the account file", () => {
+    const block = [
+      'Uploaded smasnug-p-k3j9 (1.20 sec)',
+      'Deployed smasnug-p-k3j9 triggers (0.50 sec)',
+      '  https://smasnug-p-k3j9.tmp-quiet-river-42.workers.dev',
+      'Temporary account ready',
+      '  Account: Temporary account 1234 (0a1b2c3d4e5f60718293a4b5c6d7e8f9)',
+      '  Claim URL: https://dash.cloudflare.com/x/ABCdef123',
+      '  Claim this account within 60 minutes:',
+      '    https://dash.example/a/Zq9x',
+      '  Expires: 2026-10-07T13:00:00.000Z',
+    ].join('\n');
+    const r = redact(block + '\n' + TOML_FIXTURE);
+    expect(r).not.toMatch(/ABCdef123|Zq9x|0a1b2c3d4e5f60718293a4b5c6d7e8f9|tmpTok_EXAMPLE|EXAMPLEclaimTOKEN|dash\.cloudflare\.com\/x/);
+    // Only the preview URL itself survives.
+    expect(r.match(/https:\/\/\S+/g)).toEqual(['https://smasnug-p-k3j9.tmp-quiet-river-42.workers.dev']);
+    expect(r).toContain('Temporary account ready');
   });
 });
 
