@@ -91,6 +91,59 @@ export function escapeAffectedTags(md: string): string {
   return md.replace(AFFECTED_LT, '&lt;');
 }
 
+/**
+ * Single-star emphasis on one line, `*x*`: not `**`, not a `* ` bullet, not inside a word (`2*3*4`), not escaped.
+ * The model is told to write **bold** and _italic_, so a lone `*x*` is Slack's bold habit (mrkdwn `*bold*`), but
+ * Slack's markdown renders it as italic: it is sent as `**x**` (and rendered bold in rich_text too).
+ */
+const STAR_PAIR = /(?<![\p{L}\p{N}*\\])\*(?![\s*])([^\n]*?[^\s*\\])\*(?![\p{L}\p{N}*])/gu;
+const STAR_OPENER = /(?<![\p{L}\p{N}*\\])\*(?![\s*])/gu;
+
+/** `*x*` → `**x**` outside inline code spans, paragraph by paragraph. */
+export function boldSingleStars(md: string): string {
+  if (!md.includes('*')) return md;
+  let out = '';
+  let last = 0;
+  for (const p of paragraphs(md)) {
+    out += md.slice(last, p.start);
+    const para = md.slice(p.start, p.end);
+    let at = 0;
+    for (const sp of codeSpans(para, true).spans) {
+      out += para.slice(at, sp.start).replace(STAR_PAIR, '**$1**') + para.slice(sp.start, sp.end);
+      at = sp.end;
+    }
+    out += para.slice(at).replace(STAR_PAIR, '**$1**');
+    last = p.end;
+  }
+  return out + md.slice(last);
+}
+
+/**
+ * Streaming: where to hold back an incomplete paragraph so the `*x*` rewrite stays prefix-stable. A trailing run of
+ * `*` (it may still become `**`, an opener or a closer), or a single-star opener on the last line whose closer
+ * hasn't arrived yet (outside code spans). Returns para.length when nothing needs holding.
+ */
+function starHold(para: string, spans: Span[]): number {
+  const lineStart = para.lastIndexOf('\n') + 1;
+  const trailing = /\*+$/.exec(para);
+  let hold = trailing ? trailing.index : para.length;
+  const inSpan = (i: number) => spans.some((sp) => i >= sp.start && i < sp.end);
+  // Without the held trailing stars: a pair they would close isn't closed yet either.
+  const line = para.slice(lineStart, hold);
+  const matched: [number, number][] = [];
+  for (const m of line.matchAll(STAR_PAIR)) if (!inSpan(lineStart + m.index!)) matched.push([m.index!, m.index! + m[0].length]);
+  for (const m of line.matchAll(STAR_OPENER)) {
+    const i = m.index!;
+    if (inSpan(lineStart + i) || matched.some(([s, e]) => i >= s && i < e)) continue;
+    hold = Math.min(hold, lineStart + i);
+    break;
+  }
+  return hold;
+}
+
+/** The markdown sent for prose: `*x*` as bold, affected tags escaped. */
+const proseMarkdown = (md: string) => escapeAffectedTags(boldSingleStars(md));
+
 // ---------- Code fences ----------
 
 interface Fence {
@@ -333,8 +386,9 @@ export function streamUnits(text: string, final: boolean): StreamUnit[] {
       }
       if (!complete) {
         // Hold back a trailing `\` / `<…` that may still become (an escaped) affected tag.
+        // Also hold a `*` that may still open or close a `*x*` (sent as `**x**`, boldSingleStars).
         const hold = /\\?(?:<\/?[a-z0-9-]*)?$/i.exec(para)!;
-        md(r.start + from, r.start + p.start + hold.index);
+        md(r.start + from, r.start + p.start + Math.min(hold.index, starHold(para, spans)));
         stop = true;
         break;
       }
@@ -347,7 +401,7 @@ export function streamUnits(text: string, final: boolean): StreamUnit[] {
 
 /** The markdown actually sent for a markdown unit's raw text. */
 export function mdDisplay(raw: string): string {
-  return escapeAffectedTags(raw).replace(/^(?:[ \t]*\n)+/, '');
+  return proseMarkdown(raw).replace(/^(?:[ \t]*\n)+/, '');
 }
 
 /** Concatenated markdown text of stream call args (`markdown_text` or `markdown_text` chunks). For tests/logs. */
@@ -387,7 +441,9 @@ function parseStyled(t: string, style: RichStyle, out: RichInline[]) {
     else if (m[7] !== undefined) out.push({ type: 'channel', channel_id: m[7] });
     else if (m[8] !== undefined || m[9] !== undefined) parseStyled((m[8] ?? m[9])!, { ...style, bold: true }, out);
     else if (m[10] !== undefined) parseStyled(m[10], { ...style, strike: true }, out);
-    else if (m[11] !== undefined || m[12] !== undefined) parseStyled((m[11] ?? m[12])!, { ...style, italic: true }, out);
+    // A single-star `*x*` is bold, as in the markdown blocks (boldSingleStars); `_x_` is italic.
+    else if (m[11] !== undefined) parseStyled(m[11], { ...style, bold: true }, out);
+    else if (m[12] !== undefined) parseStyled(m[12], { ...style, italic: true }, out);
     else out.push({ type: 'link', url: m[13]!, ...styled(style) });
     last = m.index! + m[0].length;
   }
@@ -485,7 +541,7 @@ function richElements(seg: Segment): RichElement[] {
 }
 
 export function segmentBlock(seg: Segment): ReplyBlock {
-  if (seg.kind === 'markdown') return { type: 'markdown', text: escapeAffectedTags(seg.text) };
+  if (seg.kind === 'markdown') return { type: 'markdown', text: proseMarkdown(seg.text) };
   return { type: 'rich_text', elements: nonEmptyElements(richElements(seg)) };
 }
 
@@ -508,7 +564,7 @@ export function replyBlocks(text: string, opts: { maxBlocks?: number } = {}): Re
   let budget = MARKDOWN_BUDGET;
   segs = segs.map((s) => {
     if (s.kind !== 'markdown') return s;
-    const len = escapeAffectedTags(s.text).length;
+    const len = proseMarkdown(s.text).length;
     if (len > budget) return { kind: 'rich', text: s.text };
     budget -= len;
     return s;

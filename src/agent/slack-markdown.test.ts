@@ -223,6 +223,43 @@ describe('streamUnits', () => {
   });
 });
 
+describe('*x* is bold (the model writes **bold** / _italic_; a lone *x* is Slack-style bold)', () => {
+  it('rewrites single-star pairs to **…**; leaves **bold**, _italic_, bullets, math, escapes and code alone', () => {
+    const cases: [string, string][] = [
+      ['This is *important* now', 'This is **important** now'],
+      ['*Note:* check *both* links.', '**Note:** check **both** links.'],
+      ['Already **bold** and _italic_ and ***both***', 'Already **bold** and _italic_ and ***both***'],
+      ['* item one\n* item two', '* item one\n* item two'],
+      ['2*3*4 and a*b', '2*3*4 and a*b'],
+      ['rated 5* hotel', 'rated 5* hotel'],
+      ['\\*not bold\\*', '\\*not bold\\*'],
+      ['code `*x*` stays, prose *y* does not', 'code `*x*` stays, prose **y** does not'],
+      ['- *Step 1*: install\n- *Step 2*: run', '- **Step 1**: install\n- **Step 2**: run'],
+      ['_*bold italic*_', '_**bold italic**_'],
+      ['no pair *across\nlines*', 'no pair *across\nlines*'],
+    ];
+    for (const [input, out] of cases) expect(mdDisplay(input), input).toBe(out);
+    expect(replyBlocks('Hi *there*')).toEqual([{ type: 'markdown', text: 'Hi **there**' }]);
+  });
+
+  it('rich_text rendering agrees: *x* bold, _x_ italic', () => {
+    const big = `${'x'.repeat(MARKDOWN_BUDGET)}\n\nThen *bold* and _it_.`;
+    const rich = replyBlocks(big).find((b) => b.type === 'rich_text') as any;
+    const els = rich.elements.flatMap((e: any) => e.elements);
+    expect(els.find((e: any) => e.text === 'bold')?.style).toEqual({ bold: true });
+    expect(els.find((e: any) => e.text === 'it')?.style).toEqual({ italic: true });
+  });
+
+  it('streaming holds an unclosed *opener (and a trailing *) so what was sent never changes', () => {
+    expect(streamUnits('Check *both', false)).toEqual([{ kind: 'md', start: 0, end: 6 }]);
+    // The closing star may still become `**`: held until the next character.
+    expect(streamUnits('Check *both*', false)).toEqual([{ kind: 'md', start: 0, end: 6 }]);
+    expect(streamUnits('Check *both* ', false)).toEqual([{ kind: 'md', start: 0, end: 13 }]);
+    expect(mdDisplay('Check *both* links')).toBe('Check **both** links');
+    for (const t of ['A *b* c *d e* f **g** h', '* list *item*\n* two *x*', 'x `*y*` *z*', '*a `b` c* d', '5* and *ok*.\n\n*next* para']) expectPrefixStable(t);
+  });
+});
+
 describe('helpers', () => {
   it('streamArgsText reads markdown_text or markdown_text chunks', () => {
     expect(streamArgsText({ markdown_text: 'a' })).toBe('a');
