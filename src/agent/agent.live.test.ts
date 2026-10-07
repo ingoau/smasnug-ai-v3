@@ -114,7 +114,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
       // The card lives in the turn's reply: chat.update of that message, no separate card post.
       expect(cardMsg!.method).toBe('chat.update');
       expect(cardMsg!.args.ts).toBe(card.messageTs);
-      expect(cardMsg!.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'plan']);
+      expect(cardMsg!.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown']); // one card, above the reply
       expect(calls.some((c) => c.method === 'chat.postMessage' && hasPlan(c) && c.args.channel === channel)).toBe(false);
     } else {
       expect(cardMsg!.method).toBe('chat.postMessage');
@@ -145,7 +145,9 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     await processCardRender(cardId);
     calls = await fakeCalls();
     const update = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
-    expect(update?.args.blocks.find((b: any) => b.type === 'plan').title).toMatch(/^Ran \d subagents?$/);
+    // Everything done: the card collapses to its line.
+    expect(update?.args.blocks[0]).toMatchObject({ type: 'context', block_id: `card_${cardId}_plan` });
+    expect(update?.args.blocks[0].elements[0].text).toMatch(/^✓ \*Ran \d subagents?\*/);
 
     // Synthesis turn.
     const before = calls.length;
@@ -165,6 +167,8 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const frozen = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
     expect(frozen).toBeTruthy();
     expect(frozen!.args.blocks.some((b: any) => b.type === 'actions')).toBe(false); // no Stop all button
+    expect(frozen!.args.blocks[0].type).toBe('context'); // collapsed: "✓ *Title* · ran N subagents"
+    expect(frozen!.args.blocks.filter((b: any) => b.type === 'plan' || b.block_id === `card_${cardId}_plan`)).toHaveLength(1);
     const [card2] = await sql<any[]>`select * from cards where id = ${cardId}`;
     expect(card2.frozen).toBe(true);
     expect(card2.synthesized).toBe(true);
@@ -173,7 +177,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const events = await sql<any[]>`select type, payload from thread_events where thread_id = ${threadId} order by id`;
     expect(events.filter((e) => e.type === 'reply').length).toBeGreaterThanOrEqual(1);
     // eslint-disable-next-line no-console
-    console.log('card title:', frozen!.args.blocks.find((b: any) => b.type === 'plan').title, '| in reply:', replied, '| synthesis:', streamed.slice(0, 200));
+    console.log('card line:', frozen!.args.blocks[0].elements[0].text, '| in reply:', replied, '| synthesis:', streamed.slice(0, 200));
   }, 180_000);
 
   async function freshThread(tag: string) {

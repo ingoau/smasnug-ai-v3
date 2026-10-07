@@ -1,6 +1,6 @@
 /**
  * End-to-end (LIVE=1): real pipeline scheduling + thread-run, real context rendering, real tools, real OpenRouter,
- * SLACK_FAKE Slack. A mention spawns a subagent, the run completes, the synthesis turn streams below the frozen card.
+ * SLACK_FAKE Slack. A mention spawns a subagent, the run completes, the synthesis turn streams below the collapsed card.
  *   LIVE=1 pnpm vitest run src/agent/e2e.live.test.ts
  */
 import { afterAll, describe, expect, it } from 'vitest';
@@ -74,6 +74,8 @@ describe.skipIf(!LIVE)('agent e2e through the pipeline (LIVE)', () => {
     const lastUpdate = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
     expect(lastUpdate!.args.blocks.some((b: any) => b.type === 'actions')).toBe(false);
     // eslint-disable-next-line no-console
-    console.log('e2e:', calls.map((c) => c.method).join(' → '), '| in reply:', replied, '| title:', lastUpdate!.args.blocks.find((b: any) => b.type === 'plan').title);
+    // Frozen after the synthesis: collapsed to one line ("✓ *Title* · ran N subagents"), never deleted.
+    expect(lastUpdate!.args.blocks[0].type).toBe('context');
+    console.log('e2e:', calls.map((c) => c.method).join(' → '), '| in reply:', replied, '| card:', lastUpdate!.args.blocks[0].elements[0].text);
   }, 180_000);
 });

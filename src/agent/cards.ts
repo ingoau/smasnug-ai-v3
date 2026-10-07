@@ -1,6 +1,7 @@
 /**
- * Plan cards: one card per turn that started runs, living in that turn's last reply message (blocks: reply markdown,
- * plan, Stop all) — or in a message of its own when the turn didn't reply. The message is a pure render of DB state
+ * Plan cards: one card per turn that did work (its own steps, card-steps.ts) or started runs, living in a reply
+ * message of that turn (blocks: card, reply markdown, buttons) — or, for runs, in a message of its own when the turn
+ * didn't reply. One card per message. The message is a pure render of DB state
  * (card-render.ts); children write progress to the DB and call `scheduleCardRender`, which coalesces updates per
  * card to at most one per `limits.cardCoalesceMs` via a Redis flag + delayed `card-render` job. Updates always go
  * through `chat.update` (never a held-open stream).
@@ -12,7 +13,9 @@ import { enqueue, QUEUE } from '../core/queues.js';
 import { redis } from '../core/redis.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
-import { renderCard, type CardRun, type CardState, type RunStatus } from './card-render.js';
+import { renderCard, renderCardBlock, type CardRun, type CardState, type PlanBlock, type RunStatus } from './card-render.js';
+import type { ContextBlock } from './reply-buttons.js';
+import type { CardStep } from './card-steps.js';
 import { buttonsBlock, buttonsFallbackText } from './reply-buttons.js';
 import { buttonsForMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { markdownMessage } from './reply.js';
@@ -28,6 +31,8 @@ export interface CardRow {
   synthesized: boolean;
   /** Set when the card lives in the turn's reply message (message_ts is then the reply's ts). */
   replyText: string | null;
+  /** The turn's own steps (lookups), see card-steps.ts. */
+  steps: CardStep[];
   /** Loaded alongside (not a column): the quick-reply buttons of the reply the card lives in. */
   buttons?: ReplyButtonsRow | null;
 }
@@ -68,7 +73,7 @@ export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: C
     finishedAt: r.finishedAt,
   }));
   const buttons = card.replyText != null ? await buttonsForMessage(card.channelId, card.messageTs) : undefined;
-  return { card: { ...card, id: Number(card.id), buttons: buttons ?? null }, runs };
+  return { card: { ...card, id: Number(card.id), steps: Array.isArray(card.steps) ? card.steps : [], buttons: buttons ?? null }, runs };
 }
 
 /** Get or create this turn's card row (not yet posted). */
@@ -87,24 +92,58 @@ export async function ensureTurnCard(opts: { threadId: string; turnId: number })
 export interface ReplyRef {
   ts: string;
   text: string;
-  /** Delivered via chat.startStream/stopStream (chat.update on it is unverified). */
+  /** Delivered via chat.startStream/stopStream. */
   streamed: boolean;
 }
 
+/** This turn's card, if it has one. */
+export async function turnCardId(turnId: number): Promise<number | null> {
+  const [row] = await sql<{ id: number }[]>`select id from cards where turn_id = ${turnId}`;
+  return row ? Number(row.id) : null;
+}
+
+/** Record the turn's steps on its card. */
+export async function saveCardSteps(cardId: number, steps: CardStep[]): Promise<void> {
+  await sql`update cards set steps = ${sql.json(steps as any)} where id = ${cardId}`;
+}
+
 /**
- * Show the card once, after the turn's replies: attached to the turn's last reply (chat.update of that message:
- * [reply markdown, plan, actions]) when there is one, else as its own message. If attaching fails (e.g. Slack
- * refuses to update a streamed message), the card is posted as its own message and a warning is logged.
+ * The card block for a reply message that is about to carry it (the reply's final layout or its post): null when
+ * the card has nothing to show yet or already lives in another message.
+ */
+export async function cardBlockFor(cardId: number): Promise<PlanBlock | ContextBlock | null> {
+  const loaded = await loadCard(cardId);
+  if (!loaded || loaded.card.messageTs || (!loaded.runs.length && !loaded.card.steps.length)) return null;
+  return renderCardBlock(toState(loaded.card), loaded.runs);
+}
+
+/** The card now lives in this reply message (rendered with it): later renders keep [card, reply, buttons]. */
+export async function attachCard(cardId: number, ts: string, text: string): Promise<void> {
+  await sql`update cards set message_ts = ${ts}, reply_text = ${text} where id = ${cardId} and message_ts is null`;
+  const [card] = await sql<{ threadId: string }[]>`select thread_id from cards where id = ${cardId}`;
+  if (card) await appendEvent(card.threadId, 'card_posted', 'bot', { cardId, ts, attachedToReply: true, withReply: true }).catch(() => {});
+}
+
+/**
+ * Show the card once the turn is over. Already in a reply message (attached when the reply went out): re-render it
+ * with the final state. Otherwise attach it to the turn's last reply (chat.update of that message: [card, reply
+ * markdown, buttons]); runs without a reply (or a reply that can't take it) get a message of their own. A card with
+ * only steps is never posted alone.
  */
 export async function postCard(cardId: number, reply?: ReplyRef | null): Promise<void> {
   const loaded = await loadCard(cardId);
-  if (!loaded || loaded.card.messageTs || loaded.runs.length === 0) return;
+  if (!loaded) return;
+  if (loaded.card.messageTs) {
+    await renderCardNow(cardId);
+    return;
+  }
   const { card, runs } = loaded;
+  if (!runs.length && (!card.steps.length || !reply)) return;
   if (reply) {
     const buttons = await buttonsForMessage(card.channelId, reply.ts).catch(() => undefined);
     const msg = renderCard({ ...toState(card), replyText: reply.text, buttons: buttons ? toButtonsState(buttons) : null }, runs);
     try {
-      await slackCall('chat.update', { channel: card.channelId, ts: reply.ts, text: msg.text, blocks: msg.blocks });
+      await editCardMessage({ channel: card.channelId, ts: reply.ts, text: msg.text, blocks: msg.blocks });
       await sql`update cards set message_ts = ${reply.ts}, reply_text = ${reply.text} where id = ${cardId} and message_ts is null`;
       await appendEvent(card.threadId, 'card_posted', 'bot', { cardId, ts: reply.ts, attachedToReply: true, streamed: reply.streamed, runs: runs.map((r) => r.id) });
       await scheduleCardRender(cardId);
@@ -113,6 +152,7 @@ export async function postCard(cardId: number, reply?: ReplyRef | null): Promise
       const code = slackErrorCode(err) ?? String((err as any)?.message ?? err);
       log.warn({ cardId, replyTs: reply.ts, streamed: reply.streamed, code }, 'attaching plan card to the reply failed; posting it as its own message');
       await appendEvent(card.threadId, 'card_attach_failed', 'bot', { cardId, replyTs: reply.ts, streamed: reply.streamed, code }).catch(() => {});
+      if (!runs.length) return; // steps only: not worth a message of its own
     }
   }
   const { threadTs } = parseThreadId(card.threadId);
@@ -128,6 +168,22 @@ export async function postCard(cardId: number, reply?: ReplyRef | null): Promise
   await appendEvent(card.threadId, 'card_posted', 'bot', { cardId, ts, runs: runs.map((r) => r.id) });
   // State may have moved on while posting; make sure the latest state lands.
   await scheduleCardRender(cardId);
+}
+
+/**
+ * chat.update of a card message, retried briefly while Slack still counts a just-stopped stream as streaming
+ * (`streaming_state_conflict`). Throws the last error.
+ */
+async function editCardMessage(args: Record<string, unknown>): Promise<void> {
+  for (const delay of [300, 1000, -1]) {
+    try {
+      await slackCall('chat.update', args);
+      return;
+    } catch (err) {
+      if (delay < 0 || slackErrorCode(err) !== 'streaming_state_conflict') throw err;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
 }
 
 const pendingKey = (id: number) => `card:pending:${id}`;
@@ -168,7 +224,7 @@ export async function renderCardNow(cardId: number): Promise<void> {
     const loaded = await loadCard(cardId);
     if (!loaded || !loaded.card.messageTs) return; // not posted yet: posting renders the latest state
     const msg = renderCard(toState(loaded.card), loaded.runs);
-    await slackCall('chat.update', { channel: loaded.card.channelId, ts: loaded.card.messageTs, text: msg.text, blocks: msg.blocks });
+    await editCardMessage({ channel: loaded.card.channelId, ts: loaded.card.messageTs, text: msg.text, blocks: msg.blocks });
   } catch (err) {
     log.warn({ err, cardId }, 'card render failed');
   } finally {
@@ -177,14 +233,14 @@ export async function renderCardNow(cardId: number): Promise<void> {
   }
 }
 
-/** Freeze a card after its synthesis: final title, buttons removed. */
+/** Freeze a card after its synthesis: final title, collapsed to its line. */
 export async function freezeCard(cardId: number): Promise<void> {
   await sql`update cards set frozen = true where id = ${cardId}`;
   await renderCardNow(cardId);
 }
 
 function toState(card: CardRow): CardState {
-  return { id: card.id, title: card.title, frozen: card.frozen, replyText: card.replyText ?? null, buttons: card.buttons ? toButtonsState(card.buttons) : null };
+  return { id: card.id, title: card.title, frozen: card.frozen, replyText: card.replyText ?? null, buttons: card.buttons ? toButtonsState(card.buttons) : null, steps: card.steps };
 }
 
 /**

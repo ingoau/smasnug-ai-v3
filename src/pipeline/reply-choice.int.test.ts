@@ -136,14 +136,17 @@ describe.skipIf(!INTEGRATION)('reply buttons: press flow', () => {
     expect((await turnsOf()).filter((t) => t.authorId === 'UBTNX')).toHaveLength(0);
   });
 
-  it('a plan card living in the pressed reply is re-rendered with the note (plan kept)', async () => {
+  it('a plan card living in the pressed reply is re-rendered with the note (card kept)', async () => {
     const { id, ts } = await offer(['Go deeper', 'All good'], 'here is the gist. want more?');
-    await sql`insert into cards (thread_id, channel_id, message_ts, reply_text) values (${threadId}, ${C}, ${ts}, 'here is the gist. want more?')`;
+    const steps = sql.json([{ tool: 'web_search', status: 'complete' }]);
+    await sql`insert into cards (thread_id, channel_id, message_ts, reply_text, steps) values (${threadId}, ${C}, ${ts}, 'here is the gist. want more?', ${steps})`;
     const k = (await fakeCalls()).length;
     await press({ user: 'UBTNC', id, index: 0, ts, actionTs: '1700000400.000001' });
     const upd = (await callsSince(k)).find((c) => c.method === 'chat.update' && c.args.ts === ts)!;
-    expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'context', 'plan']);
-    expect(upd.args.blocks[1].elements[0].text).toBe('<@UBTNC> pressed *Go deeper*');
+    // [the card (collapsed: its one step is done), the reply, the pressed note]
+    expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['context', 'markdown', 'context']);
+    expect(upd.args.blocks[0].elements[0].text).toBe('✓ *Searched the web*');
+    expect(upd.args.blocks[2].elements[0].text).toBe('<@UBTNC> pressed *Go deeper*');
     expect(upd.args.text).toBe('here is the gist. want more?');
   });
 });

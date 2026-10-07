@@ -64,47 +64,111 @@ describe('renderCard', () => {
     expect(text.length).toBeGreaterThan(0);
   });
 
-  it('freezes with the final title when nothing is active', () => {
+  it('collapses to one titled line once nothing is active: the summary, or the set_card_title title once frozen', () => {
     const runs = [run(1, { status: 'complete', output: 'ok' }), run(2, { status: 'cancelled' })];
-    const live = renderCard({ id: 1, title: null, frozen: false }, runs);
-    expect(live.blocks).toHaveLength(1);
-    expect((live.blocks[0] as any).title).toBe('Ran 2 subagents');
+    const done = renderCard({ id: 1, title: null, frozen: false }, runs);
+    expect(done.blocks).toEqual([{ type: 'context', block_id: 'card_1_plan', elements: [{ type: 'mrkdwn', text: '✓ *Ran 2 subagents*' }] }]);
+    expect(done.text).toBe('Ran 2 subagents');
     const frozen = renderCard({ id: 1, title: 'Checked the docs', frozen: true }, runs);
-    expect(frozen.blocks).toHaveLength(1);
-    expect((frozen.blocks[0] as any).title).toBe('Checked the docs');
+    expect(frozen.blocks).toEqual([{ type: 'context', block_id: 'card_1_plan', elements: [{ type: 'mrkdwn', text: '✓ *Checked the docs* · ran 2 subagents' }] }]);
     expect(frozen.text.startsWith('Checked the docs')).toBe(true);
   });
 
-  it('frozen card never shows the button and orders runs by id', () => {
-    const r = renderCard({ id: 1, title: null, frozen: true }, [run(3, { status: 'running' }), run(2)]);
+  it('a frozen card is collapsed even with a run still marked active; the title is escaped and never pings', () => {
+    const r = renderCard({ id: 1, title: '<!channel> & co', frozen: true }, [run(3, { status: 'running' }), run(2)]);
     expect(r.blocks).toHaveLength(1);
-    expect((r.blocks[0] as any).title).toBe('Ran 2 subagents');
+    expect(r.blocks[0]!.type).toBe('context');
+    const text = (r.blocks[0] as any).elements[0].text as string;
+    expect(text).toContain('&amp; co');
+    expect(text).not.toContain('<!channel>');
+  });
+
+  it('orders runs by id while live', () => {
+    const r = renderCard({ id: 1, title: null, frozen: false }, [run(3, { status: 'running' }), run(2)]);
     expect((r.blocks[0] as any).tasks.map((t: any) => t.task_id)).toEqual(['run_2', 'run_3']);
   });
 
-  it('lives in the reply message: [reply markdown, plan], text = reply text; frozen keeps the text', () => {
+  it('lives in the reply message: [card, reply markdown], text = reply text; collapsed keeps the text', () => {
     const runs = [run(1, { status: 'running', details: 'Reading docs' })];
     const live = renderCard({ id: 4, title: null, frozen: false, replyText: 'On it — checking the docs.' }, runs);
-    expect(live.blocks.map((b) => b.type)).toEqual(['markdown', 'plan']);
-    expect((live.blocks[0] as any).text).toBe('On it — checking the docs.');
+    expect(live.blocks.map((b) => b.type)).toEqual(['plan', 'markdown']);
+    expect((live.blocks[1] as any).text).toBe('On it — checking the docs.');
     expect(live.text).toBe('On it — checking the docs.');
     const frozen = renderCard({ id: 4, title: 'Checked the docs', frozen: true, replyText: 'On it — checking the docs.' }, [run(1, { status: 'complete', output: 'ok' })]);
-    expect(frozen.blocks.map((b) => b.type)).toEqual(['markdown', 'plan']);
-    expect((frozen.blocks[1] as any).title).toBe('Checked the docs');
+    expect(frozen.blocks.map((b) => b.type)).toEqual(['context', 'markdown']);
+    expect(JSON.stringify(frozen.blocks[0])).toContain('Checked the docs');
     expect(frozen.text).toBe('On it — checking the docs.');
     // Over Slack's 12k markdown budget: rendered as rich_text (nothing cut), fallback text 3k.
     const long = renderCard({ id: 4, title: null, frozen: false, replyText: 'x'.repeat(20_000) }, runs);
-    expect(long.blocks.map((b) => b.type)).toEqual(['rich_text', 'plan']);
+    expect(long.blocks.map((b) => b.type)).toEqual(['plan', 'rich_text']);
     expect(long.text.length).toBe(3_000);
   });
 
-  it('a reply with code keeps it as rich_text preformatted above the plan, with stable block ids', () => {
+  it('a reply with code keeps it as rich_text preformatted below the card, with stable block ids', () => {
     const replyText = 'Here:\n```html\n<h1>Hello, world!</h1>\n```\nMore soon.';
     const r = renderCard({ id: 5, title: null, frozen: false, replyText }, [run(1)]);
-    expect(r.blocks.map((b) => b.type)).toEqual(['markdown', 'rich_text', 'markdown', 'plan']);
-    expect(r.blocks.map((b) => (b as any).block_id)).toEqual(['card_5_reply', 'card_5_reply_1', 'card_5_reply_2', 'card_5_plan']);
-    expect((r.blocks[1] as any).elements[0]).toEqual({ type: 'rich_text_preformatted', language: 'html', elements: [{ type: 'text', text: '<h1>Hello, world!</h1>' }] });
+    expect(r.blocks.map((b) => b.type)).toEqual(['plan', 'markdown', 'rich_text', 'markdown']);
+    expect(r.blocks.map((b) => (b as any).block_id)).toEqual(['card_5_plan', 'card_5_reply', 'card_5_reply_1', 'card_5_reply_2']);
+    expect((r.blocks[2] as any).elements[0]).toEqual({ type: 'rich_text_preformatted', language: 'html', elements: [{ type: 'text', text: '<h1>Hello, world!</h1>' }] });
     expect(r.text).toBe(replyText);
+  });
+});
+
+describe('turn steps on the card', () => {
+  const steps = (...s: [string, 'in_progress' | 'complete' | 'error'][]) => s.map(([tool, status]) => ({ tool, status }));
+
+  it('steps come first as tasks, then the runs, in one plan (one card per message)', () => {
+    const r = renderCard({ id: 6, title: null, frozen: false, steps: steps(['slack_search', 'complete'], ['fetch_url', 'error']) }, [run(1, { status: 'running' })]);
+    const plan = r.blocks[0] as any;
+    expect(r.blocks.filter((b) => b.type === 'plan')).toHaveLength(1);
+    expect(plan.title).toBe('Running 1 subagent');
+    expect(plan.tasks.map((t: any) => [t.task_id, t.title, t.status])).toEqual([
+      ['step_1', 'Searched Slack', 'complete'],
+      ['step_2', 'Read a page', 'error'],
+      ['run_1', 'Task 1', 'in_progress'],
+    ]);
+  });
+
+  it('a step still running keeps the card open ("Working…"), with its live label', () => {
+    const r = renderCard({ id: 6, title: null, frozen: false, steps: steps(['web_search', 'complete'], ['fetch_url', 'in_progress']) }, []);
+    const plan = r.blocks[0] as any;
+    expect(plan.type).toBe('plan');
+    expect(plan.title).toBe('Working…');
+    expect(plan.tasks.map((t: any) => t.title)).toEqual(['Searched the web', 'Reading the page…']);
+  });
+
+  it('once done, a steps-only card is one line summing up the steps', () => {
+    const r = renderCard(
+      { id: 7, title: null, frozen: false, replyText: 'Here you go.', steps: steps(['slack_search', 'complete'], ['fetch_url', 'complete'], ['fetch_url', 'complete'], ['slack_semantic_search', 'complete']) },
+      [],
+    );
+    expect(r.blocks[0]).toEqual({ type: 'context', block_id: 'card_7_plan', elements: [{ type: 'mrkdwn', text: '✓ *Searched Slack twice, read 2 pages*' }] });
+    expect(r.blocks.map((b) => b.type)).toEqual(['context', 'markdown']);
+  });
+
+  it('the collapsed line of a written-up card: its title · the steps and runs', () => {
+    const runs = [run(1, { status: 'complete', output: 'ok' }), run(2, { status: 'error', error: 'x' }), run(3, { status: 'complete', output: 'ok' })];
+    const r = renderCard({ id: 8, title: 'Compared frontend libraries', frozen: true, steps: steps(['slack_search', 'complete'], ['fetch_url', 'complete'], ['fetch_url', 'complete']) }, runs);
+    expect((r.blocks[0] as any).elements[0].text).toBe('✓ *Compared frontend libraries* · searched Slack, read 2 pages, ran 3 subagents (1 failed)');
+    expect(r.text).toBe('Compared frontend libraries · searched Slack, read 2 pages, ran 3 subagents (1 failed)');
+  });
+});
+
+describe('card steps', () => {
+  it('only work is a step: lookups, reads, files, canvases; not bookkeeping, responses or the subagent tools', async () => {
+    const { isCardStep } = await import('./card-steps.js');
+    for (const t of ['web_search', 'slack_search', 'slack_semantic_search', 'fetch_url', 'read_thread', 'ask_thread', 'read_public_channel', 'read_file', 'ask_file', 'create_canvas']) expect(isCardStep(t)).toBe(true);
+    for (const t of ['reply', 'react', 'remember', 'set_reminder', 'spawn_subagent', 'message_subagent', 'set_card_title', 'send_message', 'report_user', 'end_turn']) expect(isCardStep(t)).toBe(false);
+  });
+
+  it('summaries count and pluralise', async () => {
+    const { summarizeSteps } = await import('./card-steps.js');
+    const s = (tool: string) => ({ tool, status: 'complete' as const });
+    expect(summarizeSteps([s('web_search'), s('web_search'), s('web_search')])).toBe('searched the web 3 times');
+    expect(summarizeSteps([s('fetch_url')])).toBe('read a page');
+    expect(summarizeSteps([s('read_thread'), s('ask_thread')])).toBe('read the thread twice');
+    expect(summarizeSteps([], [{ status: 'complete' }])).toBe('ran 1 subagent');
+    expect(summarizeSteps([])).toBe('');
   });
 });
 
@@ -176,7 +240,8 @@ describe('task card output', () => {
     expect(outputBudget(5).maxChars).toBe(300);
     expect(outputBudget(10).maxChars).toBe(150);
     expect(outputBudget(20)).toEqual({ maxChars: 0, maxLines: 0, sources: 0 });
-    const many = Array.from({ length: 60 }, (_, i) => run(i + 1, { status: 'complete', output: `Result ${i + 1}`, result: longResult, sources: [{ url: 'https://example.com/x' }] }));
+    // One run still going keeps the card expanded.
+    const many = Array.from({ length: 60 }, (_, i) => run(i + 1, { status: i === 59 ? 'running' : 'complete', output: `Result ${i + 1}`, result: longResult, sources: [{ url: 'https://example.com/x' }] }));
     const { blocks } = renderCard({ id: 1, title: null, frozen: false }, many);
     const plan = blocks[0] as any;
     expect(plan.tasks).toHaveLength(50);
@@ -185,7 +250,7 @@ describe('task card output', () => {
     expect(plan.tasks[0].output.elements).toHaveLength(1);
     expect(plan.tasks[0].sources).toBeUndefined();
     expect(JSON.stringify(blocks).length).toBeLessThan(20_000);
-    const four = renderCard({ id: 1, title: null, frozen: false }, many.slice(0, 4));
+    const four = renderCard({ id: 1, title: null, frozen: false }, [...many.slice(0, 3), run(99, { status: 'running' })]);
     const t0 = (four.blocks[0] as any).tasks[0];
     expect(plain(t0.output).length).toBeLessThan(300 + 40);
     expect(t0.sources).toHaveLength(1);

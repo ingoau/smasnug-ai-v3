@@ -67,8 +67,9 @@ describe.skipIf(!LIVE)('multi-round subagent workflow (LIVE)', () => {
     // eslint-disable-next-line no-console
     console.log('workflow cards:', JSON.stringify(cards), 'replies:', replies.map((r) => String(r.payload.text ?? '').slice(0, 120)));
 
-    // Either it ran in rounds (a later card started from a summary turn) or it parallelized up front.
-    const multiRound = cards.some((c) => c.parentCardId != null);
+    // Either it ran in rounds (a later card with runs started from a summary turn; a summary turn's card can also hold
+    // just its own lookups) or it parallelized up front.
+    const multiRound = cards.some((c) => c.parentCardId != null && c.runs > 0);
     expect(multiRound || cards.some((c) => c.runs >= 3)).toBe(true);
     expect(cards.some((c) => c.runs >= 2)).toBe(true); // some round ran subagents in parallel
     const last = replies.at(-1)?.payload.text ?? '';
@@ -103,7 +104,7 @@ describe.skipIf(!LIVE)('multi-round subagent workflow (LIVE)', () => {
       from cards c where c.thread_id = ${threadId} order by c.id`;
     // eslint-disable-next-line no-console
     console.log('staged cards:', JSON.stringify(cards));
-    const second = cards.find((c) => c.parentCardId != null);
+    const second = cards.find((c) => c.parentCardId != null && c.runs > 0);
     expect(second).toBeTruthy();
     expect(second!.runs).toBeGreaterThanOrEqual(2);
     const synth = await sql`select 1 from turns where thread_id = ${threadId} and kind = 'synthesis'`;

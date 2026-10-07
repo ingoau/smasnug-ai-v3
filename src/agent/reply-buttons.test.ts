@@ -140,15 +140,15 @@ describe('reply buttons: plan card re-render', () => {
   const run = { id: 1, subagentTitle: 'Research', status: 'running' as const, isResume: false, details: null, steerNotes: [], output: null, error: null };
   it('a card living in a reply keeps its buttons, then the pressed note, with stable block ids', () => {
     const open = renderCard({ id: 3, title: null, frozen: false, replyText: 'which one?', buttons: { id: 9, labels: ['A', 'B'] } }, [run]);
-    expect(open.blocks.map((b) => b.type)).toEqual(['markdown', 'actions', 'plan']);
-    expect(open.blocks[1]).toMatchObject({ block_id: 'reply_9_buttons' });
+    expect(open.blocks.map((b) => b.type)).toEqual(['plan', 'markdown', 'actions']);
+    expect(open.blocks[2]).toMatchObject({ block_id: 'reply_9_buttons' });
     const pressed = renderCard({ id: 3, title: null, frozen: false, replyText: 'which one?', buttons: { id: 9, labels: ['A', 'B'], pressedBy: 'U2', pressedLabel: 'B' } }, [run]);
-    expect(pressed.blocks.map((b) => b.type)).toEqual(['markdown', 'context', 'plan']);
-    expect(JSON.stringify(pressed.blocks[1])).toContain('<@U2> pressed *B*');
-    expect(pressed.blocks[0]).toMatchObject({ block_id: 'card_3_reply' });
-    expect(pressed.blocks[2]).toMatchObject({ block_id: 'card_3_plan' });
-    // Standalone cards and replies without buttons are unchanged.
-    expect(renderCard({ id: 3, title: null, frozen: false, replyText: 'hi' }, [run]).blocks.map((b) => b.type)).toEqual(['markdown', 'plan']);
+    expect(pressed.blocks.map((b) => b.type)).toEqual(['plan', 'markdown', 'context']);
+    expect(JSON.stringify(pressed.blocks[2])).toContain('<@U2> pressed *B*');
+    expect(pressed.blocks[1]).toMatchObject({ block_id: 'card_3_reply' });
+    expect(pressed.blocks[0]).toMatchObject({ block_id: 'card_3_plan' });
+    // Replies without buttons: just the card and the reply.
+    expect(renderCard({ id: 3, title: null, frozen: false, replyText: 'hi' }, [run]).blocks.map((b) => b.type)).toEqual(['plan', 'markdown']);
   });
 });
 
