@@ -1,9 +1,10 @@
 // OWNER: agent module. Shared upload helper (reply + send_message).
 import { createHash } from 'node:crypto';
-import { slackCall } from '../core/slack.js';
+import { slackCall, slackErrorCode } from '../core/slack.js';
+import { log } from '../log.js';
 import { threadIdOf } from '../core/events.js';
 import { createFile, FileError, fileStore, loadFileBytes, recordFilePosts, resolveFile } from '../files/store.js';
-import { sanitizeFileName } from '../files/format.js';
+import { sanitizeFileName, slackSnippetType, uploadContentType } from '../files/format.js';
 
 /**
  * A file to post: a file-store file (`fileId`; access already checked by `prepareOutgoingFiles`), or inline text
@@ -76,6 +77,21 @@ async function bytesOf(f: OutgoingFile): Promise<Buffer> {
 }
 
 /**
+ * files.getUploadURLExternal with the file's Slack type as `snippet_type` (an .html file was shown as plain text
+ * without it; completeUploadExternal takes no type). Slack refusing the type (`unknown_snippet_type`) → retried without.
+ */
+async function getUploadUrl(filename: string, length: number): Promise<any> {
+  const snippetType = slackSnippetType(filename, length);
+  try {
+    return await slackCall<any>('files.getUploadURLExternal', { filename, length, ...(snippetType ? { snippet_type: snippetType } : {}) });
+  } catch (err) {
+    if (!snippetType || slackErrorCode(err) !== 'unknown_snippet_type') throw err;
+    log.info({ snippetType }, 'Slack refused the snippet type; uploading without it');
+    return slackCall<any>('files.getUploadURLExternal', { filename, length });
+  }
+}
+
+/**
  * Upload files via files.getUploadURLExternal → POST to upload_url → files.completeUploadExternal into a
  * channel/thread. The complete call carries the idempotency key, so a retried turn never shares files twice.
  * Store files are recorded as posted (file_posts): the Slack copy maps back to the same id in context, and the file
@@ -86,13 +102,13 @@ export async function uploadFiles(opts: { channelId: string; threadTs?: string; 
   const uploaded: { id: string; title: string; fileId?: string }[] = [];
   for (const f of opts.files) {
     const bytes = await bytesOf(f);
-    const res = await slackCall<any>('files.getUploadURLExternal', { filename: f.filename, length: bytes.byteLength });
+    const res = await getUploadUrl(f.filename, bytes.byteLength);
     if (!res.upload_url || !res.file_id) throw new Error('files.getUploadURLExternal returned no upload_url');
     if (!FAKE()) {
       const up = await fetch(res.upload_url, {
         method: 'POST',
         body: new Uint8Array(bytes),
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': uploadContentType(f.filename) },
         signal: AbortSignal.timeout(30_000),
       });
       if (!up.ok) throw new Error(`file upload failed: HTTP ${up.status}`);

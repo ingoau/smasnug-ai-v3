@@ -94,8 +94,8 @@ describe.skipIf(!INTEGRATION)('file store', () => {
     const calls = (await fakeCalls()).slice(n);
     const urls = calls.filter((c) => c.method === 'files.getUploadURLExternal');
     expect(urls.map((c) => c.args)).toEqual([
-      { filename: 'index.html', length: 28 },
-      { filename: 'notes.md', length: 7 },
+      { filename: 'index.html', length: 28, snippet_type: 'html' },
+      { filename: 'notes.md', length: 7, snippet_type: 'markdown' },
     ]);
     const complete = calls.filter((c) => c.method === 'files.completeUploadExternal');
     expect(complete).toHaveLength(1);

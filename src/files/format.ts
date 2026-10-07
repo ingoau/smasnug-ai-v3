@@ -111,6 +111,65 @@ export function mimeFromName(name: string | null | undefined): string | undefine
   return EXT_MIME[extensionOf(name)];
 }
 
+/**
+ * Slack `filetype` (https://docs.slack.dev/reference/objects/file-object, the types table) for text files by
+ * extension: passed as files.getUploadURLExternal's `snippet_type`, so an .html file shows as HTML, not plain text.
+ */
+const EXT_SLACK_TYPE: Record<string, string> = {
+  html: 'html',
+  htm: 'html',
+  css: 'css',
+  js: 'javascript',
+  mjs: 'javascript',
+  cjs: 'javascript',
+  jsx: 'javascript',
+  json: 'json',
+  csv: 'csv',
+  tsv: 'tsv',
+  md: 'markdown',
+  markdown: 'markdown',
+  svg: 'svg',
+  xml: 'xml',
+  yaml: 'yaml',
+  yml: 'yaml',
+  py: 'python',
+  rb: 'ruby',
+  go: 'go',
+  rs: 'rust',
+  java: 'java',
+  kt: 'kotlin',
+  swift: 'swift',
+  c: 'c',
+  h: 'c',
+  cpp: 'cpp',
+  hpp: 'cpp',
+  cs: 'csharp',
+  php: 'php',
+  sh: 'shell',
+  bash: 'shell',
+  zsh: 'shell',
+  ps1: 'powershell',
+  sql: 'sql',
+  lua: 'lua',
+  txt: 'text',
+};
+
+/** Slack's snippets are limited to 1 MB; bigger text files are uploaded without a snippet type. */
+export const SLACK_SNIPPET_MAX_BYTES = 1024 * 1024;
+
+/** The Slack snippet type for an upload of `name` with `size` bytes, or undefined (let Slack decide). */
+export function slackSnippetType(name: string | null | undefined, size: number): string | undefined {
+  if (size > SLACK_SNIPPET_MAX_BYTES) return undefined;
+  return EXT_SLACK_TYPE[extensionOf(name)];
+}
+
+/** Content-Type for uploading `name`: its MIME type by extension (text with charset), else octet-stream. */
+export function uploadContentType(name: string | null | undefined): string {
+  const m = mimeFromName(name);
+  if (!m) return 'application/octet-stream';
+  return isTextMime(m) ? `${m}; charset=utf-8` : m;
+}
+
 /** MIME type from magic bytes (common binaries only), or undefined. */
 export function sniffMime(b: Buffer): string | undefined {
   if (b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';

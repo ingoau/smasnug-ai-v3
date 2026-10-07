@@ -10,9 +10,12 @@ import {
   looksLikeText,
   sanitizeDescription,
   sanitizeFileName,
+  SLACK_SNIPPET_MAX_BYTES,
+  slackSnippetType,
   sniffMime,
   textPage,
   textPageHeader,
+  uploadContentType,
 } from './format.js';
 import { FILE_ID_RE, isFileId, newFileId, parseFileRef } from './ids.js';
 import { askFileUserPrompt } from './prompts.js';
@@ -88,6 +91,25 @@ describe('names, MIME types and kinds', () => {
     expect(decideMime('notes', Buffer.from('plain words'))).toBe('text/plain');
     expect(decideMime('blob.bin', Buffer.from([0, 1, 2, 255]))).toBe('application/octet-stream');
     expect(decideMime('fake.csv', Buffer.from([0, 1, 2, 255]))).toBe('application/octet-stream');
+  });
+
+  it('upload types: Slack snippet type and Content-Type by extension (an .html file is HTML, not plain text)', () => {
+    const cases: [string, string | undefined, string][] = [
+      ['index.html', 'html', 'text/html; charset=utf-8'],
+      ['site.CSS', 'css', 'text/css; charset=utf-8'],
+      ['app.js', 'javascript', 'text/javascript; charset=utf-8'],
+      ['data.json', 'json', 'application/json; charset=utf-8'],
+      ['table.csv', 'csv', 'text/csv; charset=utf-8'],
+      ['README.md', 'markdown', 'text/markdown; charset=utf-8'],
+      ['logo.svg', 'svg', 'image/svg+xml; charset=utf-8'],
+      ['chart.png', undefined, 'image/png'],
+      ['blob', undefined, 'application/octet-stream'],
+    ];
+    for (const [name, snippet, ct] of cases) {
+      expect(slackSnippetType(name, 100), name).toBe(snippet);
+      expect(uploadContentType(name), name).toBe(ct);
+    }
+    expect(slackSnippetType('big.html', SLACK_SNIPPET_MAX_BYTES + 1)).toBeUndefined(); // snippets are ≤ 1 MB
   });
 
   it('detects text', () => {
