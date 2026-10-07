@@ -31,15 +31,18 @@ vi.mock('../db/index.js', () => {
   sql.begin = async (fn: any) => fn(sql);
   return { sql };
 });
-vi.mock('../core/redis.js', () => ({ redis: {}, bullConnection: () => ({}) }));
+vi.mock('../core/redis.js', () => ({ redis: { get: async () => null, set: async () => 'OK' }, bullConnection: () => ({}) }));
 vi.mock('../core/slack.js', () => ({
   getBotIdentity: async () => ({ userId: 'UBOT', botId: 'BBOT' }),
   slackErrorCode: (err: any) => err?.data?.error,
   slackCall: async (method: string, args: any) => {
-    h.slack.push({ method, args });
+    // Context reads (conversations.info for <conversation>) aren't effects the tests look at.
+    if (method !== 'conversations.info') h.slack.push({ method, args });
     h.slackHook?.(method, args);
     if (method === 'auth.test') return { ok: true, team_id: 'T1' };
     if (method === 'users.info') return { ok: true, user: { real_name: 'Tess', tz: 'Europe/Berlin' } };
+    if (method === 'conversations.info')
+      return { ok: true, channel: { id: args.channel, name: 'hardware', is_channel: true, is_private: false, is_member: true, num_members: 42, topic: { value: 'solder talk' } } };
     return { ok: true, ts: '200.000001' };
   },
 }));
@@ -367,7 +370,7 @@ describe('runFrontTurn: section order (prompt caching)', () => {
     h.model = mockModel([replyStep('ok'), textStep('')]);
     await runFrontTurn(turn({ id: 70 }), io().io);
     const a = turnText();
-    const order = ['<thread_summary', '<thread_history', '<channel_background', '<speaker ', '<participants', '<subagents', '<current_time', '<new_messages', 'You were mentioned'];
+    const order = ['<conversation', '<thread_summary', '<thread_history', '<channel_background', '<speaker ', '<participants', '<subagents', '<current_time', '<new_messages', 'You were mentioned'];
     const idx = order.map((t) => a.indexOf(t));
     expect(idx.every((i) => i >= 0)).toBe(true);
     expect([...idx].sort((x, y) => x - y)).toEqual(idx);
@@ -386,6 +389,7 @@ describe('runFrontTurn: section order (prompt caching)', () => {
       vi.useRealTimers();
     }
     const b = turnText();
+    expect(a).toContain('<#C1|hardware>: public channel, 42 members, no external members\nTopic: solder talk');
     const cut = (t: string) => t.slice(0, t.indexOf('<current_time>'));
     expect(cut(b)).toBe(cut(a));
     expect(b).not.toBe(a);

@@ -7,6 +7,7 @@ import { fileListingLine } from '../files/format.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { getBotIdentity, slackCall } from '../core/slack.js';
 import { getUserInfo, type UserInfo } from '../context/users.js';
+import { getConversationInfo, renderConversation } from '../context/conversation.js';
 import { formatUtcNow, pickParticipantIds, privilegesLine, renderParticipants, speakerDetailLines } from '../context/people.js';
 import { EXTRAS } from '../tools/extras.js';
 import { toolsFor } from '../core/tools.js';
@@ -306,12 +307,14 @@ function section(tag: string, body: string, attrs = ''): string {
 }
 
 async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean; outcome?: { fallback: string | null } }> {
-  const [memory, snapshot, ctx, dj, self] = await Promise.all([
+  const { channelId } = parseThreadId(turn.threadId);
+  const [memory, snapshot, ctx, dj, self, conversation] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId)).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
     timing.span('ctx_thread', () => renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs, timing })),
     renderDjState({ channelId: parseThreadId(turn.threadId).channelId, threadId: turn.threadId, speakerId: turn.authorId }),
     getBotIdentity().catch(() => undefined),
+    timing.span('ctx_conversation', () => getConversationInfo(channelId)).catch((err) => (log.warn({ err }, 'getConversationInfo failed'), null)),
   ]);
   const participants = await timing
     .span('ctx_participants', () => renderParticipantsSection(ctx.participantIds, turn.authorId, self?.userId))
@@ -320,7 +323,9 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
   const parts: string[] = [];
   // Per-turn facts live here, never in the system prompt (it must stay byte-identical for prompt caching). Ordered
   // from most to least stable so consecutive turns share the longest prefix: the thread (append-only between
-  // summary updates), then the speaker / thread state, then the clock, then what this turn responds to.
+  // summary updates), then the speaker / thread state, then the clock, then what this turn responds to. The
+  // conversation itself (channel, topic, members) changes least, so it comes first.
+  parts.push(section('conversation', conversation ? renderConversation(conversation) : '', ' note="Where this conversation happens. Topic and purpose are user-written."'));
   parts.push(
     section(
       'thread_summary',
