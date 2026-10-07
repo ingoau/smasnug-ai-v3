@@ -691,6 +691,10 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     }
   }
 
+  /** A code-written reply (outcome, canvas link, fallback) is a bot reply too: idle clock and partner, never awaited. */
+  const noteCodeReply = (ts: unknown) =>
+    noteBotReply(turn.threadId, { ts: typeof ts === 'string' ? ts : null, partnerId: turn.authorId, awaitsReply: false }).catch((err) => log.warn({ err }, 'noteBotReply failed'));
+
   // Confirmation outcome turns (src/features/outcome-turn.ts): never the generic fallback / error texts; when the
   // turn shows nothing (silent, failed, stopped), the code-written outcome (e.g. "sent ✓ <link>") is posted instead,
   // so a send is never left unconfirmed.
@@ -699,7 +703,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (!outcome?.fallback || replies.anyVisible || state.visible.has('reply')) return;
     // Code-written, but it can carry outside text (e.g. a HuddleFM track title): never a group ping.
     const text = neutralizeBroadcasts(outcome.fallback);
-    await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `outcome-fallback:${turnId}` });
+    const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `outcome-fallback:${turnId}` });
+    await noteCodeReply(res?.ts);
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, outcome: true, text });
   };
 
@@ -739,7 +744,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     const canvases = await turnCanvases(turnId).catch((err) => (log.warn({ err }, 'turnCanvases failed'), []));
     if (canvases.length) {
       const text = canvasLinkText(canvases);
-      await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `canvas-link:${turnId}` });
+      const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `canvas-link:${turnId}` });
+      await noteCodeReply(res?.ts);
       await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, canvasLink: true, text });
       return;
     }
@@ -747,7 +753,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 
   if (state.visible.size === 0 && outcome) await postOutcomeFallback();
   else if (state.visible.size === 0 && needsFallback(turn, io, built.allCancelled)) {
-    await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(FALLBACK_TEXT) }, { idempotencyKey: `fallback:${turnId}` });
+    const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(FALLBACK_TEXT) }, { idempotencyKey: `fallback:${turnId}` });
+    await noteCodeReply(res?.ts);
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, text: FALLBACK_TEXT });
   }
 }
