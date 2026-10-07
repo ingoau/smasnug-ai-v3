@@ -1,7 +1,7 @@
 # smasnug-ai
 
 Workspace Slack agent. Full spec: `docs/design.md` (read the sections relevant to your work).
-Sandbox and observability (tracing/evals) are **out of scope for now**.
+Observability (tracing/evals) is **out of scope for now**. Code sandboxes: `docs/sandbox.md`.
 
 ## Stack
 TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK v7 (`ai`, docs in
@@ -47,6 +47,7 @@ TEST_REDIS_URL are set, `<test db>_<name>` + the test Redis db plus an offset (s
 | tools | `src/tools/**`, `src/context/**`, `src/files/**` | fetch_url, web search, slack search, read_thread/read_channel, read_file/ask_file, search_emojis, react, thread context rendering, images, file store (create_file/read_file/ask_file) |
 | agent | `src/agent/**` | front agent loop, reply tool + streaming, subagents/runs/inbox, plan cards, set_card_title, sweeper, expiry, compaction, synthesis |
 | features | `src/features/**`, `slack-manifest.yml` | memory + extraction + memory tools, workspace facts, App Home, send_message + confirmation + attribution, reports/suspension/moderation, report_user (bot reports, `bot-reports.ts`), limits/guard, kill switches, retention, HuddleFM DJ mode (`huddlefm/`) |
+| sandbox | `src/sandbox/**` | code sandboxes (docs/sandbox.md): provider (Modal) + lifecycle, sandbox tools (children with `sandbox: true`), HCA access + allowlist, budget/quotas, live previews (Cloudflare) |
 
 Cross-module contracts are stub files with final signatures — implement yours, call others', don't change a
 signature without coordinating: `src/pipeline/scheduler.ts` (requestTurn), `src/agent/front.ts` (runFrontTurn,

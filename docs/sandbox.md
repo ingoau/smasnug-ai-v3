@@ -1,7 +1,59 @@
-# Code sandboxes — plan
+# Code sandboxes
 
-2026-10-07 · planning only, nothing here is built yet. Replaces the "Sandbox (deferred)" notes in `docs/design.md`
-once implemented (Phase 7).
+2026-10-07 · **built** (phases 0a–7; module `src/sandbox/`, migration `250_sandbox.sql`). The Cloudflare spike
+(Phase 0b) is prepared but not run yet, so the preview deploy's output parsing is unverified (§10). Written as the
+plan; "Built:" notes and §0 record where the implementation differs. `docs/design.md` "Code sandboxes" is the summary.
+
+## 0. Implementation status and deviations
+
+What exists (all off unless `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET` are set: no tools, no jobs, no App Home section,
+nothing at startup):
+- `provider.ts` (interface), `modal.ts` (Modal), `fake-provider.ts` (tests), `providers.ts` (selection + base tags),
+  `image.ts` (pinned work + deploy images, `pnpm sandbox:images` prebuilds them), `egress.ts` (IPv4 complement).
+- `lifecycle.ts`: lazy create, reuse, idle pause (snapshot + terminate), resume, lost handling, destroy, the sweep,
+  reconcile (orphans, lost rows), retention. `budget.ts`: usage segments, monthly estimate, Modal metered cost, hard
+  stop, 80 % notice. `settings.ts`: kill switches. `hca.ts` + `access.ts`: the access decision and ephemerals.
+- `tools.ts`: `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_import`, `sandbox_export`,
+  `request_preview` (children only). `hooks.ts`: run end → idle clock + preview hand-off. `prompts.ts`: prompt
+  sections. `home.ts`: App Home disclosure + admin section.
+- `preview/`: `tar.ts` (minimal tar reader/writer), `bundle.ts` (limits, form scan, banner, `_headers`, the Worker,
+  wrangler config), `deploy.ts` (fresh-sandbox `wrangler deploy --temporary`, output parsing, takedown), `crypto.ts`
+  (AES-256-GCM), `store.ts` (rows, consent), `flow.ts` (jobs, preview message, buttons, expiry).
+
+Deviations from the plan below (all decided 2026-10-07 unless noted):
+- **Access:** HCA verified (`verified_eligible` or `verified_but_over_18`) OR the admin allowlist, from the start
+  (`sandbox_access_mode` defaults to `hca_or_allowlist`; the plan kept allowlist-only until Phase 5, but all phases
+  landed together).
+- **Run cap:** 30 minutes for runs of sandbox subagents (`limits.sandboxRunMaxDurationMs`); other runs keep 10.
+  Hence a live segment's provider lifetime is 45 minutes (> run cap + idle grace + a sweep).
+- **Resources:** reserve 0.5 core / 1 GiB, limits 1 core / 2 GiB. Modal bills max(reservation, usage), and a
+  sandbox mostly idles while the model thinks; spend is estimated at the limits (an upper bound). Sandbox rates are
+  3× the function rates (§9), so the plan's $14/month estimate was too low.
+- **Budget:** `SANDBOX_MONTHLY_BUDGET_USD` (default 20; give dev ~5) is compared with max(our estimate, Modal's
+  metered cost for the environment); `SANDBOX_WORKSPACE_CREDIT_USD` (default 28) stops everything when Modal's
+  whole-workspace cost (dev + prod) reaches it. Environment budgets aren't available on Starter (§9), and the
+  workspace has a $0 spend limit beyond the credit.
+- **File store caps:** scoped, not raised globally. `createFile` and `loadFileBytes` take an optional `maxBytes`;
+  sandbox exports and preview bundles use 25 MB, imports read up to 50 MB (not stored when > 5 MB, like big images).
+  Everything else keeps `limits.fileMaxBytes` = 5 MB: Postgres holds the content, and nothing else needs more.
+- **Egress:** IPv4 only. Modal's allowlist rejects IPv6 CIDRs, and with an allowlist set IPv6 is unreachable, so the
+  IPv6 complement in `egress.ts` is tested but not sent. Documentation ranges (TEST-NET-*) stay allowed (nothing
+  routes there; each would add ~15 CIDRs). Extra denies: `SANDBOX_EGRESS_DENY`.
+- **Disclosure:** one line in App Home for everyone; a one-time first-use note (ephemeral, on the user's first
+  sandbox tool call, recorded in `sandbox_first_use`, migration 251): code and files go to Modal (US) and are deleted
+  when the task ends, previews go to Cloudflare after asking; for previews, the terms prompt (Cloudflare's Terms and
+  Privacy Policy, a temporary account in their name, files to Cloudflare, code on Modal in the US).
+- **Claim links:** offered to every requester via "Get claim link", shown only to the requester (ephemeral);
+  Cloudflare enforces its own age rules at claim / sign-up.
+- **Banner:** injected into every HTML file at bundle time (pure, unit-tested) instead of by HTMLRewriter in the
+  Worker; the Worker only sets `X-Robots-Tag`, `form-action 'none'` and `Referrer-Policy`, and `_headers` does the
+  same for the assets-only fallback (`PREVIEW_ASSETS_ONLY=1`). Same result, works in both modes.
+- **Preview caps** are counted from `previews` rows (5 per user and 30 overall per UTC day), not a new `LimitKind`.
+  `sandbox_exec` is a new hourly `LimitKind`.
+- **Reports** of a preview go to the mod channel with a Take down button (admin only), like other reports.
+- **Exec output:** the full output stays in `/work/.last/{stdout,stderr}`; the model gets the head (2k chars) and
+  tail (10k chars) with a cut note.
+- **Snapshots** get a 7-day TTL (Modal's default is 30 days) and are deleted when the sandbox is destroyed.
 
 ## 1. Goals and non-goals
 
@@ -29,12 +81,12 @@ once implemented (Phase 7).
 |---|---|---|
 | D1 | **Provider: Modal Sandboxes**, behind a thin internal `SandboxProvider` interface, so E2B can be swapped in. | Modal is the only provider with a recurring free credit ($30/month). That covers the expected load: ~100 sessions/day × 3 min ≈ $14/month. [pricing](https://modal.com/pricing), [sandboxes](https://modal.com/docs/guide/sandbox) |
 | D2 | **Pause = filesystem snapshot + terminate; resume = create from the snapshot.** | Modal has no native pause. Snapshots expire after 30 days. Memory snapshots are alpha and not used. [snapshots](https://modal.com/docs/guide/sandbox-snapshots) |
-| D3 | **Egress = open internet minus private, link-local and CGNAT ranges and cloud metadata**, via `outbound_cidr_allowlist` set to the complement of those ranges. | Modal has no deny list, only an allowlist. [networking](https://modal.com/docs/guide/sandbox-networking) |
+| D3 | **Egress = open internet minus private, link-local and CGNAT ranges and cloud metadata**, via `outboundCidrAllowlist` set to the complement of those ranges. Built: IPv4 only; IPv6 ends up unreachable (§9). | Modal has no deny list, only an allowlist. [networking](https://modal.com/docs/guide/sandbox-networking) |
 | D4 | **Step 1 is a spike** to check that Modal's JS SDK (`modal` npm / libmodal) covers what we need from Node: create, exec, files, snapshot/restore, networking and tunnels. | The JS SDK is reportedly newer and less complete than the Python one. |
 | D5 | **Fallback: E2B.** | Technically the best fit: memory+fs pause, ~1 s resume, `denyOut` CIDRs, mature TS SDK. But it only has a one-off $100 credit, which lasts ~10 months at our load. [pricing](https://e2b.dev/pricing) |
 | D6 | **Rejected providers.** | Daytona: an egress allowlist needs a $500+ top-up, and its core went closed-source in Oct 2026. Vercel Hobby: too small. Cloudflare Containers: the API is migrating and the legacy one ends 2026-12-31. A self-hosted VPS: not free. Home mini-server: untrusted code on the home network. |
 | D7 | **Budget: free tiers only, with a hard stop.** When the monthly credit is used up, the feature pauses until the reset and users get a clear message. Spend is tracked as sandbox-seconds × price, with a running monthly total and a kill switch. | No surprise bills. |
-| D8 | **Access: HCA verified OR on the admin allowlist.** The allowlist is managed in App Home. | Abuse control without hand-approving every user. [HCA API](https://auth.hackclub.com/docs/api) |
+| D8 | **Access: HCA verified (`verified_eligible` or `verified_but_over_18`) OR on the admin allowlist.** The allowlist is managed in App Home. | Abuse control without hand-approving every user. [HCA API](https://auth.hackclub.com/docs/api) |
 | D9 | **HCA check:** `GET https://auth.hackclub.com/api/external/check?slack_id=U…`. Results:<br>• `verified_eligible`, `verified_but_over_18` → allow; cache `true` + timestamp for ~7 days.<br>• `needs_submission`, `not_found` → deny; ephemeral with a verify/link-Slack link; 5–15 min negative cache.<br>• `pending` → "being reviewed"; short cache.<br>• `rejected` → neutral message pointing to #identity-help.<br>• Network error, 5xx, unknown → **never** treated as unverified and never cached. Use the last known positive, else "can't check right now". | The endpoint is public with no auth, meant for integrations. An HCA outage was once read as "everyone revoked"; that must not repeat. |
 | D10 | **Privacy of verification:** store only the boolean, never the over/under-18 distinction; never reveal anyone's status to others; no tool can look up arbitrary users. Gating has its own kill switch. | The community is mostly teenagers. |
 | D11 | **Lifecycle:** one sandbox per subagent, reused when it resumes (`message_subagent`), paused when idle, deleted when the subagent expires (24 h idle) or is cancelled. Hard CPU, memory and wall-clock limits per exec and per session. No secrets inside. | Matches the subagent model (design.md "Subagents"). |
@@ -48,6 +100,11 @@ once implemented (Phase 7).
 ## 3. Architecture
 
 ### 3.1 Module and file layout
+
+Built: as below, plus `providers.ts` (provider selection + base tags), `fake-provider.ts` (tests), `format.ts`
+(exec wrapper + output cutting), `hooks.ts` (run end), `prompts.ts`, `home.ts`, `preview/tar.ts` and `preview/flow.ts`
+(jobs, message, buttons, expiry; `actions.ts` / `rest.ts` / `worker-script.ts` were folded into `flow.ts`,
+`bundle.ts` and `deploy.ts`; the REST + proof-of-work path is not built). No `e2b.ts`.
 
 New module **sandbox**, `src/sandbox/**`. The main session adds a row to the CLAUDE.md module table: *sandbox —
 provider + lifecycle, sandbox tools, HCA access + allowlist, budget/quotas, previews*.
@@ -95,6 +152,12 @@ src/sandbox/
 
 ### 3.2 The Sandbox interface
 
+Built (`provider.ts`): as sketched, with these changes: `ImageRef` is `{ kind: 'work' | 'deploy' }`; the spec has
+reservation and limit for cpu and memory, no `workdir`; exec options add `root` (setup only) and the result adds
+`aborted`; `writeFile` makes parents and gives the file to the `sandbox` user; `isAlive` was added; `list` returns
+tags; no `exposePort`. Provider-side gone sandboxes throw `SandboxGoneError` (the caller marks the row lost and
+retries once on a fresh sandbox). `sandboxProvider()` lives in `providers.ts`.
+
 ```ts
 // src/sandbox/provider.ts
 export interface SandboxSpec {
@@ -140,6 +203,10 @@ Exec conventions:
   Nothing from the worker's env is passed through.
 
 ### 3.3 Images
+
+Built: Modal's image builder (`fromRegistry` + `dockerfileCommands`), defined in `image.ts`: the work image starts
+from `mcr.microsoft.com/playwright:v1.56.1-noble`; the deploy image from `node:22-bookworm-slim` + `wrangler@4.148.0`.
+`pnpm sandbox:images` builds both (first work build ~13 min, then cached).
 
 - **Work image** (pinned tag, built once per version, referenced by digest):
   - Debian slim; Python 3.12 with numpy, pandas, matplotlib, pillow, openpyxl, requests, beautifulsoup4;
@@ -262,6 +329,10 @@ the sandbox busy past `lifetimeMs` loses unsaved state, and the tool says so.
 
 ### 3.7 Queue jobs and maintenance
 
+Built: as planned, except `sandbox:budget` runs every 5 minutes (the estimate is computed live; the task refreshes
+Modal's metered numbers and sends the notices) and the 30-second sweep does the 100 % pause. The `sandbox` queue's
+processor is always registered (an idle consumer when the feature is off), the maintenance tasks only when on.
+
 New queue `sandbox` in `src/core/queues.ts`, processor in `src/sandbox/register.ts`, concurrency ~4. Jobs:
 
 | Job | Data | Notes |
@@ -282,6 +353,11 @@ Claims use the reminder/cursor pattern (`for update skip locked`, a claim id + l
 nothing lives in memory.
 
 ### 3.8 DB tables (one new migration, next free number, e.g. `2x0_sandbox.sql`)
+
+Built: `250_sandbox.sql` (+ `251_sandbox_first_use.sql`). Differences: `sandboxes.subagent_id` is nullable (set null on delete), plus `live_since`
+and `ended_at`; no claim columns on `sandboxes` (a Redis lock per subagent serialises transitions);
+`sandbox_spend_monthly` also stores Modal's metered environment / workspace cost and the 80 % / stop flags;
+`previews.bundle_file_id` is nullable (the bundle is deleted when the preview goes live or ends) and has `ended_at`.
 
 ```sql
 alter table subagents add column sandbox boolean not null default false;
@@ -384,35 +460,35 @@ about the reason in the thread." `budget` and `disabled` aren't personal, so the
 
 | Limit | Value | Where |
 |---|---|---|
-| CPU / memory per sandbox | 1 core / 2 GiB | spec |
-| Lifetime per live segment | 30 min | provider timeout |
+| CPU / memory per sandbox | reserve 0.5 core / 1 GiB, limit 1 core / 2 GiB | spec |
+| Lifetime per live segment | 45 min | provider timeout |
 | Exec timeout | 60 s default, 300 s max | tool |
 | Execs per user per hour | 200 | `takeLimit('sandbox_exec')` (new hourly kind in guard) |
 | Concurrent live sandboxes | 2 per user, 8 global | `ensureSandbox` (count of `running` rows) |
 | Sandbox minutes per user per day | 30 | `budget.ts` (sum of today's segments) |
-| Previews | 5 per user per day, 30 global per day | `takeLimit('preview')` + a daily count |
+| Previews | 5 per user per day, 30 global per day | daily counts of `previews` rows |
 | Import / export size | 50 MB / 25 MB | tools |
-| Run duration for sandbox subagents | `runMaxDurationMs` stays 10 min; revisit after the spike (builds may need 20) | child.ts |
+| Run duration for sandbox subagents | 30 min (`sandboxRunMaxDurationMs`); other runs keep 10 | child.ts |
 
 ### 4.3 Budget (`budget.ts`)
 
-- **Pricing:** `segmentUsd(cpu, memGiB, seconds) = seconds × (cpu × PRICE_CPU_CORE_S + memGiB × PRICE_MEM_GIB_S)`.
-  The constants come from modal.com/pricing (the sandbox rates, checked in Phase 0) and live in config.
+- **Pricing:** `segmentUsd(cpu, memMiB, seconds) = hours × (cpu × $0.1419 + GiB × $0.024)`, the sandbox rates
+  read from Modal's billing-rates API in Phase 0 (`sandboxPricing` in config), at the cpu / memory *limits*.
 - **Accrual:** closed segments are summed into `sandbox_spend_monthly`. Open segments are accrued live:
   `now() − started_at`.
-- **Month:** the Modal billing period (assumed calendar month UTC; verify).
-- **Hard stop at `SANDBOX_MONTHLY_BUDGET_USD`.** The default is $25, below the $30 credit, to leave room for estimate
-  error, image builds, snapshot storage and dev usage.
+- **Month:** the calendar month, UTC (confirmed: Modal's billing summaries run from the 1st 00:00 UTC).
+- **Hard stop at `SANDBOX_MONTHLY_BUDGET_USD`** (default $20; dev ~$5), compared with max(our estimate, Modal's
+  metered cost for this environment, refreshed every 5 minutes by `sandbox:budget`). Second backstop:
+  `SANDBOX_WORKSPACE_CREDIT_USD` (default $28) against Modal's whole-workspace metered cost.
 - **Start check:** `month_total + reserve` must stay under the budget before every create, resume or deploy.
   `reserve` = the cost of one maximum segment.
-- **At 100 %** (`sandbox:budget`): pause every running sandbox (snapshot first, so work isn't lost), refuse new ones,
+- **At 100 %** (the 30-second sweep): pause every running sandbox (snapshot first, so work isn't lost), refuse new ones,
   and show the `budget` message. It resumes automatically at the next month.
 - **At 80 %:** one notice to the mod channel.
-- **Backstop:** if Modal offers a workspace spend limit on the Starter plan, set it at the credit amount (Phase 0
-  checks). Then even a bug in our accounting can't create a bill.
-- **Dev vs prod** share one Modal workspace and credit, but have separate databases, so neither sees the other's
-  spend. Use separate Modal environments and give dev a fixed slice: prod budget = $25 − dev allowance (e.g. $5).
-  Phase 0 checks whether Modal exposes actual usage to reconcile against.
+- **Backstop:** the workspace spend limit is $0 beyond the free credit. Environment budgets are not
+  available on Starter.
+- **Dev vs prod** share one Modal workspace and credit, but have separate databases. Separate Modal environments; each
+  side's budget covers its own spend (estimate or its environment's metered cost), and the workspace check sees both.
 
 ### 4.4 Kill switches (`settings` keys, toggled from App Home admin blocks)
 
@@ -496,6 +572,7 @@ App Home admin additions:
 | Negative HCA cache | Redis, 5–15 min, reason kind only | TTL |
 | `sandbox_allowlist` | Until an admin removes it | — |
 | `preview_terms` | Kept as consent record (user, version, time) | When the user asks |
+| `sandbox_first_use` | User id + time the first-use note was shown | When the user asks |
 | `previews` | 30 days | Secrets nulled at expiry or takedown; rows on the 30-day retention |
 | Preview bundles (file store, internal) | Until the preview ends | With the preview row |
 | Thread events (`sandbox_*`, `preview_*`) | 30-day thread retention | as today |
@@ -665,34 +742,39 @@ IPv6 egress) have workarounds in `src/sandbox/modal.ts`.
 
 ## 10. Open questions / to verify
 
-**Modal (Phase 0a)**
-1. JS SDK coverage: snapshot/restore, egress allowlist (the exact parameter name), tunnels, list by tag, kill of a
-   running exec, non-root exec.
-2. Exact sandbox CPU/memory rates (sandboxes may be priced differently from functions); whether the $30 credit
-   applies to sandboxes; snapshot storage and image build costs; the billing period reset date.
-3. Is there a Starter-plan workspace spend limit? Is a card required? Can actual usage be read via an API, to
-   reconcile against our estimate?
-4. Can snapshots be deleted, or only left to expire after 30 days?
-5. IPv6 egress, and whether the CIDR allowlist also governs DNS.
-6. Cold start of the Playwright image and resume-from-snapshot latency. Is the user-visible wait OK?
-7. Modal's acceptable-use terms for running third-party, user-directed code.
+**Modal (Phase 0a)** — answered by the spike (§9) unless noted.
+1. ~~JS SDK coverage~~: all there; kill, timeout and non-root via workarounds. Parameter: `outboundCidrAllowlist`.
+2. ~~Rates~~: $0.1419 / core-hour, $0.024 / GiB-hour for sandboxes; billing month = calendar month UTC. Still open:
+   snapshot storage and image build costs (small; they show up in Modal's metered cost, which the budget uses).
+3. Partly: environment budgets aren't available on Starter; the metered cost is readable (environment and
+   workspace billing summaries) and is used. What Modal does at a $0 spend limit once the credit is gone is untested;
+   our stop is meant to come first.
+4. ~~Snapshots~~: deletable (`images.delete`); TTL settable.
+5. ~~IPv6 / DNS~~: IPv6 unreachable with an allowlist; DNS works.
+6. ~~Latency~~: create ~0.3–1 s + first exec ~4 s; resume about the same; first image build ~13 min (prebuild).
+7. Open: Modal's acceptable-use terms for third-party, user-directed code (Ingo).
 
-**Cloudflare (Phase 0b)**
+**Cloudflare (Phase 0b)** — prepared, not run (it creates a temporary Cloudflare account and accepts Cloudflare's
+terms; it needs the user's go-ahead). The spike script deploys one hello page from a fresh deploy sandbox, reads the
+URL and temporary-account file, fetches the page, tries the takedown and prints only names, booleans and redacted
+text. Until it has run, `preview/deploy.ts`'s parsing of wrangler's output (questions 16–17) is a best guess.
 8. The 2025 general terms vs. this platform flow ("on behalf of a third party", automated multi-account clauses).
-9. Age rules for teen claimers (see gaps below).
+9. Age rules for teen claimers: Cloudflare enforces its own at claim / sign-up (decided).
 10. Does the URL change on claim?
 11. Does delete work with the temporary token (takedown)?
 12. Rate-limit numbers for temporary account creation.
 13. Non-interactive workers.dev subdomain registration.
-14. Proof-of-work time (REST path).
-15. `--no-autoconfig` behaviour.
-16. Does `--temporary` accept a Worker with code + assets (our banner Worker), or only assets?
-17. Where exactly does wrangler write `wrangler-temporary-account.toml` under a custom HOME/XDG?
+14. Proof-of-work time (REST path; not built).
+15. `--no-autoconfig` behaviour (not passed: we ship our own `wrangler.jsonc`).
+16. Does `--temporary` accept a Worker with code + assets (our headers Worker), or only assets? (`PREVIEW_ASSETS_ONLY=1`
+    switches to the assets-only fallback.)
+17. Where exactly does wrangler write the temporary-account file under a custom HOME/XDG, and its keys?
 
 **HCA**
-18. Exact response shape (field names, HTTP status for `not_found`), rate limits, and whether caching 7 days is
-    acceptable to the HCA team.
+18. Partly answered: `GET /api/external/check?slack_id=` returns HTTP 200 with `{"result": "…", "note": "…"}`, also
+    `not_found` for unknown ids (checked 2026-10-07). Open: rate limits, and whether caching 7 days is acceptable to
+    the HCA team.
 
 **Product**
-19. Is a 10-minute run limit enough for build tasks, or do sandbox subagents get a longer `runMaxDurationMs`?
+19. ~~Run limit~~: 30 minutes for sandbox subagents (decided).
 20. Should live dev-server tunnels ever be offered? Proposed: no, until there's a concrete need.
