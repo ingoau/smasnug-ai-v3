@@ -263,7 +263,7 @@ States (`sandboxes.state`): `creating → running → pausing → paused → res
 | Idle | maintenance `sandbox:sweep` (every 30 s) | `running` with no queued/running run on the subagent and `idle_since < now() − limits.sandboxIdlePauseMs` (5 min) → `pause` job. A resume during the grace period just reuses the live sandbox. |
 | `message_subagent` on an idle subagent | none; the new run's first tool call resumes | — |
 | Expiry (24 h idle), cancel, `!stop`, root deleted, thread removed by retention | `sandbox:sweep` (reconcile) | Subagent `expired`/`cancelled`, or the row gone (thread cascade) → `destroy` + `deletePaused`, state `destroyed`. No hooks into `maintenance.ts`/`cancelSubagent` needed; worst-case lag is one sweep. |
-| Provider kill (lifetime) or worker crash | `sandbox:reconcile` (every 10 min) | `provider.list({app:'smasnug', env})`. Provider sandboxes without a `running` row → destroy (orphans). `running` rows the provider doesn't have → `lost`; the next use creates a fresh one. Rows `running` longer than `lifetimeMs` → pause. |
+| Provider kill (lifetime) or worker crash | `sandbox:reconcile` (every 10 min) | `provider.list({app:'smasnug', env})`. Provider sandboxes whose row is gone, ended, or moved on to another box → destroy (orphans); a row in any non-terminal state (incl. `pausing`) or changed within the last 2 min keeps its box, and an orphan with a row is destroyed only under the row's lock (skipped while a transition holds it). `running` rows the provider doesn't have → `lost`; the next use creates a fresh one. Rows `running` longer than `lifetimeMs` → pause. |
 
 Pausing before Modal's lifetime kill: `lifetimeMs` (30 min) must exceed the run max (`limits.runMaxDurationMs`, 10
 min) plus the idle grace. Every resume creates a new sandbox with a fresh lifetime. A sandbox subagent whose run keeps
@@ -465,7 +465,7 @@ about the reason in the thread." `budget` and `disabled` aren't personal, so the
 | Lifetime per live segment | 45 min | provider timeout |
 | Exec timeout | 60 s default, 300 s max | tool |
 | Execs per user per hour | 200 | `takeLimit('sandbox_exec')` (new hourly kind in guard) |
-| Concurrent live sandboxes | 2 per user, 8 global | `ensureSandbox` (count of `running` rows) |
+| Concurrent live sandboxes | 2 per user, 8 global | `ensureSandbox`: counts sandboxes in active use (creating/resuming, or `running` for a subagent with a queued/running run). A finished subagent's sandbox stays live until the idle pause but doesn't count; if it would push the live total over a cap, the oldest idle ones get a pause job at once. |
 | Sandbox minutes per user per day | 30 | `budget.ts` (sum of today's segments) |
 | Previews | 5 per user per day, 30 global per day | daily counts of `previews` rows |
 | Import / export size | 50 MB / 25 MB | tools |

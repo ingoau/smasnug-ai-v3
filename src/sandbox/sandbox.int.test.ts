@@ -354,7 +354,31 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       const sa = await newSubagent({ threadId: t, owner: u });
       outs.push(await call(ctxOf(t, u, sa), 'sandbox_exec', { command: 'true' }));
     }
-    expect(outs[2]).toMatch(/already has 2 live sandboxes/);
+    expect(outs[2]).toMatch(/already has 2 sandboxes in use by other running subagents/);
+  });
+
+  it('quota: idle sandboxes of finished subagents do not count; the oldest idle one is paused to make room', async () => {
+    const t = await newThread();
+    const u = await newUser();
+    const { queue, QUEUE } = await import('../core/queues.js');
+    const done: { subagentId: string; runId: number }[] = [];
+    for (let i = 0; i < 2; i++) {
+      const sa = await newSubagent({ threadId: t, owner: u });
+      expect(await call(ctxOf(t, u, sa), 'sandbox_exec', { command: 'true' })).toContain('ran: true');
+      await finishRun(sa.runId);
+      await hooks.onSandboxRunFinished(sa.runId);
+      done.push(sa);
+    }
+    // Both are still live (idle, not yet paused by the sweep), but neither is in use.
+    const idle = await sql<any[]>`select * from sandboxes where subagent_id in ${sql(done.map((d) => d.subagentId))} order by idle_since`;
+    expect(idle.map((r) => r.state)).toEqual(['running', 'running']);
+    const third = await newSubagent({ threadId: t, owner: u });
+    expect(await call(ctxOf(t, u, third), 'sandbox_exec', { command: 'true' })).toContain('ran: true');
+    // Live total would be 3 > 2: the oldest idle one gets a pause job.
+    const job = await queue(QUEUE.sandbox).getJob(`pause-${idle[0].id}-${idle[0].generation}`);
+    expect(job?.data).toMatchObject({ type: 'pause', sandboxId: idle[0].id });
+    expect(await queue(QUEUE.sandbox).getJob(`pause-${idle[1].id}-${idle[1].generation}`)).toBeFalsy();
+    await job!.remove();
   });
 
   it('HCA: positive cached as a boolean, negatives short, errors never revoke', async () => {

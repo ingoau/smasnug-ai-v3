@@ -98,23 +98,58 @@ export async function sandboxRowForSubagent(subagentId: string): Promise<Sandbox
 export function startRefusal(o: { canStart: boolean; userLive: number; globalLive: number; userMinutes: number }): string | null {
   if (!o.canStart) return "Code sandboxes are paused until next month: this month's free compute is used up. Tell the user plainly.";
   if (o.userLive >= limits.userLiveSandboxes)
-    return `Limit reached: this user already has ${o.userLive} live sandboxes (max ${limits.userLiveSandboxes}). Wait until another subagent's sandbox is idle, then retry.`;
+    return `Limit reached: this user already has ${o.userLive} sandboxes in use by other running subagents (max ${limits.userLiveSandboxes}). Retry once one of those subagents has finished its run.`;
   if (o.globalLive >= limits.globalLiveSandboxes) return 'All code sandboxes are busy right now. Try again in a few minutes.';
   if (o.userMinutes >= limits.userSandboxMinutesPerDay)
     return `Limit reached: this user has used today's ${limits.userSandboxMinutesPerDay} sandbox minutes. It resets at 00:00 UTC. Tell the user briefly.`;
   return null;
 }
 
+/**
+ * Pure: how many idle live sandboxes (oldest first) to pause so that the active ones, the idle ones left and the new
+ * one fit under `cap`.
+ */
+export function idleToPause(o: { active: number; idle: number; cap: number }): number {
+  return Math.max(0, Math.min(o.idle, o.active + o.idle + 1 - o.cap));
+}
+
+interface LiveSandbox {
+  id: string;
+  generation: number;
+  ownerId: string;
+  active: boolean;
+}
+
+/**
+ * Quotas count live sandboxes in active use: being created / resumed, or running for a subagent with a queued or
+ * running run. A finished subagent's sandbox stays live until the idle pause (limits.sandboxIdlePauseMs) but doesn't
+ * count; when it would push the live total over a cap, the oldest idle ones are paused now (enqueued) to make room.
+ */
 async function checkStart(ownerId: string): Promise<void> {
-  const [budget, [counts], minutes] = await Promise.all([
+  const [budget, live, minutes] = await Promise.all([
     budgetStatus(),
-    sql<{ user: number; global: number }[]>`
-      select count(*) filter (where owner_id = ${ownerId})::int as user, count(*)::int as global
-      from sandboxes where state in ('creating', 'running', 'resuming')`,
+    sql<LiveSandbox[]>`
+      select x.id, x.generation, x.owner_id,
+        (x.state <> 'running' or exists (select 1 from runs r where r.subagent_id = x.subagent_id and r.status in ('queued', 'running'))) as active
+      from sandboxes x where x.state in ('creating', 'running', 'resuming')
+      order by coalesce(x.idle_since, x.last_used_at)`,
     userMinutesToday(ownerId),
   ]);
-  const refusal = startRefusal({ canStart: budget.canStart, userLive: counts?.user ?? 0, globalLive: counts?.global ?? 0, userMinutes: minutes });
+  const mine = live.filter((x) => x.ownerId === ownerId);
+  const userActive = mine.filter((x) => x.active).length;
+  const globalActive = live.filter((x) => x.active).length;
+  const refusal = startRefusal({ canStart: budget.canStart, userLive: userActive, globalLive: globalActive, userMinutes: minutes });
   if (refusal) throw new SandboxRefused(refusal);
+  const myIdle = mine.filter((x) => !x.active);
+  const allIdle = live.filter((x) => !x.active);
+  const toPause = new Map<string, LiveSandbox>();
+  for (const x of myIdle.slice(0, idleToPause({ active: userActive, idle: myIdle.length, cap: limits.userLiveSandboxes }))) toPause.set(x.id, x);
+  const globalRoom = idleToPause({ active: globalActive, idle: allIdle.length, cap: limits.globalLiveSandboxes });
+  for (const x of allIdle) {
+    if (toPause.size >= globalRoom) break;
+    toPause.set(x.id, x);
+  }
+  for (const x of toPause.values()) await enqueuePause(x).catch((err) => log.warn({ err, sandboxId: x.id }, 'on-demand pause enqueue failed'));
 }
 
 export interface Ensured {

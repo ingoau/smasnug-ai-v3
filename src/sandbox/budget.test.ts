@@ -4,7 +4,7 @@ vi.hoisted(() => {
 });
 import { limits, sandboxPricing } from '../config.js';
 import { dayStart, evaluateBudget, minutesLeft, monthStart, nextMonthStart, reserveUsd, segmentUsd } from './budget.js';
-import { startRefusal } from './lifecycle.js';
+import { idleToPause, startRefusal } from './lifecycle.js';
 
 describe('pricing', () => {
   it('prices a segment by cores and GiB', () => {
@@ -51,10 +51,20 @@ describe('quotas', () => {
   it('passes under every cap', () => expect(startRefusal(ok)).toBeNull());
   it('refuses at each cap', () => {
     expect(startRefusal({ ...ok, canStart: false })).toMatch(/next month/);
-    expect(startRefusal({ ...ok, userLive: limits.userLiveSandboxes })).toMatch(/live sandboxes/);
+    const user = startRefusal({ ...ok, userLive: limits.userLiveSandboxes });
+    expect(user).toMatch(/sandboxes in use by other running subagents/);
+    expect(user).not.toMatch(/idle/);
     expect(startRefusal({ ...ok, globalLive: limits.globalLiveSandboxes })).toMatch(/busy/);
     expect(startRefusal({ ...ok, userMinutes: limits.userSandboxMinutesPerDay })).toMatch(/minutes/);
     expect(startRefusal({ ...ok, userLive: limits.userLiveSandboxes - 1, userMinutes: limits.userSandboxMinutesPerDay - 0.5 })).toBeNull();
+  });
+  it('idle sandboxes to pause to make room (oldest first)', () => {
+    expect(idleToPause({ active: 0, idle: 0, cap: 2 })).toBe(0);
+    expect(idleToPause({ active: 0, idle: 1, cap: 2 })).toBe(0);
+    expect(idleToPause({ active: 0, idle: 2, cap: 2 })).toBe(1);
+    expect(idleToPause({ active: 1, idle: 2, cap: 2 })).toBe(2);
+    expect(idleToPause({ active: 1, idle: 5, cap: 8 })).toBe(0);
+    expect(idleToPause({ active: 2, idle: 1, cap: 2 })).toBe(1);
   });
   it('minutes left', () => {
     expect(minutesLeft(10, 30)).toBe(20);
