@@ -26,6 +26,11 @@ const Env = z.object({
    * partner thinking aloud through at p ≈ 0.62).
    */
   GATE_PARTNER_THRESHOLD: z.coerce.number().min(0).max(1).default(0.65),
+  /**
+   * Threshold for the bot's latest conversation partner when someone else wrote since the bot's reply, within
+   * limits.recentPartnerMs of it (base 0.8 dropped a partner's question after a bystander's remark at p ≈ 0.55).
+   */
+  GATE_RECENT_PARTNER_THRESHOLD: z.coerce.number().min(0).max(1).default(0.65),
   /** Threshold once the thread is cooling (idle longer than limits.gateCoolingAfterMs). */
   GATE_COOLING_THRESHOLD: z.coerce.number().min(0).max(1).default(0.9),
   BOT_DISPLAY_NAME: z.string().default('smasnug ai'),
@@ -165,6 +170,11 @@ export const limits = {
   disengageAfterMs: 7 * 24 * 60 * 60 * 1000,
   /** Idle (no address, no bot reply) longer than this: the thread is cooling and the gate uses GATE_COOLING_THRESHOLD. */
   gateCoolingAfterMs: 3 * 60 * 60 * 1000,
+  /**
+   * The bot's latest conversation partner, after someone else wrote, stays a "recent partner" (gate at
+   * GATE_RECENT_PARTNER_THRESHOLD) for this long after the bot's reply to them.
+   */
+  recentPartnerMs: 10 * 60 * 1000,
   /** A previous turn's tool calls are shown to the next user turn when it finished at most this long ago. */
   previousTurnToolsMaxAgeMs: 30 * 60 * 1000,
   gateContextMessages: 6,

@@ -4,12 +4,14 @@ import {
   awaitsReply,
   batchIsAddressed,
   batchIsPartnerLike,
+  batchIsRecentPartner,
   batchIsMention,
   batchNeedsGate,
   debounceWindowMs,
   decide,
   gateThreshold,
   isCooling,
+  isRecentPartner,
   lastEngagedAt,
   mentionFacts,
   shouldDisengage,
@@ -80,6 +82,37 @@ describe("someone else answering the bot's question / offer", () => {
   });
 });
 
+describe("the bot's recent partner after someone else wrote", () => {
+  const now = new Date('2026-10-07T12:00:00Z');
+  const ago = (ms: number) => new Date(now.getTime() - ms);
+  const tenMin = 10 * 60_000;
+  const f = { authorId: 'U1', lastBotPartner: 'U1', lastBotReplyAt: ago(4 * 60_000), othersSpoke: true };
+  it('is the latest partner within the window, only when someone else wrote since the reply', () => {
+    expect(isRecentPartner(f, now, tenMin)).toBe(true);
+    expect(isRecentPartner({ ...f, lastBotReplyAt: ago(tenMin) }, now, tenMin)).toBe(true);
+    expect(isRecentPartner({ ...f, lastBotReplyAt: ago(tenMin + 1) }, now, tenMin)).toBe(false);
+    expect(isRecentPartner({ ...f, othersSpoke: false }, now, tenMin)).toBe(false); // that's a plain 'partner'
+    expect(isRecentPartner({ ...f, lastBotPartner: 'U2' }, now, tenMin)).toBe(false);
+    expect(isRecentPartner({ ...f, lastBotPartner: null }, now, tenMin)).toBe(false);
+    expect(isRecentPartner({ ...f, lastBotReplyAt: null }, now, tenMin)).toBe(false);
+    expect(isRecentPartner({ ...f, lastBotReplyAt: new Date(now.getTime() + 1000) }, now, tenMin)).toBe(false);
+  });
+  it('goes through the gate (not addressed) unless a stronger reason applies', () => {
+    expect(decide({ ...base, recentPartner: true })).toEqual({ action: 'batch', reason: 'recent_partner' });
+    expect(decide({ ...base, recentPartner: true, partner: true })).toEqual({ action: 'batch', reason: 'partner' });
+    expect(decide({ ...base, recentPartner: true, answersOther: true })).toEqual({ action: 'batch', reason: 'answer_other' });
+    expect(decide({ ...base, recentPartner: true, mentionsOthers: true })).toEqual({ action: 'ignore', reason: 'mentions_other' });
+    expect(decide({ ...base, recentPartner: true, engaged: false })).toEqual({ action: 'ignore', reason: 'not_engaged' });
+    expect(decide({ ...base, recentPartner: true, quietPrefix: true })).toEqual({ action: 'ignore', reason: 'quiet' });
+    expect(batchNeedsGate(['recent_partner', 'gate'])).toBe(true);
+    expect(batchIsAddressed(['recent_partner'])).toBe(false);
+    expect(batchIsPartnerLike(['recent_partner'])).toBe(false);
+    expect(batchIsRecentPartner(['recent_partner', 'gate'])).toBe(true);
+    expect(batchIsRecentPartner(['recent_partner', 'partner'])).toBe(false); // partner wins
+    expect(batchIsRecentPartner(['gate'])).toBe(false);
+  });
+});
+
 describe('batch helpers', () => {
   it('needs the gate only when every message was gated (partner messages are gated too)', () => {
     expect(batchNeedsGate(['gate', 'gate'])).toBe(true);
@@ -109,6 +142,14 @@ describe('gate threshold and idle clock', () => {
     expect(gateThreshold({ partner: true, cooling: false }, t)).toBe(0.65);
     expect(gateThreshold({ partner: false, cooling: true }, t)).toBe(0.9);
     expect(gateThreshold({ partner: true, cooling: true }, t)).toBe(0.65);
+  });
+  it('a recent partner after someone else wrote gets the intermediate threshold; partner wins over it', () => {
+    const t2 = { ...t, partner: 0.6, recentPartner: 0.7 };
+    expect(gateThreshold({ partner: false, recentPartner: true, cooling: false }, t2)).toBe(0.7);
+    expect(gateThreshold({ partner: false, recentPartner: true, cooling: true }, t2)).toBe(0.7);
+    expect(gateThreshold({ partner: true, recentPartner: true, cooling: false }, t2)).toBe(0.6);
+    expect(gateThreshold({ partner: false, recentPartner: false, cooling: false }, t2)).toBe(0.8);
+    expect(gateThreshold({ partner: false, recentPartner: true, cooling: false }, t)).toBe(0.8); // not configured
   });
   it('any bot reply counts as activity: the idle clock runs from the later of address and reply', () => {
     expect(lastEngagedAt({ lastAddressedAt: null, lastBotReplyAt: null })).toBeNull();

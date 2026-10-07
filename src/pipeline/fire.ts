@@ -13,7 +13,7 @@ import { markMessage } from '../core/timing.js';
 import { isLatestSeq, takeBatch, type DebounceJob } from './debounce.js';
 import { clearIntakeStatus } from './session-status.js';
 import { runGate, type GateResult } from './gate.js';
-import { batchIsAddressed, batchIsMention, batchIsPartnerLike, batchNeedsGate, gateThreshold, isCooling } from './rules.js';
+import { batchIsAddressed, batchIsMention, batchIsPartnerLike, batchIsRecentPartner, batchNeedsGate, gateThreshold, isCooling } from './rules.js';
 import { pushToRunningTurn, scheduleMessages } from './scheduler.js';
 import { getThread, loadMessages, recentMessages } from './store.js';
 import { djGateNote } from '../features/huddlefm/render.js';
@@ -21,6 +21,14 @@ import { djGateNote } from '../features/huddlefm/render.js';
 /** The gate's note for a partner batch: who the author is to the bot (code-written, from thread state). */
 export function partnerGateNote(botName: string): string {
   return `The newest message comes from the person ${botName} was just talking with in this thread (no one else has written since ${botName}'s last reply, or only the two of them are in the thread): a question, request or follow-up from them is most likely meant for ${botName}, unless they're clearly just acknowledging ("ok", "nah", "got it") or thinking aloud.`;
+}
+
+/**
+ * The gate's note for the bot's recent partner after someone else wrote (rules.ts 'recent_partner'): softer than the
+ * partner note, since the other person's message may have changed who they're talking to.
+ */
+export function recentPartnerGateNote(botName: string): string {
+  return `The newest message comes from the person ${botName} was talking with a few minutes ago in this thread; someone else has written since. A question or request from them is probably still meant for ${botName} unless it is aimed at the other person, and an acknowledgement or thinking aloud needs no reply.`;
 }
 
 /** The gate's note for someone else's first message after the bot's question / offer (rules.ts 'answer_other'). */
@@ -66,15 +74,27 @@ export async function processDebounce(job: Job<DebounceJob>) {
   // Partner threshold: the bot's conversation partner ('partner'), or someone else answering it ('answer_other').
   const partner = batchIsPartnerLike(reasons);
   const answersOther = partner && !reasons.includes('partner');
+  // Intermediate threshold: the bot's recent partner, but someone else wrote since its reply ('recent_partner').
+  const recentPartner = batchIsRecentPartner(reasons);
   if (needsGate) {
     const thread = await getThread(threadId);
     if (!thread?.engaged) return; // disengaged while the window was open
     const bot = await getBotIdentity();
     const cooling = isCooling(thread, new Date(), limits.gateCoolingAfterMs);
-    const threshold = gateThreshold({ partner, cooling }, { base: env.GATE_THRESHOLD, partner: env.GATE_PARTNER_THRESHOLD, cooling: env.GATE_COOLING_THRESHOLD });
+    const threshold = gateThreshold(
+      { partner, recentPartner, cooling },
+      { base: env.GATE_THRESHOLD, partner: env.GATE_PARTNER_THRESHOLD, recentPartner: env.GATE_RECENT_PARTNER_THRESHOLD, cooling: env.GATE_COOLING_THRESHOLD },
+    );
     const [context, djNote] = await Promise.all([recentMessages(threadId, ts[0]!, limits.gateContextMessages), djGateNote({ channelId, threadId })]);
     // Code-written situation for the gate (never thread content).
-    const note = [answersOther ? answerGateNote(env.BOT_DISPLAY_NAME) : partner ? partnerGateNote(env.BOT_DISPLAY_NAME) : '', djNote ?? ''].filter(Boolean).join(' ');
+    const roleNote = answersOther
+      ? answerGateNote(env.BOT_DISPLAY_NAME)
+      : partner
+        ? partnerGateNote(env.BOT_DISPLAY_NAME)
+        : recentPartner
+          ? recentPartnerGateNote(env.BOT_DISPLAY_NAME)
+          : '';
+    const note = [roleNote, djNote ?? ''].filter(Boolean).join(' ');
     const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId, threshold, ...(note ? { note } : {}) });
     await appendEvent(threadId, 'gate_decision', 'system', {
       messageTs: ts,
@@ -86,6 +106,7 @@ export async function processDebounce(job: Job<DebounceJob>) {
       threshold,
       ...(partner ? { partner: true } : {}),
       ...(answersOther ? { answersOther: true } : {}),
+      ...(recentPartner ? { recentPartner: true } : {}),
       ...(cooling ? { cooling: true } : {}),
       ...(result.probability !== undefined ? { probability: result.probability } : {}),
       ...(result.fallback ? { fallback: result.fallback } : {}),
@@ -94,7 +115,7 @@ export async function processDebounce(job: Job<DebounceJob>) {
     await recordModelUsage({ userId: authorId, threadId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens }).catch((err) =>
       log.warn({ err }, 'recordModelUsage failed'),
     );
-    log.info({ threadId, authorId, respond: result.respond, model: result.model, probability: result.probability, threshold, partner, cooling, fallback: result.fallback, latencyMs: result.latencyMs }, 'gate decision');
+    log.info({ threadId, authorId, respond: result.respond, model: result.model, probability: result.probability, threshold, partner, recentPartner, cooling, fallback: result.fallback, latencyMs: result.latencyMs }, 'gate decision');
     if (!result.respond) return;
     // Addressed: reset the disengagement counters.
     await sql`update threads set last_addressed_at = now(), messages_since_addressed = 0 where id = ${threadId}`;

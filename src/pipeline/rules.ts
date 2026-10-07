@@ -11,9 +11,11 @@
  *   through the gate at the lower partner threshold (gateThreshold).
  * - 'answer_other': the first human message after the bot's question / offer to someone else (answersOtherOffer):
  *   probably taking it up, but less certain than 'direct', so through the gate at the partner threshold.
+ * - 'recent_partner': the bot's latest conversation partner, a few minutes after its reply, but someone else wrote in
+ *   between (isRecentPartner): through the gate at the intermediate recent-partner threshold.
  * - 'gate': through the gate at the normal (or cooling) threshold.
  */
-export type BatchReason = 'dm' | 'mention' | 'direct' | 'partner' | 'answer_other' | 'gate';
+export type BatchReason = 'dm' | 'mention' | 'direct' | 'partner' | 'answer_other' | 'recent_partner' | 'gate';
 
 export type Decision =
   | { action: 'ignore'; reason: 'bot' | 'not_engaged' | 'mentions_other' | 'disengaged' | 'unsupported' | 'quiet' }
@@ -45,6 +47,11 @@ export interface MessageFacts {
    * message since (answersOtherOffer): gated at the partner threshold.
    */
   answersOther?: boolean;
+  /**
+   * The author is the bot's latest conversation partner, its reply to them was recent, but someone else has written
+   * since (isRecentPartner): gated at the recent-partner threshold.
+   */
+  recentPartner?: boolean;
   /** Text starts with `<>` (guidelines rule 4): never answered unless the bot is @mentioned. */
   quietPrefix?: boolean;
 }
@@ -60,7 +67,23 @@ export function decide(f: MessageFacts): Decision {
   if (f.mentionsOthers) return { action: 'ignore', reason: 'mentions_other' };
   if (f.twoParty || f.partner) return { action: 'batch', reason: 'partner' };
   if (f.answersOther) return { action: 'batch', reason: 'answer_other' };
+  if (f.recentPartner) return { action: 'batch', reason: 'recent_partner' };
   return { action: 'batch', reason: 'gate' };
+}
+
+/**
+ * Is the author still the bot's recent conversation partner although someone else wrote since? They are the speaker
+ * the bot's latest reply was for (`lastBotPartner`), that reply is at most `withinMs` old, and another human wrote
+ * between it and this message (`othersSpoke`, checked by the caller; with nobody in between it's a plain 'partner').
+ */
+export function isRecentPartner(
+  f: { authorId: string; lastBotPartner: string | null | undefined; lastBotReplyAt: Date | null | undefined; othersSpoke: boolean },
+  now: Date,
+  withinMs: number,
+): boolean {
+  if (!f.othersSpoke || !f.lastBotPartner || f.lastBotPartner !== f.authorId || !f.lastBotReplyAt) return false;
+  const age = now.getTime() - f.lastBotReplyAt.getTime();
+  return age >= 0 && age <= withinMs;
 }
 
 /**
@@ -71,7 +94,7 @@ export function answersOtherOffer(f: { awaitsReplyFrom: string | null | undefine
   return Boolean(f.awaitsReplyFrom) && f.awaitsReplyFrom !== f.authorId && !f.humansSinceReply;
 }
 
-const GATED = new Set<BatchReason>(['gate', 'partner', 'answer_other']);
+const GATED = new Set<BatchReason>(['gate', 'partner', 'answer_other', 'recent_partner']);
 
 /** A batch runs the front agent without the gate if any of its messages had a deterministic reason. */
 export function batchNeedsGate(reasons: BatchReason[]): boolean {
@@ -89,6 +112,11 @@ export function batchIsAddressed(reasons: BatchReason[]): boolean {
 /** A gated batch that gets the partner threshold: the bot's conversation partner, or someone answering the bot. */
 export function batchIsPartnerLike(reasons: BatchReason[]): boolean {
   return reasons.some((r) => r === 'partner' || r === 'answer_other');
+}
+
+/** A gated batch from the bot's recent partner after someone else wrote (and no partner-like message in it). */
+export function batchIsRecentPartner(reasons: BatchReason[]): boolean {
+  return !batchIsPartnerLike(reasons) && reasons.includes('recent_partner');
 }
 
 /** Mention/DM turns get the status indicator. */
@@ -132,10 +160,15 @@ export function isCooling(s: Pick<EngagementState, 'lastAddressedAt' | 'lastBotR
 /**
  * The gate's respond threshold for a batch. A partner batch (two-party thread, the bot's latest conversation partner
  * continuing, or someone else answering the bot's question / offer: batchIsPartnerLike) gets the low threshold, even in a cooling thread (nobody else spoke since the bot did); a
- * cooling thread gets the high one; everything else the base GATE_THRESHOLD.
+ * recent partner after someone else wrote (batchIsRecentPartner) the intermediate one; a cooling thread the high
+ * one; everything else the base GATE_THRESHOLD.
  */
-export function gateThreshold(f: { partner: boolean; cooling: boolean }, t: { base: number; partner: number; cooling: number }): number {
+export function gateThreshold(
+  f: { partner: boolean; recentPartner?: boolean; cooling: boolean },
+  t: { base: number; partner: number; recentPartner?: number; cooling: number },
+): number {
   if (f.partner) return t.partner;
+  if (f.recentPartner && t.recentPartner != null) return t.recentPartner;
   if (f.cooling) return t.cooling;
   return t.base;
 }

@@ -556,6 +556,36 @@ describe.skipIf(!infra)('pipeline integration', () => {
       gate.mockRestore();
     });
 
+    it("the bot's recent partner after a bystander's remark: intake → intermediate threshold, softer note, a gated (not addressed) turn", async () => {
+      const { noteBotReply } = await import('./store.js');
+      const root = nextTs();
+      const tid = `${C}:${root}`;
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> why does my bot poll so often', ts: root }));
+      await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 1 });
+      const botTs = nextTs();
+      await processSlackEvent(messageEnvelope({ bot_id: 'BBOT', user: 'UBOT', text: 'it polls the history every 2s per channel.', ts: botTs, thread_ts: root }));
+      await noteBotReply(tid, { ts: botTs, partnerId: 'U1', awaitsReply: false });
+      await processSlackEvent(messageEnvelope({ user: 'U2', text: 'the widget team had the same issue', ts: nextTs(), thread_ts: root }));
+      await debounce.takeBatch({ threadId: tid, authorId: 'U2', seq: 1 });
+      const q = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'whats the widget team?', ts: q, thread_ts: root }));
+
+      const gate = vi.spyOn(gateImpl, 'run').mockResolvedValue({ respond: true, raw: '0.7', probability: 0.7, latencyMs: 5, model: 'test' });
+      await processDebounce(job({ threadId: tid, authorId: 'U1', seq: 2 }));
+      expect(gate).toHaveBeenCalledTimes(1);
+      expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.65 });
+      expect(gate.mock.calls[0]![0].note).toMatch(/a few minutes ago in this thread; someone else has written since/);
+      const [d] = await sql`select payload from thread_events where thread_id = ${tid} and type = 'gate_decision'`;
+      expect(d!.payload).toMatchObject({ recentPartner: true, threshold: 0.65, messageTs: [q] });
+      expect(d!.payload.partner).toBeUndefined();
+      expect((await sql`select addressed, gated, message_ts from turns where thread_id = ${tid} and author_id = 'U1' and status = 'pending'`)[0]).toEqual({
+        addressed: false,
+        gated: true,
+        messageTs: [q],
+      });
+      gate.mockRestore();
+    });
+
     it('direct (answer to the bot) batches skip the gate and are addressed', async () => {
       await makeThread();
       await storeMsg('U1', '1.8', 'build it');
@@ -676,11 +706,16 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const b = nextTs();
       await processSlackEvent(messageEnvelope({ user: 'U1', text: 'and the docs', ts: b, thread_ts: root }));
       expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 3 })).toEqual([{ ts: b, reason: 'partner' }]);
-      // Someone else's message in between: back to the normal gate for U1.
+      // Someone else's message in between: U1 is only a recent partner (intermediate threshold) while the bot's
+      // reply is at most limits.recentPartnerMs old, then back to the normal gate.
       await processSlackEvent(messageEnvelope({ user: 'U2', text: 'lol', ts: nextTs(), thread_ts: root }));
       const c = nextTs();
       await processSlackEvent(messageEnvelope({ user: 'U1', text: 'anyway', ts: c, thread_ts: root }));
-      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 4 })).toEqual([{ ts: c, reason: 'gate' }]);
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 4 })).toEqual([{ ts: c, reason: 'recent_partner' }]);
+      await sql`update threads set last_bot_reply_at = now() - interval '11 minutes' where id = ${tid}`;
+      const c2 = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'anyway, later', ts: c2, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 5 })).toEqual([{ ts: c2, reason: 'gate' }]);
       // An answer that @mentions someone else is not for the bot.
       await noteBotReply(tid, { ts: nextTs(), partnerId: 'U1', awaitsReply: true });
       await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@U2> what do you think?', ts: nextTs(), thread_ts: root }));

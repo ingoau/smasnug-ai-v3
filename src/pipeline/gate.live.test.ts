@@ -82,3 +82,23 @@ describe.skipIf(!LIVE)("gate (live): someone else answering the bot's offer", ()
     expect(r.respond).toBe(expected);
   }, 30_000);
 });
+
+describe.skipIf(!LIVE)("gate (live): the bot's recent partner after a bystander's remark", () => {
+  const convo = [
+    msg('UALICE', '<@UBOT> can you look at why my bot polls slack so often'),
+    msg('UBOT', 'it polls conversations.history every 2s per channel; that is what burns your rate limit.', true),
+    msg('UBOB', 'nd studio had the same issue, they moved to the events api'),
+  ];
+  it.each([
+    // Without the note this scored ~0.5, under the base threshold (0.8).
+    { name: 'a question from the partner', next: 'Whats nd studio?', expected: true },
+    { name: 'an aside to the bystander', next: 'bob did you ever fix yours?', expected: false },
+  ])('$name', async ({ next, expected }) => {
+    const { runGate } = await import('./gate.js');
+    const { recentPartnerGateNote } = await import('./fire.js');
+    const r = await runGate({ context: convo, newMessages: [msg('UALICE', next)], botUserId: 'UBOT', threshold: 0.65, note: recentPartnerGateNote('smasnug ai') });
+    console.log(JSON.stringify({ next, raw: r.raw, probability: r.probability, fallback: r.fallback, error: r.error }));
+    expect(r.error).toBeUndefined();
+    expect(r.respond).toBe(expected);
+  }, 30_000);
+});
