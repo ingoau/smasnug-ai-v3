@@ -20,7 +20,20 @@ import { isBotPeerDm } from './dm-peer.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { handleHuddleFmMessage, isFromHuddleFm } from '../features/huddlefm/inbound.js';
 import { showIntakeStatus } from './session-status.js';
-import { applyDelete, applyEdit, getThread, insertTombstone, isBotMessage, isTwoPartyThread, storeMessage, upsertThread, type SlackMessage, type ThreadRow } from './store.js';
+import {
+  applyDelete,
+  applyEdit,
+  consumeAwaitedReply,
+  getThread,
+  insertTombstone,
+  isBotMessage,
+  isTwoPartyThread,
+  othersSpokeBetween,
+  storeMessage,
+  upsertThread,
+  type SlackMessage,
+  type ThreadRow,
+} from './store.js';
 
 export const RATE_LIMITED_TEXT = "You're sending me a lot of messages — give me a bit and try again.";
 
@@ -54,7 +67,7 @@ async function markAddressed(threadId: string, engaged: boolean) {
 }
 
 export async function disengage(threadId: string, reason: string, actor: string | null) {
-  await sql`update threads set engaged = false where id = ${threadId} and engaged`;
+  await sql`update threads set engaged = false, awaits_reply_from = null where id = ${threadId} and engaged`;
   await appendEvent(threadId, 'disengaged', actor, { reason });
 }
 
@@ -101,10 +114,19 @@ async function handleNewMessage(ev: MessageEvent) {
   } else if (thread.engaged) {
     disengageDue = await countUnaddressed(thread);
   }
-  const twoParty = thread.engaged && !isDm && !mentionsBot && !mentionsOthers ? await isTwoPartyThread(thread, authorId) : false;
-
   const quietPrefix = hasQuietPrefix(text);
-  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, quietPrefix });
+  const followUp = !isDm && !mentionsBot && !mentionsOthers && !quietPrefix;
+  // The bot's latest message asked this author something (or offered): their next message needs no gate, whatever
+  // the idle time or engagement (taken atomically, so only the first message after the question counts).
+  const awaitedReply = followUp && thread.awaitsReplyFrom === authorId ? await consumeAwaitedReply(threadId, authorId) : false;
+  const twoParty = followUp && thread.engaged && !awaitedReply ? await isTwoPartyThread(thread, authorId) : false;
+  // The bot's latest reply was for this author and nobody else has written since: still their conversation.
+  const partner =
+    followUp && thread.engaged && !awaitedReply && !twoParty && thread.lastBotPartner === authorId && thread.lastBotReplyTs
+      ? !(await othersSpokeBetween(threadId, authorId, thread.lastBotReplyTs, ev.ts))
+      : false;
+
+  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, partner, awaitedReply, quietPrefix });
   log.debug({ threadId, ts: ev.ts, decision }, 'message decision');
   if (decision.action === 'ignore') {
     if (decision.reason === 'disengaged') await disengage(threadId, 'idle', null);
@@ -137,11 +159,11 @@ async function handleNewMessage(ev: MessageEvent) {
   markMessage(channelId, ev.ts, { debounce_scheduled: Date.now() });
 }
 
-/** Count an unaddressed human message; returns true when the thread should disengage. */
+/** Count an unaddressed human message; returns true when the thread should disengage (25 messages / 7 days idle). */
 async function countUnaddressed(thread: ThreadRow): Promise<boolean> {
-  const [row] = await sql<{ messagesSinceAddressed: number; lastAddressedAt: Date | null }[]>`
+  const [row] = await sql<{ messagesSinceAddressed: number; lastAddressedAt: Date | null; lastBotReplyAt: Date | null }[]>`
     update threads set messages_since_addressed = messages_since_addressed + 1, last_activity_at = now()
-    where id = ${thread.id} returning messages_since_addressed, last_addressed_at`;
+    where id = ${thread.id} returning messages_since_addressed, last_addressed_at, last_bot_reply_at`;
   if (!row) return false;
   return shouldDisengage(row, new Date(), { afterMessages: limits.disengageAfterMessages, afterMs: limits.disengageAfterMs });
 }

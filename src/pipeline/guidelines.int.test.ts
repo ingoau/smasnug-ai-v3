@@ -229,7 +229,7 @@ describe.skipIf(!infra)('workspace AI-bot guidelines (intake)', () => {
       expect(first.history).toContain('replying here');
       const f = nextTs();
       await processSlackEvent(messageEnvelope({ user: 'U1', text: 'any update?', ts: f, thread_ts: th!.threadTs }));
-      expect(await debounce.takeBatch({ threadId: newThread, authorId: 'U1', seq: await batchSeq(newThread, 'U1') })).toEqual([{ ts: f, reason: 'direct' }]);
+      expect(await debounce.takeBatch({ threadId: newThread, authorId: 'U1', seq: await batchSeq(newThread, 'U1') })).toEqual([{ ts: f, reason: 'partner' }]);
       const later = await renderThreadContext(newThread, { newMessageTs: [f] });
       expect(later.history).toContain('help with the deploy?');
       expect(later.newMessages).toContain('any update?');

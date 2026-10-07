@@ -9,6 +9,11 @@ export interface TurnRow {
    */
   kind: 'user' | 'synthesis' | 'scheduled';
   isMention: boolean;
+  /**
+   * Not a mention, but addressed to the bot all the same (no @mention needed): an answer to the bot's question or
+   * offer, or a two-party / conversation-partner follow-up that passed the gate. Framed as "talking with you".
+   */
+  addressed?: boolean;
   messageTs: string[];
   cardId: number | null;
   status: 'pending' | 'running' | 'done' | 'cancelled' | 'error';

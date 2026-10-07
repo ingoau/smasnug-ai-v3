@@ -13,10 +13,15 @@ import { markMessage } from '../core/timing.js';
 import { isLatestSeq, takeBatch, type DebounceJob } from './debounce.js';
 import { clearIntakeStatus } from './session-status.js';
 import { runGate, type GateResult } from './gate.js';
-import { batchIsMention, batchNeedsGate } from './rules.js';
+import { batchIsAddressed, batchIsMention, batchNeedsGate, gateThreshold, isCooling } from './rules.js';
 import { pushToRunningTurn, scheduleMessages } from './scheduler.js';
 import { getThread, loadMessages, recentMessages } from './store.js';
 import { djGateNote } from '../features/huddlefm/render.js';
+
+/** The gate's note for a partner batch: who the author is to the bot (code-written, from thread state). */
+export function partnerGateNote(botName: string): string {
+  return `The newest message comes from the person ${botName} was just talking with in this thread (no one else has written since ${botName}'s last reply, or only the two of them are in the thread): a question, request or follow-up from them is most likely meant for ${botName}.`;
+}
 
 /** Swappable for tests. */
 export const gateImpl: { run: typeof runGate } = { run: runGate };
@@ -44,20 +49,26 @@ export async function processDebounce(job: Job<DebounceJob>) {
   const reasons = items.map((b) => b.reason);
   const isMention = batchIsMention(reasons);
 
-  // Same author mid-turn with a tool boundary coming: inject into the running turn, no gate.
-  const pushed = await pushToRunningTurn(threadId, authorId, ts, isMention);
+  // Same author mid-turn with a tool boundary coming: inject into the running turn, no gate. Each row keeps its
+  // reason: leftovers the turn never drained go through the gate if they needed it (scheduler.finishTurn).
+  const pushed = await pushToRunningTurn(threadId, authorId, ts, isMention, items);
   if (pushed != null) {
     await appendEvent(threadId, 'inbox_push', authorId, { turnId: pushed, messageTs: ts });
     return;
   }
 
   const needsGate = batchNeedsGate(reasons);
+  const partner = reasons.includes('partner');
   if (needsGate) {
     const thread = await getThread(threadId);
     if (!thread?.engaged) return; // disengaged while the window was open
     const bot = await getBotIdentity();
-    const [context, note] = await Promise.all([recentMessages(threadId, ts[0]!, limits.gateContextMessages), djGateNote({ channelId, threadId })]);
-    const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId, ...(note ? { note } : {}) });
+    const cooling = isCooling(thread, new Date(), limits.gateCoolingAfterMs);
+    const threshold = gateThreshold({ partner, cooling }, { base: env.GATE_THRESHOLD, partner: env.GATE_PARTNER_THRESHOLD, cooling: env.GATE_COOLING_THRESHOLD });
+    const [context, djNote] = await Promise.all([recentMessages(threadId, ts[0]!, limits.gateContextMessages), djGateNote({ channelId, threadId })]);
+    // Code-written situation for the gate (never thread content).
+    const note = [partner ? partnerGateNote(env.BOT_DISPLAY_NAME) : '', djNote ?? ''].filter(Boolean).join(' ');
+    const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId, threshold, ...(note ? { note } : {}) });
     await appendEvent(threadId, 'gate_decision', 'system', {
       messageTs: ts,
       authorId,
@@ -65,21 +76,25 @@ export async function processDebounce(job: Job<DebounceJob>) {
       raw: result.raw,
       latencyMs: result.latencyMs,
       model: result.model,
-      ...(result.probability !== undefined ? { probability: result.probability, threshold: env.GATE_THRESHOLD } : {}),
+      threshold,
+      ...(partner ? { partner: true } : {}),
+      ...(cooling ? { cooling: true } : {}),
+      ...(result.probability !== undefined ? { probability: result.probability } : {}),
       ...(result.fallback ? { fallback: result.fallback } : {}),
       ...(result.error ? { error: result.error.slice(0, 300) } : {}),
     });
     await recordModelUsage({ userId: authorId, threadId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens }).catch((err) =>
       log.warn({ err }, 'recordModelUsage failed'),
     );
-    log.info({ threadId, authorId, respond: result.respond, model: result.model, probability: result.probability, fallback: result.fallback, latencyMs: result.latencyMs }, 'gate decision');
+    log.info({ threadId, authorId, respond: result.respond, model: result.model, probability: result.probability, threshold, partner, cooling, fallback: result.fallback, latencyMs: result.latencyMs }, 'gate decision');
     if (!result.respond) return;
     // Addressed: reset the disengagement counters.
     await sql`update threads set last_addressed_at = now(), messages_since_addressed = 0 where id = ${threadId}`;
   }
 
-  // The inbox was just checked above; only re-check after a (slow) gate call.
-  const res = await scheduleMessages(threadId, authorId, ts, isMention, { allowInbox: needsGate });
+  // The inbox was just checked above; only re-check after a (slow) gate call. An answer to the bot's question, or a
+  // partner follow-up that passed the gate, is framed as talking with the bot (TurnRow.addressed).
+  const res = await scheduleMessages(threadId, authorId, ts, isMention, { allowInbox: needsGate, addressed: !isMention && batchIsAddressed(reasons), items });
   for (const t of ts) markMessage(channelId, t, { debounce_fired: firedAt, turn_created: Date.now() });
   if (res.kind === 'inbox') await appendEvent(threadId, 'inbox_push', authorId, { turnId: res.turnId, messageTs: ts });
 }

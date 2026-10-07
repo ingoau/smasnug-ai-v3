@@ -19,8 +19,12 @@ const Env = z.object({
   MODEL_LUNA: z.string().default('openai/gpt-6-luna'),
   /** Relevance gate: a decisions model on OpenRouter's Decisions API, or 'luna' to use the chat model. */
   GATE_MODEL: z.string().default('typesafe/jev-1.13'),
-  /** Respond when the gate model's probability is at least this. */
+  /** Respond when the gate model's probability is at least this (contextual: see gateThreshold in pipeline/rules.ts). */
   GATE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
+  /** Threshold for the bot's own conversation partner: two-party threads, or the person it just replied to. */
+  GATE_PARTNER_THRESHOLD: z.coerce.number().min(0).max(1).default(0.5),
+  /** Threshold once the thread is cooling (idle longer than limits.gateCoolingAfterMs). */
+  GATE_COOLING_THRESHOLD: z.coerce.number().min(0).max(1).default(0.9),
   BOT_DISPLAY_NAME: z.string().default('smasnug ai'),
   LOG_LEVEL: z.string().default('info'),
   /**
@@ -104,7 +108,12 @@ export const limits = {
   /** ask_thread: the answering model call's timeout. */
   askThreadTimeoutMs: 90_000,
   disengageAfterMessages: 25,
-  disengageAfterMs: 3 * 60 * 60 * 1000,
+  /** Full disengagement after this long without being addressed and without a bot reply. */
+  disengageAfterMs: 7 * 24 * 60 * 60 * 1000,
+  /** Idle (no address, no bot reply) longer than this: the thread is cooling and the gate uses GATE_COOLING_THRESHOLD. */
+  gateCoolingAfterMs: 3 * 60 * 60 * 1000,
+  /** A previous turn's tool calls are shown to the next user turn when it finished at most this long ago. */
+  previousTurnToolsMaxAgeMs: 30 * 60 * 1000,
   gateContextMessages: 6,
   subagentIdleExpiryMs: 24 * 60 * 60 * 1000,
   heartbeatMs: 10_000,

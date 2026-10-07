@@ -512,6 +512,71 @@ describe.skipIf(!infra)('pipeline integration', () => {
     });
   });
 
+  describe('gate thresholds and addressed turns', () => {
+    it('partner batches use the low threshold and become addressed turns; cooling threads the high one', async () => {
+      await makeThread();
+      await storeMsg('U2', '1.6', 'whats nd studio?');
+      const gate = vi.spyOn(gateImpl, 'run').mockResolvedValue({ respond: true, raw: '0.6', probability: 0.6, latencyMs: 5, model: 'test' });
+      await debounce.addToBatch(THREAD, 'U2', '1.6', 'partner');
+      await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 1 }));
+      expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.5 });
+      expect(gate.mock.calls[0]![0].note).toMatch(/just talking with/);
+      const [t] = await sql`select addressed, is_mention from turns where thread_id = ${THREAD}`;
+      expect(t).toEqual({ addressed: true, isMention: false });
+
+      await sql`update threads set last_addressed_at = now() - interval '4 hours', last_bot_reply_at = null where id = ${THREAD}`;
+      await storeMsg('U3', '1.7', 'anyone?');
+      await debounce.addToBatch(THREAD, 'U3', '1.7', 'gate');
+      await processDebounce(job({ threadId: THREAD, authorId: 'U3', seq: 1 }));
+      expect(gate.mock.calls[1]![0]).toMatchObject({ threshold: 0.9 });
+      expect(gate.mock.calls[1]![0].note).toBeUndefined();
+      const decisions = await sql`select payload from thread_events where thread_id = ${THREAD} and type = 'gate_decision' order by id`;
+      expect(decisions.map((d) => [d.payload.threshold, d.payload.partner ?? false, d.payload.cooling ?? false])).toEqual([
+        [0.5, true, false],
+        [0.9, false, true],
+      ]);
+      const ts = await sql`select addressed from turns where thread_id = ${THREAD} and author_id = 'U3'`;
+      expect(ts[0]!.addressed).toBe(false);
+      gate.mockRestore();
+    });
+
+    it('direct (answer to the bot) batches skip the gate and are addressed', async () => {
+      await makeThread();
+      await storeMsg('U1', '1.8', 'build it');
+      const gate = vi.spyOn(gateImpl, 'run');
+      await debounce.addToBatch(THREAD, 'U1', '1.8', 'direct');
+      await processDebounce(job({ threadId: THREAD, authorId: 'U1', seq: 1 }));
+      expect(gate).not.toHaveBeenCalled();
+      expect(await turns()).toMatchObject([{ authorId: 'U1', messageTs: ['1.8'], isMention: false }]);
+      expect((await sql`select addressed from turns`)[0]!.addressed).toBe(true);
+      gate.mockRestore();
+    });
+
+    it('inbox leftovers that needed the gate go back through it; mentions stay a direct turn', async () => {
+      await makeThread();
+      await storeMsg('U1', '1.2', 'yes make it');
+      await storeMsg('U1', '1.3', '<@UBOT> and this');
+      await scheduler.scheduleMessages(THREAD, 'U1', ['1.1'], true);
+      const turn = (await scheduler.claimNextPending(THREAD))!;
+      await scheduler.pushToRunningTurn(THREAD, 'U1', ['1.2'], false, [{ ts: '1.2', reason: 'gate' }]);
+      expect(await scheduler.finishTurn(turn.id, 'done')).toBeNull();
+      expect((await turns()).filter((t) => t.status === 'pending')).toHaveLength(0);
+      expect(await debounce.takeBatch({ threadId: THREAD, authorId: 'U1', seq: 1 })).toEqual([{ ts: '1.2', reason: 'gate' }]);
+      const evs = await sql`select payload from thread_events where thread_id = ${THREAD} and type = 'inbox_regated'`;
+      expect(evs[0]!.payload).toMatchObject({ turnId: turn.id, messageTs: ['1.2'] });
+
+      await scheduler.scheduleMessages(THREAD, 'U1', ['1.4'], true);
+      const turn2 = (await scheduler.claimNextPending(THREAD))!;
+      await scheduler.pushToRunningTurn(THREAD, 'U1', ['1.2', '1.3'], true, [
+        { ts: '1.2', reason: 'gate' },
+        { ts: '1.3', reason: 'mention' },
+      ]);
+      const follow = await scheduler.finishTurn(turn2.id, 'done');
+      expect(follow).not.toBeNull();
+      expect((await turns()).find((t) => t.id === follow)).toMatchObject({ status: 'pending', messageTs: ['1.2', '1.3'], isMention: true });
+    });
+  });
+
   describe('ingress + interactions', () => {
     it('dedupes Events API retries on event_id', async () => {
       const { handleEnvelope } = await import('../ingress/main.js');
@@ -553,7 +618,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(await debounce.takeBatch({ threadId: `${C}:${ts}`, authorId: 'U1', seq: 1 })).toEqual([{ ts, reason: 'mention' }]);
     });
 
-    it('follow-ups: two-party → direct; third person → gate; mentioning someone else → skipped; bots → stored only', async () => {
+    it('follow-ups: two-party → partner (gated, low threshold); third person → gate; mentioning someone else → skipped; bots → stored only', async () => {
       const root = nextTs();
       const tid = `${C}:${root}`;
       await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> question', ts: root }));
@@ -566,12 +631,62 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const u1 = await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 2 });
       expect(u1).toEqual([
         { ts: root, reason: 'mention' },
-        { ts: f1, reason: 'direct' },
+        { ts: f1, reason: 'partner' },
       ]);
       // U2's seq: the skipped message never entered the batch, so seq is still 1.
       expect(await debounce.takeBatch({ threadId: tid, authorId: 'U2', seq: 1 })).toEqual([{ ts: f2, reason: 'gate' }]);
       const [row] = await sql`select count(*)::int as count from messages where thread_id = ${tid}`;
       expect(row!.count).toBe(5);
+    });
+
+    it("answering the bot's question skips the gate once; the bot's conversation partner is a partner until someone else writes", async () => {
+      const { noteBotReply } = await import('./store.js');
+      const root = nextTs();
+      const tid = `${C}:${root}`;
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> question', ts: root }));
+      await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 1 });
+      await processSlackEvent(messageEnvelope({ user: 'U2', text: 'me too', ts: nextTs(), thread_ts: root })); // not two-party any more
+      const botTs = nextTs();
+      await processSlackEvent(messageEnvelope({ bot_id: 'BBOT', user: 'UBOT', text: 'want me to dig deeper?', ts: botTs, thread_ts: root }));
+      await noteBotReply(tid, { ts: botTs, partnerId: 'U1', awaitsReply: true });
+      // Idle and even disengaged: the answer still runs, without the gate.
+      await sql`update threads set engaged = false, last_addressed_at = now() - interval '2 days' where id = ${tid}`;
+      const a = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'yes', ts: a, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 2 })).toEqual([{ ts: a, reason: 'direct' }]);
+      const [th] = await sql`select engaged, awaits_reply_from from threads where id = ${tid}`;
+      expect(th).toEqual({ engaged: true, awaitsReplyFrom: null });
+      // The flag is taken: U1's next message is a partner follow-up (nobody else wrote since the bot's reply).
+      const b = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'and the docs', ts: b, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 3 })).toEqual([{ ts: b, reason: 'partner' }]);
+      // Someone else's message in between: back to the normal gate for U1.
+      await processSlackEvent(messageEnvelope({ user: 'U2', text: 'lol', ts: nextTs(), thread_ts: root }));
+      const c = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'anyway', ts: c, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 4 })).toEqual([{ ts: c, reason: 'gate' }]);
+      // An answer that @mentions someone else is not for the bot.
+      await noteBotReply(tid, { ts: nextTs(), partnerId: 'U1', awaitsReply: true });
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@U2> what do you think?', ts: nextTs(), thread_ts: root }));
+      expect((await sql`select awaits_reply_from from threads where id = ${tid}`)[0]!.awaitsReplyFrom).toBe('U1');
+    });
+
+    it('idle for hours only cools a thread (stricter gate); it disengages after a week, or after 25 messages', async () => {
+      const root = nextTs();
+      const tid = `${C}:${root}`;
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> hey', ts: root }));
+      await sql`update threads set last_addressed_at = now() - interval '5 hours' where id = ${tid}`;
+      const a = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U2', text: 'so what now', ts: a, thread_ts: root }));
+      expect((await sql`select engaged from threads where id = ${tid}`)[0]!.engaged).toBe(true);
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U2', seq: 1 })).toEqual([{ ts: a, reason: 'gate' }]);
+      // A recent bot reply (e.g. a synthesis turn) counts as activity even when nobody addressed the bot for 8 days.
+      await sql`update threads set last_addressed_at = now() - interval '8 days', last_bot_reply_at = now() - interval '1 hour' where id = ${tid}`;
+      await processSlackEvent(messageEnvelope({ user: 'U2', text: 'still here', ts: nextTs(), thread_ts: root }));
+      expect((await sql`select engaged from threads where id = ${tid}`)[0]!.engaged).toBe(true);
+      await sql`update threads set last_bot_reply_at = now() - interval '8 days' where id = ${tid}`;
+      await processSlackEvent(messageEnvelope({ user: 'U2', text: 'hello?', ts: nextTs(), thread_ts: root }));
+      expect((await sql`select engaged from threads where id = ${tid}`)[0]!.engaged).toBe(false);
     });
 
     it('ignores follow-ups in threads the bot is not part of and disengages after idle messages', async () => {

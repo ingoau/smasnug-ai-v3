@@ -11,6 +11,11 @@ export interface ThreadRow {
   lastAddressedAt: Date | null;
   messagesSinceAddressed: number;
   backfilled: boolean;
+  /** The bot's latest reply (any turn kind): idle clock, conversation partner, awaited answer (migration 220). */
+  lastBotReplyAt?: Date | null;
+  lastBotReplyTs?: string | null;
+  lastBotPartner?: string | null;
+  awaitsReplyFrom?: string | null;
 }
 
 /** Raw Slack message (the event, or `event.message` for message_changed). */
@@ -146,4 +151,32 @@ export async function recentMessages(threadId: string, beforeTs: string, n: numb
     from messages where thread_id = ${threadId} and not deleted and ts::numeric < ${beforeTs}::numeric
     order by ts::numeric desc limit ${n}`;
   return rows.reverse();
+}
+
+/**
+ * The bot replied in a thread (any turn kind): the idle clock restarts, `partnerId` (the turn's speaker) is who it
+ * was talking with, and `awaitsReply` (rules.ts awaitsReply: a question, an offer or buttons) lets that person's next
+ * message skip the gate. Called by the front agent after each delivered reply.
+ */
+export async function noteBotReply(threadId: string, o: { ts: string | null; partnerId: string; awaitsReply: boolean }): Promise<void> {
+  await sql`
+    update threads set last_bot_reply_at = now(), last_bot_reply_ts = coalesce(${o.ts}, last_bot_reply_ts),
+      last_bot_partner = ${o.partnerId}, awaits_reply_from = ${o.awaitsReply ? o.partnerId : null}, last_activity_at = now()
+    where id = ${threadId}`;
+}
+
+/** Atomically take the "bot awaits your answer" flag for this author. True for the first message that takes it. */
+export async function consumeAwaitedReply(threadId: string, authorId: string): Promise<boolean> {
+  const rows = await sql`update threads set awaits_reply_from = null where id = ${threadId} and awaits_reply_from = ${authorId} returning id`;
+  return rows.length > 0;
+}
+
+/** True if a human other than `authorId` wrote in the thread after `afterTs` and before `beforeTs` (stored copies). */
+export async function othersSpokeBetween(threadId: string, authorId: string, afterTs: string, beforeTs: string): Promise<boolean> {
+  const [row] = await sql<{ spoke: boolean }[]>`
+    select exists (
+      select 1 from messages where thread_id = ${threadId} and not deleted and bot_id is null and user_id is not null
+        and user_id <> ${authorId} and ts::numeric > ${afterTs}::numeric and ts::numeric < ${beforeTs}::numeric
+    ) as spoke`;
+  return Boolean(row?.spoke);
 }

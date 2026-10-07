@@ -3,8 +3,15 @@
  * so it can be unit-tested directly.
  */
 
-/** Why a message joins a debounce batch. Anything but 'gate' runs the front agent without the relevance gate. */
-export type BatchReason = 'dm' | 'mention' | 'direct' | 'gate';
+/**
+ * Why a message joins a debounce batch.
+ * - 'dm' / 'mention': always runs (no gate).
+ * - 'direct': the author answers the bot's own question / offer (awaitedReply): runs without the gate.
+ * - 'partner': a two-party thread, or the bot's latest conversation partner continuing with nobody else in between:
+ *   through the gate at the lower partner threshold (gateThreshold).
+ * - 'gate': through the gate at the normal (or cooling) threshold.
+ */
+export type BatchReason = 'dm' | 'mention' | 'direct' | 'partner' | 'gate';
 
 export type Decision =
   | { action: 'ignore'; reason: 'bot' | 'not_engaged' | 'mentions_other' | 'disengaged' | 'unsupported' | 'quiet' }
@@ -21,6 +28,16 @@ export interface MessageFacts {
   disengageDue: boolean;
   /** Only the original poster and the bot have spoken in the thread, and this author is the original poster. */
   twoParty: boolean;
+  /**
+   * The author is the bot's most recent conversation partner (the speaker its latest reply was for) and nobody else
+   * has written since that reply.
+   */
+  partner?: boolean;
+  /**
+   * The bot's latest message ended with a question, an offer or quick-reply buttons for this author, and this is
+   * their first message since: runs without the gate, regardless of idle time or disengagement.
+   */
+  awaitedReply?: boolean;
   /** Text starts with `<>` (guidelines rule 4): never answered unless the bot is @mentioned. */
   quietPrefix?: boolean;
 }
@@ -30,16 +47,27 @@ export function decide(f: MessageFacts): Decision {
   if (f.quietPrefix && !f.mentionsBot) return { action: 'ignore', reason: 'quiet' };
   if (f.isDm) return { action: 'batch', reason: 'dm' };
   if (f.mentionsBot) return { action: 'batch', reason: 'mention' };
+  if (f.awaitedReply && !f.mentionsOthers) return { action: 'batch', reason: 'direct' };
   if (!f.engaged) return { action: 'ignore', reason: 'not_engaged' };
   if (f.disengageDue) return { action: 'ignore', reason: 'disengaged' };
   if (f.mentionsOthers) return { action: 'ignore', reason: 'mentions_other' };
-  if (f.twoParty) return { action: 'batch', reason: 'direct' };
+  if (f.twoParty || f.partner) return { action: 'batch', reason: 'partner' };
   return { action: 'batch', reason: 'gate' };
 }
 
+const GATED = new Set<BatchReason>(['gate', 'partner']);
+
 /** A batch runs the front agent without the gate if any of its messages had a deterministic reason. */
 export function batchNeedsGate(reasons: BatchReason[]): boolean {
-  return reasons.length > 0 && reasons.every((r) => r === 'gate');
+  return reasons.length > 0 && reasons.every((r) => GATED.has(r));
+}
+
+/**
+ * Not a mention, but framed as addressed to the bot ("talking with you"): an answer to its question / offer, or a
+ * partner follow-up (only reaches a turn after passing the gate).
+ */
+export function batchIsAddressed(reasons: BatchReason[]): boolean {
+  return reasons.some((r) => r === 'direct' || r === 'partner');
 }
 
 /** Mention/DM turns get the status indicator. */
@@ -51,12 +79,63 @@ export interface EngagementState {
   /** Count of human messages since the bot was last addressed, including the current one. */
   messagesSinceAddressed: number;
   lastAddressedAt: Date | null;
+  /** Any bot reply (also synthesis / scheduled turns) counts as activity for the idle clock. */
+  lastBotReplyAt?: Date | null;
 }
 
+/** When the thread last saw the bot in action: addressed, or the bot's latest reply. Null if neither is known. */
+export function lastEngagedAt(s: Pick<EngagementState, 'lastAddressedAt' | 'lastBotReplyAt'>): Date | null {
+  const a = s.lastAddressedAt?.getTime() ?? null;
+  const b = s.lastBotReplyAt?.getTime() ?? null;
+  if (a == null && b == null) return null;
+  return new Date(Math.max(a ?? -Infinity, b ?? -Infinity));
+}
+
+/**
+ * Full disengagement: more than `afterMessages` unaddressed human messages, or idle (no address, no bot reply) for
+ * longer than `afterMs` (days; a few idle hours only make the gate stricter, see isCooling).
+ */
 export function shouldDisengage(s: EngagementState, now: Date, opts: { afterMessages: number; afterMs: number }): boolean {
   if (s.messagesSinceAddressed > opts.afterMessages) return true;
-  if (s.lastAddressedAt && now.getTime() - s.lastAddressedAt.getTime() > opts.afterMs) return true;
+  const last = lastEngagedAt(s);
+  if (last && now.getTime() - last.getTime() > opts.afterMs) return true;
   return false;
+}
+
+/** The thread is cooling: idle (no address, no bot reply) for more than `afterMs`. The gate then needs more. */
+export function isCooling(s: Pick<EngagementState, 'lastAddressedAt' | 'lastBotReplyAt'>, now: Date, afterMs: number): boolean {
+  const last = lastEngagedAt(s);
+  return Boolean(last && now.getTime() - last.getTime() > afterMs);
+}
+
+/**
+ * The gate's respond threshold for a batch. A partner batch (two-party thread, or the bot's latest conversation
+ * partner continuing) gets the low threshold, even in a cooling thread (nobody else spoke since the bot did); a
+ * cooling thread gets the high one; everything else the base GATE_THRESHOLD.
+ */
+export function gateThreshold(f: { partner: boolean; cooling: boolean }, t: { base: number; partner: number; cooling: number }): number {
+  if (f.partner) return t.partner;
+  if (f.cooling) return t.cooling;
+  return t.base;
+}
+
+/** Offer phrasings at the end of a reply that expect an answer even without a question mark. */
+const OFFER = /\b(want me to|should i|shall i|if you want|if you'd like|if you like|just say the word|say the word|lmk if|let me know if)\b/i;
+
+/**
+ * Does the bot's reply wait for an answer? True when it has quick-reply buttons, its text ends with a question
+ * (trailing "?", also before closing punctuation, emoji codes or a code fence), or its last sentence is an offer.
+ */
+export function awaitsReply(text: string, hasButtons = false): boolean {
+  if (hasButtons) return true;
+  const t = text
+    .trim()
+    .replace(/(?:\s*:[a-z0-9_+'-]+:)+$/i, '') // trailing emoji codes
+    .replace(/[\s)\]"'*_~`]+$/, '');
+  if (!t) return false;
+  if (t.endsWith('?')) return true;
+  const last = t.split(/(?<=[.!?])\s+|\n+/).filter(Boolean).at(-1) ?? '';
+  return OFFER.test(last);
 }
 
 /** Slackbot's user id: its system messages ("you were added to a user group…") never start anything. */

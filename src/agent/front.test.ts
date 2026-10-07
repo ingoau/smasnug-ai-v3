@@ -454,6 +454,54 @@ describe('runFrontTurn: a reply or reaction ends the turn', () => {
   });
 });
 
+describe('runFrontTurn: conversation state', () => {
+  it('frames an addressed (non-mention) turn as talking with the bot', async () => {
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 97, isMention: false, addressed: true }), io(false).io);
+    expect(turnText()).toContain('<@U1> is talking with you in this thread (no @mention needed): respond');
+    expect(turnText()).not.toContain('unmentioned follow-up');
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 98, isMention: false }), io(false).io);
+    expect(turnText()).toContain('This is an unmentioned follow-up');
+  });
+
+  it('every delivered reply updates the thread (idle clock, partner, awaited answer)', async () => {
+    const queries: string[] = [];
+    h.sqlHook = (q) => void queries.push(q) as any;
+    h.model = mockModel([toolStep(['reply', { text: 'want me to dig deeper?' }])]);
+    await runFrontTurn(turn({ id: 99 }), io().io);
+    expect(queries.some((q) => q.includes('last_bot_reply_at = now()') && q.includes('awaits_reply_from'))).toBe(true);
+  });
+
+  it('records the turn\'s tool calls and shows a recent previous turn\'s calls to the next user turn', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    try {
+      h.model = mockModel([toolStep(['web_search', { query: 'nd studio' }]), toolStep(['reply', { text: 'found it' }])]);
+      await runFrontTurn(turn({ id: 100 }), io().io);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    const ev = h.events.find((e) => e.type === 'turn_tools')!;
+    expect(ev.payload).toEqual({ turnId: 100, calls: [{ tool: 'web_search', args: '{"query":"nd studio"}' }] });
+
+    h.sqlHook = (q) => {
+      if (q.includes('from turns where thread_id') && q.includes("status in ('done', 'error')")) return [{ id: 100, finishedAt: new Date() }];
+      if (q.includes("type = 'turn_tools'")) return [{ payload: ev.payload }];
+      return undefined;
+    };
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 101 }), io().io);
+    expect(turnText()).toContain('<previous_turn_tools');
+    expect(turnText()).toContain('- web_search {"query":"nd studio"}');
+
+    // Too old, or not a user turn: nothing.
+    h.sqlHook = (q) => (q.includes('from turns where thread_id') && q.includes("status in ('done', 'error')") ? [{ id: 100, finishedAt: new Date(Date.now() - 3600_000) }] : undefined);
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 102 }), io().io);
+    expect(turnText()).not.toContain('<previous_turn_tools');
+  });
+});
+
 describe('runFrontTurn: spawn_subagent fan-out', () => {
   it('one call with several tasks starts one subagent per task on the same card; a failed one is reported, not fatal', async () => {
     const tasks = [

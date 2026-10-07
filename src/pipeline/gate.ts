@@ -42,14 +42,14 @@ export function decisionsRequest(opts: { model: string; context: string; newMess
         instructions: `Should ${botName} respond to the newest message(s)?`,
         criteria: {
           true: `The newest message is addressed to ${botName}: a question or request aimed at it, a follow-up to its last answer, or a reply that disputes, corrects or questions what it said (even without naming it); or people are explicitly looking for information or help ${botName} would clearly add.`,
-          false: `People are talking among themselves or to someone else (including other bots), reacting ("lol", "thanks", "nice", emoji), chatting socially or answering each other, or a response from ${botName} would be unwelcome or redundant. When genuinely unclear, false.`,
+          false: `People are talking among themselves or to someone else (including other bots), reacting ("lol", "thanks", "nice", emoji), chatting socially or answering each other, or a response from ${botName} would be unwelcome or redundant. When genuinely unclear while other people are talking with each other, false. A question or request from the person ${botName} was just talking with (when the situation says so) is meant for ${botName} unless clearly aimed at someone else.`,
         },
       },
     },
   };
 }
 
-async function runDecisionsGate(model: string, context: string, newMessages: string, started: number, note?: string): Promise<GateResult> {
+async function runDecisionsGate(model: string, context: string, newMessages: string, started: number, threshold: number, note?: string): Promise<GateResult> {
   const res = await fetch(DECISIONS_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${env.OPENROUTER_KEY}`, 'Content-Type': 'application/json' },
@@ -61,7 +61,7 @@ async function runDecisionsGate(model: string, context: string, newMessages: str
   const p = Number(body?.answers?.should_respond?.noul);
   if (!Number.isFinite(p)) throw new Error('decisions: no probability in response');
   return {
-    respond: p >= env.GATE_THRESHOLD,
+    respond: p >= threshold,
     raw: p.toFixed(3),
     probability: p,
     latencyMs: Date.now() - started,
@@ -100,6 +100,8 @@ export async function runGate(opts: {
   abortSignal?: AbortSignal;
   /** Extra situation from code (e.g. the bot is DJing the huddle here), not from thread content. */
   note?: string;
+  /** Decisions-model respond threshold (pipeline/rules.ts gateThreshold); default GATE_THRESHOLD. */
+  threshold?: number;
 }): Promise<GateResult> {
   const started = Date.now();
   let fallback: string | undefined;
@@ -110,6 +112,7 @@ export async function runGate(opts: {
         renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId),
         renderForGate(opts.newMessages, opts.botUserId),
         started,
+        opts.threshold ?? env.GATE_THRESHOLD,
         opts.note,
       );
     } catch (err) {

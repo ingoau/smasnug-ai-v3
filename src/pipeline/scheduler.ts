@@ -10,10 +10,18 @@ type Tx = TransactionSql<{}>;
 import { enqueue, QUEUE } from '../core/queues.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { parseThreadId } from '../core/events.js';
-import { compareTs } from './rules.js';
+import { batchIsAddressed, batchNeedsGate, compareTs, type BatchReason } from './rules.js';
 import { loadMessages } from './store.js';
+import { addToBatch } from './debounce.js';
+import { appendEvent } from '../core/events.js';
 
-const TURN_COLS = sql`id::int as id, thread_id, author_id, kind, is_mention, message_ts, card_id::int as card_id, status, phase`;
+const TURN_COLS = sql`id::int as id, thread_id, author_id, kind, is_mention, addressed, message_ts, card_id::int as card_id, status, phase`;
+
+/** A message with the intake reason it was batched for (rules.ts BatchReason). */
+export interface ReasonedTs {
+  ts: string;
+  reason: BatchReason;
+}
 
 async function lockThread(tx: Tx, threadId: string) {
   await tx`select id from threads where id = ${threadId} for update`;
@@ -37,10 +45,12 @@ export async function requestTurn(opts: {
   cardId?: number;
   messageTs?: string[];
   isMention?: boolean;
+  /** User turns: framed as talking with the bot without a mention (TurnRow.addressed). */
+  addressed?: boolean;
 }): Promise<number> {
   const id = await sql.begin(async (tx) => {
     await lockThread(tx, opts.threadId);
-    if (opts.kind === 'user') return addToPendingTurnTx(tx, opts.threadId, opts.authorId, opts.messageTs ?? [], opts.isMention ?? false);
+    if (opts.kind === 'user') return addToPendingTurnTx(tx, opts.threadId, opts.authorId, opts.messageTs ?? [], opts.isMention ?? false, opts.addressed ?? false);
     const [row] = await tx<{ id: number }[]>`
       insert into turns (thread_id, author_id, kind, is_mention, message_ts, card_id)
       values (${opts.threadId}, ${opts.authorId}, ${opts.kind}, ${opts.isMention ?? false}, ${opts.messageTs ?? []}::text[], ${opts.cardId ?? null})
@@ -69,19 +79,20 @@ export async function insertTurnTx(
 }
 
 /** Append to the author's pending user turn, or create one. Caller holds the thread row lock. */
-async function addToPendingTurnTx(tx: Tx, threadId: string, authorId: string, ts: string[], isMention: boolean): Promise<number> {
+async function addToPendingTurnTx(tx: Tx, threadId: string, authorId: string, ts: string[], isMention: boolean, addressed = false): Promise<number> {
   const [pending] = await tx<{ id: number; messageTs: string[] }[]>`
     select id::int as id, message_ts from turns
     where thread_id = ${threadId} and author_id = ${authorId} and kind = 'user' and status = 'pending'
     order by id limit 1 for update`;
   if (pending) {
-    await tx`update turns set message_ts = ${mergeTs(pending.messageTs, ts)}::text[], is_mention = is_mention or ${isMention}
+    await tx`update turns set message_ts = ${mergeTs(pending.messageTs, ts)}::text[], is_mention = is_mention or ${isMention},
+               addressed = addressed or ${addressed}
              where id = ${pending.id}`;
     return pending.id;
   }
   const [row] = await tx<{ id: number }[]>`
-    insert into turns (thread_id, author_id, kind, is_mention, message_ts)
-    values (${threadId}, ${authorId}, 'user', ${isMention}, ${mergeTs([], ts)}::text[])
+    insert into turns (thread_id, author_id, kind, is_mention, addressed, message_ts)
+    values (${threadId}, ${authorId}, 'user', ${isMention}, ${addressed}, ${mergeTs([], ts)}::text[])
     returning id::int as id`;
   return row!.id;
 }
@@ -90,9 +101,11 @@ export type ScheduleResult = { kind: 'inbox'; turnId: number } | { kind: 'turn';
 
 /**
  * If the thread's running turn belongs to the same author, is in phase 'tools' and no turn of theirs is already
- * waiting, push the messages into its inbox. Returns the running turn id, or null.
+ * waiting, push the messages into its inbox. Returns the running turn id, or null. `items` gives each message's
+ * intake reason (kept on the inbox row for leftovers, see finishTurn); without it the rows are mention / direct.
  */
-export async function pushToRunningTurn(threadId: string, authorId: string, ts: string[], isMention: boolean): Promise<number | null> {
+export async function pushToRunningTurn(threadId: string, authorId: string, ts: string[], isMention: boolean, items?: ReasonedTs[]): Promise<number | null> {
+  const reasonOf = new Map(items?.map((i) => [i.ts, i.reason]));
   return sql.begin(async (tx) => {
     await lockThread(tx, threadId);
     const [running] = await tx<{ id: number; authorId: string; phase: string | null; kind: string }[]>`
@@ -102,21 +115,27 @@ export async function pushToRunningTurn(threadId: string, authorId: string, ts: 
     const [waiting] = await tx`select 1 from turns where thread_id = ${threadId} and author_id = ${authorId} and status = 'pending' limit 1`;
     if (waiting) return null; // keep order: the author's newer messages queue behind their waiting turn
     for (const t of ts) {
-      await tx`insert into thread_inbox (turn_id, message_ts, is_mention) values (${running.id}, ${t}, ${isMention})`;
+      await tx`insert into thread_inbox (turn_id, message_ts, is_mention, reason) values (${running.id}, ${t}, ${isMention}, ${reasonOf.get(t) ?? null})`;
     }
     return running.id;
   });
 }
 
 /** Debounced batch → inbox push into the author's running turn, or a (new or extended) pending turn + thread-run. */
-export async function scheduleMessages(threadId: string, authorId: string, ts: string[], isMention: boolean, opts: { allowInbox?: boolean } = {}): Promise<ScheduleResult> {
+export async function scheduleMessages(
+  threadId: string,
+  authorId: string,
+  ts: string[],
+  isMention: boolean,
+  opts: { allowInbox?: boolean; addressed?: boolean; items?: ReasonedTs[] } = {},
+): Promise<ScheduleResult> {
   if (opts.allowInbox !== false) {
-    const turnId = await pushToRunningTurn(threadId, authorId, ts, isMention);
+    const turnId = await pushToRunningTurn(threadId, authorId, ts, isMention, opts.items);
     if (turnId != null) return { kind: 'inbox', turnId };
   }
   const turnId = await sql.begin(async (tx) => {
     await lockThread(tx, threadId);
-    return addToPendingTurnTx(tx, threadId, authorId, ts, isMention);
+    return addToPendingTurnTx(tx, threadId, authorId, ts, isMention, opts.addressed ?? false);
   });
   await ensureThreadRun(threadId);
   return { kind: 'turn', turnId };
@@ -156,28 +175,51 @@ export async function setPhase(turnId: number, phase: 'tools' | 'final') {
 }
 
 /**
- * Finish a running turn. Inbox rows it never drained move into a new pending turn for the same author (the holder
- * loop picks it up next). Returns the id of that follow-up turn, if any.
+ * The intake reasons of leftover inbox rows. Rows from before reasons were stored count as what they ran as then
+ * (mention, or a direct follow-up).
+ */
+export function leftoverReasons(rows: { isMention: boolean; reason: string | null }[]): BatchReason[] {
+  return rows.map((r) => (r.reason as BatchReason | null) ?? (r.isMention ? 'mention' : 'direct'));
+}
+
+/**
+ * Finish a running turn. Inbox rows it never drained: if every one of them needed the gate (rules.ts batchNeedsGate:
+ * pushed into the running turn before any gate ran), they go back into the author's debounce batch with their
+ * reasons, so the gate decides on them like on any other message; otherwise (a mention, DM, button press or answer
+ * to the bot is among them) they move into a new pending turn for the same author (the holder loop picks it up
+ * next). Returns the id of that follow-up turn, if any.
  */
 export async function finishTurn(turnId: number, status: 'done' | 'error' | 'cancelled'): Promise<number | null> {
-  return sql.begin(async (tx) => {
+  const out = await sql.begin(async (tx) => {
     const [t] = await tx<{ threadId: string }[]>`select thread_id from turns where id = ${turnId}`;
     if (!t) return null;
     await lockThread(tx, t.threadId);
     const [turn] = await tx<{ authorId: string; status: string }[]>`select author_id, status from turns where id = ${turnId} for update`;
     if (!turn || turn.status !== 'running') return null;
     await tx`update turns set status = ${status}, phase = null, finished_at = now() where id = ${turnId}`;
-    const left = await tx<{ messageTs: string; isMention: boolean }[]>`
-      update thread_inbox set consumed_at = now() where turn_id = ${turnId} and consumed_at is null returning message_ts, is_mention`;
+    const left = await tx<{ messageTs: string; isMention: boolean; reason: string | null }[]>`
+      update thread_inbox set consumed_at = now() where turn_id = ${turnId} and consumed_at is null returning message_ts, is_mention, reason`;
     if (left.length === 0) return null;
-    return addToPendingTurnTx(
+    const reasons = leftoverReasons(left);
+    const items = left.map((r, i) => ({ ts: r.messageTs, reason: reasons[i]! }));
+    if (batchNeedsGate(reasons)) return { threadId: t.threadId, authorId: turn.authorId, regate: items, followUp: null };
+    const isMention = left.some((r) => r.isMention);
+    const followUp = await addToPendingTurnTx(
       tx,
       t.threadId,
       turn.authorId,
-      left.map((r) => r.messageTs),
-      left.some((r) => r.isMention),
+      items.map((i) => i.ts),
+      isMention,
+      !isMention && batchIsAddressed(reasons),
     );
+    return { threadId: t.threadId, authorId: turn.authorId, regate: null, followUp };
   });
+  if (!out) return null;
+  if (out.regate) {
+    for (const i of out.regate) await addToBatch(out.threadId, out.authorId, i.ts, i.reason);
+    await appendEvent(out.threadId, 'inbox_regated', 'system', { turnId, messageTs: out.regate.map((i) => i.ts) }).catch(() => {});
+  }
+  return out.followUp;
 }
 
 /** A deleted message leaves pending turns and unconsumed inbox rows; turns left empty are cancelled. */

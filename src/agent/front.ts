@@ -27,6 +27,8 @@ import { cursorInstructRefusal, cursorRefusal } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
 import { endsTurnAfterStep, type StepCall, type StepResultPart } from './turn-end.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
+import { noteBotReply } from '../pipeline/store.js';
+import { awaitsReply } from '../pipeline/rules.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 
@@ -245,6 +247,44 @@ export async function renderEarlierRounds(cardId: number, maxRounds = 4): Promis
   return parts.join('\n\n');
 }
 
+/** Tools not worth repeating to the next turn: the visible responses themselves and bookkeeping. */
+const UNREPORTED_TOOLS = new Set(['reply', 'react', 'unreact', 'end_turn', 'search_emojis', 'set_session_title', 'set_card_title']);
+const MAX_REPORTED_CALLS = 12;
+const REPORTED_ARGS_CHARS = 200;
+
+/** One line per tool call of a turn, args as compact JSON (clipped). Stored as the `turn_tools` event. */
+export function summarizeToolCalls(calls: { tool: string; args: unknown }[]): { tool: string; args: string }[] {
+  return calls
+    .filter((c) => !UNREPORTED_TOOLS.has(c.tool))
+    .slice(0, MAX_REPORTED_CALLS)
+    .map((c) => {
+      let args = '';
+      try {
+        args = JSON.stringify(c.args ?? {});
+      } catch {
+        args = '{}';
+      }
+      return { tool: c.tool, args: args.length > REPORTED_ARGS_CHARS ? `${args.slice(0, REPORTED_ARGS_CHARS - 1)}…` : args };
+    });
+}
+
+/**
+ * The previous turn's tool calls (tool + args, one line each), when the previous turn in this thread finished
+ * recently and used tools: a follow-up like "yes, make it" then knows what was looked up or started. Only the calls,
+ * never their results (Slack content, notably semantic-search results, isn't repeated).
+ */
+export async function renderPreviousTurnTools(threadId: string, turnId: number, now = new Date()): Promise<string> {
+  const [prev] = await sql<{ id: number; finishedAt: Date | null }[]>`
+    select id::int as id, finished_at from turns where thread_id = ${threadId} and id < ${turnId} and status in ('done', 'error')
+    order by id desc limit 1`;
+  if (!prev?.finishedAt || now.getTime() - new Date(prev.finishedAt).getTime() > limits.previousTurnToolsMaxAgeMs) return '';
+  const [ev] = await sql<{ payload: { calls?: { tool: string; args: string }[] } }[]>`
+    select payload from thread_events where thread_id = ${threadId} and type = 'turn_tools' and payload->>'turnId' = ${String(prev.id)}
+    order by id desc limit 1`;
+  const calls = ev?.payload?.calls ?? [];
+  return calls.map((c) => `- ${c.tool} ${oneLine(String(c.args ?? ''), REPORTED_ARGS_CHARS)}`).join('\n');
+}
+
 function section(tag: string, body: string, attrs = ''): string {
   return body.trim() ? `<${tag}${attrs}>\n${body.trim()}\n</${tag}>` : '';
 }
@@ -299,6 +339,16 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
   if (session?.isDm) parts.push(section('session', renderSessionNote(session)));
   parts.push(section('huddle_dj', dj));
   parts.push(section('subagents', snapshot ? clipTokens(snapshot, BUDGET.snapshot) : 'None in this thread.'));
+  if (turn.kind === 'user') {
+    const prevTools = await renderPreviousTurnTools(turn.threadId, turn.id, now).catch((err) => (log.warn({ err }, 'renderPreviousTurnTools failed'), ''));
+    parts.push(
+      section(
+        'previous_turn_tools',
+        prevTools,
+        ' note="Tools you called in your previous turn in this thread (calls only; their results are not shown again: call a tool again if you need its result)."',
+      ),
+    );
+  }
   parts.push(section('current_time', renderNow(now, speaker.tz)));
   let synthesisRunIds: number[] = [];
   let allCancelled = false;
@@ -329,7 +379,9 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
         ? 'The speaker just pinged you, with no request in the message. Do not answer messages from <channel_background>; they belong to other conversations. If <thread_history> makes it clear what they want from you, help with that; otherwise reply briefly and casually asking what they need.'
         : turn.isMention
           ? 'You were mentioned / messaged directly: respond to <new_messages> using your tools.'
-          : 'This is an unmentioned follow-up: respond only if it is addressed to you or you clearly add something; otherwise do nothing.',
+          : turn.addressed
+            ? `<@${turn.authorId}> is talking with you in this thread (no @mention needed): respond to <new_messages> using your tools.`
+            : 'This is an unmentioned follow-up: respond only if it is addressed to you or you clearly add something; otherwise do nothing.',
     );
   }
   return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, allCancelled, ...(outcome ? { outcome } : {}) };
@@ -379,7 +431,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     timing: io.timing,
     // Cards only where a reply is expected (DMs, mentions, reminder turns, write-ups): a silent unmentioned turn
     // would otherwise post and delete a message in the thread, which can notify its followers.
-    activityCards: Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks' && (io.isMention || turn.kind === 'synthesis'),
+    activityCards: Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks' && (io.isMention || Boolean(turn.addressed) || turn.kind === 'synthesis'),
     // A reply only streams into the activity message if nothing was posted below it meanwhile.
     postedSince: async (ts) =>
       Boolean((await sql<{ moved: boolean }[]>`select exists (select 1 from messages where thread_id = ${turn.threadId} and not deleted and ts::numeric > ${ts}::numeric) as moved`)[0]?.moved),
@@ -390,6 +442,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
         log.warn({ err }, 'sessionReleased failed');
       }
     },
+    // Every delivered reply (any turn kind) restarts the thread's idle clock, names the speaker as the bot's
+    // conversation partner and records whether it waits for their answer (pipeline/rules.ts awaitsReply).
+    onDelivered: (r) => noteBotReply(turn.threadId, { ts: r.ts, partnerId: turn.authorId, awaitsReply: awaitsReply(r.text, r.buttons) }),
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
   const state: FrontTurnState = {
@@ -462,6 +517,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   };
 
   let failed: unknown;
+  /** Every tool call of this turn, for the next turn's <previous_turn_tools>. */
+  const turnCalls: { tool: string; args: unknown }[] = [];
   try {
     if (await checkStop()) throw new TurnStopped();
     timing.mark('model_request');
@@ -504,6 +561,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     let stepTools: string[] = [];
     let stepCalls: StepCall[] = [];
     let stepResults: StepResultPart[] = [];
+    turnCalls.length = 0;
     for await (const part of result.fullStream) {
       if (part.type !== 'start' && part.type !== 'start-step') timing.mark('first_chunk');
       switch (part.type) {
@@ -520,6 +578,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           announce(part.toolCallId, part.toolName);
           stepTools.push(part.toolName);
           stepCalls.push({ toolCallId: part.toolCallId, toolName: part.toolName, input: part.input });
+          turnCalls.push({ tool: part.toolName, args: part.input });
           break;
         case 'tool-result': {
           stepResults.push({ toolCallId: part.toolCallId, toolName: part.toolName, output: part.output });
@@ -567,6 +626,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   } catch (err) {
     if (!(err instanceof TurnStopped)) failed = err;
   } finally {
+    const reported = summarizeToolCalls(turnCalls);
+    if (reported.length) await appendEvent(turn.threadId, 'turn_tools', 'bot', { turnId, calls: reported }).catch((err) => log.warn({ err }, 'turn_tools event failed'));
     // An activity message no reply took over (silent turn, error, stop) leaves nothing behind.
     await replies.closeActivity();
     // The card goes in right after this turn's replies (or alone if there was no reply). Not when the turn cancelled

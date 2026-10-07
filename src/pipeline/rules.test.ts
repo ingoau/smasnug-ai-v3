@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  awaitsReply,
+  batchIsAddressed,
   batchIsMention,
   batchNeedsGate,
   debounceWindowMs,
   decide,
+  gateThreshold,
+  isCooling,
+  lastEngagedAt,
   mentionFacts,
   shouldDisengage,
   threadRootTs,
@@ -37,22 +42,72 @@ describe('decide', () => {
   it('ignores once disengagement is due', () => {
     expect(decide({ ...base, disengageDue: true, twoParty: true })).toEqual({ action: 'ignore', reason: 'disengaged' });
   });
-  it('two-party threads skip the gate; everything else is gated', () => {
-    expect(decide({ ...base, twoParty: true })).toEqual({ action: 'batch', reason: 'direct' });
+  it('two-party threads and the bot\'s conversation partner go through the gate as partners; everything else is gated', () => {
+    expect(decide({ ...base, twoParty: true })).toEqual({ action: 'batch', reason: 'partner' });
+    expect(decide({ ...base, partner: true })).toEqual({ action: 'batch', reason: 'partner' });
     expect(decide(base)).toEqual({ action: 'batch', reason: 'gate' });
+  });
+  it('an answer to the bot\'s question runs without the gate, even disengaged or idle, unless it mentions someone else', () => {
+    expect(decide({ ...base, awaitedReply: true })).toEqual({ action: 'batch', reason: 'direct' });
+    expect(decide({ ...base, awaitedReply: true, engaged: false })).toEqual({ action: 'batch', reason: 'direct' });
+    expect(decide({ ...base, awaitedReply: true, disengageDue: true })).toEqual({ action: 'batch', reason: 'direct' });
+    expect(decide({ ...base, awaitedReply: true, mentionsOthers: true })).toEqual({ action: 'ignore', reason: 'mentions_other' });
+    expect(decide({ ...base, awaitedReply: true, quietPrefix: true })).toEqual({ action: 'ignore', reason: 'quiet' });
   });
 });
 
 describe('batch helpers', () => {
-  it('needs the gate only when every message was gated', () => {
+  it('needs the gate only when every message was gated (partner messages are gated too)', () => {
     expect(batchNeedsGate(['gate', 'gate'])).toBe(true);
+    expect(batchNeedsGate(['gate', 'partner'])).toBe(true);
     expect(batchNeedsGate(['gate', 'direct'])).toBe(false);
+    expect(batchNeedsGate(['partner', 'mention'])).toBe(false);
     expect(batchNeedsGate([])).toBe(false);
+  });
+  it('is addressed (talking with the bot) for answers to the bot and partner follow-ups', () => {
+    expect(batchIsAddressed(['direct'])).toBe(true);
+    expect(batchIsAddressed(['gate', 'partner'])).toBe(true);
+    expect(batchIsAddressed(['gate'])).toBe(false);
   });
   it('is a mention batch when any message was a mention/DM/stop-mention', () => {
     expect(batchIsMention(['gate', 'mention'])).toBe(true);
     expect(batchIsMention(['dm'])).toBe(true);
     expect(batchIsMention(['direct', 'gate'])).toBe(false);
+  });
+});
+
+describe('gate threshold and idle clock', () => {
+  const t = { base: 0.8, partner: 0.5, cooling: 0.9 };
+  const now = new Date('2026-10-03T12:00:00Z');
+  const ago = (ms: number) => new Date(now.getTime() - ms);
+  it('partner < base < cooling; a partner keeps the low threshold even when the thread cooled', () => {
+    expect(gateThreshold({ partner: false, cooling: false }, t)).toBe(0.8);
+    expect(gateThreshold({ partner: true, cooling: false }, t)).toBe(0.5);
+    expect(gateThreshold({ partner: false, cooling: true }, t)).toBe(0.9);
+    expect(gateThreshold({ partner: true, cooling: true }, t)).toBe(0.5);
+  });
+  it('any bot reply counts as activity: the idle clock runs from the later of address and reply', () => {
+    expect(lastEngagedAt({ lastAddressedAt: null, lastBotReplyAt: null })).toBeNull();
+    expect(lastEngagedAt({ lastAddressedAt: ago(5000), lastBotReplyAt: ago(1000) })).toEqual(ago(1000));
+    expect(lastEngagedAt({ lastAddressedAt: ago(1000), lastBotReplyAt: null })).toEqual(ago(1000));
+    const h3 = 3 * 3600_000;
+    expect(isCooling({ lastAddressedAt: ago(h3 + 1), lastBotReplyAt: null }, now, h3)).toBe(true);
+    expect(isCooling({ lastAddressedAt: ago(h3 + 1), lastBotReplyAt: ago(60_000) }, now, h3)).toBe(false);
+    expect(isCooling({ lastAddressedAt: null, lastBotReplyAt: null }, now, h3)).toBe(false);
+  });
+});
+
+describe('awaitsReply', () => {
+  it('questions, offers and buttons wait for an answer; statements do not', () => {
+    expect(awaitsReply('want me to dig deeper?')).toBe(true);
+    expect(awaitsReply('which one, the pico or the esp32? :eyes:')).toBe(true);
+    expect(awaitsReply('ok, does that work?)')).toBe(true);
+    expect(awaitsReply('here it is. i can build the whole thing if you want')).toBe(true);
+    expect(awaitsReply('found 3 options. want me to compare them.')).toBe(true);
+    expect(awaitsReply('pick one', true)).toBe(true);
+    expect(awaitsReply('the deadline is friday.')).toBe(false);
+    expect(awaitsReply('is it friday? yes, friday at 5pm.')).toBe(false);
+    expect(awaitsReply('')).toBe(false);
   });
 });
 
@@ -68,6 +123,8 @@ describe('shouldDisengage', () => {
     expect(shouldDisengage({ messagesSinceAddressed: 1, lastAddressedAt: t }, now, opts)).toBe(true);
     expect(shouldDisengage({ messagesSinceAddressed: 1, lastAddressedAt: new Date(now.getTime() - 3600_000) }, now, opts)).toBe(false);
     expect(shouldDisengage({ messagesSinceAddressed: 1, lastAddressedAt: null }, now, opts)).toBe(false);
+    // A recent bot reply (e.g. a synthesis turn) keeps the thread alive.
+    expect(shouldDisengage({ messagesSinceAddressed: 1, lastAddressedAt: t, lastBotReplyAt: new Date(now.getTime() - 60_000) }, now, opts)).toBe(false);
   });
 });
 
@@ -90,6 +147,8 @@ describe('debounceWindowMs', () => {
     expect(debounceWindowMs(false, opts, 'dm')).toBe(300);
     expect(debounceWindowMs(false, opts, 'mention')).toBe(300);
     expect(debounceWindowMs(false, opts, 'gate')).toBe(1000);
+    expect(debounceWindowMs(false, opts, 'partner')).toBe(300);
+    expect(debounceWindowMs(false, opts, 'direct')).toBe(300);
     expect(debounceWindowMs(true, opts, 'dm')).toBe(3000);
   });
 });

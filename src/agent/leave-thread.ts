@@ -19,7 +19,7 @@ registerTool({
         'Stop following this thread: you will ignore follow-ups here until someone @mentions you again. Use it when asked to go away / stop following / leave people alone, or when the conversation has clearly moved on without you. In DMs (which always reach you) it marks the conversation as done instead: closed in the user\'s sidebar until they write again; use it there only when the user wraps up (e.g. "that\'s all, thanks").',
       inputSchema: z.object({ reason: z.string().max(200).optional().describe('Short note for the logs') }),
       execute: async ({ reason }) => {
-        await sql`update threads set engaged = false where id = ${ctx.threadId}`;
+        await sql`update threads set engaged = false, awaits_reply_from = null where id = ${ctx.threadId}`;
         await appendEvent(ctx.threadId, 'disengaged', 'bot', { reason: 'agent', note: reason ?? null, turnId: ctx.turnId ?? null });
         // DMs: the turn ends with the agent session `closed` (src/pipeline/agent-session.ts).
         if (ctx.turnId != null && (await requestSessionClose(ctx.threadId, ctx.turnId))) {

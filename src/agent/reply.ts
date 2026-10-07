@@ -59,6 +59,8 @@ export interface ReplyTarget {
   onSessionReleased?: () => void;
   /** True if a message was posted in the thread after `ts` (then a reply doesn't stream into that activity message). */
   postedSince?: (ts: string) => Promise<boolean>;
+  /** A reply was delivered (its last message's ts, the text, whether it carries quick-reply buttons). Awaited, must not throw. */
+  onDelivered?: (r: { ts: string | null; text: string; buttons: boolean }) => Promise<void>;
 }
 
 /**
@@ -498,6 +500,7 @@ export class ReplyManager {
     this.delivered++;
     if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs };
     this.deliveredTexts.push(text);
+    await this.t.onDelivered?.({ ts: last.ts, text, buttons: Boolean(btnRow) }).catch((err) => log.warn({ err }, 'onDelivered failed'));
     if (files?.length) {
       try {
         await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files, idempotencyKey: this.key(e, ':files') });
