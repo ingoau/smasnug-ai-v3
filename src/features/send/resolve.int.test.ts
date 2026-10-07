@@ -36,14 +36,16 @@ describe.skipIf(!INTEGRATION)('send_message channel names', () => {
   });
 
   beforeEach(async () => {
-    await redis.del('features:botchans');
+    await redis.del('features:botchans', 'features:chan:random'); // the per-name cache of the workspace scan
     counts.member = 0;
     counts.list = 0;
   });
 
   afterAll(async () => {
     remove?.();
-    redis.disconnect();
+    // The fake memberships must not leak into later tests (they would resolve #general to CPUB1).
+    await redis?.del('features:botchans', 'features:chan:random');
+    redis?.disconnect();
   });
 
   it("a private channel the bot is in is found among its memberships, without scanning the workspace's list", async () => {
