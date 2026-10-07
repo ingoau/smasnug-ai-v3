@@ -78,7 +78,10 @@ export class SlackBusyError extends Error {
   }
 }
 
-/** Requests per minute, roughly Slack's tiers. Unlisted methods default to tier 3. */
+/**
+ * Slots per window, per method (METHOD_WINDOW_MS; default a 60 s window, so requests per minute, roughly Slack's
+ * tiers). Unlisted methods default to tier 3.
+ */
 const METHOD_RPM: Record<string, number> = {
   'chat.postMessage': 300,
   'chat.update': 100,
@@ -89,6 +92,8 @@ const METHOD_RPM: Record<string, number> = {
   'reactions.add': 100,
   'agents.sessions.setStatus': 300,
   'agents.sessions.rename': 50, // Tier 3 (docs.slack.dev/reference/methods/agents.sessions.rename)
+  // ~25 per 30 s (≈50/min) measured on the dev app 2026-10-07 (429 on call 25–26 of a burst, Retry-After 30): 20 per
+  // 30-s window (METHOD_WINDOW_MS) keeps bursts at 80 % of that, ≈40/min sustained.
   'search.messages': 20,
   'conversations.replies': 50,
   'conversations.history': 50,
@@ -128,13 +133,24 @@ export interface SlackWaitEvent {
   done: boolean;
 }
 
+/** Window length per method (ms) where Slack's limit is about bursts, not a minute; others use DEFAULT_WINDOW_MS. */
+const METHOD_WINDOW_MS: Record<string, number> = {
+  'search.messages': 30_000,
+};
+const DEFAULT_WINDOW_MS = 60_000;
+
 /**
- * Slots per minute only interactive calls may take: background calls stop at `perMin - reserve`, so a user's quick
+ * Slots per window only interactive calls may take: background calls stop at `perMin - reserve`, so a user's quick
  * question isn't stuck behind a research job's searches. search.messages is the one that matters (one user token).
  */
 const METHOD_INTERACTIVE_RESERVE: Record<string, number> = {
-  'search.messages': limits.slackSearchInteractiveReservePerMin,
+  'search.messages': limits.slackSearchInteractiveReserve,
 };
+
+/** A method's shared limit: slots per window, the window, and the interactive reserve. */
+export function methodLimit(method: string): { slots: number; windowMs: number; reserve: number } {
+  return { slots: METHOD_RPM[method] ?? 50, windowMs: METHOD_WINDOW_MS[method] ?? DEFAULT_WINDOW_MS, reserve: METHOD_INTERACTIVE_RESERVE[method] ?? 0 };
+}
 
 /** Waits longer than this are logged (info) with their key. */
 const LOG_WAIT_MS = 1000;
@@ -417,11 +433,12 @@ async function throttle(
   channel: string | undefined,
   o: { deadline: number; priority?: SlackPriority; wait: WaitReporter },
 ) {
-  const take = async (key: string, perMin: number, reserve: number) => {
+  const take = async (key: string, perMin: number, reserve: number, windowMs = DEFAULT_WINDOW_MS) => {
     let estimate = 0;
     const waited = await acquireRateSlot(key, {
       perMin,
       reserve,
+      windowMs,
       priority: o.priority,
       deadline: o.deadline,
       onWait: (ms) => {
@@ -431,7 +448,8 @@ async function throttle(
     });
     if (estimate) o.wait.end('rate_limit', estimate, waited);
   };
-  await take(rateLimitKey(token, method), METHOD_RPM[method] ?? 50, METHOD_INTERACTIVE_RESERVE[method] ?? 0);
+  const m = methodLimit(method);
+  await take(rateLimitKey(token, method), m.slots, m.reserve, m.windowMs);
   if (channel && PER_CHANNEL_METHODS.has(method)) await take(`slack:rl:chan:${channel}`, PER_CHANNEL_PER_MIN, 0);
 }
 

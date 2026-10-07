@@ -3,7 +3,7 @@
  *   INTEGRATION=1 pnpm vitest run src/tools/slack-search.int
  * A burst of subagent searches never waits longer than limits.slackSearchMaxWaitMs (the excess gets the busy result),
  * waiting searches are served in order, and a front-agent (interactive) search gets a slot while subagent
- * (background) searches are queued. Uses the production 60 s window (search.messages, 20/min, 4 reserved).
+ * (background) searches are queued. Uses the production window (search.messages: 20 per 30 s, 4 reserved).
  */
 import './test-env.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -36,7 +36,8 @@ describe.skipIf(!INTEGRATION)('slack_search under the shared rate limit', () => 
   });
   let n = 0;
   const q = (s: string) => `ss3${r} ${s} ${n++}`; // unique: no cache hits
-  const PER_MIN = 20;
+  const PER_MIN = 20; // slots per window
+  const WINDOW_MS = 30_000;
 
   let key = '';
   const clearLimiter = () => redis.del(key, `${key}:qi`, `${key}:qb`, `${key}:seen`);
@@ -44,7 +45,7 @@ describe.skipIf(!INTEGRATION)('slack_search under the shared rate limit', () => 
   const fill = async (fresh: number, expiresInMs: number[] = []) => {
     const now = Date.now();
     for (let i = 0; i < fresh; i++) await redis.zadd(key, now, `${now}:fresh${i}`);
-    for (const [i, ms] of expiresInMs.entries()) await redis.zadd(key, now - 60_000 + ms, `${now}:exp${i}`);
+    for (const [i, ms] of expiresInMs.entries()) await redis.zadd(key, now - WINDOW_MS + ms, `${now}:exp${i}`);
   };
 
   beforeAll(async () => {
@@ -94,7 +95,7 @@ describe.skipIf(!INTEGRATION)('slack_search under the shared rate limit', () => 
     );
     const ok = results.filter((x) => x.out.includes('public channels only'));
     const busy = results.filter((x) => x.out.startsWith('Slack search is rate limited right now'));
-    expect(ok).toHaveLength(PER_MIN - limits.slackSearchInteractiveReservePerMin);
+    expect(ok).toHaveLength(PER_MIN - limits.slackSearchInteractiveReserve);
     expect(busy).toHaveLength(30 - ok.length);
     for (const x of results) expect(x.ms).toBeLessThan(limits.slackSearchMaxWaitMs);
     // The busy ones knew up front: no slot frees within maxWaitMs, so they didn't sit it out.

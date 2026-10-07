@@ -323,7 +323,7 @@ export function skippedNote(skipped: number): string | null {
 /** Model-facing result when the shared limiter is full. */
 export function searchBusyText(waitMs: number): string {
   const s = Math.max(1, Math.ceil(waitMs / 1000));
-  return `Slack search is rate limited right now (~${s}s until a slot frees; the limit is shared by everyone using the bot). Work with the hits you have; open them with ask_thread / read_public_thread / read_public_channel (separate limits), or search again later.`;
+  return `Slack search is rate limited right now (~${s}s until a slot frees; about 20 searches per 30 s, shared by everyone using the bot). Work with the hits you have; open them with ask_thread / read_public_thread / read_public_channel (separate limits), or search again later.`;
 }
 
 /**

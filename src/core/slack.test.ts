@@ -101,6 +101,40 @@ describe('limiter waits through slackCall', () => {
   });
 });
 
+describe('per-method windows', () => {
+  it('search.messages: 20 per 30 s (bursts stay under the ~25 per 30 s Slack allows), 4 reserved; others keep 60 s', async () => {
+    const { methodLimit } = await import('./slack.js');
+    expect(methodLimit('search.messages')).toEqual({ slots: 20, windowMs: 30_000, reserve: 4 });
+    expect(methodLimit('conversations.replies')).toEqual({ slots: 50, windowMs: 60_000, reserve: 0 });
+    expect(methodLimit('some.unlisted')).toEqual({ slots: 50, windowMs: 60_000, reserve: 0 });
+  });
+
+  it('search.messages calls older than 30 s no longer count; a full 30-s window fails fast with a wait under 30 s', async () => {
+    const { rateLimitKey } = await import('./slack.js');
+    const method = 'search.messages';
+    const key = rateLimitKey('user', method);
+    await redis.del(key, `${key}:qi`, `${key}:qb`, `${key}:seen`);
+    const remove = addFakeHandler((m) => (m === method ? { ok: true, messages: { matches: [] } } : undefined));
+    try {
+      const now = Date.now();
+      // 20 calls 31-40 s ago: outside the 30-s window (they would still count in a 60-s one).
+      for (let i = 0; i < 20; i++) await redis.zadd(key, now - 31_000 - i * 400, `${now}:old${i}`);
+      const t0 = Date.now();
+      await slackCall(method, { query: 'x' }, { token: 'user', maxWaitMs: 500 });
+      expect(Date.now() - t0).toBeLessThan(400);
+      // Now the window holds 1 + 19 fresh: full. The next frees when the oldest fresh one is 30 s old.
+      for (let i = 0; i < 19; i++) await redis.zadd(key, Date.now(), `${now}:fresh${i}`);
+      const busy = await slackCall(method, { query: 'y' }, { token: 'user', maxWaitMs: 2000 }).catch((e) => e);
+      expect(busy).toBeInstanceOf(SlackBusyError);
+      expect(busy.waitMs).toBeGreaterThan(25_000);
+      expect(busy.waitMs).toBeLessThanOrEqual(30_000);
+    } finally {
+      remove();
+      await redis.del(key, `${key}:qi`, `${key}:qb`, `${key}:seen`);
+    }
+  });
+});
+
 describe('quiet Slack warnings', () => {
   it('only the expected missing-subscription warning is quiet', async () => {
     const { isQuietSlackWarning } = await import('./slack.js');

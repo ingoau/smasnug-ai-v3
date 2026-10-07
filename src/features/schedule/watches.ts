@@ -107,7 +107,7 @@ export const defaultDeps: WatchDeps = {
   fetchPage: (url) => fetchPage(url),
   webSearch: (ctx, query) => runWebSearch(ctx, { query, num_results: limits.webSearchMaxResults }),
   async slackSearch(query) {
-    // Background work must not hold up interactive slack_search on the shared user-token limiter (~20/min): queued
+    // Background work must not hold up interactive slack_search on the shared user-token limiter (20 per 30 s): queued
     // as background (behind interactive calls, outside their reserve), failing fast (SlackBusyError) so the check
     // is retried shortly (checkWatch) instead of blocking. Not cached: a watch wants fresh results.
     const res = await slackCall<any>(
