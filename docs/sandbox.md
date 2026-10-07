@@ -634,7 +634,36 @@ Budget *accounting* starts in Phase 1, so admin testing counts too.
 - `docs/slack-setup.md` if App Home or the manifest change;
 - update this doc's open questions with the spike results.
 
-## 9. Open questions / to verify
+## 9. Phase 0 results (Modal spike, 2026-10-07)
+
+Run with `scripts/spikes/modal-spike.ts` (`basic`, `image`, `billing`, `cleanup` stages) against the `smasnug-ai-dev`
+environment with `modal@0.11.0`. Everything it created was terminated and its snapshot images deleted.
+
+| Need | Result | Notes / workaround |
+|---|---|---|
+| Create from an image, cpu/mem/timeout, tags | **works** | `sandboxes.create(app, image, { cpu, cpuLimit, memoryMiB, memoryLimitMiB, timeoutMs, workdir, tags })`. Create returns in ~0.3–1 s; the first exec waits for the container (~4 s cold). The SDK now creates "V2" sandboxes. |
+| Image build (Playwright + Python + Node) | **works**, slow once | `images.fromRegistry('mcr.microsoft.com/playwright:v1.56.1-noble').dockerfileCommands([...])`: the first build took **12.7 min**; afterwards Modal resolves the cached layers and a create takes ~0.3 s. Prebuild with `pnpm sandbox:images` after every image change, before users hit it. Node 22.20, Python 3.12.3, pnpm 10, Playwright 1.56.1 for both languages, matplotlib: Chromium screenshots from Node and Python in ~1.3 s each. |
+| Exec: stdout/stderr/exit code | **works** | Binary mode streams; 200 KB of stdout came through. |
+| Exec timeout | **workaround** | The SDK's `timeoutMs` throws "Deadline exceeded while streaming stdio" instead of returning. Use `timeout --kill-after=5 <n>s` inside (exit 124) and keep the SDK timeout only as a backstop. |
+| Kill a running exec | **workaround** | No kill API on a process. Run each command in its own process group (`setsid`) with a pid file; a second exec `kill -KILL -- -<pgid>` stopped it in < 1 s. |
+| Non-root | **workaround** | `exec` has no user option. `setpriv --reuid=1000 --regid=1000 --init-groups` works (can write `/work`, not `/etc`). The SDK's filesystem API writes as root, so tool writes go through exec stdin as the `sandbox` user. |
+| Binary read/write | **works**, slowish | `filesystem.readBytes` / `writeBytes`: 10 MB write 8.5 s, read 4.8 s; 40 MB write 27 s, read 11 s. Through exec stdin/stdout: 10 MB write 7.2 s, read 4.1 s. Fine for the 25 MB export cap. |
+| Filesystem snapshot → restore | **works** | `snapshotFilesystem({ ttlMs })` ~1–2 s, returns an Image; `create(app, image)` from it ~0.3 s + ~4 s first exec. Files and owners survive. |
+| Delete snapshots | **works** | `images.delete(imageId)` (snapshots are images); `fromId` afterwards throws NotFoundError. Snapshot TTL is settable (we use 7 days). |
+| Terminate | **works**, idempotent | A second terminate is fine. `poll()` right after terminate can still say running (it's asynchronous). An exec on a dead sandbox throws `NOT_FOUND … already shut down`. |
+| Lifetime kill | **works** | `timeoutMs` kills the sandbox (exit 124). |
+| List by tag | **works** | `sandboxes.list({ appId, tags })` (without `appId` it warns that the environment-wide list is deprecated). |
+| Egress allowlist | **works**, IPv4 only | Parameter `outboundCidrAllowlist`. It rejects IPv6 CIDRs (`Invalid CIDR (outbound IPv4)`). With our 73-CIDR complement: 1.1.1.1 and example.com reachable; 10.0.0.1, 169.254.169.254, 100.100.100.200, 192.168.1.1 time out; 127.0.0.1 refused (the sandbox's own loopback). **IPv6 is unreachable** once an allowlist is set (connect fails immediately, so clients fall back to IPv4 at once). DNS works (the resolver at 172.21.0.1 is exempt; 1.1.1.1/8.8.8.8 are also listed). |
+| Tunnels | available, unused | `encryptedPorts` + `sandbox.tunnels()`; not needed in v1 (non-goal). |
+| Actual usage | **partly** | `SandboxGetResourceUsage` refuses V2 sandboxes. `EnvironmentBillingSummary` and `WorkspaceBillingSummary` (raw gRPC via `cpClient`) return the month's metered cost: used as a second, authoritative check next to our estimate (§4.3). Environment budgets (`EnvironmentGetBudget`) are "not enabled for this workspace" on Starter. |
+| Rates | read from the API | `WorkspaceBillingRates`: sandboxes cost **$0.1419 per core-hour** and **$0.024 per GiB-hour** (3× the function rates). 1 core + 2 GiB ≈ $0.19/h, so a 3-minute session ≈ $0.0095 and 100 sessions/day ≈ $28/month: **more than the plan's $14 estimate**, close to the whole $30 credit. Hence: reserve 0.5 core / 1 GiB (limits 1 core / 2 GiB; Modal bills max(reservation, usage) and a sandbox mostly idles while the model thinks), the 5-minute idle pause, the per-user daily minutes, and the hard stop. |
+| $0 spend limit beyond the credit | no surprise seen | Creation worked normally on the free credit; the month's metered cost showed $0.00 right after (billing lags). What happens when the credit runs out could not be tested; our hard stop (§4.3) is meant to stop well before. |
+| Billing period | calendar month (UTC) | Both billing summaries report 2026-10-01T00:00Z – 2026-11-01T00:00Z. |
+
+**Decision: Modal stays.** Nothing essential is missing from the JS SDK; the gaps (exec kill, exec timeout, non-root,
+IPv6 egress) have workarounds in `src/sandbox/modal.ts`.
+
+## 10. Open questions / to verify
 
 **Modal (Phase 0a)**
 1. JS SDK coverage: snapshot/restore, egress allowlist (the exact parameter name), tunnels, list by tag, kill of a

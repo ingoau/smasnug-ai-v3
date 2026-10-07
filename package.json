@@ -30,6 +30,7 @@
     "ioredis": "^6.0.0",
     "ipaddr.js": "^2.5.0",
     "linkedom": "^0.18.13",
+    "modal": "0.11.0",
     "pino": "^10.4.0",
     "postgres": "^3.4.9",
     "request-filtering-agent": "^3.2.1",
