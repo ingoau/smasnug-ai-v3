@@ -605,8 +605,14 @@ export class ReplyManager {
     if (!a) return null;
     if (!(await this.postedSince(a.ts))) {
       try {
-        await slackCall('chat.stopStream', { channel: this.t.channelId, ts: a.ts, ...(a.chunks.length ? { chunks: a.chunks } : {}) }, { idempotencyKey: a.stopKey });
-        this.t.onSessionReleased?.();
+        try {
+          await slackCall('chat.stopStream', { channel: this.t.channelId, ts: a.ts, ...(a.chunks.length ? { chunks: a.chunks } : {}) }, { idempotencyKey: a.stopKey });
+          this.t.onSessionReleased?.();
+        } catch (err) {
+          // Slack already ended the stream (e.g. idle during a long tool call): the message is still ours and the
+          // latest, so the reply is still written into it (no delete + post gap); only a failed update drops it.
+          log.info({ code: slackErrorCode(err), turnId: this.t.turnId }, 'stopping the activity message failed (already ended?); updating it anyway');
+        }
         await editMessage('chat.update', { channel: this.t.channelId, ts: a.ts, ...replyLayout(text, actions, card) });
         this.t.timing?.mark('reply_posted');
         return a.ts;

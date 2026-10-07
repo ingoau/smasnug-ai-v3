@@ -327,6 +327,18 @@ describe('ReplyManager with activity cards', () => {
     expect(finalStatuses()).toEqual({ 'activity-1': 'complete' });
   });
 
+  it('a posted reply into an activity stream Slack already ended: still written into it (no delete + post gap)', async () => {
+    const rm = new ReplyManager(target(1));
+    rm.activity('Updating a subagent…');
+    await sleep(10);
+    failOn = (m) => (m === 'chat.stopStream' ? 'message_not_in_streaming_state' : null);
+    await rm.finish('tc1', 'Told the subagent.');
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.update']);
+    expect(methods()).not.toContain('chat.delete');
+    expect(rm.lastDelivered).toMatchObject({ ts: calls[1]!.args.ts, text: 'Told the subagent.', streamed: false });
+  });
+
   it('the turn card goes above a posted reply and is recorded with its message', async () => {
     const attached: string[] = [];
     const card = { type: 'plan', block_id: 'card_5_plan', title: 'Running 1 subagent', tasks: [] } as const;
