@@ -391,6 +391,22 @@ export const limits = {
   sandboxUsageRetentionMs: 62 * 24 * 60 * 60 * 1000,
   /** hca_verifications rows not re-checked for this long are dropped. */
   hcaRowRetentionMs: 30 * 24 * 60 * 60 * 1000,
+  // Workspace directory (src/tools/directory/): people + public channels, the one profile store.
+  /** find_people + find_channels calls per user per hour (generous: they're cheap Postgres queries). */
+  userDirectoryLookupsPerHour: 300,
+  /** A profile not refreshed (crawl, users.info, event) for this long is re-read with users.info on lookup. */
+  directoryProfileMaxAgeMs: 24 * 60 * 60 * 1000,
+  /** A crawl kind whose last complete crawl is older than this is crawled again (the weekly re-crawl). */
+  directoryRecrawlAfterMs: 7 * 24 * 60 * 60 * 1000,
+  /** Pause between crawl pages: users.list / conversations.list are Tier 2 (20+/min); ≈17 pages/min. */
+  directoryCrawlPageIntervalMs: 3_500,
+  /** users.list page size (Slack recommends ≤ 200, allows 1000; may return fewer). */
+  directoryUsersPageSize: 500,
+  /** conversations.list page size (max 1000; Slack may return fewer after filtering). */
+  directoryChannelsPageSize: 1000,
+  /** Progress estimate before the first complete crawl (Hack Club: ~150k users, 20k+ public channels). */
+  directoryPeopleEstimate: 150_000,
+  directoryChannelsEstimate: 25_000,
 } as const;
 
 /**

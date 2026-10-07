@@ -28,6 +28,7 @@ const CONCURRENCY: Record<QueueName, number> = {
   [QUEUE.threadSummary]: 5,
   [QUEUE.sandbox]: 4,
   [QUEUE.titles]: 5,
+  [QUEUE.directory]: 2,
   [QUEUE.maintenance]: 4,
 };
 
@@ -69,6 +70,7 @@ async function scheduleMaintenance(tasks: Map<string, Task>) {
 
 export async function startWorker() {
   pipeline.onStart();
+  void tools.onStart();
   const processors = collectProcessors();
   const tasks = collectMaintenance();
   await scheduleMaintenance(tasks);

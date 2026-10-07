@@ -42,7 +42,7 @@ export async function checkEntry(userId: string, channelId?: string, opts: { cou
   return { ok: true };
 }
 
-export type LimitKind = 'search' | 'websearch' | 'fetch' | 'send' | 'subagent' | 'canvas_read' | 'canvas_write' | 'dj' | 'sandbox_exec';
+export type LimitKind = 'search' | 'websearch' | 'fetch' | 'send' | 'subagent' | 'canvas_read' | 'canvas_write' | 'dj' | 'sandbox_exec' | 'directory';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -55,6 +55,7 @@ const HOURLY: Record<Exclude<LimitKind, 'subagent'>, { max: number; noun: string
   canvas_write: { max: limits.userCanvasWritesPerHour, noun: 'canvas writes' },
   dj: { max: limits.userDjCommandsPerHour, noun: 'huddle DJ commands' },
   sandbox_exec: { max: limits.userSandboxExecsPerHour, noun: 'sandbox commands' },
+  directory: { max: limits.userDirectoryLookupsPerHour, noun: 'directory lookups (find_people / find_channels)' },
 };
 
 /**

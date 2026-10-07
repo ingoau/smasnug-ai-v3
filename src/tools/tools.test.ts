@@ -96,8 +96,8 @@ describe('registry', () => {
     if (!sandboxConfigured()) expect(allChild).toEqual(child);
     for (const n of sandboxTools) expect(front).not.toContain(n);
     const gate = Object.keys(toolsFor('gate', baseCtx()));
-    for (const n of ['ask_thread', 'fetch_url', 'web_search', 'slack_search', 'read_thread', 'read_public_thread', 'read_public_channel', 'read_channel', 'read_file', 'ask_file', 'create_file', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
-    expect(child).toEqual(['ask_file', 'ask_thread', 'create_file', 'fetch_url', 'read_canvas', 'read_channel', 'read_file', 'read_public_channel', 'read_public_thread', 'read_thread', 'slack_search', 'web_search']);
+    for (const n of ['ask_thread', 'fetch_url', 'web_search', 'slack_search', 'find_people', 'find_channels', 'read_thread', 'read_public_thread', 'read_public_channel', 'read_channel', 'read_file', 'ask_file', 'create_file', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
+    expect(child).toEqual(['ask_file', 'ask_thread', 'create_file', 'fetch_url', 'find_channels', 'find_people', 'read_canvas', 'read_channel', 'read_file', 'read_public_channel', 'read_public_thread', 'read_thread', 'slack_search', 'web_search']);
     expect(gate).toEqual([]);
     // A normal client tool (Exa), not a provider/server tool.
     const ws = toolsFor('front', baseCtx()).web_search as any;

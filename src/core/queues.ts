@@ -33,6 +33,11 @@ export const QUEUE = {
    * title) | { type: 'card', cardId, turnId } (a finished plan card's title).
    */
   titles: 'titles',
+  /**
+   * Workspace directory crawl (src/tools/directory/crawl.ts): one users.list / conversations.list page per job,
+   * paced (Tier 2), resumable: { type: 'page', kind: 'people' | 'channels', startedAt, page }.
+   */
+  directory: 'directory',
   /** Repeatable maintenance: sweeper, expiry, memory extraction, retention */
   maintenance: 'maintenance',
 } as const;
