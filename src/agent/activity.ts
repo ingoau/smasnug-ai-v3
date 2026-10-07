@@ -6,6 +6,8 @@
 const LABELS: Record<string, string> = {
   web_search: 'Searching the web…',
   slack_search: 'Searching Slack…',
+  find_people: 'Looking people up…',
+  find_channels: 'Looking for channels…',
   fetch_url: 'Reading the page…',
   read_thread: 'Reading the thread…',
   ask_thread: 'Reading the thread…',

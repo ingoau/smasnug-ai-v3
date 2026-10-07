@@ -146,6 +146,10 @@ export function describeToolStep(toolName: string, input: unknown): string {
       return q('query') ? `Searching the web for “${q('query')}”` : 'Searching the web';
     case 'slack_search':
       return q('query') ? `Searching Slack for “${q('query')}”` : 'Searching Slack';
+    case 'find_people':
+      return q('query') ? `Looking up “${q('query')}” in the directory` : 'Looking people up';
+    case 'find_channels':
+      return q('query') ? `Looking for channels about “${q('query')}”` : 'Looking for channels';
     case 'fetch_url':
       return q('url') ? `Reading ${q('url')}` : 'Reading a page';
     case 'read_thread':
