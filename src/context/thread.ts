@@ -13,7 +13,7 @@ import { parseThreadId } from '../core/events.js';
 import type { StoredMessage } from '../core/types.js';
 import { log } from '../log.js';
 import type { TurnTiming } from '../core/timing.js';
-import { compareTs, formatMessages, formatThread, selectThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
+import { authorsMostRecentFirst, compareTs, formatMessages, formatThread, selectThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
 import { assignImageIds } from './images.js';
 import { fetchHistoryAfter, fetchHistoryBefore, fetchReplies, fromStored, storeMessages } from './slack-messages.js';
 import { getUserNames } from './users.js';
@@ -25,6 +25,8 @@ export interface RenderedThreadContext {
   channelContext: string;
   /** The turn's new messages rendered the same way. */
   newMessages: string;
+  /** Human authors of the shown thread messages + new messages, most recent first, unique (bots excluded). */
+  participantIds?: string[];
 }
 
 const CHANNEL_BEFORE = Math.max(1, limits.contextChannelMessages - 2);
@@ -160,6 +162,7 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
     history: formatThread(sel, fenv),
     channelContext: formatMessages(channelMsgs, { ...fenv, maxChars: CHANNEL_CHARS }),
     newMessages: formatMessages(newMsgs, { ...fenv, maxChars: NEW_CHARS }),
+    participantIds: authorsMostRecentFirst([...(sel.parent ? [sel.parent] : []), ...sel.replies, ...newMsgs]),
   };
 }
 

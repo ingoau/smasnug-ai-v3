@@ -1,4 +1,7 @@
-/** Slack user lookups (users.info), cached in Redis for ~1 day. Shared helper: other modules need tz and avatar. */
+/**
+ * Slack user lookups (users.info, needs only users:read), cached in Redis for ~1 day. Shared helper: other modules
+ * need tz and avatar; the front agent's turn message shows profile details (pronouns, title, status, admin/owner).
+ */
 import { redis } from '../core/redis.js';
 import { slackCall } from '../core/slack.js';
 import { log } from '../log.js';
@@ -18,11 +21,23 @@ export interface UserInfo {
   image?: string;
   isBot: boolean;
   deleted?: boolean;
+  /** Profile fields below are user-written: render them via src/context/people.ts (one line, capped). */
+  pronouns?: string;
+  /** Job title (profile `title`). */
+  title?: string;
+  statusText?: string;
+  /** e.g. ':palm_tree:'. */
+  statusEmoji?: string;
+  /** Unix seconds when the status clears; 0/undefined = never. The cache can outlive it: check at render time. */
+  statusExpiration?: number;
+  isAdmin?: boolean;
+  isOwner?: boolean;
 }
 
 const TTL_S = 24 * 60 * 60;
 const NEG_TTL_S = 10 * 60;
-const key = (id: string) => `slack:user:${id}`;
+/** v2: entries carry profile details (pronouns, title, status, admin/owner); v1 entries simply age out. */
+const key = (id: string) => `slack:user:v2:${id}`;
 
 export function userInfoFromSlack(u: any): UserInfo {
   const p = u?.profile ?? {};
@@ -36,6 +51,13 @@ export function userInfoFromSlack(u: any): UserInfo {
     image: p.image_192 || p.image_72 || p.image_512 || undefined,
     isBot: !!u.is_bot,
     deleted: !!u.deleted,
+    pronouns: p.pronouns || undefined,
+    title: p.title || undefined,
+    statusText: p.status_text || undefined,
+    statusEmoji: p.status_emoji || undefined,
+    statusExpiration: typeof p.status_expiration === 'number' && p.status_expiration > 0 ? p.status_expiration : undefined,
+    isAdmin: u.is_admin ? true : undefined,
+    isOwner: u.is_owner || u.is_primary_owner ? true : undefined,
   };
 }
 

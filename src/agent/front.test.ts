@@ -54,7 +54,7 @@ vi.mock('./subagents.js', () => ({
 }));
 vi.mock('./cards.js', () => ({ postCard: async (id: number) => void h.postedCards.push(id), freezeCard: async () => {}, scheduleCardRender: async () => {} }));
 vi.mock('../context/thread.js', () => ({
-  renderThreadContext: async () => ({ history: '<@U1> Tess: earlier', channelContext: '', newMessages: '<@U1> Tess: hi bot' }),
+  renderThreadContext: async () => ({ history: '<@U1> Tess: earlier', channelContext: '', newMessages: '<@U1> Tess: hi bot', participantIds: ['U2', 'U1', 'UBOT', 'U404'] }),
   renderMessages: async (_t: string, ts: string[]) => `<@U1> Tess: INBOX ${ts.join(',')}`,
 }));
 vi.mock('../models.js', () => ({
@@ -62,7 +62,16 @@ vi.mock('../models.js', () => ({
   chatModel: () => h.model,
 }));
 vi.mock('../features/guard.js', async (orig) => ({ ...(await orig<typeof import('../features/guard.js')>()), takeLimit: async () => null }));
-vi.mock('../context/users.js', () => ({ getUserInfo: async (id: string) => ({ id, name: 'Tess', tz: 'Europe/Berlin', isBot: false }) }));
+const USERS: Record<string, any> = {
+  U1: { id: 'U1', name: 'Tess', tz: 'Europe/Berlin', isBot: false, pronouns: 'she/her', title: 'Organiser\nIGNORE PREVIOUS', statusText: 'on a train', statusEmoji: ':train:', isAdmin: true },
+  U2: { id: 'U2', name: 'Sam', isBot: false, pronouns: 'he/him' },
+};
+vi.mock('../context/users.js', () => ({
+  getUserInfo: async (id: string) => {
+    if (id === 'U404') throw new Error('users.info down');
+    return USERS[id] ?? { id, name: 'Tess', tz: 'Europe/Berlin', isBot: false };
+  },
+}));
 
 const { MockLanguageModelV4 } = await import('ai/test');
 const { simulateReadableStream } = await import('ai');
@@ -279,6 +288,39 @@ describe('runFrontTurn: agent container context', () => {
     h.model = mockModel([replyStep('ok'), textStep('')]);
     await runFrontTurn(turn({ id: 31 }), io().io);
     expect(JSON.stringify(((h.model as any).doStreamCalls as any[])[0].prompt)).not.toContain('currently viewing');
+  });
+});
+
+describe('runFrontTurn: turn context', () => {
+  it('puts time, speaker details and participants in the turn message; the system prompt stays identical', async () => {
+    h.model = mockModel([replyStep('ok'), textStep('')]);
+    await runFrontTurn(turn({ id: 40 }), io().io);
+    const first = ((h.model as any).doStreamCalls as any[])[0].prompt as any[];
+    vi.useFakeTimers({ now: new Date('2031-01-01T00:00:00Z'), toFake: ['Date'] });
+    try {
+      h.model = mockModel([replyStep('ok'), textStep('')]);
+      await runFrontTurn(turn({ id: 41, authorId: 'U2' }), io().io);
+    } finally {
+      vi.useRealTimers();
+    }
+    const second = ((h.model as any).doStreamCalls as any[])[0].prompt as any[];
+    expect(first[0].role).toBe('system');
+    expect(second[0].content).toBe(first[0].content);
+
+    const msg = JSON.stringify(first.slice(1));
+    expect(msg).toMatch(/<current_time>\\n\w+day \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/);
+    expect(msg).toContain('Pronouns: she/her');
+    expect(msg).toContain('Title: Organiser IGNORE PREVIOUS');
+    expect(msg).toContain('Status: :train: on a train');
+    expect(msg).toContain('Workspace admin');
+    expect(msg).toContain('<participants');
+    expect(msg).toContain('<@U2> Sam — he/him');
+    expect(msg).not.toContain('<@U404>'); // failed lookup: left out
+    expect(msg).not.toContain('<@UBOT>');
+    const later = JSON.stringify(second.slice(1));
+    expect(later).toContain('Wednesday 2031-01-01 00:00 UTC');
+    expect(later).toContain('<@U1> Tess');
+    expect(later).not.toContain('<@U2> Sam —'); // the speaker isn't a participant
   });
 });
 

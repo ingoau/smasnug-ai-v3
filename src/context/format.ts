@@ -191,3 +191,12 @@ export function userIdsIn(msgs: RenderMsg[]): string[] {
   }
   return [...ids];
 }
+
+/** Human authors (no bots, no deleted messages), most recent message first, each once. */
+export function authorsMostRecentFirst(msgs: RenderMsg[]): string[] {
+  const out: string[] = [];
+  for (const m of [...msgs].filter((m) => !m.deleted).sort((a, b) => compareTs(b.ts, a.ts))) {
+    if (m.userId && !m.botId && !out.includes(m.userId)) out.push(m.userId);
+  }
+  return out;
+}

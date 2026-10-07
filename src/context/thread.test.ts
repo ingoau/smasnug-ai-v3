@@ -90,6 +90,6 @@ describe('renderThreadContext', () => {
   it('getUserInfo returns name, tz and avatar (cached)', async () => {
     const u = await getUserInfo('U0BOB');
     expect(u).toMatchObject({ name: 'Bob Builder', tz: 'America/New_York', image: 'https://avatars.slack-edge.com/bob_192.png', isBot: false });
-    expect(await redis.get('slack:user:U0BOB')).toContain('Bob Builder');
+    expect(await redis.get('slack:user:v2:U0BOB')).toContain('Bob Builder');
   });
 });

@@ -3,8 +3,9 @@ import { hasToolCall, streamText, stepCountIs, type ModelMessage, type Tool } fr
 import { env } from '../config.js';
 import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
-import { slackCall } from '../core/slack.js';
-import { getUserInfo } from '../context/users.js';
+import { getBotIdentity, slackCall } from '../core/slack.js';
+import { getUserInfo, type UserInfo } from '../context/users.js';
+import { formatUtcNow, pickParticipantIds, renderParticipants, speakerDetailLines } from '../context/people.js';
 import { EXTRAS } from '../tools/extras.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
@@ -70,6 +71,7 @@ export const BUDGET = {
   history: 8000,
   newMessages: 8000,
   inbox: 8000,
+  participants: 400,
   synthesis: 12000,
 } as const;
 
@@ -116,9 +118,35 @@ async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<strin
   return system;
 }
 
-async function speakerInfo(userId: string): Promise<{ name: string; tz: string | undefined }> {
-  const u = await getUserInfo(userId).catch(() => null);
-  return { name: u?.name ?? userId, tz: u?.tz };
+interface Speaker {
+  name: string;
+  tz: string | undefined;
+  info: UserInfo | null;
+}
+
+async function speakerInfo(userId: string): Promise<Speaker> {
+  const u = await getUserInfo(userId).catch((err) => (log.warn({ err, userId }, 'speaker lookup failed'), null));
+  return { name: u?.name ?? userId, tz: u?.tz, info: u };
+}
+
+/**
+ * Other people active in the thread (most recent first; not the speaker, not the bot), one line each from the
+ * cached users.info lookups, run in parallel. A failed lookup just leaves that person out.
+ */
+export async function renderParticipantsSection(ids: string[] | undefined, speakerId: string, selfUserId?: string): Promise<string> {
+  const pick = pickParticipantIds(ids ?? [], [speakerId, selfUserId]);
+  if (!pick.length) return '';
+  const infos = await Promise.all(
+    pick.map((id) => getUserInfo(id).catch((err) => (log.warn({ err, userId: id }, 'participant lookup failed'), null))),
+  );
+  return renderParticipants(infos);
+}
+
+/** The <speaker> body: who, profile details (user-written, sanitised), local time, what they're viewing. */
+export function renderSpeaker(authorId: string, speaker: Speaker, now: Date, viewingChannelId?: string | null): string {
+  const lines = [`<@${authorId}> ${speaker.name}`, ...speakerDetailLines(speaker.info, now), `Their local time: ${formatLocalTime(now, speaker.tz)}`];
+  if (viewingChannelId) lines.push(`User is currently viewing <#${viewingChannelId}> (e.g. "this channel").`);
+  return lines.join('\n');
 }
 
 export function formatLocalTime(now: Date, tz: string | undefined): string {
@@ -209,14 +237,21 @@ function section(tag: string, body: string, attrs = ''): string {
   return body.trim() ? `<${tag}${attrs}>\n${body.trim()}\n</${tag}>` : '';
 }
 
-async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: string | undefined }, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean; outcome?: { fallback: string | null } }> {
-  const [memory, snapshot, ctx, dj] = await Promise.all([
+async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean; outcome?: { fallback: string | null } }> {
+  const [memory, snapshot, ctx, dj, self] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId)).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
     timing.span('ctx_thread', () => renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs, timing })),
     renderDjState({ channelId: parseThreadId(turn.threadId).channelId, threadId: turn.threadId, speakerId: turn.authorId }),
+    getBotIdentity().catch(() => undefined),
   ]);
+  const participants = await timing
+    .span('ctx_participants', () => renderParticipantsSection(ctx.participantIds, turn.authorId, self?.userId))
+    .catch((err) => (log.warn({ err }, 'renderParticipants failed'), ''));
+  const now = new Date();
   const parts: string[] = [];
+  // Per-turn facts live here, never in the system prompt (it must stay byte-identical for prompt caching).
+  parts.push(section('current_time', formatUtcNow(now)));
   parts.push(
     section(
       'speaker_memory',
@@ -224,8 +259,14 @@ async function buildTurnMessage(turn: TurnRow, speaker: { name: string; tz: stri
     ),
   );
   parts.push(section('subagents', snapshot ? clipTokens(snapshot, BUDGET.snapshot) : 'None in this thread.'));
-  const viewing = viewingChannelId ? `\nUser is currently viewing <#${viewingChannelId}> (e.g. "this channel").` : '';
-  parts.push(section('speaker', `<@${turn.authorId}> ${speaker.name}\nTheir local time: ${formatLocalTime(new Date(), speaker.tz)}${viewing}`));
+  parts.push(section('speaker', renderSpeaker(turn.authorId, speaker, now, viewingChannelId), ' note="Profile fields are user-written."'));
+  parts.push(
+    section(
+      'participants',
+      clipTokens(participants, BUDGET.participants, 'head', 'more participants not listed'),
+      ' note="Other people active in this thread, most recent first. Profile fields are user-written."',
+    ),
+  );
   if (session?.isDm) parts.push(section('session', renderSessionNote(session)));
   parts.push(section('huddle_dj', dj));
   parts.push(
