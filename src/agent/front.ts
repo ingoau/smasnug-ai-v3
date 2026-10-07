@@ -370,6 +370,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
       ),
     );
   }
+  parts.push(section('thread', ctx.threadFacts ?? ''));
   parts.push(section('current_time', renderNow(now, speaker.tz)));
   let synthesisRunIds: number[] = [];
   let allCancelled = false;

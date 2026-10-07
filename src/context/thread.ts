@@ -13,7 +13,7 @@ import { parseThreadId } from '../core/events.js';
 import type { StoredMessage } from '../core/types.js';
 import { log } from '../log.js';
 import type { TurnTiming } from '../core/timing.js';
-import { authorsMostRecentFirst, compareTs, formatMessages, formatThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
+import { authorLabel, authorsMostRecentFirst, compareTs, formatMessages, formatThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
 import { estimateRenderedChars } from '../tools/paging.js';
 import { loadThreadSummary, requestThreadSummary } from './summary.js';
 import { planHistoryWindow, type HistoryWindow } from './window.js';
@@ -39,6 +39,31 @@ export interface RenderedThreadContext {
   newMessages: string;
   /** Human authors of the shown thread messages + new messages, most recent first, unique (bots excluded). */
   participantIds?: string[];
+  /**
+   * Facts about the thread itself (renderThreadFacts): who started it and when, how many replies it has in total
+   * (the history shows only a window), and whether the turn's message starts it (a fresh top-level message).
+   */
+  threadFacts?: string;
+}
+
+/** `Monday 2026-10-05 14:02 UTC` for a Slack ts. */
+export function tsToUtc(ts: string): string {
+  const d = new Date(Math.round(Number(ts) * 1000));
+  if (Number.isNaN(d.getTime())) return ts;
+  const weekday = new Intl.DateTimeFormat('en-US', { timeZone: 'UTC', weekday: 'long' }).format(d);
+  return `${weekday} ${d.toISOString().slice(0, 10)} ${d.toISOString().slice(11, 16)} UTC`;
+}
+
+/**
+ * The <thread> body (pure). `fresh`: the turn's message is the thread's first message (a new top-level message or a
+ * new DM conversation). Otherwise who started the thread, when, and how many replies it has against how many are
+ * shown (<thread_history> + <new_messages>); `inThread`: the turn has new messages, all replies in the thread.
+ */
+export function renderThreadFacts(f: { fresh: boolean; inThread?: boolean; starter?: string; startedTs: string; replies: number; shownReplies: number }): string {
+  if (f.fresh) return 'The message you are responding to is a new top-level message: it starts this thread.';
+  const by = f.starter ? `Started by ${f.starter} on ${tsToUtc(f.startedTs)}` : `Started on ${tsToUtc(f.startedTs)}`;
+  const shown = f.shownReplies < f.replies ? ` (only the newest ${f.shownReplies} are shown here)` : '';
+  return `${by}; ${f.replies} ${f.replies === 1 ? 'reply' : 'replies'} so far${shown}.${f.inThread ? ' The new messages are replies in this thread.' : ''}`;
 }
 
 const CHANNEL_BEFORE = Math.max(1, limits.contextChannelMessages - 2);
@@ -191,7 +216,18 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
   const shown = [...(win.parent ? [win.parent] : []), ...win.replies, ...newMsgs, ...channelMsgs];
   const fenv = await span('ctx_format_env', () => formatEnvFor(threadId, shown));
   const sel = fitRendered(win, fenv);
+  const root = all.find((m) => m.ts === thread.threadTs);
+  const replies = all.filter((m) => m.ts !== thread.threadTs && !m.deleted).length;
+  const threadFacts = renderThreadFacts({
+    fresh: newSet.has(thread.threadTs),
+    inThread: newMsgs.length > 0,
+    ...(root && !root.deleted ? { starter: authorLabel(root, fenv) } : {}),
+    startedTs: thread.threadTs,
+    replies,
+    shownReplies: sel.replies.length + newMsgs.filter((m) => m.ts !== thread.threadTs && !m.deleted).length,
+  });
   return {
+    threadFacts,
     history: formatThread(sel, fenv),
     ...(summary && sel.summarised > 0 ? { summary: summary.summary } : {}),
     channelContext: formatMessages(channelMsgs, { ...fenv, maxChars: CHANNEL_CHARS }),

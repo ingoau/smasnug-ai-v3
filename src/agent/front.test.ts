@@ -366,11 +366,11 @@ describe('runFrontTurn: thread summary', () => {
 
 describe('runFrontTurn: section order (prompt caching)', () => {
   it('goes from stable to variable: thread, speaker / thread state, clock, then the new messages', async () => {
-    h.ctx = { summary: 'S', channelContext: '[1.000100] <@U9> Mo: chan msg' };
+    h.ctx = { summary: 'S', channelContext: '[1.000100] <@U9> Mo: chan msg', threadFacts: 'Started by <@U1> Tess; 3 replies so far.' };
     h.model = mockModel([replyStep('ok'), textStep('')]);
     await runFrontTurn(turn({ id: 70 }), io().io);
     const a = turnText();
-    const order = ['<conversation', '<thread_summary', '<thread_history', '<channel_background', '<speaker ', '<participants', '<subagents', '<current_time', '<new_messages', 'You were mentioned'];
+    const order = ['<conversation', '<thread_summary', '<thread_history', '<channel_background', '<speaker ', '<participants', '<subagents', '<thread>\nStarted by', '<current_time', '<new_messages', 'You were mentioned'];
     const idx = order.map((t) => a.indexOf(t));
     expect(idx.every((i) => i >= 0)).toBe(true);
     expect([...idx].sort((x, y) => x - y)).toEqual(idx);

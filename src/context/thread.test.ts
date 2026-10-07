@@ -5,7 +5,7 @@ import { redis } from '../core/redis.js';
 import { addFakeHandler } from '../core/slack-fake.js';
 import { threadIdOf } from '../core/events.js';
 import { slackFixtureHandler, FIX_THREAD_TS } from './fixtures.js';
-import { renderMessages, renderThreadContext } from './thread.js';
+import { renderMessages, renderThreadContext, renderThreadFacts, tsToUtc } from './thread.js';
 import { registerSlackFiles, resolveFile } from '../files/store.js';
 import { getUserInfo } from './users.js';
 import { closeQueues, queue, QUEUE } from '../core/queues.js';
@@ -57,6 +57,8 @@ describe('renderThreadContext', () => {
 
     // A long thread and a self-contained new message: no channel background.
     expect(ctx.channelContext).toBe('');
+    // Who started it, when, and the total reply count (38 visible replies, all shown).
+    expect(ctx.threadFacts).toBe(`Started by <@U0INGO> Ingo on ${tsToUtc(FIX_THREAD_TS)}; 38 replies so far. The new messages are replies in this thread.`);
 
     // Second render: no new backfill, same ids.
     const again = await renderThreadContext(threadId, { newMessageTs: [] });
@@ -133,5 +135,16 @@ describe('renderThreadContext', () => {
     const u = await getUserInfo('U0BOB');
     expect(u).toMatchObject({ name: 'Bob Builder', tz: 'America/New_York', image: 'https://avatars.slack-edge.com/bob_192.png', isBot: false });
     expect(await redis.get('slack:user:v2:U0BOB')).toContain('Bob Builder');
+  });
+});
+
+describe('renderThreadFacts', () => {
+  it('a fresh top-level message, or who started the thread and how much of it is shown', () => {
+    expect(renderThreadFacts({ fresh: true, startedTs: '1790000000.000100', replies: 0, shownReplies: 0 })).toMatch(/new top-level message: it starts this thread/);
+    expect(tsToUtc('1790000000.000100')).toBe('Monday 2026-09-21 14:13 UTC');
+    expect(renderThreadFacts({ fresh: false, inThread: true, starter: '<@U1> Ingo', startedTs: '1790000000.000100', replies: 120, shownReplies: 25 })).toBe(
+      'Started by <@U1> Ingo on Monday 2026-09-21 14:13 UTC; 120 replies so far (only the newest 25 are shown here). The new messages are replies in this thread.',
+    );
+    expect(renderThreadFacts({ fresh: false, startedTs: '1790000000.000100', replies: 1, shownReplies: 1 })).toBe('Started on Monday 2026-09-21 14:13 UTC; 1 reply so far.');
   });
 });
