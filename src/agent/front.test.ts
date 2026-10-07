@@ -633,6 +633,8 @@ describe('runFrontTurn: queued user turns in non-user turns', () => {
     await runFrontTurn(turn({ id: 120, kind: 'synthesis', cardId: 5, messageTs: [], isMention: false }), io(false).io);
     expect(turnText()).toContain('Queued after this turn');
     expect(turnText()).toContain('<@UADMIN>: [100.000008] [100.000009]');
+    // Groundwork for a deliverable: produce it now, not a report plus an offer.
+    expect(turnText()).toContain('groundwork for something the speaker asked you to produce');
 
     // User turns don't get it.
     h.model = mockModel([textStep('')]);

@@ -523,6 +523,56 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     await sql`delete from files where thread_id = ${tid}`;
   }, 120_000);
 
+  /** Files the bot posted into a thread's channel since `before` (files.completeUploadExternal). */
+  async function postedFiles(tid: string, before: number) {
+    const channelId = tid.split(':')[0]!;
+    return (await fakeCalls()).slice(before).filter((c) => c.method === 'files.completeUploadExternal' && c.args.channel_id === channelId);
+  }
+
+  it('"@bot ^" after the speaker\'s own unanswered request does that request (no "what do you need?")', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const th = await freshThread('CARET');
+    const ch = th.id.split(':')[0]!;
+    const speaker = `${user}CR`;
+    const askTs = `${Number(th.ts) + 1}.000100`;
+    const pingTs = `${Number(th.ts) + 90}.000100`;
+    const ask = '<@UBOT> make me a tiny one-file HTML page for my chess club "Knight Owls": a heading and one sentence about meeting on thursdays';
+    await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${ch}, ${askTs}, ${th.id}, ${speaker}, ${ask}), (${ch}, ${pingTs}, ${th.id}, ${speaker}, ${'<@UBOT> ^'})`;
+    threadText.set(th.id, { history: `[${askTs}] <@${speaker}> Tester: ${ask}`, newMessages: `[${pingTs}] <@${speaker}> Tester: <@UBOT> ^` });
+    const before = (await fakeCalls()).length;
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${th.id}, ${speaker}, true, ${[pingTs]}, 'running') returning *`;
+    await runFrontTurn({ ...t, id: Number(t.id) }, io(true));
+    const o = await outcome(th.id, before);
+    const files = await postedFiles(th.id, before);
+    // eslint-disable-next-line no-console
+    console.log('caret ping:', JSON.stringify(o), JSON.stringify(files.map((c) => c.args.files)));
+    expect(files.length + o.spawns).toBeGreaterThan(0); // built it (or delegated building it), didn't just ask
+    await sql`delete from files where thread_id = ${th.id}`;
+  }, 120_000);
+
+  it('a go-ahead ("yes make it") to the bot\'s own offer is acted on, not re-confirmed', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const th = await freshThread('GOAHEAD');
+    const speaker = `${user}GA`;
+    const goTs = `${Number(th.ts) + 120}.000100`;
+    threadText.set(th.id, {
+      history:
+        `[${th.ts}] <@${speaker}> Tester: <@UBOT> my robotics club "Gearheads" needs a simple landing page, we meet tuesdays in room 4b\n` +
+        `[${Number(th.ts) + 20}.000100] [bot] smasnug ai (you): nice. i can make you a single index.html with a heading, a line about tuesdays in room 4b and a simple dark theme. want me to make it?`,
+      newMessages: `[${goTs}] <@${speaker}> Tester: yes make it`,
+    });
+    const before = (await fakeCalls()).length;
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, addressed, message_ts, status) values (${th.id}, ${speaker}, false, true, ${[goTs]}, 'running') returning *`;
+    await runFrontTurn({ ...t, id: Number(t.id) }, io(false));
+    const o = await outcome(th.id, before);
+    const files = await postedFiles(th.id, before);
+    // eslint-disable-next-line no-console
+    console.log('go-ahead:', JSON.stringify(o), JSON.stringify(files.map((c) => c.args.files)));
+    expect(files.length + o.spawns).toBeGreaterThan(0);
+    expect(o.replies.join(' ')).not.toMatch(/want me to|should i|shall i/i);
+    await sql`delete from files where thread_id = ${th.id}`;
+  }, 120_000);
+
   it('an uploaded image in context is looked at with read_file / ask_file', async () => {
     const { runFrontTurn } = await import('./front.js');
     const { createFile } = await import('../files/store.js');
