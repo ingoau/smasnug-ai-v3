@@ -13,7 +13,18 @@ if (LIVE) {
   } catch {}
   process.env.SLACK_FAKE = '1';
   process.env.LOG_LEVEL ??= 'warn';
+  // Coding agents on (fake key: a proposal never calls Cursor before Launch), with a test admin, for the musing case.
+  process.env.ADMIN_USER_ID = 'U_LIVEADMIN';
+  process.env.CURSOR_API_KEY ||= 'crsr_live_test';
+  process.env.CURSOR_REPO ||= 'https://github.com/example/repo';
 }
+
+/** Sandbox access per test: `deny` makes canUseSandbox refuse like an unverified user. */
+const sandboxAccess = vi.hoisted(() => ({ deny: false }));
+vi.mock('../sandbox/access.js', async (orig) => {
+  const m = await orig<typeof import('../sandbox/access.js')>();
+  return { ...m, canUseSandbox: async (userId: string) => (sandboxAccess.deny ? { ok: false as const, reason: 'denied' as const } : m.canUseSandbox(userId)) };
+});
 
 const requested: any[] = [];
 const threadText = new Map<string, { history: string; newMessages: string; channelContext?: string }>();
@@ -595,6 +606,98 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(files.length + o.spawns).toBeGreaterThan(0);
     expect(o.replies.join(' ')).not.toMatch(/want me to|should i|shall i/i);
     await sql`delete from files where thread_id = ${th.id}`;
+  }, 120_000);
+
+  /** The tool names a thread's latest turn called (turn_tools event). */
+  async function turnToolNames(tid: string): Promise<string[]> {
+    const [ev] = await sql<{ payload: { calls: { tool: string; args: string }[] } }[]>`
+      select payload from thread_events where thread_id = ${tid} and type = 'turn_tools' order by id desc limit 1`;
+    return (ev?.payload.calls ?? []).map((c) => c.tool);
+  }
+
+  it('a landing page for a user without sandbox access is written with create_file and posted (no giving up)', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    sandboxAccess.deny = true;
+    try {
+      const before = (await fakeCalls()).length;
+      const { tid, turn } = await dmTurn('LANDING', '', 'build me a landing page for my hackathon team "Byte Brigade": a hero section, a short about-us and a sign-up button');
+      await runFrontTurn(turn, io());
+      const o = await outcome(tid, before);
+      const files = await postedFiles(tid, before);
+      // eslint-disable-next-line no-console
+      console.log('landing (no sandbox):', JSON.stringify(o), JSON.stringify(await turnToolNames(tid)), JSON.stringify(files.map((c) => c.args.files)));
+      expect(files.some((c) => /\.html?$/.test(String(c.args.files?.[0]?.title ?? '')))).toBe(true);
+      expect(o.replies.join(' ')).not.toMatch(/can.?t build|not available|unable to/i);
+      await sql`delete from files where thread_id = ${tid}`;
+    } finally {
+      sandboxAccess.deny = false;
+    }
+  }, 180_000);
+
+  it('"@bot ^" under a teammate\'s request does that request for them (one speaker is not "only their own requests")', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const th = await freshThread('TEAMCARET');
+    const ch = th.id.split(':')[0]!;
+    const speaker = `${user}TC`;
+    const mate = `${user}MATE`;
+    const askTs = `${Number(th.ts) + 1}.000100`;
+    const pingTs = `${Number(th.ts) + 60}.000100`;
+    const ask = 'could someone make a tiny one-file HTML page for our robotics club "Gearheads"? just a heading and a line saying we meet tuesdays in room 4b';
+    await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${ch}, ${askTs}, ${th.id}, ${mate}, ${ask}), (${ch}, ${pingTs}, ${th.id}, ${speaker}, ${'<@UBOT> ^'})`;
+    threadText.set(th.id, { history: `[${askTs}] <@${mate}> Sam: ${ask}`, newMessages: `[${pingTs}] <@${speaker}> Tester: <@UBOT> ^` });
+    const before = (await fakeCalls()).length;
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${th.id}, ${speaker}, true, ${[pingTs]}, 'running') returning *`;
+    await runFrontTurn({ ...t, id: Number(t.id) }, io(true));
+    const o = await outcome(th.id, before);
+    const files = await postedFiles(th.id, before);
+    // eslint-disable-next-line no-console
+    console.log('teammate caret:', JSON.stringify(o), JSON.stringify(files.map((c) => c.args.files)));
+    expect(files.length + o.spawns).toBeGreaterThan(0);
+    expect(o.replies.join(' ')).not.toMatch(/only (act|help) for|on (their|sam'?s) behalf|ask (them|sam) to/i);
+    await sql`delete from files where thread_id = ${th.id}`;
+  }, 120_000);
+
+  it('a correction ("wait, I meant…") to a page the bot just made is acted on in the same turn', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const th = await freshThread('CORRECT');
+    const speaker = `${user}CO`;
+    const fixTs = `${Number(th.ts) + 120}.000100`;
+    threadText.set(th.id, {
+      history:
+        `[${th.ts}] <@${speaker}> Tester: <@UBOT> make me a one-file HTML page for my chess club: a heading and a line that we meet on thursdays\n` +
+        `[${Number(th.ts) + 20}.000100] [bot] smasnug ai (you): here you go: a heading "Chess Club" and a line about thursdays. [file file_abc123: chess-club.html, html page, from smasnug ai — "Chess club page"]`,
+      newMessages: `[${fixTs}] <@${speaker}> Tester: wait, i meant fridays, and the club is called "Knight Owls"`,
+    });
+    const before = (await fakeCalls()).length;
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, addressed, message_ts, status) values (${th.id}, ${speaker}, false, true, ${[fixTs]}, 'running') returning *`;
+    await runFrontTurn({ ...t, id: Number(t.id) }, io(false));
+    const o = await outcome(th.id, before);
+    const files = await postedFiles(th.id, before);
+    // eslint-disable-next-line no-console
+    console.log('correction:', JSON.stringify(o), JSON.stringify(files.map((c) => c.args.files)));
+    expect(files.length + o.spawns).toBeGreaterThan(0);
+    expect(o.replies.join(' ')).not.toMatch(/want me to|should i|shall i/i);
+    await sql`delete from files where thread_id = ${th.id}`;
+  }, 120_000);
+
+  it('an admin musing about the bot gets a brief acknowledgement, not a coding agent proposal', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const th = await freshThread('MUSE');
+    const admin = 'U_LIVEADMIN';
+    const msgTs = `${Number(th.ts) + 5}.000100`;
+    threadText.set(th.id, {
+      history: '',
+      newMessages: `[${msgTs}] <@${admin}> Ingo: <@UBOT> hmm, your reminder confirmations should probably be shorter at some point`,
+    });
+    const before = (await fakeCalls()).length;
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${th.id}, ${admin}, true, ${[msgTs]}, 'running') returning *`;
+    await runFrontTurn({ ...t, id: Number(t.id) }, io(true));
+    const o = await outcome(th.id, before);
+    const tools = await turnToolNames(th.id);
+    // eslint-disable-next-line no-console
+    console.log('admin musing:', JSON.stringify(o), JSON.stringify(tools));
+    expect(tools).not.toContain('spawn_coding_agent');
+    expect(o.replies.length + o.reactionsAdded).toBeGreaterThan(0);
   }, 120_000);
 
   it('an uploaded image in context is looked at with read_file / ask_file', async () => {

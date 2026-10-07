@@ -41,4 +41,34 @@ describe('CODING_AGENTS_PROMPT', () => {
     expect(CODING_AGENTS_PROMPT).toMatch(/may launch coding agents/);
     expect(CODING_AGENTS_PROMPT).toMatch(/Never tell them coding agents are admin-only/);
   });
+
+  it('proposes a coding agent only for an actual request, not for musings', async () => {
+    const { CODING_AGENTS_PROMPT } = await import('./front.js');
+    expect(CODING_AGENTS_PROMPT).toMatch(/only when the admin asks for a change or investigation/);
+    expect(CODING_AGENTS_PROMPT).toMatch(/musings and feedback/);
+  });
+});
+
+describe('frontSystemPrompt delegation and scope rules', () => {
+  const p = frontSystemPrompt('smasnug ai');
+
+  it('fans named independent items out, also for comparisons; dependent steps stay one task / a later round', () => {
+    expect(p).toMatch(/Independent parts \([^)]*frameworks[^)]*also when the ask is to compare them\) get one task each in ONE spawn_subagent call/);
+    expect(p).toMatch(/need each other's results are one task or a later round/);
+  });
+
+  it('"one speaker" is about identity and permissions, not about whose request the work serves', () => {
+    expect(p).toMatch(/identity and permissions are theirs/);
+    expect(p).toMatch(/work someone else requested/);
+    expect(p).not.toMatch(/act only for them/);
+  });
+
+  it('a correction to just-done or proposed work is a go-ahead; no "I\'ll …" without the call', () => {
+    expect(p).toMatch(/a correction \("wait, I meant X"\) to something you just did or proposed, means act now/);
+    expect(p).toMatch(/"I'll update…"\) goes in the same step as the call that does the work/);
+  });
+
+  it('single-file deliverables are written with create_file', () => {
+    expect(p).toMatch(/write the file yourself with create_file/);
+  });
 });

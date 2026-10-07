@@ -73,10 +73,18 @@ export function accessExplanation(reason: AccessReason, now = new Date()): strin
 
 /** What the model is told. Personal reasons stay private. */
 export function accessModelText(reason: AccessReason): string {
-  if (reason === 'budget') return "Code sandboxes are paused until next month: this month's free compute is used up. You may tell the user that plainly.";
-  if (reason === 'disabled') return 'Code sandboxes are turned off right now. You may tell the user that plainly.';
-  return "Sandbox not available for this user right now; they were told why privately. Don't speculate about the reason in the thread.";
+  const head =
+    reason === 'budget'
+      ? "Code sandboxes are paused until next month: this month's free compute is used up (you may say so plainly)."
+      : reason === 'disabled'
+        ? 'Code sandboxes are turned off right now (you may say so plainly).'
+        : "Sandbox not available for this user right now; they were told why privately. Don't speculate about the reason in the thread.";
+  return `${head} ${SANDBOX_FALLBACK}`;
 }
+
+/** Appended to every sandbox refusal: the work itself usually doesn't need one (prod: a one-file site was given up). */
+export const SANDBOX_FALLBACK =
+  "Do the task without a sandbox wherever you can, now and without asking first: write a single file (an HTML site, script, CSV, text) yourself with create_file, and research needs no sandbox. Only what truly needs code run is off for now.";
 
 /** The ephemeral explanation, at most once per user per cooldown. Never posted for anyone but `userId`. */
 export async function notifyAccess(o: { userId: string; channelId: string; threadTs?: string; reason: AccessReason }): Promise<void> {

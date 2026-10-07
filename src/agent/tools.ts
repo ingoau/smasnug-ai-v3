@@ -112,7 +112,7 @@ registerTool({
               instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, file ids file_… of uploads it should use), and what a good result looks like'),
               seed_from: z.string().optional().describe('Id of an expired subagent whose summary should seed this one'),
               ...(sandboxConfigured()
-                ? { sandbox: z.boolean().optional().describe('Give this subagent a code sandbox (Linux, Python, Node, headless Chromium) to run code, build or analyse files. Only when the task needs code run.') }
+                ? { sandbox: z.boolean().optional().describe('Give this subagent a code sandbox (Linux, Python, Node, headless Chromium) to run code: installs, data processing, analysing files, a headless browser, multi-file builds, live previews. Not for a single file you can write yourself (use create_file).') }
                 : {}),
             }),
           )

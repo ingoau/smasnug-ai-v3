@@ -109,6 +109,22 @@ describe('access texts', () => {
     expect(accessModelText('disabled')).toMatch(/turned off/);
   });
 
+  it('every refusal tells the model to do the work without a sandbox (create_file), without asking', () => {
+    for (const r of ['denied', 'pending', 'rejected', 'unavailable', 'budget', 'disabled'] as const) {
+      const t = accessModelText(r);
+      expect(t).toMatch(/without a sandbox/);
+      expect(t).toMatch(/create_file/);
+      expect(t).toMatch(/without asking first/);
+    }
+  });
+
+  it('the front prompt keeps single files out of the sandbox and falls back without one', async () => {
+    const { SANDBOX_FRONT_PROMPT } = await import('./prompts.js');
+    expect(SANDBOX_FRONT_PROMPT).toMatch(/`sandbox: true` only when it needs code run/);
+    expect(SANDBOX_FRONT_PROMPT).toMatch(/A single file you can write yourself \(a page, script, CSV, text\) is create_file with no sandbox/);
+    expect(SANDBOX_FRONT_PROMPT).toMatch(/do the task without one where you can \(e\.g\. create_file\), without asking first/);
+  });
+
   it('the user gets the explanation', () => {
     expect(accessExplanation('denied')).toMatch(/auth\.hackclub\.com/);
     expect(accessExplanation('rejected')).toMatch(/#identity-help/);

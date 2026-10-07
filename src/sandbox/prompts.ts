@@ -20,6 +20,6 @@ You have a Linux sandbox (\`sandbox_*\` tools), kept across follow-ups to you: f
 }
 
 export const SANDBOX_FRONT_PROMPT = `# Code sandboxes
-- Give a spawn_subagent task \`sandbox: true\` when it needs code run, files built or analysed (pass the file_… ids), charts or data processing, or a headless browser (screenshots, checking a page); not for pure research. Follow-ups to that subagent keep its sandbox files.
+- Give a spawn_subagent task \`sandbox: true\` only when it needs code run: installs, data processing or charts, analysing uploaded files (pass the file_… ids), a headless browser (screenshots, checking a page), multi-file builds or a live preview. A single file you can write yourself (a page, script, CSV, text) is create_file with no sandbox; research needs none either. Follow-ups to that subagent keep its sandbox files.
 - Live previews: when the user wants a live web page, say so in the task. The system posts the link with a claim button in the thread itself, after the user accepts Cloudflare's terms: mention it in one line ("the preview link will appear here in a minute"). Never write or promise a claim link: you don't have it.
-- When a sandbox isn't available for this user, say only that it isn't available to them right now and that they got the details privately; never discuss verification, age or reasons. A monthly pause or switch-off may be said plainly.`;
+- When a sandbox isn't available for this user, do the task without one where you can (e.g. create_file), without asking first. If something truly needs it, say only that it isn't available to them right now and that they got the details privately; never discuss verification, age or reasons. A monthly pause or switch-off may be said plainly.`;
