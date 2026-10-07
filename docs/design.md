@@ -40,7 +40,9 @@ Three roles, each granted tools from one shared registry. Safety rules come from
 - 
 **Gate:** a cheap relevance check that decides whether the bot should respond to an unmentioned follow-up. No tools; outputs yes or no.
 - 
-**Front agent:** the only agent that talks to users. Handles one speaker per turn, replies, reacts, spawns and steers subagents, and manages memory. Keeps its own research to one or two quick lookups and delegates anything longer.
+**Front agent:** the only agent that talks to users. Handles one speaker per turn, replies, reacts, spawns and steers subagents, and manages memory. Answers directly only for trivial or quick things (from knowledge, or one or two light lookups; a subagent adds latency and a plan card) and delegates everything else, fanning independent parts out to several subagents spawned in the same step.
+
+**Parallel tool calls.** Both agents ask the provider for parallel tool calls (`parallel_tool_calls: true` in `providerOptions.openrouter`; the OpenRouter default, set explicitly, and left out for a subagent step whose tools are switched off by its token cap). The AI SDK executes all tool calls of a step concurrently once the step's model call ends. GPT-6 Luna does emit several calls per step (checked live: four independent lookups in one step, with and without the flag). Both prompts tell the agents to put independent calls in one step: the front agent its ack `reply` + `spawn_subagent`, several spawns for independent parts, or a Slack and a web search at once; subagents several searches / fetches / `ask_thread` calls at once.
 - 
 **Subagents (children):** one general type, no specialised agents. Do longer work in the background and return results to the front agent. Never post to Slack, never touch memory.
 Tool

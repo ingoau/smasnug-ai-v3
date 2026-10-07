@@ -76,7 +76,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        'Start a background subagent for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels, summarising long threads). It cannot see this conversation: give complete, self-contained instructions. Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer.',
+        'Start a background subagent for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels, summarising long threads). It cannot see this conversation: give complete, self-contained instructions. Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer. For independent parts, spawn one per part in the same step (they run in parallel).',
       inputSchema: z.object({
         title: z.string().describe('Short task title for the plan card, e.g. "Research hosting options" (≤ 6 words)'),
         instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, image ids img_N), and what a good result looks like'),

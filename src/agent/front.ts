@@ -456,7 +456,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     timing.mark('model_request');
     const result = streamText({
       model: chatModel(MODELS.front),
-      providerOptions: { openrouter: { reasoning: { effort: env.FRONT_REASONING_EFFORT }, usage: { include: true } } },
+      // parallel_tool_calls is the provider default; set explicitly because the prompt relies on several calls per step
+      // (the AI SDK runs a step's tool calls concurrently).
+      providerOptions: { openrouter: { reasoning: { effort: env.FRONT_REASONING_EFFORT }, usage: { include: true }, parallel_tool_calls: true } },
       instructions: system,
       messages,
       tools,

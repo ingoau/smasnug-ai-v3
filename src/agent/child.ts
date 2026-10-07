@@ -171,7 +171,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
         activeTools: overBudget ? [] : undefined,
         stopWhen: stepCountIs(1),
         abortSignal: controller.signal,
-        providerOptions: { openrouter: { ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}), usage: { include: true } } },
+        providerOptions: { openrouter: { ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}), usage: { include: true }, ...(overBudget ? {} : { parallel_tool_calls: true }) } },
       });
       let stepText = '';
       let finishReason = '';

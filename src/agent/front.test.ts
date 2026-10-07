@@ -355,6 +355,16 @@ describe('runFrontTurn: thread summary', () => {
   });
 });
 
+describe('runFrontTurn: parallel tool calls', () => {
+  it('asks the provider for parallel tool calls and runs a step\'s calls together', async () => {
+    h.model = mockModel([toolStep(['reply', { text: 'on it' }], ['react', { emoji: 'eyes' }]), textStep('')]);
+    await runFrontTurn(turn({ id: 60 }), io().io);
+    const call = ((h.model as any).doStreamCalls as any[])[0];
+    expect(call.providerOptions.openrouter.parallel_tool_calls).toBe(true);
+    expect(h.slack.filter((c) => c.method === 'reactions.add')).toHaveLength(1);
+  });
+});
+
 describe('runFrontTurn: native stop', () => {
   const slackError = (code: string) => Object.assign(new Error(code), { data: { ok: false, error: code } });
 
