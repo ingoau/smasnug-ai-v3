@@ -49,7 +49,7 @@ export interface ReplyTarget {
   recipientUserId: string;
   /** Count of queued/running runs in the thread right now. */
   activeRuns: () => Promise<number>;
-  /** True once the user pressed the native stop button: nothing more gets delivered. */
+  /** True once the turn was stopped (`!stop`): nothing more gets delivered. */
   stopRequested?: () => Promise<boolean>;
   /** Latency instrumentation: first reply delta, stream start/stop, post. */
   timing?: TurnTiming;
@@ -61,8 +61,12 @@ export interface ReplyTarget {
   postedSince?: (ts: string) => Promise<boolean>;
 }
 
-/** Stream errors meaning Slack is no longer streaming this message (e.g. the user pressed stop). */
-const HALTED_STREAM = /stream|not_in_streaming_state/;
+/**
+ * Stream errors meaning Slack is no longer streaming this message (e.g. stopped by the user). `stopped_by_user` too:
+ * a frozen stream must never be rewritten (there is no native stop button any more, but a stream Slack halted for any
+ * reason stays as it is).
+ */
+export const HALTED_STREAM = /stream|not_in_streaming_state|stopped_by_user/;
 const isHalted = (code: string | undefined) => Boolean(code && code !== 'streaming_mode_mismatch' && HALTED_STREAM.test(code));
 const STOPPED_RESULT = 'Not delivered: the user pressed stop. Do not retry; call end_turn.';
 
@@ -93,7 +97,7 @@ interface ReplyEntry {
   chain: Promise<void>;
   timer: NodeJS.Timeout | null;
   failed: boolean;
-  /** Slack stopped the stream itself (native stop button): never post the rest. */
+  /** Slack stopped the stream itself (stopped by the user / stop request): never post the rest. */
   halted: boolean;
   /** Not delivered (duplicate / blocked): the model-facing reason. */
   dropped: string | null;
@@ -380,7 +384,7 @@ export class ReplyManager {
     // tool ran), and then the reply must still be delivered (recoverStream / post).
     if (e.streamTs && isHalted(code) && (await this.isStopped())) {
       e.halted = true;
-      log.info({ code, index: e.index }, 'reply stream halted by Slack (stop button?)');
+      log.info({ code, index: e.index }, 'reply stream halted by Slack (stopped?)');
     } else {
       log.warn({ err, index: e.index }, 'reply stream failed; will fall back to posting');
     }

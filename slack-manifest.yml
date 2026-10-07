@@ -15,7 +15,8 @@ features:
   bot_user:
     display_name: smasnug ai
     always_online: true
-  # Agents & AI Apps: the agent container (split view next to any channel) with a native stop button.
+  # Agents & AI Apps: the agent container (split view next to any channel). No native stop button: the app doesn't
+  # subscribe to agent_session_stopped (accidental clicks); `@bot !stop` stops a response instead.
   agent_view:
     agent_description: agentic ai b2b saas
     suggested_prompts: []
@@ -27,7 +28,7 @@ features:
 oauth_config:
   scopes:
     bot:
-      - chat:write            # post, stream, update; agents.sessions.setStatus (status + stop button)
+      - chat:write            # post, stream, update; agents.sessions.setStatus (status)
       - assistant:write       # Agents & AI Apps: app_context_changed, suggested prompts, session titles
       - chat:write.customize  # "smasnug ai on behalf of <user>" username + avatar
       - chat:write.public     # send to public channels the bot hasn't joined
@@ -64,7 +65,6 @@ settings:
       - message.mpim
       - app_home_opened
       - app_context_changed          # what the user is viewing while the agent container is open
-      - agent_session_stopped        # native stop button
       - agent_session_title_changed  # user renamed a session: never overwritten (DM titles)
       - reaction_added               # reactions shown in context (messages.reactions); never start a turn
       - reaction_removed

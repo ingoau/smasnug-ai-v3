@@ -29,6 +29,7 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
         case 'app_home_opened':
           return handleAppHomeOpened(event);
         case 'agent_session_stopped':
+          // Not subscribed any more (no native stop button, slack-manifest.yml); kept for an app still on an old manifest.
           return handleAgentSessionStopped(event);
         case 'app_context_changed':
           return handleAppContextChanged(body); // user is in body.authorizations

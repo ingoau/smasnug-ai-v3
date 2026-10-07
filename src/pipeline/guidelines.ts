@@ -3,7 +3,7 @@
  * the raw Slack message text (mrkdwn: mentions are `<@U…>`, a literal `<` / `>` arrives as `&lt;` / `&gt;`).
  *
  * 1. `##` prefix: the message is ignored completely (never stored, never triggers anything, hidden from every read).
- * 2. `@bot !stop`: same as the native stop button.
+ * 2. `@bot !stop`: stop the current response (stop.ts; there is no native stop button).
  * 3. A top-level channel message that pings a group (user group, @channel/@here/@everyone) and triggers the bot: the
  *    bot answers in a new top-level message instead of replying under the group ping.
  * 4. `<>` prefix: never triggers a turn or the gate unless the bot is @mentioned (still stored and visible).

@@ -69,3 +69,13 @@ describe('429 backoff', () => {
     expect(served).toEqual(['user']);
   });
 });
+
+describe('quiet Slack warnings', () => {
+  it('only the expected missing-subscription warning is quiet', async () => {
+    const { isQuietSlackWarning } = await import('./slack.js');
+    expect(isQuietSlackWarning(['missing_agent_session_stopped_event_subscription'])).toBe(true);
+    expect(isQuietSlackWarning(['agents.sessions.setStatus warning: missing_agent_session_stopped_event_subscription'])).toBe(true);
+    expect(isQuietSlackWarning(['missing_charset'])).toBe(false);
+    expect(isQuietSlackWarning([{ x: 1 }])).toBe(false);
+  });
+});

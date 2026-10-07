@@ -1,6 +1,6 @@
 /**
  * Side effects for the workspace AI-bot guidelines (pure detection in guidelines.ts):
- * - `@bot !stop` runs the native stop handler (stop.ts),
+ * - `@bot !stop` runs the stop handler (stop.ts),
  * - a group ping on a top-level triggering message moves the conversation into a new top-level bot message.
  */
 import { appendEvent, threadIdOf } from '../core/events.js';
@@ -14,7 +14,7 @@ import { RATE_LIMITED_TEXT } from './intake.js';
 import { handleAgentSessionStopped } from './stop.js';
 import { storeMessage, upsertThread, type SlackMessage } from './store.js';
 
-/** Rule 2: `@bot !stop` behaves exactly like the native stop button for the message's thread. Never starts a turn. */
+/** Rule 2: `@bot !stop` stops the current response in the message's thread (stop.ts). Anyone may. Never starts a turn. */
 export async function handleBangStop(channelId: string, threadTs: string, userId: string, messageTs: string): Promise<void> {
   log.info({ channelId, threadTs, userId }, '!stop message');
   await handleAgentSessionStopped({ type: 'agent_session_stopped', channel: channelId, thread_ts: threadTs, user: userId, event_ts: messageTs });

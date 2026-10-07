@@ -51,7 +51,7 @@ export interface TurnIO {
    */
   sessionReleased?(): void;
   /**
-   * True once the user pressed Slack's native stop button for this thread while this turn was running. The turn
+   * True once someone stopped this thread (`@bot !stop`) while this turn was running. The turn
    * then ends at its next step boundary, delivers no further replies and posts no fallback.
    */
   stopRequested?(): Promise<boolean>;

@@ -40,10 +40,12 @@ scopes.
   `active` when it ends (always, also on errors: it does not clear itself when the bot posts). The deprecated
   `assistant.threads.*` methods are not used. Tool activity ("Searching Slack…") shows as transient task cards in the
   reply message (`STATUS_ACTIVITY_MODE`, see docs/design.md "Status indicator").
-- **Native stop button**: while a session is `processing`, Slack shows a stop button (because the app subscribes to
-  `agent_session_stopped`). Clicking it behaves like saying "stop": the running turn ends at its next step, active
-  subagent runs in the thread are cancelled, the user's queued turns are dropped, the thread disengages, and the bot
-  confirms with "Stopped.".
+- **No native stop button**: the app deliberately does not subscribe to `agent_session_stopped` (people clicked the
+  button by accident), so Slack shows a non-interactive loading indicator while a session is `processing`, and
+  `agents.sessions.setStatus` / streaming calls answer with a `missing_agent_session_stopped_event_subscription`
+  warning, which the Slack client logs only at debug level. `@bot !stop` (anyone; in DMs the mention is optional)
+  stops the current response: the running turn ends at its next step, the user's queued turns are dropped, and the
+  bot confirms with "Stopped.".
 - DM threads get a session title (`agents.sessions.rename`, `chat:write`) and end `suspended` / `closed` where it
   fits (docs/design.md "Agent sessions in DMs"). `agent_session_title_changed` records a user's rename so the bot
   never overwrites it.

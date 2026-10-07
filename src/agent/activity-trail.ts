@@ -46,7 +46,7 @@ export interface ActivityTarget {
   /** Recipient for streams outside DMs (chat.startStream requires it in channels). */
   recipientUserId: string;
   teamId: () => Promise<string | undefined>;
-  /** True once the user pressed the native stop button: open nothing more. */
+  /** True once the turn was stopped (`!stop`): open nothing more. */
   stopRequested?: () => Promise<boolean>;
   /** chat.stopStream set the session `active` (its default `session_status`). */
   onSessionReleased?: () => void;

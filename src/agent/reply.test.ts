@@ -131,3 +131,11 @@ describe('reply: code is delivered exactly as written', () => {
     expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'rich_text', 'rich_text']);
   });
 });
+
+describe('HALTED_STREAM', () => {
+  it('matches every way Slack says a stream is no longer open, including stopped_by_user', async () => {
+    const { HALTED_STREAM } = await import('./reply.js');
+    for (const code of ['stopped_by_user', 'not_in_streaming_state', 'message_not_in_streaming_state', 'streaming_state_conflict']) expect(HALTED_STREAM.test(code), code).toBe(true);
+    expect(HALTED_STREAM.test('ratelimited')).toBe(false);
+  });
+});

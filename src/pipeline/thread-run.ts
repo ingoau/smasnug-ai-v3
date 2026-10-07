@@ -187,7 +187,7 @@ export async function shutdownThreadRuns(graceMs: number) {
   while (inFlight.size > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
   for (const [turnId, { threadId, lock, status }] of inFlight) {
     log.warn({ turnId, threadId }, 'shutdown: abandoning in-flight turn');
-    // Otherwise the session would stay `processing` (with a stop button) for up to an hour.
+    // Otherwise the session would stay `processing` for up to an hour.
     await settleAbandonedTurn(threadId, turnId, status);
     await finishTurn(turnId, 'error').catch(() => {});
     await appendEvent(threadId, 'turn_finished', 'system', { turnId, status: 'error', reason: 'shutdown' }).catch(() => {});

@@ -5,8 +5,9 @@
  * Researched 2026-10 on docs.slack.dev:
  *
  * - `agents.sessions.setStatus` (https://docs.slack.dev/reference/methods/agents.sessions.setStatus) sets the
- *   lifecycle: `active | processing | suspended | closed`. `processing` shows Slack's own "Working…" loading UX plus
- *   the native stop button (→ `agent_session_stopped`). It takes NO free text: "The `agents.sessions.setStatus`
+ *   lifecycle: `active | processing | suspended | closed`. `processing` shows Slack's own "Working…" loading UX (no
+ *   stop button: the app doesn't subscribe to `agent_session_stopped`, so every call answers with a
+ *   `missing_agent_session_stopped_event_subscription` warning, logged at debug by core/slack.ts). It takes NO free text: "The `agents.sessions.setStatus`
  *   method does not accept a custom loading message" (https://docs.slack.dev/ai/agent-sessions/). It does NOT clear
  *   when the bot posts, so every `processing` must be followed by another status (else it times out after an hour).
  * - `assistant.threads.setStatus` (free text + `loading_messages`) is deprecated with `assistant_view` (removal
@@ -61,7 +62,7 @@ export interface TurnStatusOpts {
   channelId: string;
   threadTs: string;
   userId: string;
-  /** True once the user pressed the native stop button during this turn: show nothing more. */
+  /** True once the user stopped this turn (`!stop`): show nothing more. */
   stopped?: () => Promise<boolean>;
   /** Tests: replace the Slack calls. */
   transport?: StatusTransport;
@@ -139,7 +140,7 @@ export class TurnStatus {
     this.chain = this.chain.then(async () => {
       if (this.closed) return;
       if (this.o.stopped && (await this.o.stopped().catch(() => false))) {
-        // Native stop: the stop handler already set the session `active`; don't bring `processing` back.
+        // Stopped (`!stop`): the stop handler already set the session `active`; don't bring `processing` back.
         this.closed = true;
         return;
       }

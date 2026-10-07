@@ -3,7 +3,7 @@
  * per-method and per-channel rate limits shared across workers via Redis, backoff on 429s, and idempotency keys
  * on side effects. Card-update coalescing lives in the agent's card renderer, which calls through here.
  */
-import { WebClient, type WebAPICallResult } from '@slack/web-api';
+import { LogLevel, WebClient, type Logger, type WebAPICallResult } from '@slack/web-api';
 import { env } from '../config.js';
 import { sql } from '../db/index.js';
 import { redis } from './redis.js';
@@ -12,9 +12,36 @@ import { fakeCall } from './slack-fake.js';
 
 const FAKE = process.env.SLACK_FAKE === '1';
 
+/**
+ * Response warnings Slack sends on every call of a kind, by design, that are not worth a log line. The app doesn't
+ * subscribe to `agent_session_stopped` (no native stop button: users clicked it by accident), so every
+ * `agents.sessions.setStatus` / streaming call answers with `missing_agent_session_stopped_event_subscription`.
+ */
+export const QUIET_SLACK_WARNINGS = ['missing_agent_session_stopped_event_subscription'];
+
+/** True if a WebClient log line is one of the expected warnings above. */
+export function isQuietSlackWarning(msg: unknown[]): boolean {
+  return msg.some((m) => typeof m === 'string' && QUIET_SLACK_WARNINGS.some((w) => m.includes(w)));
+}
+
+/** The WebClient's own logging (response warnings, deprecations) through pino, minus the expected warnings. */
+function webClientLogger(name: string): Logger {
+  let level = LogLevel.INFO;
+  const line = (msg: unknown[]) => msg.map((m) => (typeof m === 'string' ? m : JSON.stringify(m))).join(' ');
+  return {
+    debug: (...m) => log.debug({ slackClient: name }, line(m)),
+    info: (...m) => log.info({ slackClient: name }, line(m)),
+    warn: (...m) => (isQuietSlackWarning(m) ? log.debug({ slackClient: name }, line(m)) : log.warn({ slackClient: name }, line(m))),
+    error: (...m) => log.error({ slackClient: name }, line(m)),
+    setLevel: (l) => void (level = l),
+    getLevel: () => level,
+    setName: () => {},
+  };
+}
+
 const clients = {
-  bot: new WebClient(env.SLACK_BOT_TOKEN, { rejectRateLimitedCalls: true, retryConfig: { retries: 0 } }),
-  user: new WebClient(env.SLACK_USER_TOKEN, { rejectRateLimitedCalls: true, retryConfig: { retries: 0 } }),
+  bot: new WebClient(env.SLACK_BOT_TOKEN, { rejectRateLimitedCalls: true, retryConfig: { retries: 0 }, logger: webClientLogger('bot') }),
+  user: new WebClient(env.SLACK_USER_TOKEN, { rejectRateLimitedCalls: true, retryConfig: { retries: 0 }, logger: webClientLogger('user') }),
 };
 
 export type TokenKind = keyof typeof clients;
