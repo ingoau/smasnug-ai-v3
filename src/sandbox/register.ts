@@ -10,20 +10,29 @@ import { log } from '../log.js';
 import { refreshBudget } from './budget.js';
 import { handleSandboxAdminAction } from './home.js';
 import { destroySandbox, pauseSandbox, reconcileSandboxes, sandboxRetention, sweepSandboxes } from './lifecycle.js';
+import { deployPreview, expirePreviews, handleClaim, handleReport, handleTakedown, handleTermsAccept, handleTermsCancel, preparePreview } from './preview/flow.js';
 import { ModalProvider } from './modal.js';
 import { sandboxProvider } from './providers.js';
-import { sandboxConfigured } from './settings.js';
+import { previewsConfigured, sandboxConfigured } from './settings.js';
 
 const enabled = sandboxConfigured();
 
 if (enabled) {
   await import('./tools.js');
   registerAction('sbx:', (ctx) => handleSandboxAdminAction(ctx, publishHome));
+  if (previewsConfigured()) {
+    registerAction('preview:terms_accept', handleTermsAccept);
+    registerAction('preview:terms_cancel', handleTermsCancel);
+    registerAction('preview:claim', handleClaim);
+    registerAction('preview:report', handleReport);
+    registerAction('preview:takedown', async (ctx) => void (await handleTakedown(ctx)));
+  }
 }
 
 type SandboxJob =
   | { type: 'pause'; sandboxId: string; generation?: number; force?: boolean }
-  | { type: 'destroy'; sandboxId: string };
+  | { type: 'destroy'; sandboxId: string }
+  | { type: 'preview-prepare' | 'preview-deploy'; previewId: string };
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
   // Always registered (an idle consumer), so the worker doesn't warn about an unconsumed queue when the feature is off.
@@ -36,6 +45,12 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
         return;
       case 'destroy':
         await destroySandbox(d.sandboxId);
+        return;
+      case 'preview-prepare':
+        await preparePreview(d.previewId);
+        return;
+      case 'preview-deploy':
+        await deployPreview(d.previewId);
         return;
     }
   },
@@ -62,6 +77,7 @@ export const maintenance: Record<string, { everyMs: number; run: () => Promise<v
           await refreshBudget({ metered: p instanceof ModalProvider ? () => p.meteredSpend() : undefined, notify: notifyMods });
         },
       },
+      ...(previewsConfigured() ? { 'sandbox:previews': { everyMs: 60_000, run: expirePreviews } } : {}),
       'sandbox:retention': { everyMs: 24 * 60 * 60 * 1000, run: sandboxRetention },
     }
   : {};

@@ -13,15 +13,17 @@ import { registerTool, type ToolContext } from '../core/tools.js';
 import { sql } from '../db/index.js';
 import { takeLimit } from '../features/guard.js';
 import { fileKind, fileListingLine, formatBytes, looksLikeText, sniffMime } from '../files/format.js';
-import { createFile, FileError, loadFileBytes, resolveFile } from '../files/store.js';
+import { createFile, FileError, fileStore, loadFileBytes, resolveFile } from '../files/store.js';
 import { log } from '../log.js';
 import { processImage } from '../tools/image-process.js';
 import { errMsg, untrusted } from '../tools/util.js';
 import { accessModelText, canUseSandbox, notifyAccess } from './access.js';
 import { EXEC_SCRIPT, formatExecResult, isImagePath, safeBaseName } from './format.js';
 import { SandboxRefused, withSandbox } from './lifecycle.js';
-import { workPath, type Handle } from './provider.js';
+import { shq, workPath, type Handle } from './provider.js';
 import { sandboxProvider } from './providers.js';
+import { previewsConfigured, sandboxSettings } from './settings.js';
+import { previewCountsToday, upsertRequestedPreview } from './preview/store.js';
 
 const NOT_ENABLED = 'Sandbox tools are only available to subagents started with sandbox: true.';
 
@@ -231,6 +233,64 @@ reg('sandbox_export', (ctx) =>
     },
   }),
 );
+
+// ---------- request_preview ----------
+
+if (previewsConfigured())
+  reg('request_preview', (ctx) =>
+    tool({
+      description: `Ask for a live web preview of a static site you built: one directory with an index.html at its top (≤ ${limits.previewMaxFiles} files, ≤ 5 MiB each, ≤ 25 MiB total; no login, password or payment forms: those are refused). This does NOT deploy now: after you finish, the system deploys it (a temporary Cloudflare site, live 60 minutes) and posts the link in the thread. Only when the user wants a live page. One per task.`,
+      inputSchema: z.object({
+        dir: z.string().describe('Directory under /work with the site, e.g. "site"'),
+        title: z.string().min(1).max(80).describe('Short title, e.g. "Portfolio page"'),
+      }),
+      execute: async ({ dir, title }) => {
+        const abs = workPath(dir);
+        if (!abs) return badPath(dir);
+        if ((await sandboxSettings()).previewsDisabled) return 'Live previews are turned off right now. You may tell the user that plainly; export the files instead.';
+        if (!ctx.runId) return 'request_preview only works inside a subagent run.';
+        const counts = await previewCountsToday(ctx.speakerId);
+        if (counts.user >= limits.userPreviewsPerDay) return `Limit reached: at most ${limits.userPreviewsPerDay} live previews per user per day. Export the files instead and say so.`;
+        if (counts.global >= limits.globalPreviewsPerDay) return 'No more live previews can be made today. Export the files instead and say so.';
+        return run(ctx, 'request_preview', async (h) => {
+          const check = await p().exec(
+            h,
+            ['bash', '-c', `cd ${shq(abs)} 2>/dev/null || { echo NODIR; exit 0; }; test -f index.html && echo INDEX; echo FILES $(find . -type f | wc -l); echo LINKS $(find . -type l | wc -l); echo TOTAL $(find . -type f -printf '%s\\n' | awk '{s+=$1} END {print s+0}'); echo MAX $(find . -type f -printf '%s %p\\n' | sort -n | tail -1)`],
+            { timeoutMs: 30_000, maxOutputBytes: 8192 },
+          );
+          const out = check.stdout.toString('utf8');
+          if (out.includes('NODIR')) return `No directory ${abs}.`;
+          if (!out.includes('INDEX')) return `${abs} has no index.html at its top level.`;
+          const num = (k: string) => Number(new RegExp(`${k} (\\d+)`).exec(out)?.[1] ?? 0);
+          if (num('LINKS') > 0) return `${abs} contains symlinks; previews take regular files only.`;
+          if (num('FILES') > limits.previewMaxFiles) return `Too many files (${num('FILES')}; limit ${limits.previewMaxFiles}).`;
+          if (num('TOTAL') > limits.previewMaxTotalBytes) return `The site is ${formatBytes(num('TOTAL'))}; the limit is 25 MiB.`;
+          if (num('MAX') > limits.previewMaxFileBytes) return `A file is larger than 5 MiB (${/MAX \d+ (.*)/.exec(out)?.[1]?.slice(0, 100)}).`;
+          const tarPath = `/tmp/preview-${ctx.runId}.tar`;
+          const t = await p().exec(h, ['bash', '-c', `tar --format=gnu -cf ${tarPath} -C ${shq(abs)} .`], { timeoutMs: 60_000, maxOutputBytes: 4096 });
+          if (t.exitCode !== 0) return `Packing the site failed: ${t.stderr.toString('utf8').slice(0, 300)}`;
+          const { bytes, size } = await p().readFile(h, tarPath, { maxBytes: limits.previewMaxTotalBytes + 4 * 1024 * 1024 });
+          if (!bytes.length && size) return 'The packed site is too large.';
+          const bundle = await createFile({
+            threadId: ctx.threadId,
+            ownerId: ctx.speakerId,
+            name: 'preview-bundle.tar',
+            content: bytes,
+            description: `Preview bundle: ${title}`,
+            createdRunId: ctx.runId ?? null,
+            createdSubagentId: ctx.subagentId ?? null,
+            internal: true,
+            maxBytes: limits.previewMaxTotalBytes + 4 * 1024 * 1024,
+          });
+          // Only the subagent's owner is ever the requester (a steer from someone else can't redirect the claim).
+          const res = await upsertRequestedPreview({ runId: ctx.runId!, subagentId: ctx.subagentId!, threadId: ctx.threadId, requesterId: ctx.speakerId, title, bundleFileId: bundle.id });
+          if (res.replacedBundle) await fileStore.delete(res.replacedBundle).catch(() => {});
+          void appendEvent(ctx.threadId, 'preview_requested', `subagent:${ctx.subagentId}`, { runId: ctx.runId, previewId: res.id, title }).catch(() => {});
+          return 'Preview queued. After you finish, the system deploys it and posts the link in the thread. Mention in your result that a live preview was requested (the link comes separately; you never get it).';
+        });
+      },
+    }),
+  );
 
 function reg(name: string, build: (ctx: ToolContext) => Tool) {
   registerTool({ name, roles: ['child'], build });
