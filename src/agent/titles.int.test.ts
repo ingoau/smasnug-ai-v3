@@ -142,6 +142,19 @@ describe.skipIf(!INTEGRATION)('background titles', () => {
     expect(await session(t.id)).toMatchObject({ titleFailures: 0, titleFailedAt: null });
   });
 
+  it('a card title over the limit is asked for once more, then cut at a word boundary (no "…")', async () => {
+    const t = await thread(false);
+    const turn = await exchange(t, 'simulate 100000 dice rolls and plot them');
+    const [card] = await sql<{ id: number }[]>`insert into cards (thread_id, turn_id, channel_id, frozen) values (${t.id}, ${turn}, ${t.channelId}, true) returning id`;
+    const sa = `sa_${rand().toLowerCase()}`;
+    await sql`insert into subagents (id, thread_id, owner_id, title, status) values (${sa}, ${t.id}, 'UHUMAN', 'Dice', 'idle')`;
+    await sql`insert into runs (subagent_id, thread_id, card_id, instructions, status, output) values (${sa}, ${t.id}, ${card!.id}, 'simulate', 'complete', 'done')`;
+    answer = 'Simulated 100,000 dice rolls and plotted the distribution';
+    expect(await T.processCardTitle(Number(card!.id))).toBe('Simulated 100,000 dice rolls');
+    expect(asked).toHaveLength(2);
+    expect(asked[1]!.prompt).toMatch(/the limit is 40/);
+  });
+
   it("never overrides a user-chosen title (no model call either), and channel threads aren't titled", async () => {
     const t = await thread();
     await sql`insert into agent_sessions (thread_id, title, title_by, user_renamed_at) values (${t.id}, 'My robot project', 'user', now())`;

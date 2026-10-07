@@ -65,6 +65,8 @@ describe('prompts', () => {
     });
     expect(p.system).toMatch(/past tense/);
     expect(p.system).toMatch(/Compared 3 hosting options/);
+    expect(p.system).toMatch(/at most 40 characters \(about 5 words; count them/);
+    expect(p.system).toMatch(/Count items instead of naming them .*not "Compared Fly\.io, Render and Railway"/);
     expect(p.prompt).toContain('<request>\ncompare fly.io, render and railway for a small node app\n</request>');
     expect(p.prompt).toContain('- Fly.io pricing [complete]: About $2/month for a shared VM.');
     expect(p.prompt).toContain('- Render pricing [error]');
