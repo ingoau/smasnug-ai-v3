@@ -20,6 +20,8 @@ export interface UserInfo {
   /** Avatar URL (192px). */
   image?: string;
   isBot: boolean;
+  /** An app's user account (users.info `is_app_user`). */
+  isAppUser?: boolean;
   deleted?: boolean;
   /** Profile fields below are user-written: render them via src/context/people.ts (one line, capped). */
   pronouns?: string;
@@ -50,6 +52,7 @@ export function userInfoFromSlack(u: any): UserInfo {
     tzOffset: typeof u.tz_offset === 'number' ? u.tz_offset : undefined,
     image: p.image_192 || p.image_72 || p.image_512 || undefined,
     isBot: !!u.is_bot,
+    isAppUser: u.is_app_user ? true : undefined,
     deleted: !!u.deleted,
     pronouns: p.pronouns || undefined,
     title: p.title || undefined,

@@ -673,6 +673,64 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(batch?.map((x) => x.ts)).toEqual([root, a]);
     });
 
+    describe('intake hygiene', () => {
+      const dm = (channel: string, user: string, ts: string, text = 'hello') =>
+        job({ kind: 'event' as const, body: { event_id: `Ev${Math.random()}`, event: { type: 'message', channel, channel_type: 'im', user, text, ts } } });
+
+      it('Slackbot system messages are ignored everywhere (not stored, no thread, no batch)', async () => {
+        const ts = nextTs();
+        await processSlackEvent(dm('D0SLACKBOT', 'USLACKBOT', ts, 'You were added to the user group @staff'));
+        const root = nextTs();
+        await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> hi', ts: root }));
+        await processSlackEvent(messageEnvelope({ user: 'USLACKBOT', text: 'reminder: <@UBOT> stand-up', ts: nextTs(), thread_ts: root }));
+        expect(await sql`select 1 from threads where id = ${`D0SLACKBOT:${ts}`}`).toHaveLength(0);
+        expect(await sql`select 1 from messages where user_id = 'USLACKBOT'`).toHaveLength(0);
+        expect(await debounce.takeBatch({ threadId: `D0SLACKBOT:${ts}`, authorId: 'USLACKBOT', seq: 1 })).toBeNull();
+      });
+
+      it('a DM whose other party is a bot or app user starts nothing; the verdict is cached per channel', async () => {
+        const { addFakeHandler } = await import('../core/slack-fake.js');
+        let lookups = 0;
+        const remove = addFakeHandler((method, args) => {
+          if (method !== 'users.info' || args.user !== 'UAPPUSER') return undefined;
+          lookups++;
+          return { ok: true, user: { id: 'UAPPUSER', name: 'someapp', is_bot: false, is_app_user: true, profile: {} } };
+        });
+        try {
+          const a = nextTs();
+          await processSlackEvent(dm('D0APP', 'UAPPUSER', a));
+          await processSlackEvent(dm('D0APP', 'UAPPUSER', nextTs()));
+          expect(await sql`select 1 from threads where channel_id = 'D0APP'`).toHaveLength(0);
+          expect(await debounce.takeBatch({ threadId: `D0APP:${a}`, authorId: 'UAPPUSER', seq: 1 })).toBeNull();
+          expect(lookups).toBe(1);
+          // A person's DM still works.
+          const b = nextTs();
+          await processSlackEvent(dm('D0HUMAN', 'U1', b));
+          expect(await debounce.takeBatch({ threadId: `D0HUMAN:${b}`, authorId: 'U1', seq: 1 })).toEqual([{ ts: b, reason: 'dm' }]);
+        } finally {
+          remove();
+        }
+      });
+
+      it('restricted_action_read_only_channel marks the channel: no more turns start there', async () => {
+        const { addFakeHandler, fakeSlackError } = await import('../core/slack-fake.js');
+        const { slackCall, isChannelReadOnly } = await import('../core/slack.js');
+        const remove = addFakeHandler((method, args) => {
+          if (method === 'chat.postMessage' && args.channel === 'D0RO') throw fakeSlackError('restricted_action_read_only_channel');
+        });
+        try {
+          await expect(slackCall('chat.postMessage', { channel: 'D0RO', text: 'hi' })).rejects.toThrow();
+          expect(await isChannelReadOnly('D0RO')).toBe(true);
+          expect(await isChannelReadOnly('D0OTHER')).toBe(false);
+          const ts = nextTs();
+          await processSlackEvent(dm('D0RO', 'U1', ts));
+          expect(await debounce.takeBatch({ threadId: `D0RO:${ts}`, authorId: 'U1', seq: 1 })).toBeNull();
+        } finally {
+          remove();
+        }
+      });
+    });
+
     it('DMs: each top-level message is its own thread and always runs', async () => {
       const ts = nextTs();
       await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'message', channel: 'D1', channel_type: 'im', user: 'U1', text: 'hello', ts } } }));

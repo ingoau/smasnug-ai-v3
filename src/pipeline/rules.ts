@@ -59,6 +59,10 @@ export function shouldDisengage(s: EngagementState, now: Date, opts: { afterMess
   return false;
 }
 
+/** Slackbot's user id: its system messages ("you were added to a user group…") never start anything. */
+export const SLACKBOT_USER_ID = 'USLACKBOT';
+export const isSlackbotUser = (userId: string | null | undefined) => userId === SLACKBOT_USER_ID;
+
 const USER_MENTION = /<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g;
 
 export function mentionedUsers(text: string): string[] {

@@ -173,6 +173,19 @@ export async function slackCall<T extends WebAPICallResult = WebAPICallResult & 
   args: Record<string, unknown>,
   opts: SlackCallOpts = {},
 ): Promise<T> {
+  try {
+    return await slackCallInner<T>(method, args, opts);
+  } catch (err: any) {
+    const channel = (args.channel ?? args.channel_id) as string | undefined;
+    if (typeof channel === 'string' && err?.data?.error === READ_ONLY_ERROR) {
+      await markChannelReadOnly(channel).catch(() => {});
+      log.info({ method, channel }, 'channel is read-only for the bot; no turns start there for a day');
+    }
+    throw err;
+  }
+}
+
+async function slackCallInner<T>(method: string, args: Record<string, unknown>, opts: SlackCallOpts): Promise<T> {
   const token = opts.token ?? 'bot';
   await assertThreadExists(method, args);
   if (opts.idempotencyKey) {
@@ -221,6 +234,23 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
       throw err;
     }
   }
+}
+
+/**
+ * Channels where posting failed with `restricted_action_read_only_channel` (e.g. the bot's read-only DM with
+ * Slackbot, an announcement-only channel): remembered for a day so intake stops starting turns there.
+ */
+export const READ_ONLY_ERROR = 'restricted_action_read_only_channel';
+const readOnlyKey = (channel: string) => `slack:readonly:${channel}`;
+const READ_ONLY_TTL_S = 24 * 60 * 60;
+
+export async function markChannelReadOnly(channel: string): Promise<void> {
+  await redis.set(readOnlyKey(channel), '1', 'EX', READ_ONLY_TTL_S);
+}
+
+/** True if a Slack call recently found the channel read-only for the bot (markChannelReadOnly). */
+export async function isChannelReadOnly(channel: string): Promise<boolean> {
+  return (await redis.exists(readOnlyKey(channel))) > 0;
 }
 
 async function throttle(method: string, token: TokenKind, channel: string | undefined, deadline = Infinity) {

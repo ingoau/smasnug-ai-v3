@@ -115,6 +115,7 @@ The bot always runs on a mention or DM. In threads where it has been mentioned, 
 - 
 **Front agent.** On yes, the front agent runs and can still choose silence by not calling `reply`.
 **Never triggered by bots.** Messages from bots (`bot_id` or `subtype: bot_message`), including the bot's own and its on-behalf-of messages, never start a turn. Bot messages are still included in context, labelled as bots.
+**Intake hygiene.** Slackbot's system messages (`USLACKBOT`, e.g. "you were added to a user group" in the bot's read-only DM with Slackbot) are ignored at intake entirely: not stored, no thread, no turn. A DM whose other party is a bot or an app user (`users.info` `is_bot` / `is_app_user` of the DM's author, cached per DM channel for a week in Redis, `src/pipeline/dm-peer.ts`; a failed lookup fails open) never starts anything. When any Slack call fails with `restricted_action_read_only_channel`, the shared client marks that channel read-only for a day (Redis, `src/core/slack.ts`), and intake starts no turns there meanwhile (the message is still stored as context).
 **Disengagement.** If the bot hasn't been addressed for about 25 messages or a few hours, it stops considering follow-ups until mentioned again. "Stop" or "shut up" also disengages it.
 **Workspace AI-bot guidelines** (enforced in code: pure checks in `src/pipeline/guidelines.ts`, side effects in `src/pipeline/guideline-actions.ts`; they apply in channels, threads and DMs and run before the rules above):
 - 

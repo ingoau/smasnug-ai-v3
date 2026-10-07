@@ -3,7 +3,7 @@
  * The relevance gate runs later, once per debounced batch (see fire.ts).
  */
 import { appendEvent, parseThreadId, threadIdOf } from '../core/events.js';
-import { getBotIdentity, markThreadGone, slackCall } from '../core/slack.js';
+import { getBotIdentity, isChannelReadOnly, markThreadGone, slackCall } from '../core/slack.js';
 import { cancelThreadRuns } from '../agent/subagents.js';
 import { rehomeCodingAgents } from '../agent/cursor/agents.js';
 import { requestThreadStop } from './stop.js';
@@ -15,7 +15,8 @@ import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
-import { decide, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
+import { decide, isSlackbotUser, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
+import { isBotPeerDm } from './dm-peer.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { handleHuddleFmMessage, isFromHuddleFm } from '../features/huddlefm/inbound.js';
 import { showIntakeStatus } from './session-status.js';
@@ -37,6 +38,8 @@ export async function handleMessageEvent(ev: MessageEvent) {
   if (!ev.channel) return;
   // HuddleFM's replies and events in the bot's DM with it (DJ mode): protocol traffic, never a conversation.
   if (isFromHuddleFm(ev)) return handleHuddleFmMessage(ev);
+  // Slackbot's system messages ("you were added to a user group…", often in a read-only DM): ignored entirely.
+  if (isSlackbotUser(ev.user) || isSlackbotUser(ev.message?.user)) return;
   if (ev.subtype === 'message_changed') return handleEdit(ev);
   if (ev.subtype === 'message_deleted') return handleDelete(ev.channel, ev.deleted_ts, ev.previous_message);
   if (ev.hidden || !NEW_MESSAGE_SUBTYPES.has(ev.subtype)) return;
@@ -63,6 +66,8 @@ async function handleNewMessage(ev: MessageEvent) {
   const isBot = isBotMessage(ev) || ev.user === bot.userId;
   const threadId = threadIdOf(channelId, threadRootTs(ev));
   const text = ev.text ?? '';
+  // A DM with another bot or app (its user posting as a user): never a conversation. Cached per DM channel.
+  if (isDm && !isBot && ev.user && (await isBotPeerDm(channelId, ev.user).catch(() => false))) return;
   const { mentionsBot, mentionsOthers } = isBot ? { mentionsBot: false, mentionsOthers: false } : mentionFacts(text, bot.userId);
   if (!isBot && ev.user && shouldRedirectGroupPing({ isDm, threadTs: ev.thread_ts, ts: ev.ts, mentionsBot, text }) && !isBangStop(text, bot.userId)) {
     await redirectGroupPing({ ...ev, user: ev.user }, bot);
@@ -108,6 +113,11 @@ async function handleNewMessage(ev: MessageEvent) {
   if (decision.reason === 'direct') await markAddressed(threadId, true);
 
   markMessage(channelId, ev.ts, { i_decided: Date.now() });
+  // Posting here failed with restricted_action_read_only_channel recently (core/slack.ts): no turns, no ephemerals.
+  if (await isChannelReadOnly(channelId)) {
+    log.debug({ threadId, ts: ev.ts }, 'read-only channel: no turn');
+    return;
+  }
   const entry = await guardEntry(authorId, channelId);
   markMessage(channelId, ev.ts, { i_guarded: Date.now() });
   if (!entry.ok) {
