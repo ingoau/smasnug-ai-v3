@@ -122,7 +122,7 @@ describe('access texts', () => {
     const { SANDBOX_FRONT_PROMPT } = await import('./prompts.js');
     expect(SANDBOX_FRONT_PROMPT).toMatch(/`sandbox: true` only when it needs code run/);
     // The capability itself is listed here (only in sandbox-configured prompts), for "what can you do".
-    expect(SANDBOX_FRONT_PROMPT).toMatch(/You can also run code .*live web page previews\. Mention it when asked what you can do/);
+    expect(SANDBOX_FRONT_PROMPT).toMatch(/always include it when someone asks what you can do\): run code in a sandbox .*live web page previews/);
     expect(SANDBOX_FRONT_PROMPT).toMatch(/A single file you can write yourself \(a page, script, CSV, text\) is create_file with no sandbox/);
     expect(SANDBOX_FRONT_PROMPT).toMatch(/do the task without one where you can \(e\.g\. create_file\), without asking first/);
   });
