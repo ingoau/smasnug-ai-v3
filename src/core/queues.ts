@@ -28,6 +28,11 @@ export const QUEUE = {
    * { type: 'pause' | 'destroy', sandboxId, generation?, force? } | { type: 'preview-prepare' | 'preview-deploy', previewId }.
    */
   sandbox: 'sandbox',
+  /**
+   * Background titles (src/agent/titles.ts), never during a turn: { type: 'session', threadId, turnId } (DM sidebar
+   * title) | { type: 'card', cardId, turnId } (a finished plan card's title).
+   */
+  titles: 'titles',
   /** Repeatable maintenance: sweeper, expiry, memory extraction, retention */
   maintenance: 'maintenance',
 } as const;

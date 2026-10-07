@@ -26,8 +26,6 @@ export const TERMINAL_SAFE_TOOLS = new Set([
   'message_subagent',
   'cancel_subagent',
   'spawn_coding_agent',
-  'set_card_title',
-  'set_session_title',
   'remember',
   'forget',
   'propose_workspace_fact',

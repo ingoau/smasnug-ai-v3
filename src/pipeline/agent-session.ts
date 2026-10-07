@@ -64,7 +64,7 @@ export function normalizeSessionTitle(raw: string): string {
 }
 
 /**
- * set_session_title: rename this DM thread's session. One title per turn; never over a user-chosen title.
+ * Rename this DM thread's session (the background title job, src/agent/titles.ts). One title per turn; never over a user-chosen title.
  * Returns the model-facing result.
  */
 export async function setSessionTitle(o: { threadId: string; turnId: number; title: string }): Promise<string> {

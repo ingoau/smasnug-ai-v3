@@ -44,7 +44,7 @@ describe('endsTurnAfterStep', () => {
     const s = call('spawn_subagent', { tasks: [] });
     expect(endsTurnAfterStep([r, s], [ok(r, 'Replied (posted).'), ok(s, { started: [] })])).toBe(true);
     const m = call('remember', { fact: 'x' });
-    const t = call('set_session_title', { title: 'x' });
+    const t = call('leave_thread', {});
     expect(endsTurnAfterStep([r, m, t], [ok(r, 'Replied (posted).'), ok(m, 'ok'), ok(t, 'ok')])).toBe(true);
   });
 

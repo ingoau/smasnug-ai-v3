@@ -27,6 +27,8 @@ const h = vi.hoisted(() => ({
   cardSteps: [] as any[],
   cardBlock: undefined as undefined | (() => any),
   cardAttached: [] as string[],
+  /** Background title jobs enqueued (src/agent/titles.ts): ['card', cardId, turnId] | ['session', threadId, turnId]. */
+  titleJobs: [] as unknown[][],
 }));
 
 vi.mock('../db/index.js', () => {
@@ -77,6 +79,10 @@ vi.mock('./cards.js', () => ({
   cardBlockFor: async () => h.cardBlock?.(),
   attachCard: async (_id: number, ts: string) => void h.cardAttached.push(ts),
 }));
+vi.mock('./titles.js', () => ({
+  enqueueCardTitle: async (cardId: number, turnId: number) => void h.titleJobs.push(['card', cardId, turnId]),
+  enqueueSessionTitle: async (threadId: string, turnId: number) => void h.titleJobs.push(['session', threadId, turnId]),
+}));
 vi.mock('../context/thread.js', () => ({
   renderThreadContext: async () => ({ history: '<@U1> Tess: earlier', channelContext: '', newMessages: '<@U1> Tess: hi bot', participantIds: ['U2', 'U1', 'UBOT', 'U404'], ...h.ctx }),
   renderMessages: async (_t: string, ts: string[]) => `<@U1> Tess: INBOX ${ts.join(',')}`,
@@ -103,7 +109,6 @@ const { simulateReadableStream } = await import('ai');
 await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
-await import('./session-title.js');
 const { runFrontTurn, barePingKind, barePingInstruction } = await import('./front.js');
 const { streamArgsText } = await import('./slack-markdown.js');
 
@@ -186,6 +191,7 @@ beforeEach(() => {
   h.cardSteps = [];
   h.cardBlock = undefined;
   h.cardAttached = [];
+  h.titleJobs = [];
 });
 
 describe('runFrontTurn (mock model)', () => {
@@ -921,31 +927,42 @@ describe('runFrontTurn: model freedom', () => {
     expect(h.slack.filter((c) => c.method === 'chat.postMessage').length).toBe(2);
   });
 
-  it('only offers set_card_title on synthesis turns', async () => {
+  it('offers no title tools: a write-up\'s card title is a background job after the reply (no model step)', async () => {
     h.model = mockModel([textStep('')]);
     await runFrontTurn(turn({ id: 45, isMention: false }), io(false).io);
     expect(toolNames(0)).toContain('reply');
     expect(toolNames(0)).not.toContain('set_card_title');
+    expect(toolNames(0)).not.toContain('set_session_title');
+    expect(h.titleJobs).toEqual([]);
 
     h.sqlHook = (q) => (q.includes('from runs r join subagents') ? [{ id: 1, subagentId: 'sa_1', title: 'T', ownerId: 'U1', status: 'complete', instructions: 'x', result: 'r', error: null, isResume: false }] : undefined);
-    h.model = mockModel([textStep('')]);
+    h.model = mockModel([replyStep('Here is what they found.'), textStep('')]);
     await runFrontTurn(turn({ id: 46, kind: 'synthesis', cardId: 5, messageTs: [] }), io(false).io);
-    expect(toolNames(0)).toContain('set_card_title');
+    expect(toolNames(0)).not.toContain('set_card_title');
+    expect(JSON.stringify(h.model.doStreamCalls[0].prompt)).not.toContain('set_card_title');
+    expect(h.titleJobs).toEqual([['card', 5, 46]]);
   });
 
-  it('only offers set_session_title in DM threads, with the current title in <session>', async () => {
-    h.model = mockModel([textStep('')]);
+  it('DM threads: <session> has no title instructions; a delivered reply enqueues the session-title job', async () => {
+    h.model = mockModel([replyStep('hi')]);
     await runFrontTurn(turn({ id: 47, isMention: false }), io(false).io);
-    expect(toolNames(0)).not.toContain('set_session_title');
     expect(JSON.stringify(h.model.doStreamCalls[0].prompt.at(-1))).not.toContain('<session>');
+    expect(h.titleJobs).toEqual([]); // not a DM
 
     h.sqlHook = (q) => (q.includes('left join agent_sessions') ? [{ isDm: true, title: 'Pico question', titleBy: 'user' }] : undefined);
-    h.model = mockModel([textStep('')]);
+    h.model = mockModel([replyStep('Sure, here it is.')]);
     await runFrontTurn(turn({ id: 48 }), io().io);
-    expect(toolNames(0)).toContain('set_session_title');
+    expect(toolNames(0)).not.toContain('set_session_title');
     const prompt = JSON.stringify(h.model.doStreamCalls[0].prompt.at(-1));
     expect(prompt).toContain('<session>');
-    expect(prompt).toContain('Title: \\"Pico question\\" (chosen by the user');
+    expect(prompt).not.toContain('set_session_title');
+    expect(h.titleJobs).toEqual([['session', 'C1:100.000001', 48]]);
+
+    // Nothing delivered: no job.
+    h.titleJobs = [];
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 49, isMention: false }), io(false).io);
+    expect(h.titleJobs).toEqual([]);
   });
 
 });

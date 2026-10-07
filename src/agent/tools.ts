@@ -1,5 +1,5 @@
 /**
- * Agent-module tools (front agent only): reply, spawn_subagent, message_subagent, cancel_subagent, set_card_title.
+ * Agent-module tools (front agent only): reply, spawn_subagent, message_subagent, cancel_subagent (card titles: src/agent/titles.ts, in the background).
  * Registered at import time; src/agent/register.ts imports this file.
  */
 import { tool } from 'ai';
@@ -221,21 +221,3 @@ registerTool({
     }),
 });
 
-registerTool({
-  name: 'set_card_title',
-  roles: ['front'],
-  build: (ctx) =>
-    tool({
-      description: `Only when writing up finished subagent results: set the final title of their plan card, past tense, ≤ ${limits.cardTitleMaxChars} characters (e.g. "Compared 3 hosting options"). Call before your reply.`,
-      inputSchema: z.object({ title: z.string() }),
-      execute: async ({ title }) => {
-        const s = turnState(ctx);
-        if (s.turn.kind !== 'synthesis' || !s.turn.cardId) {
-          throw new Error('set_card_title is only available when reporting finished subagent results.');
-        }
-        await sql`update cards set title = ${title} where id = ${s.turn.cardId}`;
-        s.visible.add('card');
-        return 'Card title set.';
-      },
-    }),
-});

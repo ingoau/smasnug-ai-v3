@@ -22,7 +22,7 @@ describe('frontSystemPrompt About you', () => {
     expect(p).toMatch(/remember durable facts/);
     expect(p).toMatch(/send messages elsewhere/);
     expect(p).toMatch(/background subagents/);
-    expect(p).toMatch(/In DMs you can title/);
+    expect(p).not.toMatch(/title the conversation/); // titles are set in the background (src/agent/titles.ts)
     expect(p).not.toMatch(/OpenRouter|Hack Club AI|Postgres|Redis|BullMQ|Socket Mode/i);
     expect(p).toMatch(/don't claim Codex/);
     expect(p).not.toContain('spawn_coding_agent');

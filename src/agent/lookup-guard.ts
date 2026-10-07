@@ -31,7 +31,7 @@ export const LOOKUP_TOOLS = new Set([
  * Calls that may sit next to lookups without making the step anything but a lookup step: an ack reply / reaction
  * (`continue_turn`) and trivia. A step that also spawns, sends or creates something is not a lookup step.
  */
-const NEUTRAL_TOOLS = new Set([...RESPONSE_TOOLS, 'search_emojis', 'set_session_title']);
+const NEUTRAL_TOOLS = new Set([...RESPONSE_TOOLS, 'search_emojis']);
 
 /** A lookup step: at least one research call, and nothing else but neutral calls. */
 export function isLookupStep(toolNames: readonly string[]): boolean {

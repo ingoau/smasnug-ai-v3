@@ -27,6 +27,7 @@ const CONCURRENCY: Record<QueueName, number> = {
   [QUEUE.huddlefm]: 10,
   [QUEUE.threadSummary]: 5,
   [QUEUE.sandbox]: 4,
+  [QUEUE.titles]: 5,
   [QUEUE.maintenance]: 4,
 };
 

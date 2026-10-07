@@ -58,7 +58,7 @@ export type RunStatus = 'queued' | 'running' | 'complete' | 'error' | 'cancelled
 
 export interface CardState {
   id: number;
-  /** Set by set_card_title on synthesis. */
+  /** Set in the background after the write-up (src/agent/titles.ts). */
   title: string | null;
   frozen: boolean;
   /** The card lives in this reply message: its text is re-rendered above the plan. null/undefined = standalone. */
@@ -130,7 +130,7 @@ export function liveTitle(runs: Pick<CardRun, 'status'>[]): string {
   return active > 0 ? `Running ${plural(active)}` : `Ran ${plural(runs.length)}`;
 }
 
-/** Title for a frozen card: the agent's set_card_title value as written, else "Ran N subagents". */
+/** Title for a frozen card: its background title (src/agent/titles.ts) as written, else "Ran N subagents". */
 export function frozenTitle(title: string | null | undefined, runCount: number): string {
   const t = title?.trim();
   return t ? t : `Ran ${plural(runCount)}`;
@@ -220,7 +220,7 @@ export function isCollapsed(card: Pick<CardState, 'frozen' | 'steps'>, runs: Pic
 const escapeMrkdwn = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
 /**
- * The collapsed card's line: the set_card_title title (frozen cards) with the summary of what it did, or the
+ * The collapsed card's line: the card's title (frozen cards, src/agent/titles.ts) with the summary of what it did, or the
  * summary alone ("Searched Slack, read 2 pages"), or "Ran N subagents".
  */
 export function collapsedLine(card: Pick<CardState, 'frozen' | 'title' | 'steps'>, runs: Pick<CardRun, 'status'>[]): { title: string; summary: string } {

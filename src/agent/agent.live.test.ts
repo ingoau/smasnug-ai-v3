@@ -394,7 +394,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(o.replies.length).toBeLessThanOrEqual(1);
     expect(o.reactionsAdded).toBe(0);
     expect(o.cancels).toBe(0);
-    expect(o.cardTitles.every((t) => t == null)).toBe(true); // set_card_title not offered / not used
+    expect(o.cardTitles.every((t) => t == null)).toBe(true); // a user turn never titles its card (titles come after the write-up)
   }, 120_000);
 
   it('comparing three named, independent things fans out: one spawn_subagent call with a task per item', async () => {

@@ -9,8 +9,8 @@ import { STOP_ALL_ACTION } from './card-render.js';
 import { processSubagentRun, shutdownRuns } from './child.js';
 import { expireIdleSubagents, sweepStaleRuns } from './maintenance.js';
 import { cancelCardRuns } from './subagents.js';
+import { processTitleJob, type TitleJob } from './titles.js';
 import './leave-thread.js';
-import './session-title.js';
 import './tools.js';
 import './cursor/tools.js';
 import { pollCursorRuns } from './cursor/agents.js';
@@ -22,6 +22,10 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
   },
   [QUEUE.cardRender]: async (job) => {
     await processCardRender(Number(job.data.cardId));
+  },
+  // Background DM session titles and finished plan-card titles (no tool calls in the turn).
+  [QUEUE.titles]: async (job) => {
+    await processTitleJob(job.data as TitleJob);
   },
 };
 
