@@ -25,6 +25,7 @@ const CONCURRENCY: Record<QueueName, number> = {
   [QUEUE.cardRender]: 20,
   [QUEUE.huddlefm]: 10,
   [QUEUE.threadSummary]: 5,
+  [QUEUE.sandbox]: 4,
   [QUEUE.maintenance]: 4,
 };
 

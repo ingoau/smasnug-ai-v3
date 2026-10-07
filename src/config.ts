@@ -58,6 +58,42 @@ const Env = z.object({
    * HuddleFM's bot API (JSON DMs); its own user id must be in HuddleFM's INTEGRATION_USER_IDS. Unset → no DJ tools.
    */
   HUDDLEFM_USER_ID: z.string().optional(),
+  /**
+   * Code sandboxes (src/sandbox/, docs/sandbox.md): subagents spawned with `sandbox: true` run code in Modal
+   * Sandboxes. Off (no tools, no jobs, no App Home section) unless MODAL_TOKEN_ID and MODAL_TOKEN_SECRET are set.
+   * Never logged; never passed into a sandbox.
+   */
+  MODAL_TOKEN_ID: z.string().optional(),
+  MODAL_TOKEN_SECRET: z.string().optional(),
+  /** Modal environment (dev and prod share one workspace and its free credit, but use separate environments). */
+  MODAL_ENVIRONMENT: z.string().optional(),
+  /** Modal app the sandboxes are created under (per environment). */
+  MODAL_APP_NAME: z.string().default('smasnug-sandbox'),
+  /** Sandbox provider behind src/sandbox/provider.ts. Only Modal is implemented (E2B is the documented fallback). */
+  SANDBOX_PROVIDER: z.enum(['modal']).default('modal'),
+  /**
+   * Hard stop for this deployment's estimated sandbox spend per calendar month (UTC), in USD. Below Modal's $30/month
+   * free credit, which dev and prod share: give dev a small slice (e.g. 5) and prod the rest (e.g. 20).
+   */
+  SANDBOX_MONTHLY_BUDGET_USD: z.coerce.number().min(0).default(20),
+  /**
+   * Second backstop: Modal's own metered cost for the whole workspace this month (all environments). At or above
+   * this, new sandboxes are refused everywhere (the credit is $30; the workspace spend limit is $0 beyond it).
+   */
+  SANDBOX_WORKSPACE_CREDIT_USD: z.coerce.number().min(0).default(28),
+  /** Extra egress deny list (comma-separated IPv4 CIDRs or IPs), e.g. our own hosts' public addresses. */
+  SANDBOX_EGRESS_DENY: z.string().optional(),
+  /**
+   * Live previews (Cloudflare temporary deploys, src/sandbox/preview/): AES-256-GCM key for the preview's Cloudflare
+   * token and claim URL (32 bytes, base64). Previews are off without it.
+   */
+  PREVIEW_SECRET_KEY: z.string().optional(),
+  /** Bump when Cloudflare's terms change: requesters accept again on their next preview. */
+  PREVIEW_TERMS_VERSION: z.string().default('cf-2025-10'),
+  /** wrangler version used by the preview deploy sandbox (pinned). */
+  WRANGLER_VERSION: z.string().default('4.148.0'),
+  /** Hack Club Auth (identity verification check for sandbox access). */
+  HCA_URL: z.string().default('https://auth.hackclub.com'),
 });
 
 export const env = Env.parse(process.env);
@@ -233,4 +269,69 @@ export const limits = {
   djProbeAfterMs: 10 * 60_000,
   /** An active session HuddleFM hasn't answered for this long is ended (it was probed every few minutes). */
   djGiveUpAfterMs: 60 * 60_000,
+  // code sandboxes (src/sandbox/, docs/sandbox.md §4.2)
+  /** CPU cores: reserved (billed at least this) and hard limit. Spend is estimated at the limit (an upper bound). */
+  sandboxCpu: 0.5,
+  sandboxCpuLimit: 1,
+  /** Memory MiB: reserved and hard limit (Chromium needs ~1-2 GiB). */
+  sandboxMemoryMiB: 1024,
+  sandboxMemoryLimitMiB: 2048,
+  /**
+   * Provider-side lifetime of one live segment (Modal `timeout`). Must exceed sandboxRunMaxDurationMs plus
+   * sandboxIdlePauseMs plus a sweep, so an idle sandbox is paused (snapshotted) before the provider kills it.
+   */
+  sandboxLifetimeMs: 45 * 60_000,
+  /** A live sandbox whose subagent has no active run is paused (filesystem snapshot + terminate) after this. */
+  sandboxIdlePauseMs: 5 * 60_000,
+  /** Run duration cap for subagents with a sandbox (other runs keep runMaxDurationMs). */
+  sandboxRunMaxDurationMs: 30 * 60_000,
+  sandboxExecDefaultMs: 60_000,
+  sandboxExecMaxMs: 300_000,
+  /** stdout / stderr kept per exec (each), before the head/tail cut shown to the model. */
+  sandboxExecOutputMaxBytes: 64 * 1024,
+  sandboxExecShowHeadChars: 2_000,
+  sandboxExecShowTailChars: 10_000,
+  /** sandbox_write_file content cap (bigger files: make them with sandbox_exec). */
+  sandboxWriteMaxBytes: 200 * 1024,
+  sandboxReadPageChars: 24_000,
+  /** Largest file sandbox_read_file pulls out of the sandbox to show (images are resized afterwards). */
+  sandboxReadMaxBytes: 25 * 1024 * 1024,
+  sandboxImportMaxBytes: 50 * 1024 * 1024,
+  /** Sandbox exports into the file store (the store's general cap, fileMaxBytes, stays 5 MB for everything else). */
+  sandboxExportMaxBytes: 25 * 1024 * 1024,
+  userSandboxExecsPerHour: 200,
+  userLiveSandboxes: 2,
+  globalLiveSandboxes: 8,
+  /** Live sandbox minutes per user per UTC day (sum of usage segments). */
+  userSandboxMinutesPerDay: 30,
+  userPreviewsPerDay: 5,
+  globalPreviewsPerDay: 30,
+  previewMaxFiles: 1000,
+  previewMaxFileBytes: 5 * 1024 * 1024,
+  previewMaxTotalBytes: 25 * 1024 * 1024,
+  /** Cloudflare deletes unclaimed temporary deployments after 60 min; redeploys don't extend it. */
+  previewLifetimeMs: 60 * 60_000,
+  previewTermsTtlMs: 30 * 60_000,
+  previewDeployTimeoutMs: 4 * 60_000,
+  /** HCA: a positive answer is trusted this long before re-checking (and kept as the "last known positive"). */
+  hcaPositiveTtlMs: 7 * 24 * 60 * 60 * 1000,
+  hcaNegativeTtlMs: 10 * 60_000,
+  hcaPendingTtlMs: 5 * 60_000,
+  hcaTimeoutMs: 3_000,
+  /** At most one access explanation (ephemeral) per user per this long. */
+  sandboxNoticeCooldownMs: 15 * 60_000,
+  /** sandboxes / previews rows are kept this long after they end; usage segments longer (they cover a billing month). */
+  sandboxRowRetentionMs: 30 * 24 * 60 * 60 * 1000,
+  sandboxUsageRetentionMs: 62 * 24 * 60 * 60 * 1000,
+  /** hca_verifications rows not re-checked for this long are dropped. */
+  hcaRowRetentionMs: 30 * 24 * 60 * 60 * 1000,
+} as const;
+
+/**
+ * Modal's sandbox rates (USD per core-hour / GiB-hour), read from the workspace's billing rates in the Phase 0 spike
+ * (2026-10-07: `cpu_hour_cost_sandbox` 0.1419, `mem_gib_hour_cost_sandbox` 0.024). Billed at max(reservation, usage).
+ */
+export const sandboxPricing = {
+  cpuCoreHourUsd: 0.1419,
+  memGibHourUsd: 0.024,
 } as const;

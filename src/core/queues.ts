@@ -23,6 +23,11 @@ export const QUEUE = {
   huddlefm: 'huddlefm',
   /** Rolling thread summary update (src/context/summary.ts): { threadId, targetTs }. Never blocks a turn. */
   threadSummary: 'thread-summary',
+  /**
+   * Code sandboxes (src/sandbox/): pause / destroy a sandbox, prepare / deploy a live preview:
+   * { type: 'pause' | 'destroy', sandboxId, generation?, force? } | { type: 'preview-prepare' | 'preview-deploy', previewId }.
+   */
+  sandbox: 'sandbox',
   /** Repeatable maintenance: sweeper, expiry, memory extraction, retention */
   maintenance: 'maintenance',
 } as const;

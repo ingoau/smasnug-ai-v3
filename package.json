@@ -17,7 +17,8 @@
     "simulate": "SLACK_FAKE=1 tsx --env-file=.env scripts/simulate.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "db:up": "docker compose up -d"
+    "db:up": "docker compose up -d",
+    "sandbox:images": "tsx --env-file=.env scripts/sandbox-images.ts"
   },
   "dependencies": {
     "@mozilla/readability": "^0.6.0",
