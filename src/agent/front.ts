@@ -33,6 +33,8 @@ import { noteBotReply } from '../pipeline/store.js';
 import { awaitsReply } from '../pipeline/rules.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
+import { SANDBOX_FRONT_PROMPT } from '../sandbox/prompts.js';
+import { sandboxConfigured } from '../sandbox/settings.js';
 
 export interface TurnIO {
   /** Messages pushed to this turn's inbox since the last drain (same author). Call before every model step. */
@@ -120,6 +122,7 @@ async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<strin
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
   let system = frontSystemPrompt(env.BOT_DISPLAY_NAME);
   if (huddleFmConfigured()) system = `${system}\n\n${HUDDLE_DJ_PROMPT}`;
+  if (sandboxConfigured()) system = `${system}\n\n${SANDBOX_FRONT_PROMPT}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
   // Admin-only section last: the shared prefix stays the same for everyone.
   if (opts.codingAgents) system = `${system}\n\n${CODING_AGENTS_PROMPT}`;
@@ -188,15 +191,15 @@ export function formatLocalTime(now: Date, tz: string | undefined): string {
 
 /** The thread's subagents (running + idle; expired/cancelled excluded) for the front agent. */
 export async function renderSnapshot(threadId: string): Promise<string> {
-  const rows = await sql<{ id: string; ownerId: string; title: string; status: string; summary: string | null; current: string | null; runStatus: string | null; kind: string }[]>`
-    select s.id, s.owner_id, s.title, s.status, s.summary, s.kind,
+  const rows = await sql<{ id: string; ownerId: string; title: string; status: string; summary: string | null; current: string | null; runStatus: string | null; kind: string; sandbox: boolean }[]>`
+    select s.id, s.owner_id, s.title, s.status, s.summary, s.kind, s.sandbox,
       (select coalesce(r.details, r.status) from runs r where r.subagent_id = s.id and r.status in ('queued', 'running') order by r.id desc limit 1) as current
     from subagents s where s.thread_id = ${threadId} and s.status in ('running', 'idle') order by s.created_at`;
   if (rows.length === 0) return '';
   return rows
     .map((r) => {
       const state = r.status === 'running' ? `running${r.current ? `: ${oneLine(r.current, 80)}` : ''}` : `idle${r.summary ? `: ${oneLine(r.summary, 120)}` : ''}`;
-      return `- ${r.id} "${r.title}"${r.kind === 'cursor' ? ' [coding agent, Cursor]' : ''} (owner <@${r.ownerId}>) — ${state}`;
+      return `- ${r.id} "${r.title}"${r.kind === 'cursor' ? ' [coding agent, Cursor]' : r.sandbox ? ' [sandbox]' : ''} (owner <@${r.ownerId}>) — ${state}`;
     })
     .join('\n');
 }

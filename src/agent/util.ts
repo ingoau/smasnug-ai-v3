@@ -172,6 +172,18 @@ export function describeToolStep(toolName: string, input: unknown): string {
       return q('file_id') ? `Reading ${q('file_id')}` : 'Reading a file';
     case 'create_file':
       return q('name') ? `Writing ${q('name')}` : 'Writing a file';
+    case 'sandbox_exec':
+      return q('command') ? `Running \`${oneLine(q('command'), 50)}\`` : 'Running code';
+    case 'sandbox_read_file':
+      return q('path') ? `Looking at ${q('path')}` : 'Looking at a file';
+    case 'sandbox_write_file':
+      return q('path') ? `Writing ${q('path')}` : 'Writing a file';
+    case 'sandbox_import':
+      return 'Copying a file into the sandbox';
+    case 'sandbox_export':
+      return q('name') || q('path') ? `Exporting ${(q('name') || q('path')).split('/').pop()}` : 'Exporting a file';
+    case 'request_preview':
+      return 'Preparing a live preview';
     default: {
       const first = Object.values(i).find((v) => typeof v === 'string') as string | undefined;
       return first ? `${toolName}: ${oneLine(first, 50)}` : `Using ${toolName}`;

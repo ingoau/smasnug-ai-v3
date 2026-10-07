@@ -12,6 +12,8 @@ import { MAX_BUTTONS, MAX_LABEL_CHARS } from './reply-buttons.js';
 import { turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
 import { prepareOutgoingFiles } from './files.js';
+import { accessModelText, canUseSandbox, notifyAccess } from '../sandbox/access.js';
+import { sandboxConfigured } from '../sandbox/settings.js';
 
 /**
  * `reply(files)`: file ids (uploads, subagent results, create_file), or an inline text file that is stored first.
@@ -109,6 +111,9 @@ registerTool({
               title: z.string().describe('Short task title for the plan card, e.g. "Research hosting options" (≤ 6 words)'),
               instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, file ids file_… of uploads it should use), and what a good result looks like'),
               seed_from: z.string().optional().describe('Id of an expired subagent whose summary should seed this one'),
+              ...(sandboxConfigured()
+                ? { sandbox: z.boolean().optional().describe('Give this subagent a code sandbox (Linux, Python, Node, headless Chromium) to run code, build or analyse files. Only when the task needs code run.') }
+                : {}),
             }),
           )
           .min(1)
@@ -121,8 +126,16 @@ registerTool({
         const failed: { title: string; error: string }[] = [];
         let firstError: unknown;
         // One after another: the limits are checked per spawn, and every run is queued (and starts) right away.
-        for (const t of tasks) {
+        for (const t of tasks as (typeof tasks[number] & { sandbox?: boolean })[]) {
           try {
+            if (t.sandbox) {
+              // Access is checked before anything starts; the explanation goes to the owner only.
+              const access = await canUseSandbox(s.turn.authorId);
+              if (!access.ok) {
+                void notifyAccess({ userId: s.turn.authorId, channelId: ctx.channelId, threadTs: ctx.threadTs, reason: access.reason });
+                throw new ToolError(accessModelText(access.reason));
+              }
+            }
             const r = await spawnSubagent({
               threadId: s.threadId,
               turnId: s.turn.id,
@@ -130,6 +143,7 @@ registerTool({
               title: t.title,
               instructions: t.instructions,
               seedFrom: t.seed_from,
+              sandbox: !!t.sandbox && sandboxConfigured(),
             });
             s.cardId = r.cardId;
             s.spawned.add(r.subagentId);

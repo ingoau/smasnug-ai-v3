@@ -119,11 +119,17 @@ export interface CreateFileInput {
   /** Same key → the same file (no duplicate for a retried side effect). */
   idempotencyKey?: string;
   internal?: boolean;
+  /**
+   * Size cap for this file (default limits.fileMaxBytes, 5 MB). Only the sandbox raises it, for its exports and
+   * preview bundles (limits.sandboxExportMaxBytes, 25 MB); everything else keeps the general cap.
+   */
+  maxBytes?: number;
 }
 
 export async function createFile(input: CreateFileInput): Promise<FileMeta> {
-  if (input.content.byteLength > limits.fileMaxBytes) {
-    throw new FileError(`File too large: ${formatBytes(input.content.byteLength)} (the limit is ${formatBytes(limits.fileMaxBytes)}).`);
+  const maxBytes = input.maxBytes ?? limits.fileMaxBytes;
+  if (input.content.byteLength > maxBytes) {
+    throw new FileError(`File too large: ${formatBytes(input.content.byteLength)} (the limit is ${formatBytes(maxBytes)}).`);
   }
   const name = sanitizeFileName(input.name);
   const mime = input.mime ?? decideMime(name, input.content);
@@ -275,16 +281,17 @@ const defaultDownloader: FileDownloader = (meta, maxBytes) => {
 
 /**
  * The file's bytes. Uploads are downloaded on first use and stored when ≤ limits.fileMaxBytes. Larger uploads:
- * images (≤ 25 MB) are returned without storing (the processed image is cached separately); anything else is refused.
+ * images (≤ 25 MB) are returned without storing (the processed image is cached separately); anything else is refused,
+ * unless the caller allows more with `maxBytes` (sandbox_import: returned without storing, like big images).
  */
-export async function loadFileBytes(meta: FileMeta, opts: { download?: FileDownloader } = {}): Promise<Buffer> {
+export async function loadFileBytes(meta: FileMeta, opts: { download?: FileDownloader; maxBytes?: number } = {}): Promise<Buffer> {
   if (meta.hasContent) {
     const bytes = await fileStore.get(meta.id);
     if (bytes) return bytes;
   }
   if (meta.origin !== 'upload') throw new FileError('this file has no content');
   const image = isImageMime(meta.mime, meta.name);
-  const max = image ? MAX_IMAGE_DOWNLOAD_BYTES : limits.fileMaxBytes;
+  const max = Math.max(image ? MAX_IMAGE_DOWNLOAD_BYTES : limits.fileMaxBytes, opts.maxBytes ?? 0);
   if (meta.size != null && meta.size > max) {
     throw new FileError(`it is too large to open (${formatBytes(meta.size)}; the limit is ${formatBytes(max)})`);
   }
@@ -298,7 +305,7 @@ export async function loadFileBytes(meta: FileMeta, opts: { download?: FileDownl
       meta.mime = sniffed;
       await sql`update files set mime = ${sniffed} where id = ${meta.id} and mime is null`;
     }
-  } else if (!image) {
+  } else if (!image && bytes.byteLength > (opts.maxBytes ?? 0)) {
     throw new FileError(`it is too large to open (${formatBytes(bytes.byteLength)}; the limit is ${formatBytes(limits.fileMaxBytes)})`);
   }
   return bytes;

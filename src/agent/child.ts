@@ -17,6 +17,9 @@ import { childSystemPrompt } from './prompts/child.js';
 import { failRuns, finishRun, type RunRow, type SubagentRow } from './subagents.js';
 import { WEB_SEARCH_TOOL, webSearchSources } from '../tools/web-search.js';
 import { addSource, compactHistory, describeToolStep, oneLine, splitResult, urlsInText, type RunSource } from './util.js';
+import { onSandboxRunFinished } from '../sandbox/hooks.js';
+import { sandboxChildPrompt } from '../sandbox/prompts.js';
+import { previewsConfigured, SANDBOX_TOOL_NAMES, sandboxConfigured } from '../sandbox/settings.js';
 
 /** Step cap per run (the token cap applies too). */
 const MAX_STEPS = 50;
@@ -70,7 +73,10 @@ export async function processSubagentRun(runId: number): Promise<void> {
 
   const controller = new AbortController();
   active.set(run.id, controller);
-  const timeout = setTimeout(() => controller.abort(new RunAbort('timeout')), limits.runMaxDurationMs);
+  // Code sandbox subagents (src/sandbox/) get the longer run cap: builds and analyses take a while.
+  const sandbox = !!sa.sandbox && sandboxConfigured();
+  const maxDurationMs = sandbox ? limits.sandboxRunMaxDurationMs : limits.runMaxDurationMs;
+  const timeout = setTimeout(() => controller.abort(new RunAbort('timeout')), maxDurationMs);
   let cancelRequested = false;
   const heartbeat = setInterval(() => {
     sql<{ cancelRequested: boolean }[]>`update runs set heartbeat_at = now() where id = ${run.id} and status = 'running' returning cancel_requested`
@@ -93,6 +99,8 @@ export async function processSubagentRun(runId: number): Promise<void> {
     // queueUserImage deliberately unset: Luna accepts images in tool results.
     extras: {},
   });
+  if (!sandbox) for (const name of SANDBOX_TOOL_NAMES) delete tools[name];
+  const instructions = sandbox ? `${childSystemPrompt()}\n\n${sandboxChildPrompt({ previews: previewsConfigured() })}` : childSystemPrompt();
   // Every subagent runs on MODELS.child (runs.model records it).
   const modelId = MODELS.child;
   const model = chatModel(modelId);
@@ -165,7 +173,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
       let stepTools: string[] = [];
       const result = streamText({
         model,
-        instructions: childSystemPrompt(),
+        instructions,
         messages,
         tools,
         activeTools: overBudget ? [] : undefined,
@@ -235,7 +243,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
     const reason = controller.signal.aborted ? controller.signal.reason : err;
     if (reason instanceof RunAbort) {
       if (reason.kind === 'timeout') {
-        await finishRun(run, { status: 'error', error: `Timed out after ${Math.round(limits.runMaxDurationMs / 60000)} min` }, { tokens, history: compactHistory(messages) });
+        await finishRun(run, { status: 'error', error: `Timed out after ${Math.round(maxDurationMs / 60000)} min` }, { tokens, history: compactHistory(messages) });
       }
       // shutdown: onShutdown marks it errored; gone: someone else finished it.
       return;
@@ -247,6 +255,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
     clearInterval(heartbeat);
     clearInterval(elapsedTicker);
     active.delete(run.id);
+    if (sandbox) void onSandboxRunFinished(run.id).catch((err) => log.warn({ err, runId: run.id }, 'sandbox run-finished hook failed'));
   }
 }
 

@@ -5,6 +5,7 @@ import * as agent from '../agent/register.js';
 import * as features from '../features/register.js';
 import * as pipeline from '../pipeline/register.js';
 import * as tools from '../tools/register.js';
+import * as sandbox from '../sandbox/register.js';
 import { closeQueues, queue, QUEUE, type QueueName } from '../core/queues.js';
 import { bullConnection, redis } from '../core/redis.js';
 import { sql } from '../db/index.js';
@@ -14,7 +15,7 @@ import { WORKER_ID } from './identity.js';
 type Processor = (job: Job) => Promise<void>;
 type Task = { everyMs: number; run: () => Promise<void> };
 
-const modules = { pipeline, tools, agent, features } as const;
+const modules = { pipeline, tools, agent, features, sandbox } as const;
 
 /** Jobs are I/O bound (Slack, Postgres, model calls), so concurrency can be high. */
 const CONCURRENCY: Record<QueueName, number> = {

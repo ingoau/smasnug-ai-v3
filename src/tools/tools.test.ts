@@ -18,6 +18,7 @@ import { EXTRAS, type QueuedImage } from './extras.js';
 import { fetchPage, formatPage } from './fetch-url.js';
 import { IMAGE_CACHE_DIR, loadImageForModel } from '../files/images.js';
 import { fileStore } from '../files/store.js';
+import { SANDBOX_TOOL_NAMES, sandboxConfigured } from '../sandbox/settings.js';
 import { settleDescriptions } from '../files/describe.js';
 import { cleanEmojiName, semojiSearch } from './emoji.js';
 import { buildExaRequest, formatExaResults, webSearchSources, webSearchTool, EXA_SEARCH_URL, type WebSearchOutput } from './web-search.js';
@@ -88,7 +89,12 @@ afterAll(async () => {
 describe('registry', () => {
   it('grants tools per role', () => {
     const front = Object.keys(toolsFor('front', baseCtx())).sort();
-    const child = Object.keys(toolsFor('child', baseCtx())).sort();
+    // Code sandbox tools (src/sandbox/) are registered only when Modal is configured; child.ts filters them per subagent.
+    const sandboxTools: readonly string[] = SANDBOX_TOOL_NAMES;
+    const allChild = Object.keys(toolsFor('child', baseCtx())).sort();
+    const child = allChild.filter((n) => !sandboxTools.includes(n));
+    if (!sandboxConfigured()) expect(allChild).toEqual(child);
+    for (const n of sandboxTools) expect(front).not.toContain(n);
     const gate = Object.keys(toolsFor('gate', baseCtx()));
     for (const n of ['ask_thread', 'fetch_url', 'web_search', 'slack_search', 'read_thread', 'read_public_thread', 'read_public_channel', 'read_channel', 'read_file', 'ask_file', 'create_file', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
     expect(child).toEqual(['ask_file', 'ask_thread', 'create_file', 'fetch_url', 'read_canvas', 'read_channel', 'read_file', 'read_public_channel', 'read_public_thread', 'read_thread', 'slack_search', 'slack_semantic_search', 'web_search']);

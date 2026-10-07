@@ -10,6 +10,7 @@ import { getState, listBlocks, setPaused } from './state.js';
 import { isAdmin, mrkdwnEscape, requireAdmin, truncate } from './util.js';
 import { listWorkspaceFacts } from './workspace.js';
 import { scheduleHomeBlocks } from './schedule/home.js';
+import { sandboxAdminBlocks, sandboxDisclosureBlocks } from '../sandbox/home.js';
 
 const MAX_BLOCKS = 100;
 const USER_FACTS_SHOWN = 25;
@@ -57,7 +58,11 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
   }
 
   blocks.push(...(await scheduleHomeBlocks(userId).catch((err) => (log.warn({ err }, 'schedule home blocks failed'), []))));
-  if (isAdmin(userId)) blocks.push(...(await adminBlocks()));
+  blocks.push(...sandboxDisclosureBlocks());
+  if (isAdmin(userId)) {
+    blocks.push(...(await adminBlocks()));
+    blocks.push(...(await sandboxAdminBlocks(userId).catch((err) => (log.warn({ err }, 'sandbox home blocks failed'), []))));
+  }
   return blocks.slice(0, MAX_BLOCKS);
 }
 
