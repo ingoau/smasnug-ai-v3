@@ -85,6 +85,26 @@ describe('acquireRateSlot', () => {
     await expect(acquireRateSlot(key, { ...opts, priority: 'interactive', deadline: Date.now() + 200 })).rejects.toBeInstanceOf(SlackBusyError);
   });
 
+  it('with more callers queued than one window holds, the estimate adds whole windows (busy up front, not at the deadline)', async () => {
+    const key = newKey();
+    const opts = { perMin: 2, windowMs: 1000 };
+    await acquireRateSlot(key, opts);
+    await acquireRateSlot(key, opts);
+    // Two waiters take the next window's slots (~1 s from now).
+    const waiters = [acquireRateSlot(key, opts), acquireRateSlot(key, opts)];
+    await sleep(20);
+    let estimate = 0;
+    const late = acquireRateSlot(key, { ...opts, onWait: (ms) => (estimate = ms) });
+    await sleep(20);
+    expect(estimate).toBeGreaterThan(1700); // two windows out, not one
+    const t0 = Date.now();
+    const err = await acquireRateSlot(key, { ...opts, deadline: Date.now() + 1500 }).catch((e) => e);
+    expect(err).toBeInstanceOf(SlackBusyError);
+    expect(err.waitMs).toBeGreaterThan(1500);
+    expect(Date.now() - t0).toBeLessThan(300);
+    await Promise.all([...waiters, late]);
+  });
+
   it('a queued interactive caller is served before background callers that queued earlier', async () => {
     const key = newKey();
     const opts = { perMin: 2, windowMs: 400 };

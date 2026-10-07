@@ -166,7 +166,8 @@ const MAX_TOTAL_WAIT_MS = 5 * 60_000;
  * hold FIFO tickets, one queue per priority (KEYS[2] interactive, KEYS[3] background; score = arrival number from
  * KEYS[5]) with heartbeats in KEYS[4]. A ticket is granted when the callers ahead of it (its own queue, plus the
  * whole interactive queue for a background ticket) still leave it a free slot under its cap (perMin; perMin - reserve
- * for background). Otherwise it gets the ms until the window entry whose expiry frees its slot (a lower bound).
+ * for background). Otherwise it gets the ms until the window entry whose expiry frees its slot (a lower bound); with more callers
+ * ahead than one window holds, the slot comes from a later window: whole windows are added (each frees `cap` slots).
  * Returns {waitMs (0 = granted), callers ahead}.
  */
 const ACQUIRE_LUA = `
@@ -198,9 +199,14 @@ if ahead < cap - n then
 end
 for i = 2, 5 do redis.call('PEXPIRE', KEYS[i], windowMs + staleMs * 2) end
 local idx = n - cap + ahead
-local e = redis.call('ZRANGE', KEYS[1], idx, idx, 'WITHSCORES')
-if e[2] then return {math.max(tonumber(e[2]) + windowMs - now, 1), ahead} end
-return {windowMs, ahead}
+local rounds = 0
+while idx >= n do idx = idx - cap; rounds = rounds + 1 end
+local base = 0
+if idx >= 0 then
+  local e = redis.call('ZRANGE', KEYS[1], idx, idx, 'WITHSCORES')
+  if e[2] then base = tonumber(e[2]) + windowMs - now end
+end
+return {math.max(base + rounds * windowMs, 1), ahead}
 `;
 
 export interface AcquireOpts {
