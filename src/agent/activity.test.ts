@@ -5,7 +5,6 @@ describe('activityForTool', () => {
   it('labels lookups and work tools', () => {
     expect(activityForTool('web_search')).toBe('Searching the web…');
     expect(activityForTool('slack_search')).toBe('Searching Slack…');
-    expect(activityForTool('slack_semantic_search')).toBe('Searching Slack…');
     expect(activityForTool('fetch_url')).toBe('Reading the page…');
     expect(activityForTool('read_thread')).toBe('Reading the thread…');
     expect(activityForTool('ask_thread')).toBe('Reading the thread…');
@@ -21,8 +20,7 @@ describe('activityForTool', () => {
     for (const t of ['reply', 'react', 'unreact', 'search_emojis']) expect(activityForTool(t)).toBeNull();
   });
 
-  it('naming a DM session or leaving is bookkeeping, not work', () => {
-    expect(activityForTool('set_session_title')).toBeNull();
+  it('leaving is bookkeeping, not work', () => {
     expect(activityForTool('leave_thread')).toBeNull();
   });
 

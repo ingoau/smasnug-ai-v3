@@ -64,7 +64,7 @@ describe('renderCard', () => {
     expect(text.length).toBeGreaterThan(0);
   });
 
-  it('collapses to one titled line once nothing is active: the summary, or the set_card_title title once frozen', () => {
+  it('collapses to one titled line once nothing is active: the summary, or the background title once frozen', () => {
     const runs = [run(1, { status: 'complete', output: 'ok' }), run(2, { status: 'cancelled' })];
     const done = renderCard({ id: 1, title: null, frozen: false }, runs);
     expect(done.blocks).toEqual([{ type: 'context', block_id: 'card_1_plan', elements: [{ type: 'mrkdwn', text: '✓ *Ran 2 subagents*' }] }]);
@@ -139,7 +139,7 @@ describe('turn steps on the card', () => {
 
   it('once done, a steps-only card is one line summing up the steps', () => {
     const r = renderCard(
-      { id: 7, title: null, frozen: false, replyText: 'Here you go.', steps: steps(['slack_search', 'complete'], ['fetch_url', 'complete'], ['fetch_url', 'complete'], ['slack_semantic_search', 'complete']) },
+      { id: 7, title: null, frozen: false, replyText: 'Here you go.', steps: steps(['slack_search', 'complete'], ['fetch_url', 'complete'], ['fetch_url', 'complete'], ['slack_search', 'complete']) },
       [],
     );
     expect(r.blocks[0]).toEqual({ type: 'context', block_id: 'card_7_plan', elements: [{ type: 'mrkdwn', text: '✓ *Searched Slack twice, read 2 pages*' }] });
@@ -157,8 +157,8 @@ describe('turn steps on the card', () => {
 describe('card steps', () => {
   it('only work is a step: lookups, reads, files, canvases; not bookkeeping, responses or the subagent tools', async () => {
     const { isCardStep } = await import('./card-steps.js');
-    for (const t of ['web_search', 'slack_search', 'slack_semantic_search', 'fetch_url', 'read_thread', 'ask_thread', 'read_public_channel', 'read_file', 'ask_file', 'create_canvas']) expect(isCardStep(t)).toBe(true);
-    for (const t of ['reply', 'react', 'remember', 'set_reminder', 'spawn_subagent', 'message_subagent', 'set_card_title', 'send_message', 'report_user', 'end_turn']) expect(isCardStep(t)).toBe(false);
+    for (const t of ['web_search', 'slack_search', 'fetch_url', 'read_thread', 'ask_thread', 'read_public_channel', 'read_file', 'ask_file', 'create_canvas']) expect(isCardStep(t)).toBe(true);
+    for (const t of ['reply', 'react', 'remember', 'set_reminder', 'spawn_subagent', 'message_subagent', 'send_message', 'report_user', 'end_turn']) expect(isCardStep(t)).toBe(false);
   });
 
   it('summaries count and pluralise', async () => {

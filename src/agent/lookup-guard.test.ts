@@ -7,7 +7,7 @@ describe('isLookupStep', () => {
     expect(isLookupStep(['web_search'])).toBe(true);
     expect(isLookupStep(['web_search', 'web_search', 'fetch_url'])).toBe(true);
     expect(isLookupStep(['reply', 'web_search'])).toBe(true);
-    expect(isLookupStep(['react', 'slack_search', 'slack_semantic_search'])).toBe(true);
+    expect(isLookupStep(['react', 'slack_search', 'slack_search'])).toBe(true);
     for (const t of ['ask_thread', 'read_thread', 'read_channel', 'read_public_channel', 'read_public_thread', 'read_canvas', 'read_file', 'ask_file'])
       expect(isLookupStep([t])).toBe(true);
   });

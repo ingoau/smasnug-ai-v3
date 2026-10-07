@@ -22,8 +22,6 @@ const LABELS: Record<string, string> = {
   forget: 'Forgetting a note…',
   propose_workspace_fact: 'Noting a workspace fact…',
   send_message: 'Preparing a message…',
-  set_card_title: 'Writing up the results…',
-  slack_semantic_search: 'Searching Slack…',
   read_canvas: 'Reading the canvas…',
   create_canvas: 'Writing a canvas…',
   edit_canvas: 'Updating the canvas…',
@@ -41,8 +39,8 @@ const LABELS: Record<string, string> = {
 
 /** Tools that only respond; they never show or change the indicator. */
 const RESPONDING = new Set(['reply', 'react', 'unreact', 'search_emojis', 'end_turn']);
-/** Bookkeeping (DM session title, leaving / closing the conversation): not work either, no card flashing after a reply. */
-for (const name of ['set_session_title', 'leave_thread']) RESPONDING.add(name);
+/** Bookkeeping (leaving / closing the conversation): not work either, no card flashing after a reply. */
+RESPONDING.add('leave_thread');
 /** Tools that must stay invisible in the thread (report_user is never hinted at). */
 const SILENT = new Set(['report_user']);
 

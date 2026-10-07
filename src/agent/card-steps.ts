@@ -42,7 +42,7 @@ const KINDS: Record<string, StepKind> = {
   edit_canvas: { live: 'Updating the canvas…', done: 'Updated a canvas', summary: count('updated a canvas', 'updated # canvases') },
 };
 /** Same kind of work under another tool name. */
-const ALIASES: Record<string, string> = { slack_semantic_search: 'slack_search', ask_thread: 'read_thread', ask_file: 'read_file' };
+const ALIASES: Record<string, string> = { ask_thread: 'read_thread', ask_file: 'read_file' };
 
 const kindOf = (tool: string) => KINDS[ALIASES[tool] ?? tool];
 

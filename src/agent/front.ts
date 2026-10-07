@@ -293,7 +293,7 @@ export function summarizeToolCalls(calls: { tool: string; args: unknown }[]): { 
 /**
  * The previous turn's tool calls (tool + args, one line each), when the previous turn in this thread finished
  * recently and used tools: a follow-up like "yes, make it" then knows what was looked up or started. Only the calls,
- * never their results (Slack content, notably semantic-search results, isn't repeated).
+ * never their results (Slack content isn't repeated).
  */
 export async function renderPreviousTurnTools(threadId: string, turnId: number, now = new Date()): Promise<string> {
   const [prev] = await sql<{ id: number; finishedAt: Date | null }[]>`

@@ -16,7 +16,6 @@ export const LOOKUP_TOOLS = new Set([
   'web_search',
   'fetch_url',
   'slack_search',
-  'slack_semantic_search',
   'ask_thread',
   'read_thread',
   'read_channel',
