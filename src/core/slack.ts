@@ -4,7 +4,7 @@
  * on side effects. Card-update coalescing lives in the agent's card renderer, which calls through here.
  */
 import { LogLevel, WebClient, type Logger, type WebAPICallResult } from '@slack/web-api';
-import { env } from '../config.js';
+import { env, limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { redis } from './redis.js';
 import { log } from '../log.js';
@@ -16,12 +16,15 @@ const FAKE = process.env.SLACK_FAKE === '1';
  * Response warnings Slack sends on every call of a kind, by design, that are not worth a log line. The app doesn't
  * subscribe to `agent_session_stopped` (no native stop button: users clicked it by accident), so every
  * `agents.sessions.setStatus` / streaming call answers with `missing_agent_session_stopped_event_subscription`.
+ * The WebClient logs both forms: the code (`response_metadata.warnings`) and the human-readable `[WARN]` text from
+ * `response_metadata.messages` ("Subscribe to the agent_session_stopped event so Slack can send stop requests…"),
+ * which doesn't contain the code. Both are matched.
  */
-export const QUIET_SLACK_WARNINGS = ['missing_agent_session_stopped_event_subscription'];
+export const QUIET_SLACK_WARNINGS: RegExp[] = [/missing_agent_session_stopped_event_subscription/, /\bagent_session_stopped event\b/i];
 
 /** True if a WebClient log line is one of the expected warnings above. */
 export function isQuietSlackWarning(msg: unknown[]): boolean {
-  return msg.some((m) => typeof m === 'string' && QUIET_SLACK_WARNINGS.some((w) => m.includes(w)));
+  return msg.some((m) => typeof m === 'string' && QUIET_SLACK_WARNINGS.some((w) => w.test(m)));
 }
 
 /** The WebClient's own logging (response warnings, deprecations) through pino, minus the expected warnings. */
@@ -55,13 +58,23 @@ export interface SlackCallOpts {
    * SlackBusyError. For optional calls the caller can skip (e.g. a secondary search); default: wait.
    */
   maxWaitMs?: number;
+  /**
+   * Queue class on the shared limiter (default `interactive`). `background` callers wait behind interactive ones and
+   * can't use the method's interactive reserve (METHOD_INTERACTIVE_RESERVE).
+   */
+  priority?: SlackPriority;
+  /** Told when the call has to wait for the limiter or a 429 pause (start and end), e.g. for an activity label. */
+  onWait?: (ev: SlackWaitEvent) => void;
 }
 
 /** Thrown when a call with `maxWaitMs` would have had to wait longer for a rate limit. */
 export class SlackBusyError extends Error {
   readonly code = 'slack_busy';
+  /** How long the call would have had to wait (ms, a lower bound). */
+  readonly waitMs: number;
   constructor(what: string, waitMs: number) {
     super(`${what} is rate limited (would wait ~${Math.ceil(waitMs / 1000)}s)`);
+    this.waitMs = waitMs;
   }
 }
 
@@ -101,30 +114,149 @@ const METHOD_RPM: Record<string, number> = {
 const PER_CHANNEL_PER_MIN = 60;
 const PER_CHANNEL_METHODS = new Set(['chat.postMessage', 'chat.startStream', 'chat.postEphemeral', 'chat.scheduleMessage']);
 
-async function acquire(key: string, perMin: number, deadline = Infinity) {
-  // Sliding window over 60s in a sorted set; wait until a slot frees.
-  for (let attempt = 0; attempt < 120; attempt++) {
-    const now = Date.now();
-    const member = `${now}:${Math.random().toString(36).slice(2, 8)}`;
-    const res = (await redis.eval(
-      `redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, ARGV[1] - 60000)
-       local n = redis.call('ZCARD', KEYS[1])
-       if n < tonumber(ARGV[2]) then
-         redis.call('ZADD', KEYS[1], ARGV[1], ARGV[3]); redis.call('PEXPIRE', KEYS[1], 61000); return 0
-       end
-       local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
-       return tonumber(oldest[2]) + 60000 - tonumber(ARGV[1])`,
-      1,
-      key,
-      now,
-      perMin,
-      member,
-    )) as number;
-    if (res === 0) return;
-    if (Date.now() + res > deadline) throw new SlackBusyError(key, res);
-    await sleep(Math.min(Math.max(res, 50), 2000));
+/**
+ * Who a call is for. `interactive` (default): a user is waiting on it in a front-agent turn. `background`: subagent
+ * research, watches: queued behind interactive calls and kept out of the per-method interactive reserve.
+ */
+export type SlackPriority = 'interactive' | 'background';
+
+/** A rate-limit wait seen by `slackCall` (`SlackCallOpts.onWait`): once when it starts, once when it's over. */
+export interface SlackWaitEvent {
+  method: string;
+  /** `rate_limit`: the shared limiter's queue; `429`: a pause after Slack answered 429. */
+  reason: 'rate_limit' | '429';
+  /** Expected wait when it started (a lower bound: callers queued ahead may take slots first). */
+  estimateMs: number;
+  /** Time actually waited (0 in the start event). */
+  waitedMs: number;
+  done: boolean;
+}
+
+/**
+ * Slots per minute only interactive calls may take: background calls stop at `perMin - reserve`, so a user's quick
+ * question isn't stuck behind a research job's searches. search.messages is the one that matters (one user token).
+ */
+const METHOD_INTERACTIVE_RESERVE: Record<string, number> = {
+  'search.messages': limits.slackSearchInteractiveReservePerMin,
+};
+
+/** Waits longer than this are logged (info) with their key. */
+const LOG_WAIT_MS = 1000;
+/** A waiter re-checks the queue at least this often (which also refreshes its ticket's heartbeat). */
+const MAX_POLL_MS = 5000;
+/** A queued ticket not refreshed for this long belongs to a dead process: dropped so it doesn't hold up the queue. */
+const STALE_TICKET_MS = 20_000;
+/** Without a deadline, give up after this long in the queue. */
+const MAX_TOTAL_WAIT_MS = 5 * 60_000;
+
+/**
+ * One limiter step, atomic. Sliding window of granted calls in a sorted set (KEYS[1], as before). Waiting callers
+ * hold FIFO tickets, one queue per priority (KEYS[2] interactive, KEYS[3] background; score = arrival number from
+ * KEYS[5]) with heartbeats in KEYS[4]. A ticket is granted when the callers ahead of it (its own queue, plus the
+ * whole interactive queue for a background ticket) still leave it a free slot under its cap (perMin; perMin - reserve
+ * for background). Otherwise it gets the ms until the window entry whose expiry frees its slot (a lower bound).
+ * Returns {waitMs (0 = granted), callers ahead}.
+ */
+const ACQUIRE_LUA = `
+local now = tonumber(ARGV[1]); local perMin = tonumber(ARGV[2]); local reserve = tonumber(ARGV[3])
+local ticket = ARGV[4]; local cls = ARGV[5]; local staleMs = tonumber(ARGV[6]); local windowMs = tonumber(ARGV[7])
+redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, now - windowMs)
+local stale = redis.call('ZRANGEBYSCORE', KEYS[4], 0, now - staleMs)
+for _, t in ipairs(stale) do
+  redis.call('ZREM', KEYS[2], t); redis.call('ZREM', KEYS[3], t); redis.call('ZREM', KEYS[4], t)
+end
+local q = KEYS[2]
+if cls == 'b' then q = KEYS[3] end
+if not redis.call('ZSCORE', q, ticket) then
+  redis.call('ZADD', q, redis.call('INCR', KEYS[5]), ticket)
+end
+redis.call('ZADD', KEYS[4], now, ticket)
+local n = redis.call('ZCARD', KEYS[1])
+local ahead = redis.call('ZRANK', q, ticket)
+local cap = perMin
+if cls == 'b' then
+  cap = perMin - reserve
+  ahead = ahead + redis.call('ZCARD', KEYS[2])
+end
+if ahead < cap - n then
+  redis.call('ZADD', KEYS[1], now, now .. ':' .. ticket)
+  redis.call('PEXPIRE', KEYS[1], windowMs + 1000)
+  redis.call('ZREM', q, ticket); redis.call('ZREM', KEYS[4], ticket)
+  return {0, ahead}
+end
+for i = 2, 5 do redis.call('PEXPIRE', KEYS[i], windowMs + staleMs * 2) end
+local idx = n - cap + ahead
+local e = redis.call('ZRANGE', KEYS[1], idx, idx, 'WITHSCORES')
+if e[2] then return {math.max(tonumber(e[2]) + windowMs - now, 1), ahead} end
+return {windowMs, ahead}
+`;
+
+export interface AcquireOpts {
+  perMin: number;
+  /** Slots of `perMin` only interactive callers may take (default 0). */
+  reserve?: number;
+  priority?: SlackPriority;
+  /** Epoch ms: throw SlackBusyError instead of waiting past it (checked against the expected wait: fails fast). */
+  deadline?: number;
+  /** Called once when the caller has to wait, with the expected ms (a lower bound). */
+  onWait?: (estimateMs: number) => void;
+  /** Window length: 60 s in production, shorter in tests. */
+  windowMs?: number;
+}
+
+/**
+ * Take a slot of a shared per-key rate limit, waiting in FIFO order (interactive callers before background ones)
+ * until one frees. Returns the ms waited. Waits over ~1 s are logged with the key.
+ */
+export async function acquireRateSlot(key: string, opts: AcquireOpts): Promise<number> {
+  const windowMs = opts.windowMs ?? 60_000;
+  const reserve = Math.max(0, Math.min(opts.reserve ?? 0, opts.perMin - 1));
+  const priority = opts.priority ?? 'interactive';
+  const deadline = opts.deadline ?? Infinity;
+  const ticket = `${process.pid}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 10)}`;
+  const keys = [key, `${key}:qi`, `${key}:qb`, `${key}:seen`, `${key}:seq`];
+  const started = Date.now();
+  let queued = false;
+  let notified = false;
+  try {
+    for (;;) {
+      const [waitMs, ahead] = (await redis.eval(
+        ACQUIRE_LUA,
+        keys.length,
+        ...keys,
+        Date.now(),
+        opts.perMin,
+        reserve,
+        ticket,
+        priority === 'background' ? 'b' : 'i',
+        STALE_TICKET_MS,
+        windowMs,
+      )) as [number, number];
+      if (waitMs === 0) {
+        queued = false;
+        const waited = Date.now() - started;
+        if (waited > LOG_WAIT_MS) log.info({ key, waitMs: waited, priority }, 'slack rate limiter wait');
+        return waited;
+      }
+      queued = true;
+      if (Date.now() + waitMs > deadline) {
+        log.info({ key, waitMs, ahead, priority }, 'slack rate limiter busy, failing fast');
+        throw new SlackBusyError(key, waitMs);
+      }
+      if (Date.now() - started > MAX_TOTAL_WAIT_MS) throw new Error(`rate limiter timeout for ${key}`);
+      if (!notified) {
+        notified = true;
+        try {
+          opts.onWait?.(waitMs);
+        } catch {}
+      }
+      // Sleep until the slot should free, re-checking at least every MAX_POLL_MS; never past the deadline.
+      await sleep(Math.max(5, Math.min(waitMs + 5, MAX_POLL_MS, deadline - Date.now())));
+    }
+  } finally {
+    // Leaving early (busy, error): give up the place in the queue right away.
+    if (queued) await redis.multi().zrem(keys[1]!, ticket).zrem(keys[2]!, ticket).zrem(keys[3]!, ticket).exec().catch(() => {});
   }
-  throw new Error(`rate limiter timeout for ${key}`);
 }
 
 /**
@@ -133,10 +265,36 @@ async function acquire(key: string, perMin: number, deadline = Infinity) {
  */
 export const pauseKey = (token: TokenKind, method: string) => `slack:429:${token}:${method}`;
 
-async function pauseFor(token: TokenKind, method: string, deadline = Infinity) {
+async function pauseFor(token: TokenKind, method: string, deadline: number, wait: WaitReporter) {
   const until = Number(await redis.get(pauseKey(token, method)));
   if (until && until > deadline) throw new SlackBusyError(method, until - Date.now());
-  if (until && until > Date.now()) await sleep(until - Date.now());
+  if (until && until > Date.now()) {
+    const ms = until - Date.now();
+    const started = Date.now();
+    wait.start('429', ms);
+    await sleep(ms);
+    wait.end('429', ms, Date.now() - started);
+  }
+}
+
+/** Sends SlackWaitEvents to `SlackCallOpts.onWait` (never throws into the call). */
+interface WaitReporter {
+  start(reason: SlackWaitEvent['reason'], estimateMs: number): void;
+  end(reason: SlackWaitEvent['reason'], estimateMs: number, waitedMs: number): void;
+}
+
+function waitReporter(method: string, onWait: SlackCallOpts['onWait']): WaitReporter {
+  const emit = (ev: SlackWaitEvent) => {
+    try {
+      onWait?.(ev);
+    } catch (err) {
+      log.debug({ err, method }, 'onWait callback failed');
+    }
+  };
+  return {
+    start: (reason, estimateMs) => emit({ method, reason, estimateMs, waitedMs: 0, done: false }),
+    end: (reason, estimateMs, waitedMs) => emit({ method, reason, estimateMs, waitedMs, done: true }),
+  };
 }
 
 /** Thrown instead of posting into a thread whose root message was deleted (Slack would post it top-level). */
@@ -197,7 +355,7 @@ async function slackCallInner<T>(method: string, args: Record<string, unknown>, 
       return (row?.result ?? { ok: true, skipped: true }) as T;
     }
     try {
-      const result = await rawCall<T>(method, args, token, opts.maxWaitMs);
+      const result = await rawCall<T>(method, args, token, opts);
       await sql`update idempotency_keys set result = ${sql.json(result as any)} where key = ${key}`;
       return result;
     } catch (err) {
@@ -205,17 +363,18 @@ async function slackCallInner<T>(method: string, args: Record<string, unknown>, 
       throw err;
     }
   }
-  return rawCall<T>(method, args, token, opts.maxWaitMs);
+  return rawCall<T>(method, args, token, opts);
 }
 
-async function rawCall<T>(method: string, args: Record<string, unknown>, token: TokenKind, maxWaitMs?: number): Promise<T> {
+async function rawCall<T>(method: string, args: Record<string, unknown>, token: TokenKind, opts: SlackCallOpts): Promise<T> {
   const channel = typeof args.channel === 'string' ? args.channel : undefined;
-  const deadline = maxWaitMs === undefined ? Infinity : Date.now() + maxWaitMs;
+  const deadline = opts.maxWaitMs === undefined ? Infinity : Date.now() + opts.maxWaitMs;
   // Benchmarks and tests can run the fake through the shared rate limiter and 429 handling (SLACK_FAKE_LIMITER=1).
   if (FAKE && process.env.SLACK_FAKE_LIMITER !== '1') return (await fakeCall(method, args, token)) as T;
+  const wait = waitReporter(method, opts.onWait);
   for (let attempt = 0; ; attempt++) {
-    await pauseFor(token, method, deadline);
-    await throttle(method, token, channel, deadline);
+    await pauseFor(token, method, deadline, wait);
+    await throttle(method, token, channel, { deadline, priority: opts.priority, wait });
     try {
       return (FAKE ? await fakeCall(method, args, token) : await clients[token].apiCall(method, args)) as T;
     } catch (err: any) {
@@ -253,11 +412,31 @@ export async function isChannelReadOnly(channel: string): Promise<boolean> {
   return (await redis.exists(readOnlyKey(channel))) > 0;
 }
 
-async function throttle(method: string, token: TokenKind, channel: string | undefined, deadline = Infinity) {
-  await acquire(`slack:rl:${token}:${method}`, METHOD_RPM[method] ?? 50, deadline);
-  if (channel && PER_CHANNEL_METHODS.has(method)) {
-    await acquire(`slack:rl:chan:${channel}`, PER_CHANNEL_PER_MIN, deadline);
-  }
+/** Limiter key of a method on a token kind (the kind, never the token, is in the key). */
+export const rateLimitKey = (token: TokenKind, method: string) => `slack:rl:${token}:${method}`;
+
+async function throttle(
+  method: string,
+  token: TokenKind,
+  channel: string | undefined,
+  o: { deadline: number; priority?: SlackPriority; wait: WaitReporter },
+) {
+  const take = async (key: string, perMin: number, reserve: number) => {
+    let estimate = 0;
+    const waited = await acquireRateSlot(key, {
+      perMin,
+      reserve,
+      priority: o.priority,
+      deadline: o.deadline,
+      onWait: (ms) => {
+        estimate = ms;
+        o.wait.start('rate_limit', ms);
+      },
+    });
+    if (estimate) o.wait.end('rate_limit', estimate, waited);
+  };
+  await take(rateLimitKey(token, method), METHOD_RPM[method] ?? 50, METHOD_INTERACTIVE_RESERVE[method] ?? 0);
+  if (channel && PER_CHANNEL_METHODS.has(method)) await take(`slack:rl:chan:${channel}`, PER_CHANNEL_PER_MIN, 0);
 }
 
 /** Slack error code from a thrown WebAPI error, e.g. 'invalid_name'. */

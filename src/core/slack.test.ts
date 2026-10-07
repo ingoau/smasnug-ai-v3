@@ -70,12 +70,48 @@ describe('429 backoff', () => {
   });
 });
 
+describe('limiter waits through slackCall', () => {
+  it('a call queued behind a full window reports its wait (onWait start + end)', async () => {
+    const { rateLimitKey } = await import('./slack.js');
+    const method = 'canvases.create'; // 20/min; filled here so the next call has to wait
+    const key = rateLimitKey('bot', method);
+    await redis.del(key, `${key}:qi`, `${key}:qb`, `${key}:seen`);
+    const remove = addFakeHandler((m) => (m === method ? { ok: true } : undefined));
+    try {
+      // A full window: one call 59.5 s ago (frees in ~0.5 s), 19 just now.
+      const now = Date.now();
+      await redis.zadd(key, now - 59_500, `${now - 59_500}:fill-old`);
+      for (let i = 0; i < 19; i++) await redis.zadd(key, now, `${now}:fill${i}`);
+      const events: any[] = [];
+      await slackCall(method, {}, { onWait: (ev) => events.push(ev) });
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({ method, reason: 'rate_limit', done: false, waitedMs: 0 });
+      expect(events[0].estimateMs).toBeGreaterThan(0);
+      expect(events[0].estimateMs).toBeLessThanOrEqual(600);
+      expect(events[1]).toMatchObject({ method, reason: 'rate_limit', done: true });
+      expect(events[1].waitedMs).toBeGreaterThan(200);
+      // Busy (would wait ~60 s): fails fast, no waiting.
+      const t0 = Date.now();
+      await expect(slackCall(method, {}, { maxWaitMs: 2000 })).rejects.toBeInstanceOf(SlackBusyError);
+      expect(Date.now() - t0).toBeLessThan(500);
+    } finally {
+      remove();
+      await redis.del(key, `${key}:qi`, `${key}:qb`, `${key}:seen`);
+    }
+  });
+});
+
 describe('quiet Slack warnings', () => {
   it('only the expected missing-subscription warning is quiet', async () => {
     const { isQuietSlackWarning } = await import('./slack.js');
     expect(isQuietSlackWarning(['missing_agent_session_stopped_event_subscription'])).toBe(true);
     expect(isQuietSlackWarning(['agents.sessions.setStatus warning: missing_agent_session_stopped_event_subscription'])).toBe(true);
+    // What the WebClient actually logs from response_metadata.warnings: forEach(logger.warn) → (code, index, array).
+    expect(isQuietSlackWarning(['missing_agent_session_stopped_event_subscription', 0, ['missing_agent_session_stopped_event_subscription']])).toBe(true);
+    // ...and the `[WARN]` text from response_metadata.messages, which doesn't contain the code.
+    expect(isQuietSlackWarning(['Subscribe to the agent_session_stopped event so Slack can send stop requests for this agent.'])).toBe(true);
     expect(isQuietSlackWarning(['missing_charset'])).toBe(false);
+    expect(isQuietSlackWarning(['A message was posted without text; add a fallback'])).toBe(false);
     expect(isQuietSlackWarning([{ x: 1 }])).toBe(false);
   });
 });

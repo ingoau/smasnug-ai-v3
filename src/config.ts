@@ -206,6 +206,15 @@ export const limits = {
   userSendsPerHour: 100,
   /** slack_semantic_search (Slack Real-time Search): secondary search, kept rare. */
   userSemanticSearchesPerHour: 20,
+  // slack_search on the shared user token (search.messages, ~20/min for the whole app; src/tools/slack-search.ts)
+  /** A search that would wait longer than this for the shared rate limiter returns a "rate limited" result instead. */
+  slackSearchMaxWaitMs: 6_000,
+  /** search.messages slots per minute only interactive calls (front-agent turns) may use; background (subagents, watches) get the rest. */
+  slackSearchInteractiveReservePerMin: 4,
+  /** Identical searches (query, sort, page) share their public results for this long (Redis; public matches only). */
+  slackSearchCacheTtlS: 90,
+  /** After this many slack_search calls in one subagent run, results carry a note to read threads instead. Not a block. */
+  slackSearchSoftBudgetPerRun: 12,
   // per thread / run
   threadConcurrentSubagents: 10,
   runMaxDurationMs: 10 * 60 * 1000,
@@ -240,6 +249,8 @@ export const limits = {
   watchMinIntervalMs: 60 * 60 * 1000,
   watchMaxLifetimeMs: 30 * 24 * 60 * 60 * 1000,
   watchNotificationsPerDay: 3,
+  /** A slack_search watch check that found the search rate limiter busy is retried after this (capped at its interval). */
+  watchBusyRetryMs: 10 * 60_000,
   scheduleTickMs: 60_000,
   // coding agents (Cursor, src/agent/cursor/)
   /**
