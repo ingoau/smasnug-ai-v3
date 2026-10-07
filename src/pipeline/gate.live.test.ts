@@ -42,14 +42,19 @@ describe.skipIf(!LIVE)('gate (live)', () => {
 });
 
 describe.skipIf(!LIVE)('gate (live): the bot\'s conversation partner', () => {
-  const convo = [
+  const polling = [
     msg('UALICE', '<@UBOT> can you look at why my bot polls slack so often'),
     msg('UBOT', 'it polls conversations.history every 2s per channel; that is what burns your rate limit.', true),
   ];
+  const branches = [
+    msg('UALICE', '<@UBOT> is there a quick way to rename all my local branches to add a prefix?'),
+    msg('UBOT', 'yes: loop over `git branch --format="%(refname:short)"` and run `git branch -m "$b" "wip/$b"` for each. remote tracking branches stay as they are.', true),
+  ];
   it.each([
-    { name: 'short follow-up from the partner', next: 'decrease polling', expected: true },
-    { name: 'unclear question from the partner', next: 'Whats nd studio?', expected: true },
-  ])('$name', async ({ next, expected }) => {
+    { name: 'short follow-up from the partner', convo: polling, next: 'decrease polling', expected: true },
+    { name: 'unclear question from the partner', convo: polling, next: 'Whats nd studio?', expected: true },
+    { name: 'an acknowledgement from the partner stays silent', convo: branches, next: 'nah', expected: false },
+  ])('$name', async ({ convo, next, expected }) => {
     const { runGate } = await import('./gate.js');
     const { partnerGateNote } = await import('./fire.js');
     const r = await runGate({ context: convo, newMessages: [msg('UALICE', next)], botUserId: 'UBOT', threshold: 0.65, note: partnerGateNote('smasnug ai') });

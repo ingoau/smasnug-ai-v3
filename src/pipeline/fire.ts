@@ -20,7 +20,7 @@ import { djGateNote } from '../features/huddlefm/render.js';
 
 /** The gate's note for a partner batch: who the author is to the bot (code-written, from thread state). */
 export function partnerGateNote(botName: string): string {
-  return `The newest message comes from the person ${botName} was just talking with in this thread (no one else has written since ${botName}'s last reply, or only the two of them are in the thread): a question, request or follow-up from them is most likely meant for ${botName}.`;
+  return `The newest message comes from the person ${botName} was just talking with in this thread (no one else has written since ${botName}'s last reply, or only the two of them are in the thread): a question, request or follow-up from them is most likely meant for ${botName}, unless they're clearly just acknowledging ("ok", "nah", "got it") or thinking aloud.`;
 }
 
 /** The gate's note for someone else's first message after the bot's question / offer (rules.ts 'answer_other'). */
