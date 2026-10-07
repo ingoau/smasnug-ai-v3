@@ -696,7 +696,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     } catch (err) {
       log.warn({ err }, 'setActivity failed');
     }
-    replies.activity(text);
+    replies.activity(text, toolCallId);
   };
 
   let failed: unknown;
@@ -764,6 +764,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           turnCalls.push({ tool: part.toolName, args: part.input });
           break;
         case 'tool-result': {
+          replies.activityDone(part.toolCallId); // its activity card is finished (never left in progress)
           stepResults.push({ toolCallId: part.toolCallId, toolName: part.toolName, output: part.output });
           const v = VISIBLE_TOOLS[part.toolName];
           if (v) state.visible.add(v);
@@ -771,6 +772,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           break;
         }
         case 'tool-error':
+          replies.activityDone(part.toolCallId, false); // a real failure: its card shows as failed
           log.warn({ tool: part.toolName, error: String((part as any).error) }, 'front tool error');
           break;
         case 'finish-step': {

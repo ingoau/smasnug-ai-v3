@@ -969,6 +969,60 @@ describe('runFrontTurn: status activity', () => {
       }
     });
 
+    /** spawn_subagent and a reply streamed in one step (the turn ends with it, no end_turn step). */
+    function spawnAndReplyStep(reply: string) {
+      const input = JSON.stringify({ tasks: [{ title: 'Research', instructions: 'Research it' }] });
+      const json = JSON.stringify({ text: reply });
+      return [
+        { type: 'stream-start', warnings: [] },
+        { type: 'tool-input-start', id: 's1', toolName: 'spawn_subagent' },
+        { type: 'tool-input-delta', id: 's1', delta: input },
+        { type: 'tool-input-end', id: 's1' },
+        { type: 'tool-call', toolCallId: 's1', toolName: 'spawn_subagent', input },
+        { type: 'tool-input-start', id: 'c1', toolName: 'reply' },
+        ...[0, 8, 16, 24, 32].map((i) => ({ type: 'tool-input-delta', id: 'c1', delta: json.slice(i, i + 8) })),
+        { type: 'tool-input-delta', id: 'c1', delta: json.slice(40) },
+        { type: 'tool-input-end', id: 'c1' },
+        { type: 'tool-call', toolCallId: 'c1', toolName: 'reply', input: json },
+        { type: 'finish', usage, finishReason: { unified: 'tool-calls', raw: 'tool_calls' } },
+      ];
+    }
+    /** Each task card's last status in a message, folded over every call on it up to and including its stopStream. */
+    function statusesAtStop(ts: string) {
+      const status: Record<string, string> = {};
+      for (const c of h.slack) {
+        if (!['chat.startStream', 'chat.appendStream', 'chat.stopStream'].includes(c.method)) continue;
+        if (c.method !== 'chat.startStream' && c.args.ts !== ts) continue;
+        for (const k of c.args.chunks ?? []) if (k.type === 'task_update') status[k.title] = k.status;
+        if (c.method === 'chat.stopStream') break;
+      }
+      return status;
+    }
+
+    it('reply + spawn in one step, posted whole (subagents running): the card is finished and gone before the reply posts', async () => {
+      h.activeRuns = 1;
+      h.model = mockModel([spawnAndReplyStep('On it, I started a subagent.'), textStep('never reached')], 2);
+      await runFrontTurn(turn({ id: 71 }), ioWithActivity(true).io);
+      expect(h.model.doStreamCalls).toHaveLength(1); // the step ended the turn
+      const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
+      expect(chat.map((c) => c.method)).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.postMessage']);
+      expect(cards(chat[0]!)).toEqual(['Starting a subagent…:in_progress']);
+      // the stop finishes the card (Slack shows a task still in progress at the stop as failed), no error status
+      expect(cards(chat[1]!)).toEqual(['Starting a subagent…:complete']);
+      expect(chat.flatMap(cards).some((c) => c.endsWith(':error'))).toBe(false);
+    });
+
+    it('reply + spawn in one step, streamed: the reply adopts the card, finished before the stop', async () => {
+      h.model = mockModel([spawnAndReplyStep('On it, I started a subagent.'), textStep('never reached')], 2);
+      await runFrontTurn(turn({ id: 72 }), ioWithActivity(true).io);
+      const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
+      expect(chat.filter((c) => c.method === 'chat.startStream')).toHaveLength(1);
+      const ts = chat.find((c) => c.method === 'chat.stopStream')!.args.ts;
+      expect(statusesAtStop(ts)).toEqual({ 'Starting a subagent…': 'complete' });
+      expect(chat.flatMap(cards).some((c) => c.endsWith(':error'))).toBe(false);
+      expect(chat.at(-1)).toMatchObject({ method: 'chat.update', args: { blocks: [{ type: 'markdown', text: 'On it, I started a subagent.' }] } });
+    });
+
     it('no activity cards when the pipeline shows no status (no setActivity)', async () => {
       vi.stubGlobal('fetch', exaOk);
       try {

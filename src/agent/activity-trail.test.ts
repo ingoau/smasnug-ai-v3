@@ -24,6 +24,12 @@ editRetry.delaysMs = [5, 5];
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 const methods = () => calls.map((c) => c.method);
+/** Each card's last status over every call (start / append / stop), i.e. what Slack shows once the stream stopped. */
+const finalStatuses = () => {
+  const out: Record<string, string> = {};
+  for (const c of calls) for (const k of c.args.chunks ?? []) if (k.type === 'task_update') out[k.id] = k.status;
+  return out;
+};
 const cardsOf = (method: string) =>
   calls.filter((c) => c.method === method).map((c) => (c.args.chunks ?? []).filter((k: any) => k.type === 'task_update').map((k: any) => `${k.title}:${k.status}`));
 
@@ -63,13 +69,14 @@ describe('ActivityTrail', () => {
     expect(methods()).toEqual(['chat.startStream', 'chat.appendStream']);
   });
 
-  it('close() at the end of a silent turn stops and deletes the message (nothing left behind)', async () => {
+  it('close() at the end of a silent turn stops (card finished, never left in progress) and deletes the message', async () => {
     const released = vi.fn();
     const t = trail({ released });
     t.activity('Searching Slack…');
     await sleep(10);
     await t.close();
     expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete']);
+    expect(calls[1]!.args.chunks).toEqual([{ type: 'task_update', id: 'activity-1', title: 'Searching Slack…', status: 'complete' }]);
     expect(calls[2]!.args).toEqual({ channel: 'D1', ts: calls[1]!.args.ts });
     expect(released).toHaveBeenCalledTimes(1);
     t.activity('Late…');
@@ -98,6 +105,76 @@ describe('ActivityTrail', () => {
     await t.close();
     expect(methods()).toEqual(['chat.startStream', 'chat.startStream', 'chat.stopStream', 'chat.delete']);
     expect(calls[3]!.args.ts).not.toBe(a!.ts);
+  });
+
+  it("a card completes when its tool call returns (parallel calls: when the last one does); the stop then has nothing to finish", async () => {
+    const t = trail();
+    t.activity('Searching the web…', 'a');
+    t.activity('Searching the web…', 'b'); // same card
+    await sleep(10);
+    t.toolDone('a');
+    await sleep(150);
+    expect(methods()).toEqual(['chat.startStream']); // b still running
+    t.toolDone('b');
+    await sleep(150);
+    expect(cardsOf('chat.appendStream')).toEqual([['Searching the web…:complete']]);
+    await t.close();
+    expect(calls.find((c) => c.method === 'chat.stopStream')!.args.chunks).toBeUndefined();
+    expect(finalStatuses()).toEqual({ 'activity-1': 'complete' });
+  });
+
+  it('only a call that really failed gives its card the error status; a later card keeps going', async () => {
+    const t = trail();
+    t.activity('Reading the page…', 'f1');
+    await sleep(10);
+    t.toolDone('f1', false);
+    t.activity('Searching the web…', 'w1');
+    await sleep(150);
+    expect(cardsOf('chat.appendStream')).toEqual([['Reading the page…:error', 'Searching the web…:in_progress']]);
+    const a = await t.adopt();
+    expect(a!.chunks).toEqual([{ type: 'task_update', id: 'activity-2', title: 'Searching the web…', status: 'complete' }]);
+  });
+
+  it('parallel tools: an earlier card stays in progress while its call runs, and is finished at the stop', async () => {
+    const t = trail();
+    t.activity('Searching the web…', 'w1');
+    await sleep(10);
+    t.activity('Reading the page…', 'f1');
+    await sleep(150);
+    expect(cardsOf('chat.appendStream')).toEqual([['Reading the page…:in_progress']]);
+    await t.discard();
+    expect(cardsOf('chat.stopStream')).toEqual([['Searching the web…:complete', 'Reading the page…:complete']]);
+  });
+
+  it('a tool that returns before its card went out shows no card (e.g. an instant spawn)', async () => {
+    const t = trail();
+    t.activity('Searching Slack…', 'x');
+    await sleep(10);
+    t.activity('Starting a subagent…', 's1');
+    t.toolDone('s1');
+    await sleep(150);
+    expect(methods()).toEqual(['chat.startStream']);
+    t.toolDone('x');
+    t.activity('Starting a subagent…', 's2');
+    t.toolDone('s2');
+    await sleep(150);
+    expect(cardsOf('chat.appendStream')).toEqual([['Searching Slack…:complete']]);
+    const fresh = trail();
+    fresh.activity('Starting a subagent…', 's3');
+    fresh.toolDone('s3'); // before the first flush ran
+    await sleep(20);
+    expect(methods()).toEqual(['chat.startStream', 'chat.appendStream']);
+    await fresh.close();
+  });
+
+  it('a stop Slack refuses with the chunks is retried plainly, then the message is deleted', async () => {
+    const t = trail();
+    t.activity('Searching Slack…');
+    await sleep(10);
+    failOn = (m, a) => (m === 'chat.stopStream' && a.chunks ? 'invalid_chunks' : null);
+    await t.close();
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.stopStream', 'chat.delete']);
+    expect(calls[2]!.args.chunks).toBeUndefined();
   });
 
   it('Slack refusing a cards-only stream turns activity off for the turn (the status still shows Working…)', async () => {
@@ -212,13 +289,51 @@ describe('ReplyManager with activity cards', () => {
     expect(methods()).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.update']);
   });
 
-  it('a posted reply (subagents running) deletes the activity message', async () => {
+  it('a posted reply (subagents running) deletes the activity message first, its card finished at the stop', async () => {
     const rm = new ReplyManager(target(1));
     rm.activity('Updating a subagent…');
     await sleep(10);
     await rm.finish('tc1', 'Told the subagent.');
     await rm.closeActivity();
-    expect(methods()).toEqual(['chat.startStream', 'chat.postMessage', 'chat.stopStream', 'chat.delete']);
+    // removed before the post: the card never sits above the reply
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.postMessage']);
+    expect(cardsOf('chat.stopStream')).toEqual([['Updating a subagent…:complete']]);
+  });
+
+  it('reply + spawn in one step (posted whole): the spawn card completes on its result; nothing in progress or failed at the stop', async () => {
+    const rm = new ReplyManager(target(1));
+    rm.activity('Starting a subagent…', 's1');
+    await sleep(10);
+    rm.activityDone('s1');
+    await rm.finish('tc1', 'On it.');
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.delete', 'chat.postMessage']);
+    expect(finalStatuses()).toEqual({ 'activity-1': 'complete' });
+    expect(cardsOf('chat.stopStream')).toEqual([['Starting a subagent…:complete']]);
+  });
+
+  it('reply + spawn in one step (streamed): the reply adopts the finished card; nothing in progress or failed at the stop', async () => {
+    const rm = new ReplyManager(target(0));
+    rm.activity('Starting a subagent…', 's1');
+    await sleep(10);
+    rm.activityDone('s1');
+    const text = 'On it, a subagent is looking into it.';
+    await streamIn(rm, text);
+    expect(await rm.finish('tc1', text)).toBe('Replied (streamed).');
+    await rm.closeActivity();
+    expect([...new Set(methods())]).toEqual(['chat.startStream', 'chat.appendStream', 'chat.stopStream', 'chat.update']);
+    expect(finalStatuses()).toEqual({ 'activity-1': 'complete' });
+  });
+
+  it('no new activity message opens while a reply is being posted', async () => {
+    const rm = new ReplyManager(target(1));
+    const done = rm.finish('tc1', 'On it.');
+    await new Promise((r) => setImmediate(r)); // the post is under way
+    rm.activity('Starting a subagent…', 's1');
+    await done;
+    await sleep(20);
+    await rm.closeActivity();
+    expect(methods()).toEqual(['chat.postMessage']);
   });
 
   it('error before any reply: the activity message is deleted, nothing else changes', async () => {

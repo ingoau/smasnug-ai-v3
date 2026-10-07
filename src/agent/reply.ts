@@ -11,7 +11,8 @@
  * chat.stopStream ("rendered at the bottom of the finalized message"); if that fails, chat.update adds them, and as
  * a last resort they are posted as a small follow-up message.
  * Tool activity ("Searching Slack…") shows as transient task cards (activity-trail.ts): a reply's stream adopts the
- * open activity message and its final layout (chat.update) drops the cards; a posted reply deletes it instead.
+ * open activity message and its final layout (chat.update) drops the cards; a posted reply deletes it first. No
+ * card is ever left in progress when a stream stops (Slack would show it as failed).
  */
 import { appendEvent } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
@@ -105,6 +106,8 @@ interface ReplyEntry {
   dropped: string | null;
   /** The reply tool executed (finish() ran), or the turn closed the entry (closeUnfinished). */
   finished: boolean;
+  /** Being posted whole (or posted): no new activity message may open above it. */
+  posting: boolean;
 }
 
 /**
@@ -181,9 +184,14 @@ export class ReplyManager {
    * A tool that commits the turn to work started (code-derived label): show it as an activity card. Never blocks.
    * Not once a reply is visible: a new activity message would appear below the reply (and flash away again).
    */
-  activity(text: string): void {
+  activity(text: string, toolCallId?: string): void {
     if (this.anyVisible) return;
-    this.trail?.activity(text);
+    this.trail?.activity(text, toolCallId);
+  }
+
+  /** A tool call returned (`ok` false only if it threw): its activity card is finished (complete / error). */
+  activityDone(toolCallId: string, ok = true): void {
+    this.trail?.toolDone(toolCallId, ok);
   }
 
   /** End of turn: delete an activity message no reply took over (silent turn, error, stop). Never throws. */
@@ -193,7 +201,7 @@ export class ReplyManager {
 
   /** True if any reply has started becoming visible (a stream started or a message posted). */
   get anyVisible() {
-    return this.delivered > 0 || [...this.entries.values()].some((e) => e.streamTs);
+    return this.delivered > 0 || [...this.entries.values()].some((e) => e.streamTs || e.posting);
   }
 
   /** True once a reply has been attempted this turn (in progress or delivered, not dropped). */
@@ -230,6 +238,7 @@ export class ReplyManager {
       halted: false,
       dropped: null,
       finished: false,
+      posting: false,
     };
     this.entries.set(toolCallId, e);
     return e;
@@ -473,7 +482,7 @@ export class ReplyManager {
           }
         } else {
           // Nothing streamed yet (no deltas, or all of it held back): post whole, same visual result.
-          last = { ts: await this.post(e, text, '', actions), text };
+          last = { ts: await this.postWhole(e, text, actions), text };
           buttonsTs = last.ts;
         }
       } catch (err) {
@@ -482,7 +491,7 @@ export class ReplyManager {
           delivered = 'streamed';
           ({ last, buttonsTs } = await this.recoverStream(e, text, actions));
         } else {
-          last = { ts: await this.post(e, text, '', actions), text };
+          last = { ts: await this.postWhole(e, text, actions), text };
           buttonsTs = last.ts;
         }
       }
@@ -491,10 +500,11 @@ export class ReplyManager {
       delivered = 'streamed';
       ({ last, buttonsTs } = await this.recoverStream(e, text, actions));
     } else {
-      last = { ts: await this.post(e, text, '', actions), text };
+      last = { ts: await this.postWhole(e, text, actions), text };
       buttonsTs = last.ts;
     }
-    // Posted as a message of its own (e.g. subagents running): the activity message has done its job.
+    // Posted as a message of its own: postWhole removed the activity message first; one a tool running alongside
+    // opened meanwhile goes too.
     if (delivered === 'posted') await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
     if (btnRow) await this.recordButtons(e, btnRow, buttonsTs && buttonsTs === last.ts ? buttonsTs : null, last);
     this.delivered++;
@@ -530,6 +540,22 @@ export class ReplyManager {
     );
     this.t.timing?.mark('reply_posted');
     return res?.ts ?? null;
+  }
+
+  /**
+   * Post the reply whole as a message of its own (e.g. subagents running). An open activity message is removed
+   * first (its cards finished, see activity-trail.ts): removed after the post, it would sit above the reply for a
+   * moment. No new activity message opens from here on (`posting` counts as visible).
+   */
+  private async postWhole(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock): Promise<string | null> {
+    e.posting = true;
+    try {
+      await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
+      return await this.post(e, text, '', actions);
+    } catch (err) {
+      e.posting = false;
+      throw err;
+    }
   }
 
   /**

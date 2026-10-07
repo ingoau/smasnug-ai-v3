@@ -10,13 +10,22 @@
  * `timeline` display mode, interleaved with streamed text.
  *
  * How it stays transient (the UX of the old status line):
- * - The first activity of a turn opens a stream that holds only a task card (in progress); later activities mark
- *   the previous card complete and add a new one, coalesced to at most one update per second (latest text wins,
- *   unchanged text is skipped). Nothing is shown before the turn commits to work (same rule as the status).
+ * - The first activity of a turn opens a stream that holds only a task card (in progress); later activities add a
+ *   new card, coalesced to at most one update per second (latest text wins, unchanged text is skipped). Nothing is
+ *   shown before the turn commits to work (same rule as the status).
+ * - A card is finished when its tool calls return (`toolDone`): `complete`, or `error` only when a call really
+ *   failed (the tool threw). A card without tracked calls is completed when the next card replaces it. A tool that
+ *   returns before its card went out never shows one (e.g. an instant spawn_subagent).
+ * - A card is never left `in_progress` when its stream stops: Slack renders a task that is still pending /
+ *   in_progress when the stream ends as failed (a warning icon; Slack's docs don't say, observed on the dev app and
+ *   by others, e.g. https://github.com/openclaw/openclaw/issues/146221). Adoption and every removal carry the
+ *   chunks that finish all open cards (`complete`, or `error` for a failed call), on chat.appendStream /
+ *   chat.stopStream (which accepts `chunks`, https://docs.slack.dev/reference/methods/chat.stopStream).
  * - When the turn's next reply starts streaming, it adopts this message (ReplyManager): the reply text streams in
  *   below the cards, and the finished reply is re-rendered with chat.update without them, so the final message is
- *   exactly the posted reply. A reply that is posted whole (subagents running) deletes the activity message. So does
- *   a reply when anything was posted in the thread after the activity message (a user message, send_message, …):
+ *   exactly the posted reply. A reply that is posted whole (subagents running) deletes the activity message before
+ *   it is posted, so the cards never sit above the reply (no flash). The activity message is also deleted for a
+ *   reply when anything was posted in the thread after the activity message (a user message, send_message, …):
  *   adopting it would put the reply above that post; the reply opens a message of its own instead.
  * - At the end of the turn, an activity message no reply adopted (silent turn, error, stop) is deleted, so it
  *   leaves nothing behind.
@@ -32,11 +41,37 @@ const MAX_CARDS = 10;
 /** Slack's limit for task_update chunks. */
 const MAX_TITLE = 250;
 
+/**
+ * Slack task statuses (https://docs.slack.dev/reference/methods/chat.startStream#task_update-chunks): `in_progress`,
+ * `complete`, `error`. A task still `in_progress` when its stream stops renders as failed, so every card is finished
+ * before the stop (`complete` unless a call really failed).
+ */
+export type TaskStatus = 'in_progress' | 'complete' | 'error';
+
 export interface TaskUpdateChunk {
   type: 'task_update';
   id: string;
   title: string;
-  status: 'in_progress' | 'complete';
+  status: TaskStatus;
+}
+
+interface Card {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  /** The status Slack has (null: not sent yet). */
+  sent: TaskStatus | null;
+  /** Tool calls behind this card still running; the card finishes when the last one returns. */
+  running: Set<string>;
+  /** Some call behind it was announced without an id: only the next card (or the end) finishes it. */
+  untracked: boolean;
+  failed: boolean;
+}
+
+interface Pending {
+  title: string;
+  calls: Set<string>;
+  untracked: boolean;
 }
 
 export interface ActivityTarget {
@@ -56,7 +91,7 @@ export interface ActivityTarget {
   minIntervalMs?: number;
 }
 
-/** What a reply takes over: the open message, plus the chunks that complete its in-progress card. */
+/** What a reply takes over: the open message, plus the chunks that finish its open cards. */
 export interface AdoptedActivity {
   ts: string;
   chunks: TaskUpdateChunk[];
@@ -65,13 +100,15 @@ export interface AdoptedActivity {
   stopKey: string;
 }
 
-const card = (id: string, title: string, status: TaskUpdateChunk['status']): TaskUpdateChunk => ({ type: 'task_update', id, title, status });
+const chunk = (c: Card, status: TaskStatus = c.status): TaskUpdateChunk => ({ type: 'task_update', id: c.id, title: c.title, status });
+/** The status a card ends with when its stream stops or a reply takes it over. */
+const finalStatus = (c: Card): TaskStatus => (c.status === 'in_progress' ? (c.failed ? 'error' : 'complete') : c.status);
 
 export class ActivityTrail {
   /** The open activity message (no reply has adopted it yet). */
   private ts: string | null = null;
-  /** Cards in the open message; the last one is in progress. */
-  private cards: { id: string; title: string }[] = [];
+  /** Cards in the open message (or being sent), in order. */
+  private cards: Card[] = [];
   /** Activity messages opened this turn (idempotency keys). */
   private opened = 0;
   /** A message is open or being opened. */
@@ -82,7 +119,8 @@ export class ActivityTrail {
   private passed = false;
   /** No more activity this turn (closed, stopped, or Slack refused the stream). */
   private disabled = false;
-  private pending: string | null = null;
+  /** The next card (latest activity text wins until it goes out). */
+  private pending: Pending | null = null;
   private lastSentAt = 0;
   private timer: NodeJS.Timeout | null = null;
   private chain: Promise<unknown> = Promise.resolve();
@@ -97,25 +135,56 @@ export class ActivityTrail {
     return this.started && !this.broken;
   }
 
-  /** A tool that commits the turn to work started: show / update its card. Synchronous, never blocks. */
-  activity(text: string): void {
+  /**
+   * A tool that commits the turn to work started: show / update its card. `callId` lets `toolDone` finish the card
+   * when the call returns. Synchronous, never blocks.
+   */
+  activity(text: string, callId?: string): void {
     if (this.disabled || this.broken || !text) return;
-    this.pending = text.slice(0, MAX_TITLE);
+    const title = text.slice(0, MAX_TITLE);
+    const join = (into: { untracked: boolean }, calls: Set<string>) => {
+      if (callId) calls.add(callId);
+      else into.untracked = true;
+    };
+    if (this.pending?.title === title) {
+      join(this.pending, this.pending.calls); // its flush is coming
+      return;
+    }
+    const last = this.cards.at(-1);
+    if (!this.pending && last?.title === title && last.status === 'in_progress') {
+      join(last, last.running); // unchanged text: the call joins the current card
+      return;
+    }
+    this.pending = { title, calls: new Set(callId ? [callId] : []), untracked: !callId };
     if (!this.started) {
       this.started = true;
       return this.flushSoon(0); // first activity: no delay
     }
-    if (this.pending === this.cards.at(-1)?.title && !this.timer) {
-      this.pending = null;
-      return;
-    }
-    if (this.timer) return; // the scheduled flush picks up the latest text
-    this.flushSoon(Math.max(0, this.lastSentAt + this.minIntervalMs - Date.now()));
+    this.schedule();
   }
 
   /**
-   * A reply is about to open its stream: hand over the open activity message (null if there is none). The trail
-   * starts afresh, so activity after this reply opens a new message.
+   * A tool call returned (`ok`: false only when it really failed, i.e. threw). When its card has no other call
+   * running it is finished: `complete`, or `error` if a call failed. A call that returns before its card went out
+   * shows no card at all. Synchronous, never blocks.
+   */
+  toolDone(callId: string, ok = true): void {
+    if (this.pending?.calls.delete(callId)) {
+      if (!this.pending.calls.size && !this.pending.untracked) this.pending = null;
+      return;
+    }
+    const c = this.cards.find((k) => k.running.has(callId));
+    if (!c) return;
+    c.running.delete(callId);
+    if (!ok) c.failed = true;
+    if (c.running.size || c.untracked || c.status !== 'in_progress') return;
+    c.status = finalStatus(c);
+    if (this.ts && !this.disabled && !this.broken) this.schedule();
+  }
+
+  /**
+   * A reply is about to open its stream: hand over the open activity message (null if there is none), with the
+   * chunks that finish its open cards. The trail starts afresh, so activity after this reply opens a new message.
    */
   adopt(): Promise<AdoptedActivity | null> {
     this.cancelPending();
@@ -130,8 +199,7 @@ export class ActivityTrail {
         await this.remove();
         return null;
       }
-      const last = this.cards.at(-1);
-      const adopted: AdoptedActivity = { ts: this.ts, chunks: last ? [card(last.id, last.title, 'complete')] : [], cards: this.cards.length, stopKey: this.key(':stop') };
+      const adopted: AdoptedActivity = { ts: this.ts, chunks: this.finishing(), cards: this.cards.length, stopKey: this.key(':stop') };
       this.reset();
       await this.hook(() => this.t.onClosed?.()); // the reply owns it now
       return adopted;
@@ -143,7 +211,7 @@ export class ActivityTrail {
    * stop and delete it, so the reply opens a fresh message instead. Never throws.
    */
   dropAdopted(a: AdoptedActivity): Promise<void> {
-    return this.enqueue(() => this.removeMessage(a.ts, a.stopKey));
+    return this.enqueue(() => this.removeMessage(a.ts, a.stopKey, a.chunks));
   }
 
   /** The turn posted something else in the thread (e.g. send_message): the open message can't take a reply anymore. */
@@ -151,7 +219,7 @@ export class ActivityTrail {
     if (this.started) this.passed = true;
   }
 
-  /** The reply was posted as a message of its own: remove the activity message. */
+  /** The reply is posted as a message of its own: remove the activity message. */
   discard(): Promise<void> {
     this.cancelPending();
     return this.enqueue(() => this.remove());
@@ -175,6 +243,12 @@ export class ActivityTrail {
     return p;
   }
 
+  /** Flush soon, at most one update per interval (the scheduled flush picks up the latest state). */
+  private schedule() {
+    if (this.timer) return;
+    this.flushSoon(Math.max(0, this.lastSentAt + this.minIntervalMs - Date.now()));
+  }
+
   private flushSoon(delayMs: number) {
     if (delayMs <= 0) {
       void this.enqueue(() => this.flush());
@@ -186,18 +260,35 @@ export class ActivityTrail {
     }, delayMs);
   }
 
+  /** Chunks that bring every card to its final status (none left in progress), for a stop or an adoption. */
+  private finishing(): TaskUpdateChunk[] {
+    return this.cards.filter((c) => finalStatus(c) !== c.sent).map((c) => chunk(c, finalStatus(c)));
+  }
+
+  /** Send what changed: the pending card (if any) and every card whose status Slack doesn't have yet. */
   private async flush(): Promise<void> {
-    const text = this.pending;
+    const p = this.pending;
     this.pending = null;
-    if (this.disabled || this.broken || text == null) return;
+    if (this.disabled || this.broken) return;
     const last = this.cards.at(-1);
-    if (last?.title === text || this.cards.length >= MAX_CARDS) return;
-    if (this.t.stopRequested && (await this.t.stopRequested().catch(() => false))) {
-      this.disabled = true; // the user pressed stop: show nothing more (close() removes what is there)
-      return;
+    let next: Card | null = null;
+    if (p && last?.title === p.title && last.status === 'in_progress') {
+      p.calls.forEach((id) => last.running.add(id));
+      if (p.untracked) last.untracked = true;
+    } else if (p && this.cards.length < MAX_CARDS) {
+      if (this.t.stopRequested && (await this.t.stopRequested().catch(() => false))) {
+        this.disabled = true; // the user pressed stop: show nothing more (close() removes what is there)
+        return;
+      }
+      // A card without tracked calls is done once the next one replaces it.
+      for (const c of this.cards) if (c.status === 'in_progress' && (c.untracked || !c.running.size)) c.status = finalStatus(c);
+      next = { id: `activity-${this.cards.length + 1}`, title: p.title, status: 'in_progress', sent: null, running: new Set(p.calls), untracked: p.untracked, failed: false };
     }
-    const next = { id: `activity-${this.cards.length + 1}`, title: text };
-    const chunks = [...(last ? [card(last.id, last.title, 'complete')] : []), card(next.id, next.title, 'in_progress')];
+    if (!this.ts && !next) return; // status changes only matter in an open message
+    if (next) this.cards.push(next);
+    const sending = this.cards.filter((c) => c.status !== c.sent).map((c) => [c, c.status] as const);
+    if (!sending.length) return;
+    const chunks = sending.map(([c, s]) => chunk(c, s));
     try {
       if (!this.ts) {
         this.started = true;
@@ -219,9 +310,12 @@ export class ActivityTrail {
       } else {
         await slackCall('chat.appendStream', { channel: this.t.channelId, ts: this.ts, chunks });
       }
-      this.cards.push(next);
+      for (const [c, s] of sending) c.sent = s;
       this.lastSentAt = Date.now();
+      // A call returned while this was on its way: its status goes with the next update.
+      if (this.cards.some((c) => c.status !== c.sent)) this.schedule();
     } catch (err) {
+      if (next && this.cards.at(-1) === next) this.cards.pop();
       if (this.ts) {
         this.broken = true;
         log.info({ code: slackErrorCode(err), turnId: this.t.turnId }, 'activity update failed; no more activity in this message');
@@ -238,13 +332,14 @@ export class ActivityTrail {
     return `activity:${this.t.turnId}:${this.opened}${suffix}`;
   }
 
-  /** Stop and delete the open activity message, if any. */
+  /** Stop (every card finished) and delete the open activity message, if any. */
   private async remove(): Promise<void> {
     const ts = this.ts;
     const key = this.key(':stop');
+    const chunks = this.finishing();
     this.reset();
     if (!ts) return;
-    await this.removeMessage(ts, key);
+    await this.removeMessage(ts, key, chunks);
     await this.hook(() => this.t.onClosed?.());
   }
 
@@ -256,12 +351,24 @@ export class ActivityTrail {
     }
   }
 
-  private async removeMessage(ts: string, key: string): Promise<void> {
+  /**
+   * Stop the message, finishing its cards in the same call (a card still in progress when the stream stops would
+   * render as failed until the delete lands), then delete it.
+   */
+  private async removeMessage(ts: string, key: string, chunks: TaskUpdateChunk[]): Promise<void> {
     try {
-      await slackCall('chat.stopStream', { channel: this.t.channelId, ts }, { idempotencyKey: key });
+      await slackCall('chat.stopStream', { channel: this.t.channelId, ts, ...(chunks.length ? { chunks } : {}) }, { idempotencyKey: key });
       this.t.onSessionReleased?.();
     } catch (err) {
-      log.debug({ code: slackErrorCode(err) }, 'stopping the activity message failed (already stopped?)');
+      const code = slackErrorCode(err);
+      log.debug({ code }, 'stopping the activity message failed (already stopped?)');
+      // Slack refused the chunks (not a stream that already ended): stop it plainly, the delete follows anyway.
+      if (chunks.length && !/stream|stopped/.test(code ?? '')) {
+        await slackCall('chat.stopStream', { channel: this.t.channelId, ts }, { idempotencyKey: `${key}-plain` }).then(
+          () => this.t.onSessionReleased?.(),
+          (e) => log.debug({ code: slackErrorCode(e) }, 'stopping the activity message without chunks failed'),
+        );
+      }
     }
     try {
       await slackCall('chat.delete', { channel: this.t.channelId, ts });
