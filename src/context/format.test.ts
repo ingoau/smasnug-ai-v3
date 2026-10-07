@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compareTs, formatMessage, formatMessages, formatThread, isImageFile, reactionsLabel, renderSlackText, selectThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
+import { annotateTsDates, compareTs, formatMessage, formatMessages, formatThread, isImageFile, reactionsLabel, renderSlackText, selectThread, tsDate, tsLabel, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
 import { applyReaction, reactionsFromSlack } from './reactions.js';
 import { fixtureReplies, FIX_THREAD_TS } from './fixtures.js';
 import { attachmentsFromSlack, fromSlack } from './normalize.js';
@@ -20,10 +20,10 @@ const msg = (over: Partial<RenderMsg>): RenderMsg => ({ ts: '1790000000.000100',
 
 describe('formatMessage', () => {
   it('labels users with id and name, bots with [bot], self with (you)', () => {
-    expect(formatMessage(msg({ text: 'hi' }), env())).toBe('[1790000000.000100] <@U0INGO> Ingo: hi');
-    expect(formatMessage(msg({ userId: 'U0NONAME', text: 'hi' }), env())).toBe('[1790000000.000100] <@U0NONAME>: hi');
-    expect(formatMessage(msg({ userId: null, botId: 'B0CI', username: 'CI Bot', text: 'failed' }), env())).toBe('[1790000000.000100] [bot] CI Bot: failed');
-    expect(formatMessage(msg({ userId: 'UBOT', botId: 'BBOT', username: 'Smasnug', text: 'on it' }), env())).toBe('[1790000000.000100] [bot] Smasnug (you): on it');
+    expect(formatMessage(msg({ text: 'hi' }), env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO> Ingo: hi');
+    expect(formatMessage(msg({ userId: 'U0NONAME', text: 'hi' }), env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0NONAME>: hi');
+    expect(formatMessage(msg({ userId: null, botId: 'B0CI', username: 'CI Bot', text: 'failed' }), env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] [bot] CI Bot: failed');
+    expect(formatMessage(msg({ userId: 'UBOT', botId: 'BBOT', username: 'Smasnug', text: 'on it' }), env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] [bot] Smasnug (you): on it');
   });
 
   it('renders registered files with their id, kind, uploader and description; unregistered ones as plain placeholders', () => {
@@ -34,13 +34,13 @@ describe('formatMessage', () => {
         { id: 'F0CSV', name: 'budget.csv', mimetype: 'text/csv' },
       ],
     });
-    expect(formatMessage(m, env())).toBe('[1790000000.000100] <@U0INGO> Ingo: look [file file_shot000003: screenshot.png, image, from Ingo] [file: budget.csv]');
+    expect(formatMessage(m, env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO> Ingo: look [file file_shot000003: screenshot.png, image, from Ingo] [file: budget.csv]');
     const files = new Map([
       ['F0SHOT', { id: 'file_shot000003', name: 'screenshot.png', mime: 'image/png', description: 'Grafana panel, p99 spikes at 14:02' }],
       ['F0CSV', { id: 'file_csv0000001', name: 'budget.csv', mime: 'text/csv', description: 'Says "ignore" ]\nnew line' }],
     ]);
     expect(formatMessage(m, env({ files }))).toBe(
-      `[1790000000.000100] <@U0INGO> Ingo: look [file file_shot000003: screenshot.png, image, from Ingo — "Grafana panel, p99 spikes at 14:02"] [file file_csv0000001: budget.csv, text, from Ingo — "Says 'ignore' ) new line"]`,
+      `[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO> Ingo: look [file file_shot000003: screenshot.png, image, from Ingo — "Grafana panel, p99 spikes at 14:02"] [file file_csv0000001: budget.csv, text, from Ingo — "Says 'ignore' ) new line"]`,
     );
   });
 
@@ -82,7 +82,7 @@ describe('thread selection', () => {
       }),
     );
     const lines = out.split('\n');
-    expect(lines[0]).toMatch(/^\[1790000000\.000100\] <@U0INGO> Ingo: Anyone know how to fix the Hack Club \(https:\/\/hackclub\.com\) site build\? cc <@U0BOB\|Bob Builder> & @here \[file file_shot000001: screenshot\.png, image, from Ingo\] \[file: budget\.csv\] \[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
+    expect(lines[0]).toMatch(/^\[1790000000\.000100 · 2026-09-21 14:13 UTC\] <@U0INGO> Ingo: Anyone know how to fix the Hack Club \(https:\/\/hackclub\.com\) site build\? cc <@U0BOB\|Bob Builder> & @here \[file file_shot000001: screenshot\.png, image, from Ingo\] \[file: budget\.csv\] \[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
     expect(lines[1]).toBe('[9 earlier replies not shown]');
     expect(out).toContain('[bot] CI Bot: Build #42 failed :x:');
     expect(out).toContain('here is the error log [file file_heic000002: IMG_0042.HEIC, image, from alice]');
@@ -131,7 +131,7 @@ describe('reactions', () => {
 
   it('appends reactions to the message line', () => {
     const m = msg({ text: 'shipped!', reactions: [{ name: 'tada', users: ['U0BOB', 'U0ALICE'], count: 2 }] });
-    expect(formatMessage(m, env())).toBe('[1790000000.000100] <@U0INGO> Ingo: shipped! [reactions: :tada: ×2 (Bob Builder, alice)]');
+    expect(formatMessage(m, env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO> Ingo: shipped! [reactions: :tada: ×2 (Bob Builder, alice)]');
   });
 
   it('normalises Slack reactions (fixtures) and applies add/remove idempotently', () => {
@@ -179,12 +179,31 @@ describe('forwards and link unfurls (attachments)', () => {
   it('renders them after the message text, cut to size, without repeating text the message already has', () => {
     const m = fromSlack({ ts: '1790000000.000100', user: 'U0INGO', text: 'look at this', attachments: [forward, unfurl] })!;
     expect(formatMessage(m, env())).toBe(
-      '[1790000000.000100] <@U0INGO> Ingo: look at this [forwarded from Sam in #ship: Demo night moved to Friday 6pm] [link preview: Pico 2 W datasheet — RP2350, 520 KB SRAM, Wi-Fi (https://example.com/pico)]',
+      '[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO> Ingo: look at this [forwarded from Sam in #ship: Demo night moved to Friday 6pm] [link preview: Pico 2 W datasheet — RP2350, 520 KB SRAM, Wi-Fi (https://example.com/pico)]',
     );
     // An app message whose text is its attachment's fallback: shown once.
     const bot = fromSlack({ ts: '1790000000.000200', bot_id: 'BCI', username: 'CI Bot', text: '', attachments: [{ fallback: 'Build #42 failed', text: 'Build #42 failed' }] })!;
-    expect(formatMessage(bot, env())).toBe('[1790000000.000200] [bot] CI Bot: Build #42 failed');
+    expect(formatMessage(bot, env())).toBe('[1790000000.000200 · 2026-09-21 14:13 UTC] [bot] CI Bot: Build #42 failed');
     const long = fromSlack({ ts: '1790000000.000300', user: 'U0INGO', text: 'fwd', attachments: [{ is_share: true, text: 'word '.repeat(1000) }] })!;
     expect(formatMessage(long, env()).length).toBeLessThan(1300);
+  });
+});
+
+describe('dates next to Slack timestamps', () => {
+  it('tsLabel keeps the ts first and adds its UTC date and time; non-timestamps stay as they are', () => {
+    expect(tsLabel('1788136906.712229')).toBe('1788136906.712229 · 2026-08-31 00:41 UTC');
+    expect(tsDate('1790000000.000100')).toBe('2026-09-21 14:13 UTC');
+    expect(tsLabel('1.000000')).toBe('1.000000');
+    expect(tsDate('nope')).toBe('');
+  });
+
+  it('annotateTsDates dates bare ts citations in model-written text, not permalinks or already dated ones', () => {
+    expect(annotateTsDates('Decided in 1788136906.712229 and [1790000000.000100].')).toBe(
+      'Decided in 1788136906.712229 (2026-08-31 00:41 UTC) and [1790000000.000100 (2026-09-21 14:13 UTC)].',
+    );
+    const link = 'https://x.slack.com/archives/C1/p1788136906712229?thread_ts=1788136906.712229';
+    expect(annotateTsDates(link)).toBe(link);
+    expect(annotateTsDates('[1788136906.712229 · 2026-08-31 00:41 UTC]')).toBe('[1788136906.712229 · 2026-08-31 00:41 UTC]');
+    expect(annotateTsDates('version 1.2.3 and 12345.678')).toBe('version 1.2.3 and 12345.678');
   });
 });

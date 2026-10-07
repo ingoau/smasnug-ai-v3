@@ -107,13 +107,13 @@ describe('ask_thread', () => {
     const p = promptText();
     expect(p).toContain('Answer only the question, and only from the thread');
     expect(p).toContain('where should we hold the jam?');
-    expect(p).toContain('[1790000002.000100]');
+    expect(p).toContain('[1790000002.000100 · 2026-09-21 14:13 UTC]');
     expect(p).toContain('Question: Where is the jam?');
     expect(p).not.toContain('secret aside');
     expect(p).toContain('[truncated]'); // the long message is cut at the per-message cap
     expect(out).toContain('<untrusted_content source="ask_thread answer"');
     expect(out).toContain('Answer about this thread (the current conversation) (4 messages)');
-    expect(out).toContain(h.answer);
+    expect(out).toContain('Sam picked the CSIT building [1790000002.000100 (2026-09-21 14:13 UTC)].'); // cited ts get their date
     await new Promise((r) => setTimeout(r, 50)); // usage is recorded fire-and-forget
     const [u] = await sql<any[]>`select input_tokens, output_tokens from usage where user_id = ${speaker} and kind = 'model' order by id desc limit 1`;
     expect(u).toMatchObject({ inputTokens: 1234, outputTokens: 56 });

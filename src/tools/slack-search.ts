@@ -6,7 +6,7 @@ import { registerTool, type ToolContext } from '../core/tools.js';
 import { SlackBusyError, slackCall, slackErrorCode, type SlackPriority, type SlackWaitEvent } from '../core/slack.js';
 import { redis } from '../core/redis.js';
 import { takeLimit } from '../features/guard.js';
-import { renderSlackText } from '../context/format.js';
+import { renderSlackText, tsLabel } from '../context/format.js';
 import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
@@ -195,12 +195,12 @@ export function searchUserIds(matches: any[]): string[] {
 
 export function formatSearchMatch(m: any, i: number, names: Map<string, string>): string {
   const ch = m.channel?.id ? (m.channel?.name ? `<#${m.channel.id}|${m.channel.name}>` : `<#${m.channel.id}>`) : '#unknown';
-  const lines = [`${i + 1}. ${ch} · ${whoOf(m, names)} · ts ${m.ts}`, `   ${m.permalink ?? ''}`];
+  const lines = [`${i + 1}. ${ch} · ${whoOf(m, names)} · ts ${tsLabel(m.ts)}`, `   ${m.permalink ?? ''}`];
   const root = matchThreadTs(m);
   if (root) lines.push(`   ↳ reply in thread ${root} (not a top-level message). Read the thread with read_public_thread before relying on this; the parent says what it's about.`);
   lines.push(`   ${oneLine(m, names, TEXT_CHARS)}`);
   const { before, after } = matchContext(m);
-  const ctx = (c: any) => `      [${c.ts}] ${whoOf(c, names)}: ${oneLine(c, names, CONTEXT_CHARS)}`;
+  const ctx = (c: any) => `      [${tsLabel(c.ts)}] ${whoOf(c, names)}: ${oneLine(c, names, CONTEXT_CHARS)}`;
   if (before.length) lines.push('   nearby before:', ...before.map(ctx));
   if (after.length) lines.push('   nearby after:', ...after.map(ctx));
   return lines.join('\n');

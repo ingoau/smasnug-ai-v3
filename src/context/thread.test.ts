@@ -5,6 +5,7 @@ import { redis } from '../core/redis.js';
 import { addFakeHandler } from '../core/slack-fake.js';
 import { threadIdOf } from '../core/events.js';
 import { slackFixtureHandler, FIX_THREAD_TS } from './fixtures.js';
+import { tsLabel } from './format.js';
 import { renderMessages, renderThreadContext, renderThreadFacts, tsToUtc } from './thread.js';
 import { registerSlackFiles, resolveFile } from '../files/store.js';
 import { getUserInfo } from './users.js';
@@ -53,7 +54,7 @@ describe('renderThreadContext', () => {
     expect(ctx.history).not.toContain('has joined');
     expect(ctx.history).not.toContain(newTs);
 
-    expect(ctx.newMessages).toMatch(/^\[\d+\.000100\] <@U0BOB> Bob Builder: long message .* \[truncated\] \(edited\)$/);
+    expect(ctx.newMessages).toMatch(/^\[\d+\.000100 · [\d-]+ [\d:]+ UTC\] <@U0BOB> Bob Builder: long message .* \[truncated\] \(edited\)$/);
 
     // A long thread and a self-contained new message: no channel background.
     expect(ctx.channelContext).toBe('');
@@ -104,7 +105,7 @@ describe('renderThreadContext', () => {
     const ts = `${Number(FIX_THREAD_TS.split('.')[0]) + 39}.000100`;
     const out = await renderMessages(threadId, [ts]);
     const [heic] = await sql<{ id: string }[]>`select id from files where thread_id = ${threadId} and slack_file_id = 'F0HEIC'`;
-    expect(out).toBe(`[${ts}] <@U0ALICE> alice: here is the error log [file ${heic!.id}: IMG_0042.HEIC, image, from alice]`);
+    expect(out).toBe(`[${tsLabel(ts)}] <@U0ALICE> alice: here is the error log [file ${heic!.id}: IMG_0042.HEIC, image, from alice]`);
   });
 
   it('uploads are registered with metadata only, stable, scoped per thread and race-safe', async () => {

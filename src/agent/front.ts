@@ -13,6 +13,7 @@ import { EXTRAS } from '../tools/extras.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
+import { annotateTsDates } from '../context/format.js';
 import { lowQuotaLines, recordModelUsage, userQuotaStates } from '../features/guard.js';
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
@@ -223,7 +224,7 @@ export async function renderCardResults(cardId: number): Promise<{ text: string;
     const task = `Task: ${oneLine(r.instructions, 300)}`;
     const body =
       r.status === 'complete'
-        ? `Result:\n${clipTokens(r.result ?? '(empty)', per, 'head', `result truncated here; to publish all of it use create_canvas with from_subagent "${r.subagentId}"`)}`
+        ? `Result:\n${clipTokens(annotateTsDates(r.result ?? '(empty)'), per, 'head', `result truncated here; to publish all of it use create_canvas with from_subagent "${r.subagentId}"`)}`
         : r.status === 'cancelled'
           ? 'Cancelled before finishing.'
           : `Failed: ${r.error ?? 'unknown error'}`;
@@ -261,7 +262,7 @@ export async function renderEarlierRounds(cardId: number, maxRounds = 4): Promis
           .map((r) => {
             const files = made.get(Number(r.id)) ?? [];
             const list = files.length ? ` [files: ${files.map((f) => fileListingLine(f)).join('; ')}]` : '';
-            return `- ${r.subagentId} "${r.title}" — ${r.status}: ${r.status === 'complete' ? clipTokens(r.result ?? '', per) : (r.error ?? 'cancelled')}${list}`;
+            return `- ${r.subagentId} "${r.title}" — ${r.status}: ${r.status === 'complete' ? clipTokens(annotateTsDates(r.result ?? ''), per) : (r.error ?? 'cancelled')}${list}`;
           })
           .join('\n'),
     );

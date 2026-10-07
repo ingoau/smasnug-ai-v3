@@ -12,7 +12,7 @@ import { registerTool, type ToolContext } from '../core/tools.js';
 import { getBotIdentity, SlackBusyError } from '../core/slack.js';
 import { recordModelUsage } from '../features/guard.js';
 import { chatModel, MODELS } from '../models.js';
-import { formatMessage, userIdsIn, type FormatEnv, type RenderMsg } from '../context/format.js';
+import { annotateTsDates, formatMessage, userIdsIn, type FormatEnv, type RenderMsg } from '../context/format.js';
 import { fetchReplies } from '../context/slack-messages.js';
 import { getUserNames } from '../context/users.js';
 import { log } from '../log.js';
@@ -106,7 +106,7 @@ registerTool({
             outputTokens: res.usage.outputTokens,
             cachedInputTokens: res.usage.inputTokenDetails?.cacheReadTokens,
           }).catch((err) => log.warn({ err }, 'recordModelUsage failed'));
-          const answer = res.text.trim();
+          const answer = annotateTsDates(res.text.trim()); // its cited ts get their UTC date
           if (!answer) return `ask_thread got no answer for ${t.where}. Try read_thread / read_public_thread.`;
           const head = `Answer about ${t.where} (${t.msgs.length} ${t.msgs.length === 1 ? 'message' : 'messages'}${transcript.omitted ? `; the ${transcript.omitted} oldest replies were over the size cap and not read` : ''}), from a model that read the thread:`;
           return untrusted('ask_thread answer', [head, ...(t.hint ? [t.hint] : []), '', answer].join('\n'));

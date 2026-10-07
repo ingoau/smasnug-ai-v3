@@ -31,7 +31,7 @@ registerTool({
     tool({
       description: `Read exact messages of the CURRENT Slack thread (this conversation only), a page at a time (oldest first on the page, ~${limits.readPageTokens} tokens max). For questions about a thread (what was said or decided, catching up, summaries), use ask_thread instead; use read_thread when you need the exact full messages. Default: the newest replies. \`before_ts\` pages backwards (older), \`after_ts\` pages forwards (pass the thread's own ts to read from the start). The header says where the page is and how to continue. To read any other thread, use read_public_thread.`,
       inputSchema: z.object({
-        before_ts: z.string().optional().describe('Only replies strictly older than this message ts (the bracketed number in context): pages backwards. Omit for the newest.'),
+        before_ts: z.string().optional().describe('Only replies strictly older than this message ts (the number at the start of a context line, without its date): pages backwards. Omit for the newest.'),
         after_ts: z.string().optional().describe("Only replies strictly newer than this ts: pages forwards. The thread's own ts reads from the start."),
         limit: z.number().int().min(1).max(MAX_LIMIT).optional().describe(`Max messages on the page (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}); pages are also capped by size`),
       }),
@@ -62,7 +62,7 @@ registerTool({
     tool({
       description: `Read top-level messages of the current Slack channel (not thread replies), a page at a time (oldest first on the page, ~${limits.readPageTokens} tokens max). Default: the latest messages. \`before_ts\` pages backwards (older), \`after_ts\` pages forwards (newer). The header says where the page is and how to continue. Only works in channels the bot is in. To read any other public channel, use read_public_channel.`,
       inputSchema: z.object({
-        before_ts: z.string().optional().describe('Only messages strictly older than this message ts (the bracketed number in context): pages backwards. Omit for the latest.'),
+        before_ts: z.string().optional().describe('Only messages strictly older than this message ts (the number at the start of a context line, without its date): pages backwards. Omit for the latest.'),
         after_ts: z.string().optional().describe('Only messages strictly newer than this ts: pages forwards.'),
         limit: z.number().int().min(1).max(CHANNEL_MAX_LIMIT).optional().describe(`How many messages (default ${CHANNEL_DEFAULT_LIMIT}, max ${CHANNEL_MAX_LIMIT}); pages are also capped by size`),
       }),

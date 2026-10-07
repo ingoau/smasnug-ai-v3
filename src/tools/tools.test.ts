@@ -125,7 +125,7 @@ describe('read_thread / read_channel', () => {
   it('reads earlier replies before a ts in context format', async () => {
     const before = `${Number(FIX_THREAD_TS.split('.')[0]) + 12}.000100`;
     const out: string = await exec(toolsFor('front', baseCtx()).read_thread, { before_ts: before, limit: 5 });
-    expect(out).toContain('[1790000011.000100] <@U0BOB> Bob Builder: reply number 11');
+    expect(out).toContain('[1790000011.000100 · 2026-09-21 14:13 UTC] <@U0BOB> Bob Builder: reply number 11');
     expect(out).toContain('reply number 7');
     expect(out).not.toContain('reply number 12');
     // Replies 1-4 visible before it (5, 6 hidden); position, older and newer cursors in the header.

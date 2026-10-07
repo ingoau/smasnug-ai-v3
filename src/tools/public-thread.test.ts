@@ -113,8 +113,8 @@ describe('search results: context and thread replies', () => {
     expect(out).toContain(`1. <#${HAVEN.channel}|${HAVEN.channelName}> · <@U0HVNKAI> Kai · ts ${HAVEN.replyTs}`);
     expect(out).toContain(`↳ reply in thread ${HAVEN.rootTs}`);
     expect(out).toContain('read_public_thread');
-    expect(out).toContain('nearby before:\n      [1790099000.000100] <@U0HVNMIA> Mia: has anyone heard back from the venue people?');
-    expect(out).toContain('nearby after:\n      [1790101000.000100] <@U0HVNKAI> Kai: ok poster draft is in the drive');
+    expect(out).toContain('nearby before:\n      [1790099000.000100 · 2026-09-22 17:43 UTC] <@U0HVNMIA> Mia: has anyone heard back from the venue people?');
+    expect(out).toContain('nearby after:\n      [1790101000.000100 · 2026-09-22 18:16 UTC] <@U0HVNKAI> Kai: ok poster draft is in the drive');
     expect(out).not.toContain('ignore this');
     expect(out).toContain('Day 3: Sunday 4th October');
     expect(formatSearchMatch(top, 1, names)).not.toContain('reply in thread');
@@ -182,7 +182,7 @@ describe('read_public_thread', () => {
     const parentAt = out.indexOf('Parent:');
     expect(parentAt).toBeGreaterThan(0);
     expect(out.indexOf('[forwarded from ANU CSSA: ANU CSSA Game Jam 2026 is back!')).toBeGreaterThan(parentAt);
-    expect(out).toMatch(/\[1790100300\.000200\] <@U0HVNKAI> User U0HVNKAI: Day 1: Friday 2nd October[^\n]*\n[^\n]*\n[^\n]*\nVenue: CSIT building, ANU {2}← linked message/);
+    expect(out).toMatch(/\[1790100300\.000200 · 2026-09-22 18:05 UTC\] <@U0HVNKAI> User U0HVNKAI: Day 1: Friday 2nd October[^\n]*\n[^\n]*\n[^\n]*\nVenue: CSIT building, ANU {2}← linked message/);
     expect(out).toContain('Haven Canberra is Saturday 14 - Sunday 15 November');
     expect(out).not.toContain('note to self');
     expect(out.indexOf('Parent:')).toBeLessThan(out.indexOf('Day 1'));

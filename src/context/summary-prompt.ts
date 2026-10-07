@@ -7,7 +7,7 @@ Keep:
 - decisions and conclusions;
 - open questions and commitments (who is doing what, by when);
 - key facts, links, names and numbers;
-- the message ts (the bracketed number, e.g. [1790000000.000100]) for important points, so they can be looked up.
+- the message ts (the number at the start of a line, e.g. 1790000000.000100, without its date) for important points, so they can be looked up.
 Rules:
 - Merge the new messages into the previous summary; don't just append. Drop chit-chat, greetings and things that were superseded (say what replaced them).
 - Attribute statements to people by name. Write plainly and concisely: short bullet points under a few headings are fine.

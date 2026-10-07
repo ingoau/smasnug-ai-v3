@@ -2,12 +2,13 @@
  * Pure formatting of Slack messages for model context. No I/O — callers resolve names / file ids first.
  *
  * Line format (one message; text may span lines):
- *   [1727950000.123456] <@U123> Ingo: hello <@U456|Bob> [file file_k3x9q2mf7a: screenshot.png, image, from Ingo — "Grafana panel"]
- *   [1727950001.000200] [bot] Gorkie: …
- *   [1727950002.000300] [bot] Smasnug (you): … [reactions: :+1: ×2 (Ingo, Sam), :eyes: (you)]
- *   [1727950003.000400] [bot] Smasnug (you): which board? [buttons: ESP32 | Pico; Ingo pressed "Pico"]
- *   [1727950004.000500] <@U123> Ingo: Pico (button)
- * The bracketed number is the message ts (used by react / read_thread before_ts / read_channel before_ts).
+ *   [1727950000.123456 · 2024-10-03 10:06 UTC] <@U123> Ingo: hello <@U456|Bob> [file file_k3x9q2mf7a: screenshot.png, image, from Ingo — "Grafana panel"]
+ *   [1727950001.000200 · 2024-10-03 10:06 UTC] [bot] Gorkie: …
+ *   [1727950002.000300 · 2024-10-03 10:06 UTC] [bot] Smasnug (you): … [reactions: :+1: ×2 (Ingo, Sam), :eyes: (you)]
+ *   [1727950003.000400 · 2024-10-03 10:06 UTC] [bot] Smasnug (you): which board? [buttons: ESP32 | Pico; Ingo pressed "Pico"]
+ *   [1727950004.000500 · 2024-10-03 10:06 UTC] <@U123> Ingo: Pico (button)
+ * The bracketed number is the message ts (used by react / read_thread before_ts / read_channel before_ts), followed
+ * by its UTC date (tsLabel): models misread raw epoch seconds.
  */
 import type { MessageAttachment, MessageReaction, SlackFileRef } from '../core/types.js';
 import { contextFileLabel, type ContextFile } from '../files/format.js';
@@ -167,6 +168,36 @@ export function attachmentLabels(atts: MessageAttachment[] | undefined, rawText:
   return out;
 }
 
+/** A Slack ts as a UTC date and time ("2026-08-31 00:41 UTC"), or '' when it isn't one. */
+export function tsDate(ts: string | null | undefined): string {
+  const s = Number(String(ts ?? '').split('.')[0]);
+  if (!Number.isFinite(s) || s < 1e9 || s > 1e10) return '';
+  return `${new Date(s * 1000).toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
+/**
+ * A message ts with its date for the model: "1788136906.712229 · 2026-08-31 00:41 UTC" (models misread raw epoch
+ * seconds). The ts itself stays first and unchanged: tools take it as an argument.
+ */
+export function tsLabel(ts: string): string {
+  const d = tsDate(ts);
+  return d ? `${ts} · ${d}` : ts;
+}
+
+/** Bare Slack ts in model-written text (citations in subagent results / ask_thread answers). */
+const BARE_TS = /(?<![\d.\w/=])(1\d{9}\.\d{6})(?![\d·]|\s·)/g;
+
+/**
+ * Text with a "(2026-08-31 00:41 UTC)" date after each bare Slack ts it cites (one already followed by its date is
+ * left alone; permalinks have no dot in theirs). For model-written text shown to another model.
+ */
+export function annotateTsDates(text: string): string {
+  return text.replace(BARE_TS, (ts) => {
+    const d = tsDate(ts);
+    return d ? `${ts} (${d})` : ts;
+  });
+}
+
 export function formatMessage(m: RenderMsg, env: FormatEnv): string {
   const text = truncateText(renderSlackText(m.text ?? '', env.names).trim(), env.maxChars);
   const from = authorName(m, env);
@@ -179,7 +210,7 @@ export function formatMessage(m: RenderMsg, env: FormatEnv): string {
   if (m.replyCount) parts.push(`[thread: ${m.replyCount} ${m.replyCount === 1 ? 'reply' : 'replies'}]`);
   const reactions = reactionsLabel(m.reactions, env);
   if (reactions) parts.push(reactions);
-  return `[${m.ts}] ${authorLabel(m, env)}: ${parts.join(' ')}`;
+  return `[${tsLabel(m.ts)}] ${authorLabel(m, env)}: ${parts.join(' ')}`;
 }
 
 /** Messages in ts order, deleted ones dropped. */
