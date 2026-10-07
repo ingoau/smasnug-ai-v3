@@ -82,6 +82,11 @@ export const limits = {
   threadSummaryMessageTokens: 1500,
   threadSummaryTimeoutMs: 90_000,
   contextChannelMessages: 5,
+  /**
+   * <channel_background> only for threads with at most this many replies before the turn, or when the new message
+   * points at something ("this", "^", "above", "thoughts?", a bare ping; src/context/channel-background.ts).
+   */
+  channelBackgroundMaxReplies: 3,
   /** Per-message cuts (≈tokens, ~4 chars each) when rendering Slack messages for a model, cut with " [truncated]". */
   /** Thread history in the prompt (the history section's own budget still drops the oldest messages first). */
   messageTruncateTokens: 1000,

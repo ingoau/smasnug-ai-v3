@@ -51,13 +51,8 @@ describe('renderThreadContext', () => {
 
     expect(ctx.newMessages).toMatch(/^\[\d+\.000100\] <@U0BOB> Bob Builder: long message .* \[truncated\] \(edited\)$/);
 
-    const chan = ctx.channelContext.split('\n');
-    expect(chan).toEqual([
-      expect.stringContaining('alice: morning all'),
-      expect.stringContaining('Bob Builder: deploy went out'),
-      expect.stringContaining('alice: lunch?'),
-      expect.stringContaining('Bob Builder: after the parent'),
-    ]);
+    // A long thread and a self-contained new message: no channel background.
+    expect(ctx.channelContext).toBe('');
 
     // Second render: no new backfill, same ids.
     const again = await renderThreadContext(threadId, { newMessageTs: [] });
@@ -73,6 +68,30 @@ describe('renderThreadContext', () => {
       { name: 'eyes', users: ['UBOT'], count: 1 },
     ]);
     expect(again.history.split('\n')[0]).toMatch(/\[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
+  });
+
+  it('channel background: in a short thread, or when the new message points at something', async () => {
+    const ch2 = `C${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+    const rm = addFakeHandler(slackFixtureHandler({ channel: ch2, replyCount: 2 }));
+    try {
+      const short = await renderThreadContext(threadIdOf(ch2, FIX_THREAD_TS), { newMessageTs: [] });
+      expect(short.channelContext.split('\n')).toEqual([
+        expect.stringContaining('alice: morning all'),
+        expect.stringContaining('Bob Builder: deploy went out'),
+        expect.stringContaining('alice: lunch?'),
+        expect.stringContaining('Bob Builder: after the parent'),
+      ]);
+    } finally {
+      rm();
+      await sql`delete from threads where channel_id = ${ch2}`;
+      await sql`delete from messages where channel_id = ${ch2}`;
+    }
+    // The long thread: a pointing message ("^ thoughts?") brings it back.
+    const pointTs = `${Number(FIX_THREAD_TS.split('.')[0]) + 41}.000100`;
+    await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${channel}, ${pointTs}, ${threadId}, 'U0BOB', '<@UBOT> ^ thoughts?')`;
+    const pointing = await renderThreadContext(threadId, { newMessageTs: [pointTs] });
+    expect(pointing.channelContext).toContain('alice: morning all');
+    await sql`delete from messages where channel_id = ${channel} and ts = ${pointTs}`;
   });
 
   it('renderMessages renders inbox messages in the same format', async () => {

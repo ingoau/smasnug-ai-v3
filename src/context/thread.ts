@@ -17,6 +17,7 @@ import { authorsMostRecentFirst, compareTs, formatMessages, formatThread, userId
 import { estimateRenderedChars } from '../tools/paging.js';
 import { loadThreadSummary, requestThreadSummary } from './summary.js';
 import { planHistoryWindow, type HistoryWindow } from './window.js';
+import { wantsChannelBackground } from './channel-background.js';
 import { assignImageIds } from './images.js';
 import { fetchHistoryAfter, fetchHistoryBefore, fetchReplies, fromStored, storeMessages } from './slack-messages.js';
 import { getUserNames } from './users.js';
@@ -29,7 +30,10 @@ export interface RenderedThreadContext {
   history: string;
   /** Rolling summary of the replies not shown (summary.ts), when it covers any of them. */
   summary?: string;
-  /** ~5 channel messages around the thread parent. Empty for DMs. */
+  /**
+   * ~5 channel messages around the thread parent. Empty for DMs, and in threads past a few replies unless the new
+   * message points at something (channel-background.ts).
+   */
   channelContext: string;
   /** The turn's new messages rendered the same way. */
   newMessages: string;
@@ -175,7 +179,14 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
   });
   // Background summary update; never blocks the turn (the job is idempotent per target).
   if (win.compactTo) requestThreadSummary(threadId, win.compactTo).catch((err) => log.warn({ err, threadId }, 'thread summary enqueue failed'));
-  const channelMsgs = thread.isDm ? [] : await span('ctx_channel', () => loadChannelContext(thread));
+  const background =
+    !thread.isDm &&
+    wantsChannelBackground({
+      priorReplies: history.filter((m) => m.ts !== thread.threadTs && !m.deleted).length,
+      newMessages: newMsgs.filter((m) => !m.deleted).map((m) => ({ text: m.text ?? '', hasFiles: (m.files ?? []).length > 0 })),
+      maxReplies: limits.channelBackgroundMaxReplies,
+    });
+  const channelMsgs = background ? await span('ctx_channel', () => loadChannelContext(thread)) : [];
 
   const shown = [...(win.parent ? [win.parent] : []), ...win.replies, ...newMsgs, ...channelMsgs];
   const fenv = await span('ctx_format_env', () => formatEnvFor(threadId, shown));
