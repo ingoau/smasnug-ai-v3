@@ -119,12 +119,14 @@ describe('access texts', () => {
   });
 
   it('the front prompt keeps single files out of the sandbox and falls back without one', async () => {
-    const { SANDBOX_FRONT_PROMPT } = await import('./prompts.js');
-    expect(SANDBOX_FRONT_PROMPT).toMatch(/`sandbox: true` only when it needs code run/);
-    // The capability itself is listed here (only in sandbox-configured prompts), for "what can you do".
-    expect(SANDBOX_FRONT_PROMPT).toMatch(/always include it when someone asks what you can do\): run code in a sandbox .*live web page previews/);
-    expect(SANDBOX_FRONT_PROMPT).toMatch(/A single file you can write yourself \(a page, script, CSV, text\) is create_file with no sandbox/);
-    expect(SANDBOX_FRONT_PROMPT).toMatch(/do the task without one where you can \(e\.g\. create_file\), without asking first/);
+    const { sandboxFrontPrompt } = await import('./prompts.js');
+    const p = sandboxFrontPrompt({ previews: true });
+    expect(p).toMatch(/`sandbox: true` only when it needs code run/);
+    expect(p).toMatch(/A single file you can write yourself \(a page, script, CSV, text\) is create_file with no sandbox/);
+    expect(p).toMatch(/do the task without one where you can \(e\.g\. create_file\), without asking first/);
+    expect(p).toMatch(/Live previews:/);
+    // Without PREVIEW_SECRET_KEY: no preview instructions at all.
+    expect(sandboxFrontPrompt({ previews: false })).not.toMatch(/preview/i);
   });
 
   it('the user gets the explanation', () => {

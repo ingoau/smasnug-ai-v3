@@ -28,6 +28,15 @@ describe('frontSystemPrompt About you', () => {
     expect(p).not.toContain('spawn_coding_agent');
   });
 
+  it('"what can you do": the capability line names running code when sandboxes are on, previews only when configured', () => {
+    const line = (o: { sandbox?: boolean; previews?: boolean }) => frontSystemPrompt('smasnug ai', o).split('\n').find((l) => l.startsWith('- What the harness gives you'))!;
+    expect(line({})).not.toMatch(/sandbox|preview/i);
+    expect(line({})).toMatch(/Asked what you can do, cover all of these/);
+    expect(line({ sandbox: true })).toMatch(/spawn background subagents for longer work; run code in a sandbox \(Python, Node, a headless browser\) to process data and files and build things\./);
+    expect(line({ sandbox: true })).not.toMatch(/preview/);
+    expect(line({ sandbox: true, previews: true })).toMatch(/; publish live web page previews \(a temporary public link\)\./);
+  });
+
   it('does not claim it can hot-patch itself live', () => {
     expect(p).toMatch(/Don't claim you can hot-patch/);
     expect(p).toMatch(/Behaviour changes are shipped by the maintainer/);

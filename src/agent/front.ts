@@ -38,8 +38,8 @@ import { noteBotReply } from '../pipeline/store.js';
 import { awaitsReply } from '../pipeline/rules.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
-import { SANDBOX_FRONT_PROMPT } from '../sandbox/prompts.js';
-import { sandboxConfigured } from '../sandbox/settings.js';
+import { sandboxFrontPrompt } from '../sandbox/prompts.js';
+import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
 
 export interface TurnIO {
   /** Messages pushed to this turn's inbox since the last drain (same author). Call before every model step. */
@@ -126,9 +126,9 @@ function recordReactVisibility(tools: Record<string, Tool>, state: FrontTurnStat
 
 async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
-  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME);
+  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured() });
   if (huddleFmConfigured()) system = `${system}\n\n${HUDDLE_DJ_PROMPT}`;
-  if (sandboxConfigured()) system = `${system}\n\n${SANDBOX_FRONT_PROMPT}`;
+  if (sandboxConfigured()) system = `${system}\n\n${sandboxFrontPrompt({ previews: previewsConfigured() })}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
   // Admin-only section last: the shared prefix stays the same for everyone.
   if (opts.codingAgents) system = `${system}\n\n${CODING_AGENTS_PROMPT}`;

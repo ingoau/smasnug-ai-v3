@@ -18,7 +18,7 @@ mkdirSync(out, { recursive: true });
 const { asSchema } = await import('ai');
 const { frontSystemPrompt, CODING_AGENTS_PROMPT } = await import('../src/agent/prompts/front.js');
 const { childSystemPrompt } = await import('../src/agent/prompts/child.js');
-const { SANDBOX_FRONT_PROMPT, sandboxChildPrompt } = await import('../src/sandbox/prompts.js');
+const { sandboxFrontPrompt, sandboxChildPrompt } = await import('../src/sandbox/prompts.js');
 const { HUDDLE_DJ_PROMPT } = await import('../src/features/huddlefm/render.js');
 await import('../src/tools/index.js');
 await import('../src/agent/register.js');
@@ -28,7 +28,7 @@ await import('../src/sandbox/register.js');
 const { toolsFor } = await import('../src/core/tools.js');
 
 writeFileSync(`${out}/front.txt`, frontSystemPrompt('smasnug ai'));
-writeFileSync(`${out}/front_sandbox.txt`, SANDBOX_FRONT_PROMPT);
+writeFileSync(`${out}/front_sandbox.txt`, sandboxFrontPrompt({ previews: true }));
 writeFileSync(`${out}/front_huddle.txt`, HUDDLE_DJ_PROMPT);
 writeFileSync(`${out}/front_coding.txt`, CODING_AGENTS_PROMPT);
 writeFileSync(`${out}/child.txt`, childSystemPrompt(new Date('2026-10-07T00:00:00Z')));
