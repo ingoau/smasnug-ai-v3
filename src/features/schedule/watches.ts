@@ -251,7 +251,7 @@ export function watchTools(ctx: ToolContext, deps: WatchDeps = defaultDeps) {
         'Watch a source for the current speaker and notify them here when something meaningful changes per their criteria ' +
         '(e.g. "tell me when the YSWS deadline changes", "ping me if anyone mentions onboard-x"). Sources: url (a web page), ' +
         'web_search (new results for a query), slack_search (new public Slack messages for a query, Slack search syntax). ' +
-        `Checked every ${formatDuration(limits.watchDefaultIntervalMs)} by default (min 1h). Expires after ${Math.round(limits.watchMaxLifetimeMs / DAY)} days max.`,
+        `Checked every ${formatDuration(limits.watchDefaultIntervalMs)} by default (min 1h). Expires after ${Math.round(limits.watchMaxLifetimeMs / DAY)} days max. Only for the speaker themselves; tell them how often it checks and when it expires.`,
       inputSchema: z.object({
         source: z.enum(['url', 'web_search', 'slack_search']),
         target: z.string().min(1).max(500).describe('The URL, or the search query'),

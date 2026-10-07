@@ -397,7 +397,7 @@ export function djTools(ctx: ToolContext) {
     huddle_dj: tool({
       description:
         'Control the music once DJ mode is on: queue songs, skip, pause, volume, edit the queue. Put every step of a request in ONE call as commands; they run in order ' +
-        '(e.g. "skip this, queue X and Y, turn it down" = skip, add with queries, volume).',
+        '(e.g. "skip this, queue X and Y, turn it down" = skip, add with queries, volume). <huddle_dj> already shows now playing and up next with track ids: use status only for the full queue or settings.',
       inputSchema: z.object({
         channel: channelInput,
         commands: z.array(StepSchema).min(1).max(limits.djMaxCommandsPerCall),

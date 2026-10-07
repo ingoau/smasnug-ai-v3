@@ -32,7 +32,7 @@ export const replyFilesSchema = z
   )
   .optional()
   .describe(
-    'Optional files to post below the message: file ids (file_…) from this conversation, from subagent results or from create_file (post subagent-made files by id without reading them), or an inline text file {filename, content}. HTML files are fine (Slack shows them).',
+    'Optional files to post below the message: file ids (file_…) from this conversation, subagent results, create_file, or the speaker\'s own files from elsewhere ("post the page you made me yesterday"); post subagent-made files without reading them. Or an inline text file {filename, content}. HTML files are fine (Slack shows them).',
   );
 
 /**
@@ -44,7 +44,7 @@ export const buttonsSchema = z
   .array(z.string())
   .optional()
   .describe(
-    `Optional quick-reply buttons under the message, only when you ask the speaker a question with a few clear options. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars each), each exactly what the user would reply; a press posts that label as their message. Omit for normal answers.`,
+    `Optional quick-reply buttons under the message, when it ends with a question that has a few clear answers (options like "price, size or wireless?", a "which one?", a yes/no like "want me to dig deeper?"). 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars), each exactly what the user would type back; a press posts that label as their message. Omit for open questions and normal answers.`,
   );
 
 registerTool({

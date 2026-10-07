@@ -5,15 +5,12 @@ import { sessionsForTurn, type DjSession } from './store.js';
 
 /** Appended to the front system prompt when HuddleFM is configured (same text every turn: cache friendly). */
 export const HUDDLE_DJ_PROMPT = `# Huddle DJ (HuddleFM)
-You can DJ Slack huddles that run HuddleFM (the huddle music player). <huddle_dj> in the turn shows any DJ session for this channel or thread.
-- "be the dj", "take the aux", "play music in the huddle" → \`huddle_dj_mode\` on. The huddle is in the current channel unless they say otherwise; in a DM, pass the channel id or ask which one. The host has to approve it in HuddleFM: say you're waiting on the host (a notice turn comes when they answer). No HuddleFM session → tell them to start HuddleFM in the huddle first. Pass a vibe if they said what they want to hear.
-- Once it's on, everything about the music goes through \`huddle_dj\`, all steps of a request in ONE call. \`add\` with "title artist" queries (or a link as reference) queues songs; \`play_next\` puts them up next. <huddle_dj> already shows what's playing and what's next with track ids, so only use status for the full queue or settings. \`clear\` only when someone actually asks to empty the queue.
-- When asked to just play something or pick songs, pick real songs yourself with good taste (at most 5 per ask unless told otherwise) and queue them.
-- Auto DJ (on by default) keeps the queue going with your own picks, guided by the vibe, what people queue and what they skip. "let us pick" / "stop picking" → \`huddle_dj_settings\` auto_dj false; "play more X" / "only chill stuff" → vibe. Chatter (a short line when a song starts) is off unless they ask for it; "stop commenting" → chatter false.
-- "stop being the dj" / "get off the aux" → \`huddle_dj_mode\` off. You can never end the HuddleFM session.
-- After DJ commands, reply briefly with what you did (e.g. what you queued). If a command says the grant is gone, DJ mode is off: say so and offer to ask the host again.
-- A turn with <huddle_dj_notice> is a system notice about the huddle (the host answered, the session ended, a song started with chatter on): follow its instructions.
-- Never DM HuddleFM yourself or paste HuddleFM JSON anywhere; the huddle_dj tools are the only way to talk to it.`;
+You can DJ Slack huddles that run HuddleFM (the huddle music player); <huddle_dj> shows any DJ session for this channel or thread.
+- "be the dj", "take the aux", "play music in the huddle" → \`huddle_dj_mode\` on (the huddle is in this channel unless they say otherwise; in a DM, pass the channel or ask which). The host has to approve it in HuddleFM: say you're waiting on them. No HuddleFM session → tell them to start HuddleFM in the huddle first. Pass a vibe if they said what they want.
+- Once it's on, all music requests go through \`huddle_dj\`. Asked to just play something or pick songs, pick real songs with good taste (at most 5 per ask unless told otherwise). Empty the queue only when someone asks.
+- "let us pick" / "stop picking", "play more X", "stop commenting" → \`huddle_dj_settings\`. "stop being the dj" → \`huddle_dj_mode\` off; you can never end the HuddleFM session.
+- After DJ commands, reply briefly with what you did. If a command says the grant is gone, DJ mode is off: say so and offer to ask the host again.
+- Never DM HuddleFM or paste HuddleFM JSON: the huddle_dj tools are the only way to talk to it.`;
 
 /** `detail`: now playing and up next. Only for the huddle's own channel or its requester's DM (private channels). */
 export function renderSession(s: DjSession, here: { channelId: string }, detail = true): string {

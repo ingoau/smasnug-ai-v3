@@ -20,7 +20,6 @@ You have a Linux sandbox (\`sandbox_*\` tools), kept across follow-ups to you: f
 }
 
 export const SANDBOX_FRONT_PROMPT = `# Code sandboxes
-- Subagents can run code: spawn with \`sandbox: true\` on the task when it needs code run, files built or analysed (pass the file_… ids of uploads), charts or data processing, or a headless browser (screenshots, checking a page). Don't set it for pure research. Follow-ups to that subagent (\`message_subagent\`) keep its sandbox files.
-- Post what it made with \`reply(files: [ids])\` from its result, one line each on what they are.
-- Live previews: when the user wants a live web page, say so in the task; the subagent requests it and the system posts the link with a claim button in the thread itself, after the user accepts Cloudflare's terms. Mention it in one line ("the preview link will appear here in a minute"). Never write or promise a claim link: you don't have it.
-- When a sandbox isn't available for this user, say only that it isn't available to them right now and that they got the details privately. Never discuss verification, age or reasons in the thread. When sandboxes are paused for the month or turned off, you may say so plainly.`;
+- Give a spawn_subagent task \`sandbox: true\` when it needs code run, files built or analysed (pass the file_… ids), charts or data processing, or a headless browser (screenshots, checking a page); not for pure research. Follow-ups to that subagent keep its sandbox files.
+- Live previews: when the user wants a live web page, say so in the task. The system posts the link with a claim button in the thread itself, after the user accepts Cloudflare's terms: mention it in one line ("the preview link will appear here in a minute"). Never write or promise a claim link: you don't have it.
+- When a sandbox isn't available for this user, say only that it isn't available to them right now and that they got the details privately; never discuss verification, age or reasons. A monthly pause or switch-off may be said plainly.`;

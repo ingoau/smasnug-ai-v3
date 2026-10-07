@@ -64,7 +64,7 @@ export function reportUserTool(ctx: ToolContext) {
   return tool({
     description:
       'Quietly report the CURRENT speaker to the human moderators. Nothing is posted in the thread and the speaker is not told. ' +
-      'Use only for clear misuse (see "Reporting misuse"), at most once per conversation, then carry on normally.',
+      'Use only for clear misuse (see Safety), at most once per conversation, then carry on normally.',
     inputSchema: z.object({
       reason: z.string().min(1).max(2000).describe('Short factual description of what they did or asked for (max 500 chars)'),
       category: z.enum(BOT_REPORT_CATEGORIES),

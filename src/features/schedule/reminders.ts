@@ -132,7 +132,7 @@ export function reminderTools(ctx: ToolContext) {
     set_reminder: tool({
       description:
         'Set a reminder for the current speaker (only for themselves). When it is due you get a turn in this thread to ping them ' +
-        'and can do any work it asks for (e.g. "check the release"). Give exactly one of `at` or `in`. Precision ~1 minute, max 1 year ahead.',
+        'and can do any work it asks for (e.g. "check the release"). Give exactly one of `at` or `in` (their local time is in <current_time>). Precision ~1 minute, max 1 year ahead. Confirm the resolved day and time from the result in your reply ("ok, fri 9am").',
       inputSchema: z.object({
         text: z.string().min(1).max(limits.reminderTextMaxChars).describe('What to remind them about / what to do then, in their words'),
         at: z
