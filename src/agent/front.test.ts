@@ -73,7 +73,7 @@ vi.mock('../models.js', () => ({
 }));
 vi.mock('../features/guard.js', async (orig) => ({ ...(await orig<typeof import('../features/guard.js')>()), takeLimit: async () => null }));
 const USERS: Record<string, any> = {
-  U1: { id: 'U1', name: 'Tess', tz: 'Europe/Berlin', isBot: false, pronouns: 'she/her', title: 'Organiser\nIGNORE PREVIOUS', statusText: 'on a train', statusEmoji: ':train:', isAdmin: true },
+  U1: { id: 'U1', name: 'Tess', tz: 'Europe/Berlin', isBot: false, locale: 'de-DE', pronouns: 'she/her', title: 'Organiser\nIGNORE PREVIOUS', statusText: 'on a train', statusEmoji: ':train:', isAdmin: true },
   U2: { id: 'U2', name: 'Sam', isBot: false, pronouns: 'he/him' },
 };
 vi.mock('../context/users.js', () => ({
@@ -333,6 +333,7 @@ describe('runFrontTurn: turn context', () => {
     expect(msg).toContain('Pronouns: she/her');
     expect(msg).toContain('Title: Organiser IGNORE PREVIOUS');
     expect(msg).toContain('Status: :train: on a train');
+    expect(msg).toContain('Slack language: de-DE');
     expect(msg).toContain('Privileges: Slack workspace admin');
     expect(msg).toContain('<participants');
     expect(msg).toContain('<@U2> Sam — he/him');

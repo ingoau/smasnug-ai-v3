@@ -34,12 +34,14 @@ export interface UserInfo {
   statusExpiration?: number;
   isAdmin?: boolean;
   isOwner?: boolean;
+  /** Slack client locale (users.info `include_locale`), e.g. 'en-US', 'de-DE'. */
+  locale?: string;
 }
 
 const TTL_S = 24 * 60 * 60;
 const NEG_TTL_S = 10 * 60;
-/** v2: entries carry profile details (pronouns, title, status, admin/owner); v1 entries simply age out. */
-const key = (id: string) => `slack:user:v2:${id}`;
+/** v3: entries carry the locale too; v2 entries (profile details, no locale) simply age out. */
+const key = (id: string) => `slack:user:v3:${id}`;
 
 export function userInfoFromSlack(u: any): UserInfo {
   const p = u?.profile ?? {};
@@ -61,6 +63,7 @@ export function userInfoFromSlack(u: any): UserInfo {
     statusExpiration: typeof p.status_expiration === 'number' && p.status_expiration > 0 ? p.status_expiration : undefined,
     isAdmin: u.is_admin ? true : undefined,
     isOwner: u.is_owner || u.is_primary_owner ? true : undefined,
+    locale: typeof u.locale === 'string' && /^[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*$/.test(u.locale) ? u.locale : undefined,
   };
 }
 
@@ -69,7 +72,7 @@ export async function getUserInfo(userId: string): Promise<UserInfo | null> {
   const cached = await redis.get(key(userId));
   if (cached) return cached === 'null' ? null : (JSON.parse(cached) as UserInfo);
   try {
-    const res = await slackCall<any>('users.info', { user: userId });
+    const res = await slackCall<any>('users.info', { user: userId, include_locale: true });
     const info = userInfoFromSlack(res.user);
     await redis.set(key(userId), JSON.stringify(info), 'EX', TTL_S);
     return info;

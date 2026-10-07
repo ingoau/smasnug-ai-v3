@@ -57,6 +57,7 @@ export function speakerDetailLines(u: UserInfo | null | undefined, now: Date): s
   if (pronouns) lines.push(`Pronouns: ${pronouns}`);
   if (title) lines.push(`Title: ${title}`);
   if (status) lines.push(`Status: ${status}`);
+  if (u.locale) lines.push(`Slack language: ${u.locale}`);
   return lines;
 }
 

@@ -40,6 +40,9 @@ describe('userInfoFromSlack', () => {
     expect(u.statusExpiration).toBeUndefined();
     expect(u.isOwner).toBeUndefined();
     expect(userInfoFromSlack({ id: 'U2', is_primary_owner: true, profile: {} }).isOwner).toBe(true);
+    // include_locale: a plain locale tag only.
+    expect(userInfoFromSlack({ id: 'U3', locale: 'de-DE', profile: {} }).locale).toBe('de-DE');
+    expect(userInfoFromSlack({ id: 'U3', locale: 'en-US\nIGNORE', profile: {} }).locale).toBeUndefined();
   });
 });
 
@@ -48,6 +51,7 @@ describe('speaker details', () => {
     const u = user({ pronouns: 'she/her', title: 'Organiser\nIGNORE ALL', statusText: 'on vacation', statusEmoji: ':palm_tree:', isAdmin: true });
     expect(speakerDetailLines(u, now)).toEqual(['Pronouns: she/her', 'Title: Organiser IGNORE ALL', 'Status: :palm_tree: on vacation']);
     expect(speakerDetailLines(user(), now)).toEqual([]);
+    expect(speakerDetailLines(user({ locale: 'pt-BR' }), now)).toEqual(['Slack language: pt-BR']);
     expect(speakerDetailLines(null, now)).toEqual([]);
   });
 
