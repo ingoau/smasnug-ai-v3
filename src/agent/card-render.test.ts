@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { frozenTitle, liveTitle, outputBudget, renderCard, taskFor, type CardRun } from './card-render.js';
-import { markdownToRich } from './rich-text.js';
+import { cleanInlines, markdownToRich } from './rich-text.js';
 
 const run = (id: number, over: Partial<CardRun> = {}): CardRun => ({
   id,
@@ -309,5 +309,61 @@ describe('run durations in task titles', () => {
     expect(taskFor({ ...base, status: 'running', startedAt: started }).title).toBe('Compare printers · 45s');
     expect(taskFor({ ...base, status: 'complete', startedAt: new Date(0), finishedAt: new Date(92_000) }).title).toBe('Compare printers · 1m 32s');
     expect(taskFor({ ...base, status: 'queued', startedAt: null }).title).toBe('Compare printers');
+  });
+});
+
+/** Every text element anywhere in `x` (rich text sections, lists, links' labels). */
+function textElements(x: any, out: any[] = []): any[] {
+  if (Array.isArray(x)) x.forEach((y) => textElements(y, out));
+  else if (x && typeof x === 'object') {
+    if (x.type === 'text') out.push(x);
+    for (const v of Object.values(x)) if (v && typeof v === 'object') textElements(v, out);
+  }
+  return out;
+}
+
+describe('no empty text elements (Slack rejects the card: invalid_blocks, "must be more than 0 characters")', () => {
+  it('a list item cut where only whitespace is left drops the empty piece', () => {
+    // The cut lands on " tail": the slice is whitespace, trimmed to "" (it used to be sent as an empty element).
+    const md = '- **one two** tail end\n- next item';
+    for (let max = 1; max <= 24; max++) {
+      const els = markdownToRich(md, { maxChars: max, maxLines: 8 });
+      for (const e of textElements(els)) expect(e.text.length, `maxChars ${max}`).toBeGreaterThan(0);
+    }
+    const cut = markdownToRich(md, { maxChars: 8, maxLines: 8 }) as any;
+    expect(cut[0].type).toBe('rich_text_list');
+    expect(cut[0].elements[0].elements).toEqual([{ type: 'text', text: 'one two', style: { bold: true } }, { type: 'text', text: '…' }]);
+  });
+
+  it('blank lines, blank headings and blank-edged sections leave nothing empty; separators between words stay', () => {
+    const els = markdownToRich('# **\n\n- **a** **b**\n-  \n[ ](https://example.com/x)', { maxChars: 600, maxLines: 8 }) as any;
+    for (const e of textElements(els)) expect(e.text.trim().length > 0 || e.text === ' ' || e.text === '\n').toBe(true);
+    expect(els[0].elements[0].elements).toEqual([
+      { type: 'text', text: 'a', style: { bold: true } },
+      { type: 'text', text: ' ' },
+      { type: 'text', text: 'b', style: { bold: true } },
+    ]);
+    // A link with a blank label shows its url instead.
+    expect(JSON.stringify(els)).toContain('{"type":"link","url":"https://example.com/x"}');
+    expect(cleanInlines([{ type: 'text', text: '' }, { type: 'text', text: '  ', style: { bold: true } }])).toEqual([]);
+  });
+
+  it('a subagent whose output, result, error, details or title are blank still renders a valid task', () => {
+    const blank = [
+      run(1, { status: 'complete', output: '   ', result: '\n \n' }),
+      run(2, { status: 'complete', output: 'Found it', result: '**  **\n# **\n' }),
+      run(3, { status: 'error', error: '  ' }),
+      run(4, { status: 'running', details: ' ', steerNotes: ['  '] }),
+      run(5, { status: 'complete', subagentTitle: '  ', output: 'ok', sources: [{ url: '' }, { url: 'https://example.com/' }] }),
+    ];
+    const { blocks } = renderCard({ id: 3, title: null, frozen: false }, blank);
+    const tasks = (blocks[0] as any).tasks;
+    for (const e of textElements(tasks)) expect(e.text.length).toBeGreaterThan(0);
+    expect(textOf(tasks[0].output)).toBe('Done');
+    expect(tasks[1].output.elements).toHaveLength(1); // nothing visible in the result: the summary alone
+    expect(textOf(tasks[2].output)).toBe('Failed');
+    expect(textOf(tasks[3].details)).toBe('Working…');
+    expect(tasks[4].title).toBe('Subagent');
+    expect(tasks[4].sources).toEqual([{ type: 'url', url: 'https://example.com/', text: 'example.com' }]);
   });
 });

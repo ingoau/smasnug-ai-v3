@@ -10,7 +10,7 @@
  * is no collapsing logic here: the finished plan still lists every step and run when opened.
  */
 import { capitalize, stepTitle, summarizeSteps, type CardStep } from './card-steps.js';
-import { markdownToRich, type RichTextElement, type RichTextInline } from './rich-text.js';
+import { cleanRichElements, markdownToRich, type RichTextElement, type RichTextInline } from './rich-text.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { buttonsBlock, type ButtonsActionsBlock, type ButtonsState, type ContextBlock } from './reply-buttons.js';
 import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS, replyBlocks, type ReplyBlock } from './slack-markdown.js';
@@ -149,11 +149,24 @@ function richText(text: string, style?: { bold?: boolean }): RichTextBlock {
   return { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [el] }] };
 }
 
+/**
+ * A task's details / output as Slack accepts it: no empty (or blank-edged) text elements, no empty sections or lists
+ * (an empty text element makes Slack reject the whole message with invalid_blocks). Undefined when nothing visible
+ * is left, so the field is omitted.
+ */
+function richField(block: RichTextBlock): RichTextBlock | undefined {
+  const elements = cleanRichElements(block.elements);
+  return elements.length ? { type: 'rich_text', elements } : undefined;
+}
+
+/** `t` clipped, or `fallback` when it is missing or blank. */
+const clipOr = (t: string | null | undefined, fallback: string, max: number) => clip(t ?? '', max) || fallback;
+
 function sourceLabel(s: { url: string; title?: string }): string {
   if (s.title?.trim()) return clip(s.title, 80);
   try {
     const u = new URL(s.url);
-    return clip(`${u.hostname.replace(/^www\./, '')}${u.pathname === '/' ? '' : u.pathname}`, 80);
+    return clip(`${u.hostname.replace(/^www\./, '')}${u.pathname === '/' ? '' : u.pathname}`, 80) || clip(s.url, 80);
   } catch {
     return clip(s.url, 80);
   }
@@ -161,7 +174,7 @@ function sourceLabel(s: { url: string; title?: string }): string {
 
 /** Result output: the summary in bold, then an excerpt of the result within the budget. */
 function resultOutput(run: CardRun, budget: ReturnType<typeof outputBudget>): RichTextBlock {
-  const summary = clip(run.output || 'Done', 200);
+  const summary = clipOr(run.output, 'Done', 200);
   const head: RichTextElement = { type: 'rich_text_section', elements: [{ type: 'text', text: summary, style: { bold: true } }] };
   const result = (run.result ?? '').trim();
   if (!budget.maxChars || !result || result === run.output?.trim()) return { type: 'rich_text', elements: [head] };
@@ -170,12 +183,23 @@ function resultOutput(run: CardRun, budget: ReturnType<typeof outputBudget>): Ri
 
 export function taskFor(run: CardRun, budget = outputBudget(1)): TaskCardBlock {
   const duration = runDuration(run);
-  const title = `${clip(`${run.isResume ? '↻ ' : ''}${run.subagentTitle}`, 110)}${duration ? ` · ${duration}` : ''}`;
+  const title = `${clip(`${run.isResume ? '↻ ' : ''}${run.subagentTitle?.trim() || 'Subagent'}`, 110)}${duration ? ` · ${duration}` : ''}`;
   const base = { type: 'task_card' as const, task_id: `run_${run.id}`, title };
-  const steer = run.steerNotes.map((n) => `↪ ${clip(n, 80)}`);
-  const sources = (run.sources ?? []).slice(0, budget.sources).map((s) => ({ type: 'url' as const, url: s.url, text: sourceLabel(s) }));
+  const steer = run.steerNotes.filter((n) => n?.trim()).map((n) => `↪ ${clip(n, 80)}`);
+  const sources = (run.sources ?? [])
+    .filter((s) => typeof s?.url === 'string' && s.url.trim())
+    .slice(0, budget.sources)
+    .map((s) => ({ type: 'url' as const, url: s.url, text: sourceLabel(s) }));
   const withSources = <T extends TaskCardBlock>(t: T): T => (sources.length ? { ...t, sources } : t);
-  return withSources(taskBody(run, base, steer, budget));
+  const task = taskBody(run, base, steer, budget);
+  // Every rich text field cleaned; one with nothing visible left is omitted rather than sent empty.
+  for (const k of ['details', 'output'] as const) {
+    if (!task[k]) continue;
+    const f = richField(task[k]);
+    if (f) task[k] = f;
+    else delete task[k];
+  }
+  return withSources(task);
 }
 
 function taskBody(run: CardRun, base: Pick<TaskCardBlock, 'type' | 'task_id' | 'title'>, steer: string[], budget: ReturnType<typeof outputBudget>): TaskCardBlock {
@@ -183,13 +207,13 @@ function taskBody(run: CardRun, base: Pick<TaskCardBlock, 'type' | 'task_id' | '
     case 'queued':
       return { ...base, status: 'pending', details: richText(['Queued', ...steer].join('\n')) };
     case 'running': {
-      const lines = [clip(run.details || 'Working…', 200), ...steer];
+      const lines = [clipOr(run.details, 'Working…', 200), ...steer];
       return { ...base, status: 'in_progress', details: richText(lines.join('\n')) };
     }
     case 'complete':
       return { ...base, status: 'complete', output: resultOutput(run, budget) };
     case 'error':
-      return { ...base, status: 'error', output: richText(clip(run.error || 'Failed', 200)) };
+      return { ...base, status: 'error', output: richText(clipOr(run.error, 'Failed', 200)) };
     case 'cancelled':
       return { ...base, status: 'error', output: richText('Cancelled') };
   }

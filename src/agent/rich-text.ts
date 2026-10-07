@@ -53,7 +53,9 @@ function cutInline(els: RichTextInline[], max: number): RichTextInline[] {
       left -= len;
       continue;
     }
-    if (e.type === 'text' && left > 0) out.push({ ...e, text: e.text.slice(0, left).trimEnd() });
+    // The cut may leave only whitespace (or nothing): Slack rejects an empty text element (invalid_blocks).
+    const cut = e.type === 'text' && left > 0 ? e.text.slice(0, left).trimEnd() : '';
+    if (cut) out.push({ ...e, text: cut });
     break;
   }
   out.push({ type: 'text', text: '…' });
@@ -123,7 +125,9 @@ export function markdownToRich(md: string, opts: { maxChars: number; maxLines: n
   // Group consecutive list items into lists.
   const out: RichTextElement[] = [];
   for (const line of kept) {
-    const section: RichTextSection = { type: 'rich_text_section', elements: line.els.length ? line.els : [{ type: 'text', text: ' ' }] };
+    const els = cleanInlines(line.els);
+    if (!els.length) continue; // nothing visible left (e.g. a heading of only "**")
+    const section: RichTextSection = { type: 'rich_text_section', elements: els };
     if (line.kind === 'para') {
       // Consecutive paragraph lines share one section, separated by line breaks.
       const prev = out[out.length - 1];
@@ -135,6 +139,51 @@ export function markdownToRich(md: string, opts: { maxChars: number; maxLines: n
     const prev = out[out.length - 1];
     if (prev?.type === 'rich_text_list' && prev.style === style) prev.elements.push(section);
     else out.push({ type: 'rich_text_list', style, elements: [section] });
+  }
+  return cleanRichElements(out);
+}
+
+const isBlank = (s: string | undefined) => !s || !s.trim();
+const isSpacer = (e: RichTextInline) => e.type === 'text' && isBlank(e.text);
+
+/**
+ * Inline elements Slack accepts: no empty text (Slack rejects it: "must be more than 0 characters", invalid_blocks),
+ * no blank link labels (the link shows its url), and no whitespace-only element at the start or end of a section.
+ * A whitespace element between two others is a separator (a space between styled words, a line break) and stays,
+ * unstyled. May return [] (nothing visible).
+ */
+export function cleanInlines(els: RichTextInline[]): RichTextInline[] {
+  const kept: RichTextInline[] = [];
+  for (const e of els) {
+    if (e.type === 'link') {
+      if (isBlank(e.url)) continue;
+      if (e.text !== undefined && isBlank(e.text)) {
+        const { text: _blank, ...rest } = e;
+        kept.push(rest);
+      } else kept.push(e);
+      continue;
+    }
+    if (!e.text) continue;
+    kept.push(isBlank(e.text) ? { type: 'text', text: e.text } : e);
+  }
+  let a = 0;
+  let b = kept.length;
+  while (a < b && isSpacer(kept[a]!)) a++;
+  while (b > a && isSpacer(kept[b - 1]!)) b--;
+  return kept.slice(a, b);
+}
+
+/** Rich text elements with every section cleaned (cleanInlines); empty sections, list items and lists dropped. */
+export function cleanRichElements(elements: RichTextElement[]): RichTextElement[] {
+  const out: RichTextElement[] = [];
+  for (const el of elements) {
+    if (el.type === 'rich_text_section') {
+      const els = cleanInlines(el.elements);
+      if (els.length) out.push({ ...el, elements: els });
+      continue;
+    }
+    const items = el.elements.map((s) => ({ ...s, elements: cleanInlines(s.elements) })).filter((s) => s.elements.length);
+    if (items.length) out.push({ ...el, elements: items });
   }
   return out;
 }
