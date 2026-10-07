@@ -179,6 +179,8 @@ export type DirectoryAction =
   | { type: 'channel_refresh'; channelId: string; name?: string }
   | { type: 'channel_archived'; channelId: string; archived: boolean }
   | { type: 'channel_deleted'; channelId: string }
+  /** A message arrived from this channel as a private channel: it was converted, so it must leave the directory. */
+  | { type: 'channel_private'; channelId: string }
   | { type: 'channel_text'; channelId: string; field: 'topic' | 'purpose'; value: string }
   | { type: 'channel_renamed'; channelId: string; name: string };
 
@@ -208,6 +210,11 @@ export function directoryActions(ev: any): DirectoryAction[] {
     case 'channel_deleted':
       return typeof ev.channel === 'string' ? [{ type: 'channel_deleted', channelId: ev.channel }] : [];
     case 'message': {
+      // Slack has no event for a public channel converted to private. In channels the bot is in, the sign is that
+      // its messages now arrive as a private channel's (`channel_type` 'group', message.groups) under the same C… id:
+      // any stored row for it is stale. (Elsewhere: the weekly crawl drops it, and slack_search re-verifies rows older
+      // than limits.directoryChannelTrustMaxAgeMs.)
+      if (ev.channel_type === 'group' && typeof ev.channel === 'string' && ev.channel.startsWith('C')) return [{ type: 'channel_private', channelId: ev.channel }];
       // Topic / purpose / name changes arrive as message subtypes in channels the bot is in. Public channels only
       // (`channel_type` 'channel'); the update only touches rows that exist, i.e. verified public channels.
       if (ev.channel_type !== 'channel' || typeof ev.channel !== 'string') return [];

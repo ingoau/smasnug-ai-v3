@@ -398,6 +398,11 @@ export const limits = {
   directoryProfileMaxAgeMs: 24 * 60 * 60 * 1000,
   /** A crawl kind whose last complete crawl is older than this is crawled again (the weekly re-crawl). */
   directoryRecrawlAfterMs: 7 * 24 * 60 * 60 * 1000,
+  /**
+   * The public-channel check (slack_search & co., `channelVisibility`) trusts a directory_channels row confirmed within
+   * this long (the weekly re-crawl plus a day of slack); older or missing rows are re-verified with conversations.info.
+   */
+  directoryChannelTrustMaxAgeMs: 8 * 24 * 60 * 60 * 1000,
   /** Pause between crawl pages: users.list / conversations.list are Tier 2 (20+/min); ≈17 pages/min. */
   directoryCrawlPageIntervalMs: 3_500,
   /** users.list page size (Slack recommends ≤ 200, allows 1000; may return fewer). */

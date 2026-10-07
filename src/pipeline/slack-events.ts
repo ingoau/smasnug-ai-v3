@@ -27,7 +27,9 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
         case 'message':
           if (!event.subtype && event.channel && event.ts) markMessage(event.channel, event.ts, { intake_start: Date.now() });
           // Topic / purpose / name changes in public channels the bot is in: the directory row too.
-          if (event.subtype === 'channel_topic' || event.subtype === 'channel_purpose' || event.subtype === 'channel_name') {
+          // A message from a C… channel as a private channel's: converted from public, so out of the directory
+          // (one primary-key delete that usually matches nothing).
+          if (event.subtype === 'channel_topic' || event.subtype === 'channel_purpose' || event.subtype === 'channel_name' || (event.channel_type === 'group' && String(event.channel ?? '').startsWith('C'))) {
             await handleDirectoryEvent(event).catch((err) => log.warn({ err }, 'directory channel update failed'));
           }
           return handleMessageEvent(event);

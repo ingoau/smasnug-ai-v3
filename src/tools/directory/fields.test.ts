@@ -162,7 +162,15 @@ describe('directoryActions (event → upsert mapping)', () => {
     expect(directoryActions({ ...msg, subtype: 'channel_topic', topic: 'new\ntopic' })).toEqual([{ type: 'channel_text', channelId: 'C1', field: 'topic', value: 'new topic' }]);
     expect(directoryActions({ ...msg, subtype: 'channel_purpose', purpose: 'p' })).toEqual([{ type: 'channel_text', channelId: 'C1', field: 'purpose', value: 'p' }]);
     expect(directoryActions({ ...msg, subtype: 'channel_name', name: 'n' })).toEqual([{ type: 'channel_renamed', channelId: 'C1', name: 'n' }]);
-    expect(directoryActions({ ...msg, channel_type: 'group', subtype: 'channel_topic', topic: 'x' })).toEqual([]);
+    // A private channel's topic never lands in the directory (a C… id there means it was converted: see below).
+    expect(directoryActions({ ...msg, channel_type: 'group', subtype: 'channel_topic', topic: 'x' })).toEqual([{ type: 'channel_private', channelId: 'C1' }]);
     expect(directoryActions({ ...msg, text: 'hi' })).toEqual([]);
+  });
+  it('a message from a C… channel as a private channel\'s (converted from public) removes it', () => {
+    expect(directoryActions({ type: 'message', channel: 'C1', channel_type: 'group', text: 'hi' })).toEqual([{ type: 'channel_private', channelId: 'C1' }]);
+    // Legacy G… private channels, DMs and group DMs were never in the directory.
+    expect(directoryActions({ type: 'message', channel: 'G1', channel_type: 'group', text: 'hi' })).toEqual([]);
+    expect(directoryActions({ type: 'message', channel: 'D1', channel_type: 'im', text: 'hi' })).toEqual([]);
+    expect(directoryActions({ type: 'message', channel: 'C2', channel_type: 'mpim', text: 'hi' })).toEqual([]);
   });
 });

@@ -134,6 +134,20 @@ export async function deleteChannel(id: string): Promise<boolean> {
   return (await sql`delete from directory_channels where id = ${id}`).count > 0;
 }
 
+/**
+ * Public channels among `ids` that the directory confirmed (crawl, event or a conversations.info write-through)
+ * within `maxAgeMs`: id → name. Rows older than that aren't trusted (the caller re-verifies them); missing ids aren't
+ * in the result. The table only ever holds public channels (check constraint), so a hit means "public".
+ */
+export async function knownPublicChannels(ids: string[], maxAgeMs: number): Promise<Map<string, string>> {
+  const uniq = [...new Set(ids)].filter((id) => typeof id === 'string' && id.startsWith('C'));
+  if (!uniq.length) return new Map();
+  const rows = await sql<{ id: string; name: string }[]>`
+    select id, name from directory_channels
+    where id = any(${uniq}) and not is_private and synced_at > now() - ${maxAgeMs / 1000} * interval '1 second'`;
+  return new Map(rows.map((r) => [r.id, r.name]));
+}
+
 export async function channelExists(id: string): Promise<boolean> {
   return (await sql`select 1 from directory_channels where id = ${id}`).length > 0;
 }

@@ -67,7 +67,7 @@ Queue processors: export `processors: Partial<Record<QueueName, (job) => Promise
   = stop the current response (anyone; there is no native stop button); a top-level group/@channel ping that triggers the bot is answered in a new top-level message;
   `<>` messages never trigger unless the bot is mentioned. The bot never pings groups (neutralised in code). Any new
   path that reads Slack messages must drop `##` messages (`fromSlack` does it); slack_search must stay fail-closed
-  public-only (verified via `conversations.info`).
+  public-only (verified via the workspace directory or `conversations.info`; unknown → dropped).
 - `report_user` (bot reports) stays invisible in the user's thread (no post, no status label) and never feeds auto-suspension.
 - Tests next to code as `*.test.ts`; unit-test pure logic, keep live API tests behind `LIVE=1`.
 - Commit early and often with focused messages.

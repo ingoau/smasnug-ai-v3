@@ -8,13 +8,16 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { sql } from '../db/index.js';
 import { limits } from '../config.js';
 import { redis } from '../core/redis.js';
-import { addFakeHandler } from '../core/slack-fake.js';
+import { addFakeHandler, fakeSlackError } from '../core/slack-fake.js';
 import { SlackBusyError } from '../core/slack.js';
 import { threadIdOf } from '../core/events.js';
 import { toolsFor, type ToolContext } from '../core/tools.js';
 import { getUserNames } from '../context/users.js';
 import './index.js';
-import { formatSearchMatches, searchBudgetNote, searchBusyText, searchCacheKey, searchUserIds, slackBusyText, slackMaxWaitMs, slackWaitOpts, SLACK_WAIT_EXTRA, slimMatch } from './slack-search.js';
+import { channelFromSlack } from './directory/fields.js';
+import { handleDirectoryEvent } from './directory/events.js';
+import { upsertChannels } from './directory/store.js';
+import { channelVisibility, formatSearchMatches, searchBudgetNote, searchBusyText, searchCacheKey, searchUserIds, slackBusyText, slackMaxWaitMs, slackWaitOpts, SLACK_WAIT_EXTRA, slimMatch } from './slack-search.js';
 
 const r = Math.random().toString(36).slice(2, 8).toUpperCase();
 const channel = `C2SS${r}`;
@@ -79,6 +82,7 @@ const q = (s: string) => `ss${r} ${s}`;
 
 afterAll(async () => {
   for (const rm of removers) rm();
+  await sql`delete from directory_channels where id like ${`C2SSDIR%${r}`}`;
   await sql.end();
 });
 
@@ -201,5 +205,92 @@ describe('per-priority wait caps', () => {
     });
     expect(slackWaitOpts({ role: 'child', extras: {} })).toEqual({ priority: 'background', maxWaitMs: limits.slackToolBackgroundMaxWaitMs });
     expect(slackWaitOpts({ role: 'child', extras: {} }, 1234).maxWaitMs).toBe(1234);
+  });
+});
+
+describe('public-channel check: the directory first, conversations.info as the fail-closed fallback', () => {
+  const id = (s: string) => `C2SSDIR${s}${r}`;
+  const KNOWN = id('KNOWN');
+  const UNKNOWN = id('UNKNOWN');
+  const CONVERTED = id('CONV');
+  const OLD = id('OLD');
+  const NEWPUB = id('NEWPUB');
+  const infoCalls: string[] = [];
+  /** conversations.info answers for this block: 'public' | 'private' | 'ratelimited' (a non-definite error). */
+  const answers = new Map<string, 'public' | 'private' | 'ratelimited'>();
+  const remove = addFakeHandler((method, args) => {
+    const ch = String(args.channel);
+    if (method !== 'conversations.info' || !ch.startsWith('C2SSDIR')) return undefined;
+    infoCalls.push(ch);
+    const a = answers.get(ch);
+    if (!a || a === 'ratelimited') throw fakeSlackError('ratelimited');
+    return { ok: true, channel: { id: ch, name: `chan-${ch.toLowerCase()}`, is_channel: true, is_private: a === 'private' } };
+  });
+  afterAll(() => remove());
+  const store = (cid: string) => upsertChannels([channelFromSlack({ id: cid, name: `dir-${cid.toLowerCase()}`, is_channel: true, is_private: false })!], { touch: true });
+  const rowOf = async (cid: string) => (await sql<{ id: string }[]>`select id from directory_channels where id = ${cid}`)[0];
+
+  it('a channel the directory knows as public is verified with no Slack call', async () => {
+    await store(KNOWN);
+    infoCalls.length = 0;
+    const vis = await channelVisibility([KNOWN, KNOWN]);
+    expect([...vis.names]).toEqual([[KNOWN, `dir-${KNOWN.toLowerCase()}`]]);
+    expect(infoCalls).toEqual([]);
+  });
+
+  it('unknown to the directory and conversations.info fails: dropped (fail closed), not cached, nothing stored', async () => {
+    infoCalls.length = 0;
+    const vis = await channelVisibility([UNKNOWN]);
+    expect(vis.names.size).toBe(0);
+    expect(infoCalls).toEqual([UNKNOWN]);
+    expect(await redis.get(`slack:chanvis:${UNKNOWN}`)).toBeNull();
+    expect(await rowOf(UNKNOWN)).toBeUndefined();
+  });
+
+  it('unknown to the directory, conversations.info says public: kept and written through to the directory', async () => {
+    answers.set(NEWPUB, 'public');
+    const vis = await channelVisibility([NEWPUB]);
+    expect(vis.names.get(NEWPUB)).toBe(`chan-${NEWPUB.toLowerCase()}`);
+    expect(await rowOf(NEWPUB)).toBeDefined();
+    // From the directory next time, even with the Redis verdict gone.
+    await redis.del(`slack:chanvis:${NEWPUB}`);
+    infoCalls.length = 0;
+    expect((await channelVisibility([NEWPUB])).names.has(NEWPUB)).toBe(true);
+    expect(infoCalls).toEqual([]);
+  });
+
+  it('converted to private: the private-channel message removes the row and the cached verdict; the check drops it', async () => {
+    await store(CONVERTED);
+    expect((await channelVisibility([CONVERTED])).names.has(CONVERTED)).toBe(true);
+    expect(await handleDirectoryEvent({ type: 'message', channel: CONVERTED, channel_type: 'group', user: 'U1', text: 'invented text', ts: '1790000000.000200' })).toEqual(['channel:private']);
+    expect(await rowOf(CONVERTED)).toBeUndefined();
+    infoCalls.length = 0;
+    expect((await channelVisibility([CONVERTED])).names.has(CONVERTED)).toBe(false);
+    expect(infoCalls).toEqual([]); // the cached "not public" verdict answers
+    // Once that expires: conversations.info, which now says private.
+    await redis.del(`slack:chanvis:${CONVERTED}`);
+    answers.set(CONVERTED, 'private');
+    expect((await channelVisibility([CONVERTED])).names.has(CONVERTED)).toBe(false);
+    expect(infoCalls).toEqual([CONVERTED]);
+  });
+
+  it('a cached "not public" verdict wins over a directory row', async () => {
+    await store(KNOWN);
+    await redis.set(`slack:chanvis:${KNOWN}`, 'private', 'EX', 60);
+    try {
+      expect((await channelVisibility([KNOWN])).names.has(KNOWN)).toBe(false);
+    } finally {
+      await redis.del(`slack:chanvis:${KNOWN}`);
+    }
+  });
+
+  it('a row older than the trust window is re-verified; private now → dropped and the stale row removed', async () => {
+    await store(OLD);
+    await sql`update directory_channels set synced_at = now() - ${limits.directoryChannelTrustMaxAgeMs / 1000 + 60} * interval '1 second' where id = ${OLD}`;
+    answers.set(OLD, 'private');
+    infoCalls.length = 0;
+    expect((await channelVisibility([OLD])).names.has(OLD)).toBe(false);
+    expect(infoCalls).toEqual([OLD]);
+    expect(await rowOf(OLD)).toBeUndefined();
   });
 });

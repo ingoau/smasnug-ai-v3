@@ -1,7 +1,7 @@
 /**
  * read_public_thread: read any thread in a PUBLIC channel (incl. channels the bot isn't in), e.g. one found via
  * slack_search. Uses the USER token (`channels:history` user scope) because the bot can only read channels it's in.
- * Fail closed: the channel must be verified public via the same cached conversations.info check slack_search uses.
+ * Fail closed: the channel must be verified public via the same check slack_search uses (directory or conversations.info).
  * The one exception is a link into a private channel that the bot and the speaker are both in, asked in the
  * speaker's DM with the bot or in that channel (read with the bot token; see private-links.ts).
  */

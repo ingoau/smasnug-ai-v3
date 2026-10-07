@@ -10,6 +10,8 @@ import { renderSlackText, tsLabel } from '../context/format.js';
 import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
+import { channelFromSlack } from './directory/fields.js';
+import { deleteChannel, knownPublicChannels, upsertChannels } from './directory/store.js';
 import { errMsg, parseSlackPermalink, textWithAttachments, truncateChars, untrusted } from './util.js';
 
 const MAX_RESULTS = 10;
@@ -22,7 +24,7 @@ const VISIBILITY_TTL_S = 60 * 60;
 /**
  * First filter on a search match's own channel flags. Fails closed: only a `C…` channel that isn't flagged
  * private / IM / MPIM / group passes, and `is_private` must be `false` or absent. Passing is necessary, not
- * sufficient: the channel must also be verified public via conversations.info (`publicChannelIds`), because newer
+ * sufficient: the channel must also be verified public (`channelVisibility`: the directory or conversations.info), because newer
  * private channels have `C…` ids too and search matches don't always carry `is_private`.
  */
 export function isPublicChannelMatch(m: any): boolean {
@@ -89,30 +91,58 @@ export interface ChannelVisibility {
   busyWaitMs: number;
 }
 
+const isPublicVerdict = (v: string) => v === 'public' || v.startsWith('public:');
+
 /**
- * Verified public channels among `ids` → their names ('' when unknown): conversations.info (bot token), cached in
- * Redis for an hour. Any error or ambiguity means "not public"; failed lookups aren't cached, so they are retried.
- * With `opts.maxWaitMs`, a lookup that would wait longer for the rate limiter is skipped (fail closed) and listed in
+ * Remember that `id` is not public (e.g. it was just converted to private): the next check drops it without asking
+ * the directory or Slack. Overwrites a cached public verdict.
+ */
+export async function rememberChannelNotPublic(id: string): Promise<void> {
+  await redis.set(visibilityKey(id), 'private', 'EX', VISIBILITY_TTL_S);
+}
+
+/**
+ * Verified public channels among `ids` → their names ('' when unknown). In order:
+ * 1. a cached "not public" verdict (Redis, an hour) drops the channel;
+ * 2. the workspace directory (`directory_channels`, public channels only, crawled weekly and kept live by channel
+ *    events): a row confirmed within `limits.directoryChannelTrustMaxAgeMs` counts as verified, no Slack call;
+ * 3. otherwise conversations.info (bot token), cached in Redis for an hour; a public answer is written through to
+ *    the directory, a definite "not public" one removes a stale row.
+ * Any error or ambiguity means "not public"; failed lookups aren't cached, so they are retried. With
+ * `opts.maxWaitMs`, a lookup that would wait longer for the rate limiter is skipped (fail closed) and listed in
  * `busy`, so the caller can say some results were left out.
  */
 export async function channelVisibility(ids: string[], opts: SlackWaitOpts = {}): Promise<ChannelVisibility> {
   const out = new Map<string, string>();
   const busy = new Set<string>();
   let busyWaitMs = 0;
+  const uniq = [...new Set(ids)];
+  // The directory is only ever a positive answer; if it can't be read, everything falls back to conversations.info.
+  const known = await knownPublicChannels(uniq, limits.directoryChannelTrustMaxAgeMs).catch((err) => {
+    log.warn({ err }, 'directory channel lookup failed; verifying with conversations.info');
+    return new Map<string, string>();
+  });
   await Promise.all(
-    [...new Set(ids)].map(async (id) => {
+    uniq.map(async (id) => {
       try {
-        const cached = await redis.get(visibilityKey(id));
+        const cached = await redis.get(visibilityKey(id)).catch(() => null);
+        // 'public' (older entries) or 'public:<name>'; anything else is private, and wins over the directory.
+        if (cached && !isPublicVerdict(cached)) return;
+        if (known.has(id)) {
+          out.set(id, known.get(id)!);
+          return;
+        }
         if (cached) {
-          // 'public' (older entries) or 'public:<name>'; anything else is private.
-          if (cached === 'public' || cached.startsWith('public:')) out.set(id, cached.slice('public:'.length));
+          out.set(id, cached.slice('public:'.length));
           return;
         }
         let verdict: string;
+        let channel: any = null;
         try {
           const res = await slackCall<any>('conversations.info', { channel: id }, { maxWaitMs: opts.maxWaitMs, priority: opts.priority, onWait: opts.onWait });
           const ok = res?.ok !== false && res?.channel?.id === id && isPublicChannelInfo(res.channel);
           verdict = ok ? `public:${typeof res.channel.name === 'string' ? res.channel.name : ''}` : 'private';
+          if (ok) channel = res.channel;
         } catch (err) {
           const code = slackErrorCode(err);
           // Invisible to the bot (a private channel it isn't in) is a definite answer; other errors aren't cached.
@@ -120,6 +150,7 @@ export async function channelVisibility(ids: string[], opts: SlackWaitOpts = {})
           verdict = 'private';
         }
         await redis.set(visibilityKey(id), verdict, 'EX', VISIBILITY_TTL_S);
+        await syncDirectoryChannel(id, channel);
         if (verdict.startsWith('public:')) out.set(id, verdict.slice('public:'.length));
       } catch (err) {
         if (err instanceof SlackBusyError) {
@@ -133,6 +164,15 @@ export async function channelVisibility(ids: string[], opts: SlackWaitOpts = {})
     }),
   );
   return { names: out, busy, busyWaitMs };
+}
+
+/**
+ * Write a conversations.info verdict through to the directory: a public channel is upserted as confirmed (touched),
+ * anything else (`channel` null: private / not found) removes a row the directory may still have. Never throws.
+ */
+async function syncDirectoryChannel(id: string, channel: any): Promise<void> {
+  const row = channel ? channelFromSlack(channel) : null;
+  await (row ? upsertChannels([row], { touch: true }) : deleteChannel(id)).catch((err) => log.warn({ err, channel: id }, 'directory channel write-through failed'));
 }
 
 /** Verified public channels among `ids` → their names (see channelVisibility). */
