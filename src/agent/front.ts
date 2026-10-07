@@ -277,7 +277,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     ),
   );
   parts.push(
-    section('thread_history', clipTokens(ctx.history, BUDGET.history, 'tail', 'older messages truncated; use read_thread for more'), ' note="Earlier messages in this conversation (this thread)."'),
+    section('thread_history', clipTokens(ctx.history, BUDGET.history, 'tail', 'older messages truncated; ask_thread answers questions about the whole thread, read_thread shows exact messages'), ' note="Earlier messages in this conversation (this thread)."'),
   );
   let synthesisRunIds: number[] = [];
   let allCancelled = false;

@@ -28,7 +28,7 @@ registerTool({
   roles: ['front', 'child'],
   build: (ctx) =>
     tool({
-      description: `Read exact messages of the CURRENT Slack thread (this conversation only), a page at a time (oldest first on the page, ~${limits.readPageTokens} tokens max). Default: the newest replies. \`before_ts\` pages backwards (older), \`after_ts\` pages forwards (pass the thread's own ts to read from the start). The header says where the page is and how to continue. To read any other thread, use read_public_thread.`,
+      description: `Read exact messages of the CURRENT Slack thread (this conversation only), a page at a time (oldest first on the page, ~${limits.readPageTokens} tokens max). For questions about a thread (what was said or decided, catching up, summaries), use ask_thread instead; use read_thread when you need the exact full messages. Default: the newest replies. \`before_ts\` pages backwards (older), \`after_ts\` pages forwards (pass the thread's own ts to read from the start). The header says where the page is and how to continue. To read any other thread, use read_public_thread.`,
       inputSchema: z.object({
         before_ts: z.string().optional().describe('Only replies strictly older than this message ts (the bracketed number in context): pages backwards. Omit for the newest.'),
         after_ts: z.string().optional().describe("Only replies strictly newer than this ts: pages forwards. The thread's own ts reads from the start."),
