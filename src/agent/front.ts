@@ -412,7 +412,8 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
         : turn.isMention
           ? 'You were mentioned / messaged directly: respond to <new_messages> using your tools.'
           : turn.addressed
-            ? `<@${turn.authorId}> is talking with you in this thread (no @mention needed): respond to <new_messages> using your tools.`
+            ? // A gate pass (partner / someone answering the bot) leaves room for "ok" and musing; a direct answer doesn't.
+              `<@${turn.authorId}> is talking with you in this thread (no @mention needed): respond to <new_messages> using your tools${turn.gated ? ", unless they're clearly just acknowledging or thinking aloud" : ''}.`
             : turn.gated
               ? `No @mention, but a relevance check judged that <new_messages> from <@${turn.authorId}> is meant for you (or that you clearly have something to add): respond using your tools, unless it is clearly not for you.`
               : "This is an unmentioned follow-up in a thread you're following along: respond only if it is addressed to you or you clearly add something; otherwise do nothing.",

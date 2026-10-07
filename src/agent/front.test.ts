@@ -503,6 +503,11 @@ describe('runFrontTurn: conversation state', () => {
     h.model = mockModel([textStep('')]);
     await runFrontTurn(turn({ id: 104, isMention: false, gated: true, addressed: true }), io(false).io);
     expect(turnText()).toContain('is talking with you in this thread');
+    // A partner follow-up that passed the gate may still be just "ok" or musing; a direct answer to the bot's question isn't.
+    expect(turnText()).toContain("unless they're clearly just acknowledging or thinking aloud");
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 105, isMention: false, addressed: true }), io(false).io);
+    expect(turnText()).not.toContain('acknowledging or thinking aloud');
   });
 
   it('every delivered reply updates the thread (idle clock, partner, awaited answer)', async () => {

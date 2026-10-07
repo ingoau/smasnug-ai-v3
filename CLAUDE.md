@@ -10,7 +10,7 @@ TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK 
 
 Models: `openai/gpt-6-luna` (gate: reasoning off; front: low; children: low). Provider: Hack Club AI
 (`HACKCLUB_AI_KEY`, an OpenRouter proxy, free up to $3/day) first, OpenRouter as fallback, via `chatModel()` in
-`src/models.ts` (402 → skip Hack Club until UTC midnight). Web search: Exa via Hack Club's Exa proxy, then Exa direct
+`src/models.ts` (a spent daily budget: 402, or a 429 mentioning the spending limit/top-up → skip Hack Club until UTC midnight; same rules for the Hack Club Exa proxy). Web search: Exa via Hack Club's Exa proxy, then Exa direct
 (`EXA_API_KEY`, `src/tools/web-search.ts`). Live-test against Hack Club where possible; OpenRouter credit is limited.
 Relevance gate: `typesafe/jev-1.13` (a decisions model, OpenRouter's alpha Decisions API, ~0.45s, probability ≥ `GATE_THRESHOLD` 0.8 = respond); falls back to Luna on any error/timeout.
 
