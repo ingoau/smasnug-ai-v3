@@ -146,6 +146,8 @@ export async function ensureSandbox(o: { subagentId: string; threadId: string; o
         const paused: Paused = { kind: 'fs-snapshot', ref: row.pausedRef, expiresAt: row.pausedExpiresAt };
         try {
           handle = await provider.resume(paused, spec);
+          // The new sandbox has the files; the next pause takes a fresh snapshot.
+          if (provider.deletePaused) void provider.deletePaused(paused).catch((err) => log.debug({ err, sandboxId: id }, 'old snapshot delete failed (it expires on its own)'));
         } catch (err) {
           log.warn({ err, sandboxId: id }, 'sandbox resume failed; creating a fresh one');
           handle = await provider.create(spec);

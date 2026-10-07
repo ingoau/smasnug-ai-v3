@@ -222,6 +222,8 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
     const resumes = fake.counts.resume;
     expect(await call(ctx2, 'sandbox_read_file', { path: 'keep.txt' })).toContain('still here');
     expect(fake.counts.resume - resumes).toBe(1);
+    // The snapshot it resumed from is deleted.
+    await vi.waitFor(() => expect(fake.snapshots.has(paused.pausedRef)).toBe(false));
     // A stale pause job (old generation) is a no-op.
     expect(await L.pauseSandbox(row.id, { generation: row.generation })).toBe('skipped');
     // Provider kill: the next call runs in a fresh sandbox and says files were lost.
