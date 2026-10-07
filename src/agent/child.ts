@@ -36,6 +36,49 @@ export const FIRST_STEP_DETAILS = 'Researching…';
 /** A step running longer than this shows its elapsed time on the card, refreshed at this interval. */
 export const ELAPSED_TICK_MS = 15_000;
 
+/** Card text while the model works between tool calls (the step's tools have all returned). */
+export const THINKING_DETAILS = 'Thinking…';
+/** Card text while the model writes its final answer (text, no tool call in the step). */
+export const WRITING_DETAILS = 'Writing up…';
+/** Text shorter than this at the start of a step may be a preamble before tool calls: no "Writing up…" yet. */
+const WRITING_MIN_CHARS = 40;
+
+/**
+ * The card label as a step streams: a tool's label while it runs (the latest call's), "Thinking…" once every tool
+ * call of the step has returned (the model is generating again, so the tool's elapsed ticker must not keep running),
+ * and "Writing up…" once the model streams answer text in a step without tool calls. Methods return the new label,
+ * or null for no change. Pure.
+ */
+export class RunLabel {
+  private open = new Set<string>();
+  private toolCalls = 0;
+  private writing = false;
+
+  stepStart(): void {
+    this.open.clear();
+    this.toolCalls = 0;
+    this.writing = false;
+  }
+
+  toolCall(callId: string, label: string): string {
+    this.open.add(callId);
+    this.toolCalls++;
+    return label;
+  }
+
+  toolDone(callId: string): string | null {
+    if (!this.open.delete(callId)) return null;
+    return this.open.size ? null : THINKING_DETAILS;
+  }
+
+  /** `stepText`: the step's text so far. */
+  text(stepText: string): string | null {
+    if (this.writing || this.toolCalls || stepText.trim().length < WRITING_MIN_CHARS) return null;
+    this.writing = true;
+    return WRITING_DETAILS;
+  }
+}
+
 /** "Searching the web for “x”" + 45s → "Searching the web for “x” (45s)". */
 export function withElapsed(details: string, ms: number): string {
   return `${details} (${Math.round(ms / 1000)}s)`;
@@ -148,6 +191,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
     return cancelRequested;
   };
 
+  const label = new RunLabel();
   let detailsSince = Date.now();
   const setDetails = async (details: string) => {
     if (details === lastDetails) return;
@@ -155,7 +199,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
     detailsSince = Date.now();
     await sql`update runs set details = ${details} where id = ${run.id} and status = 'running'`;
     await scheduleCardRender(run.cardId);
-    if (details !== FIRST_STEP_DETAILS && details !== 'Thinking') {
+    if (details !== FIRST_STEP_DETAILS && details !== THINKING_DETAILS && details !== WRITING_DETAILS) {
       await appendEvent(run.threadId, 'run_progress', `subagent:${run.subagentId}`, { runId: run.id, details });
     }
   };
@@ -205,7 +249,11 @@ export async function processSubagentRun(runId: number): Promise<void> {
         messages.push({ role: 'user', content: '[Orchestrator update] You are out of time or budget for this task. Stop using tools and report what you have now (including the leads you didn\'t get to), ending with the SUMMARY line.' });
       }
       if (step === 0) await setDetails(FIRST_STEP_DETAILS);
-      else if (!lastDetails || lastDetails === FIRST_STEP_DETAILS) await setDetails('Thinking');
+      else if (!lastDetails || lastDetails === FIRST_STEP_DETAILS) await setDetails(THINKING_DETAILS);
+      label.stepStart();
+      const relabel = async (next: string | null) => {
+        if (next) await setDetails(next);
+      };
 
       const stepStart = Date.now();
       stepSlackWaitMs = 0;
@@ -225,14 +273,17 @@ export async function processSubagentRun(runId: number): Promise<void> {
       let finishReason = '';
       for await (const part of result.fullStream) {
         if (!firstChunkAt && part.type !== 'start' && part.type !== 'start-step') firstChunkAt = Date.now();
-        if (part.type === 'text-delta') stepText += part.text;
-        else if (part.type === 'tool-call') {
+        if (part.type === 'text-delta') {
+          stepText += part.text;
+          await relabel(label.text(stepText));
+        } else if (part.type === 'tool-call') {
           stepTools.push(part.toolName);
           if (part.toolName === 'fetch_url' && addSource(sources, (part.input as any)?.url)) sourcesDirty = true;
-          await setDetails(describeToolStep(part.toolName, part.input));
-        } else if (part.type === 'tool-result' && part.toolName === WEB_SEARCH_TOOL) {
-          for (const src of webSearchSources(part.output)) if (addSource(sources, src.url, src.title)) sourcesDirty = true;
-        }
+          await setDetails(label.toolCall(part.toolCallId, describeToolStep(part.toolName, part.input)));
+        } else if (part.type === 'tool-result') {
+          if (part.toolName === WEB_SEARCH_TOOL) for (const src of webSearchSources(part.output)) if (addSource(sources, src.url, src.title)) sourcesDirty = true;
+          await relabel(label.toolDone(part.toolCallId));
+        } else if (part.type === 'tool-error') await relabel(label.toolDone(part.toolCallId));
         else if (part.type === 'finish-step') {
           finishReason = part.finishReason;
           tokens += part.usage.totalTokens ?? (part.usage.inputTokens ?? 0) + (part.usage.outputTokens ?? 0);

@@ -19,10 +19,18 @@ vi.hoisted(() => {
   process.env.OPENROUTER_KEY ||= 'test';
 });
 
-const h = vi.hoisted(() => ({ model: undefined as any }));
+const h = vi.hoisted(() => ({ model: undefined as any, labels: [] as string[], threadId: '' }));
 vi.mock('../models.js', async (orig) => ({ ...(await orig<typeof import('../models.js')>()), MODELS: { gate: 'mock', front: 'mock', child: 'mock-child' }, chatModel: () => h.model }));
 vi.mock('../pipeline/scheduler.js', () => ({ requestTurn: async () => 1 }));
-vi.mock('./cards.js', async (orig) => ({ ...(await orig<typeof import('./cards.js')>()), scheduleCardRender: async () => {} }));
+// Every card render records the running run's label (what the card would show).
+vi.mock('./cards.js', async (orig) => ({
+  ...(await orig<typeof import('./cards.js')>()),
+  scheduleCardRender: async () => {
+    const { sql } = await import('../db/index.js');
+    const [r] = await sql<{ details: string | null }[]>`select details from runs where thread_id = ${h.threadId} and status = 'running' order by id desc limit 1`;
+    if (r?.details && r.details !== h.labels.at(-1)) h.labels.push(r.details);
+  },
+}));
 
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
 
@@ -31,6 +39,7 @@ describe.skipIf(!INTEGRATION)('subagent run with web_search (mock model, mocked 
   const channel = `CWEB${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
   const rootTs = '1790000000.000100';
   const threadId = `${channel}:${rootTs}`;
+  h.threadId = threadId;
   const exa: any[] = [];
   const realFetch = globalThis.fetch;
 
@@ -99,6 +108,8 @@ describe.skipIf(!INTEGRATION)('subagent run with web_search (mock model, mocked 
     expect(exa).toEqual([{ query: 'pico 2 w price', type: 'deep-lite', numResults: 2, contents: { text: { maxCharacters: 8000 } } }]);
     const progress = await sql<any[]>`select payload from thread_events where thread_id = ${threadId} and type = 'run_progress'`;
     expect(progress.map((p) => p.payload.details)).toContain('Searching the web for “pico 2 w price”');
+    // The search label only while the search runs: then "Thinking…", and "Writing up…" while the answer streams.
+    expect(h.labels).toEqual(['Researching…', 'Searching the web for “pico 2 w price”', 'Thinking…', 'Writing up…']);
     const second = JSON.stringify(h.model.doStreamCalls[1].prompt);
     expect(second).toContain('The Pico 2 W costs $7.');
     expect(second).toContain('untrusted_content');

@@ -233,7 +233,7 @@ Queued
 `details: "Queued"`
 Running
 `in_progress`
-`details`: current step, steer note
+`details`: current step (a tool's label only while it runs, then "Thinking…", or "Writing up…" while the answer streams; the elapsed time after 15 s), steer note
 Finished
 `complete`
 `output`: one-line result
