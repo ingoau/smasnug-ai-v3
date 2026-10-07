@@ -80,6 +80,56 @@ export async function takeLimit(kind: LimitKind, userId: string, threadId?: stri
   return null;
 }
 
+/** One hourly limit's state for the turn message's low-quota warnings. */
+export interface QuotaState {
+  kind: Exclude<LimitKind, 'subagent'> | 'subagent';
+  noun: string;
+  max: number;
+  remaining: number;
+}
+
+/** Close to the limit: at most 5 % of it left (at least 1). */
+export function quotaIsLow(q: Pick<QuotaState, 'max' | 'remaining'>): boolean {
+  return q.remaining <= Math.max(1, Math.floor(q.max * 0.05));
+}
+
+/** Pure: one line per limit that is close (quotaIsLow), '' when none is. */
+export function lowQuotaLines(states: QuotaState[]): string {
+  return states
+    .filter(quotaIsLow)
+    .map((q) =>
+      q.kind === 'subagent'
+        ? q.remaining <= 0
+          ? `Subagents: they already have ${q.max} running (the max); a new spawn will be refused until one finishes.`
+          : `Subagents: only ${q.remaining} more can run at once for them (max ${q.max}).`
+        : q.remaining <= 0
+          ? `${q.noun}: none left this hour (max ${q.max}/hour); calls will be refused.`
+          : `${q.noun}: only ${q.remaining} left this hour (max ${q.max}/hour).`,
+    )
+    .join('\n');
+}
+
+/**
+ * The user's remaining hourly quotas (never counts) and free subagent slots, for the turn message. One Redis round
+ * trip (pipelined ZCOUNTs over the sliding windows) and one query.
+ */
+export async function userQuotaStates(userId: string): Promise<QuotaState[]> {
+  const kinds = Object.keys(HOURLY) as Exclude<LimitKind, 'subagent'>[];
+  const since = Date.now() - HOUR_MS;
+  const p = redis.pipeline();
+  for (const k of kinds) p.zcount(`limit:${k}:${userId}`, since, '+inf');
+  const [res, rows] = await Promise.all([
+    p.exec(),
+    sql<{ active: number }[]>`select count(*)::int as active from runs r join subagents s on s.id = r.subagent_id where s.owner_id = ${userId} and r.status in ('queued', 'running')`,
+  ]);
+  const out: QuotaState[] = kinds.map((k, i) => {
+    const used = Number(res?.[i]?.[1] ?? 0) || 0;
+    return { kind: k, noun: HOURLY[k].noun.replace(/^./, (c) => c.toUpperCase()), max: HOURLY[k].max, remaining: Math.max(0, HOURLY[k].max - used) };
+  });
+  out.push({ kind: 'subagent', noun: 'Subagents', max: limits.userConcurrentSubagents, remaining: Math.max(0, limits.userConcurrentSubagents - (rows[0]?.active ?? 0)) });
+  return out;
+}
+
 /** Like takeLimit but never counts: used to fail early (e.g. before showing a send confirmation). */
 export async function peekLimit(kind: Exclude<LimitKind, 'subagent'>, userId: string): Promise<string | null> {
   if (kind === 'send') {

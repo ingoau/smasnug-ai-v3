@@ -13,7 +13,7 @@ import { EXTRAS } from '../tools/extras.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
-import { recordModelUsage } from '../features/guard.js';
+import { lowQuotaLines, recordModelUsage, userQuotaStates } from '../features/guard.js';
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
 import { loadPendingActions, renderPendingActions } from '../features/pending.js';
@@ -309,7 +309,7 @@ function section(tag: string, body: string, attrs = ''): string {
 
 async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean; outcome?: { fallback: string | null } }> {
   const { channelId } = parseThreadId(turn.threadId);
-  const [memory, snapshot, ctx, dj, self, conversation, pending] = await Promise.all([
+  const [memory, snapshot, ctx, dj, self, conversation, pending, quotas] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId)).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
     timing.span('ctx_thread', () => renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs, timing })),
@@ -317,6 +317,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     getBotIdentity().catch(() => undefined),
     timing.span('ctx_conversation', () => getConversationInfo(channelId)).catch((err) => (log.warn({ err }, 'getConversationInfo failed'), null)),
     timing.span('ctx_pending', () => loadPendingActions(turn.authorId)).catch((err) => (log.warn({ err }, 'loadPendingActions failed'), null)),
+    timing.span('ctx_quota', () => userQuotaStates(turn.authorId)).catch((err) => (log.debug({ err }, 'userQuotaStates failed'), [])),
   ]);
   const participants = await timing
     .span('ctx_participants', () => renderParticipantsSection(ctx.participantIds, turn.authorId, self?.userId))
@@ -374,6 +375,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
   }
   parts.push(section('thread', ctx.threadFacts ?? ''));
   parts.push(section('pending_actions', pending ? renderPendingActions(pending, now) : '', ' note="The speaker\'s own pending confirmations and running reminders / watches."'));
+  parts.push(section('low_quota', lowQuotaLines(quotas), ' note="The speaker\'s limits that are nearly used up. Plan around them; if one runs out, tell them briefly."'));
   parts.push(section('current_time', renderNow(now, speaker.tz)));
   let synthesisRunIds: number[] = [];
   let allCancelled = false;
