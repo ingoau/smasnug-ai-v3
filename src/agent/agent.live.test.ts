@@ -391,6 +391,40 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(o.spawns).toBe(0);
   }, 90_000);
 
+  it('a reply ends the turn in its own model step (no end_turn step)', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const { TurnTiming } = await import('../core/timing.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn('STEP', '', 'yo whats 7 times 8');
+    const timing = new TurnTiming();
+    await runFrontTurn(turn, { ...io(), timing });
+    const o = await outcome(tid, before);
+    // eslint-disable-next-line no-console
+    console.log('one step:', JSON.stringify(o), JSON.stringify(timing.notes.step_tools));
+    expect(o.replies).toHaveLength(1);
+    expect(timing.counters.model_steps).toBe(1);
+    expect((timing.notes.step_tools as string[][])[0]).toContain('reply');
+  }, 90_000);
+
+  it('a two-party follow-up framed as talking with the bot gets an answer, not silence', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const th = await freshThread('TWOPARTY');
+    const ch = th.id.split(':')[0]!;
+    const speaker = `${user}TP`;
+    threadText.set(th.id, {
+      history: `[${th.ts}] <@${speaker}> Tester: <@UBOT> what's a good free tool for 3d modelling?\n[${Number(th.ts) + 5}.000100] [bot] smasnug ai (you): blender, no contest. free, runs everywhere, tons of tutorials (start with the donut one).`,
+      newMessages: `[${Number(th.ts) + 60}.000100] <@${speaker}> Tester: does it run on a chromebook tho`,
+    });
+    const before = (await fakeCalls()).length;
+    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, addressed, message_ts, status) values (${th.id}, ${speaker}, false, true, ${[`${Number(th.ts) + 60}.000100`]}, 'running') returning *`;
+    await runFrontTurn({ ...t, id: Number(t.id) }, io(false));
+    const calls = (await fakeCalls()).slice(before).filter((c) => c.args?.channel === ch);
+    const events = await sql<any[]>`select type from thread_events where thread_id = ${th.id} and type in ('reply', 'spawn')`;
+    // eslint-disable-next-line no-console
+    console.log('two-party:', calls.filter((c) => ['chat.postMessage', 'chat.startStream', 'chat.appendStream'].includes(c.method)).map((c) => c.args.text ?? streamArgsText(c.args)).join(''));
+    expect(events.length).toBeGreaterThan(0);
+  }, 120_000);
+
   it('"thanks!" after an answer gets a reaction only, no reply', async () => {
     const { runFrontTurn } = await import('./front.js');
     const before = (await fakeCalls()).length;
