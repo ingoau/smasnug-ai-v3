@@ -98,6 +98,7 @@ registerTool({
             model: MODELS.child,
             inputTokens: res.usage.inputTokens,
             outputTokens: res.usage.outputTokens,
+            cachedInputTokens: res.usage.inputTokenDetails?.cacheReadTokens,
           }).catch((err) => log.warn({ err }, 'recordModelUsage failed'));
           const answer = res.text.trim();
           if (!answer) return `ask_thread got no answer for ${t.where}. Try read_thread / read_public_thread.`;

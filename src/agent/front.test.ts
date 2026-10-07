@@ -361,6 +361,37 @@ describe('runFrontTurn: thread summary', () => {
   });
 });
 
+describe('runFrontTurn: section order (prompt caching)', () => {
+  it('goes from stable to variable: thread, speaker / thread state, clock, then the new messages', async () => {
+    h.ctx = { summary: 'S', channelContext: '[1.000100] <@U9> Mo: chan msg' };
+    h.model = mockModel([replyStep('ok'), textStep('')]);
+    await runFrontTurn(turn({ id: 70 }), io().io);
+    const a = turnText();
+    const order = ['<thread_summary', '<thread_history', '<channel_background', '<speaker ', '<participants', '<subagents', '<current_time', '<new_messages', 'You were mentioned'];
+    const idx = order.map((t) => a.indexOf(t));
+    expect(idx.every((i) => i >= 0)).toBe(true);
+    expect([...idx].sort((x, y) => x - y)).toEqual(idx);
+    // The clock (UTC + the speaker's local time) is only in <current_time>; <speaker> has just the time zone.
+    const speaker = a.slice(a.indexOf('<speaker '), a.indexOf('</speaker>'));
+    expect(speaker).toContain('Time zone: Europe/Berlin');
+    expect(speaker).not.toMatch(/\d{2}:\d{2}/);
+    expect(a.slice(a.indexOf('<current_time>'))).toMatch(/UTC\nSpeaker's local time: \w+, \d+ \w+ \d{4}, \d{2}:\d{2} \(Europe\/Berlin\)/);
+
+    // Same thread and speaker an hour later: everything before <current_time> is byte-identical.
+    vi.useFakeTimers({ now: new Date(Date.now() + 3600_000), toFake: ['Date'] });
+    try {
+      h.model = mockModel([replyStep('ok'), textStep('')]);
+      await runFrontTurn(turn({ id: 71 }), io().io);
+    } finally {
+      vi.useRealTimers();
+    }
+    const b = turnText();
+    const cut = (t: string) => t.slice(0, t.indexOf('<current_time>'));
+    expect(cut(b)).toBe(cut(a));
+    expect(b).not.toBe(a);
+  });
+});
+
 describe('runFrontTurn: parallel tool calls', () => {
   it('asks the provider for parallel tool calls and runs a step\'s calls together', async () => {
     h.model = mockModel([toolStep(['reply', { text: 'on it' }], ['react', { emoji: 'eyes' }]), textStep('')]);

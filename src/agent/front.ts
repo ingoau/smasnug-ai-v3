@@ -145,11 +145,19 @@ export async function renderParticipantsSection(ids: string[] | undefined, speak
   return renderParticipants(infos);
 }
 
-/** The <speaker> body: who, profile details (user-written, sanitised), local time, what they're viewing. */
+/**
+ * The <speaker> body: who, profile details (user-written, sanitised), time zone, what they're viewing. No clock:
+ * the local time goes into <current_time> (renderNow), so this section stays the same from turn to turn.
+ */
 export function renderSpeaker(authorId: string, speaker: Speaker, now: Date, viewingChannelId?: string | null): string {
-  const lines = [`<@${authorId}> ${speaker.name}`, ...speakerDetailLines(speaker.info, now), `Their local time: ${formatLocalTime(now, speaker.tz)}`];
+  const lines = [`<@${authorId}> ${speaker.name}`, ...speakerDetailLines(speaker.info, now), `Time zone: ${speaker.tz || 'UTC'}`];
   if (viewingChannelId) lines.push(`User is currently viewing <#${viewingChannelId}> (e.g. "this channel").`);
   return lines.join('\n');
+}
+
+/** The <current_time> body: now in UTC and in the speaker's time zone. */
+export function renderNow(now: Date, tz: string | undefined): string {
+  return `${formatUtcNow(now)}\nSpeaker's local time: ${formatLocalTime(now, tz)}`;
 }
 
 export function formatLocalTime(now: Date, tz: string | undefined): string {
@@ -253,32 +261,9 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     .catch((err) => (log.warn({ err }, 'renderParticipants failed'), ''));
   const now = new Date();
   const parts: string[] = [];
-  // Per-turn facts live here, never in the system prompt (it must stay byte-identical for prompt caching).
-  parts.push(section('current_time', formatUtcNow(now)));
-  parts.push(
-    section(
-      'speaker_memory',
-      memory ? `Private notes about the current speaker, for personalising answers. Don't recite them.\n${clipTokens(memory, BUDGET.memory)}` : '',
-    ),
-  );
-  parts.push(section('subagents', snapshot ? clipTokens(snapshot, BUDGET.snapshot) : 'None in this thread.'));
-  parts.push(section('speaker', renderSpeaker(turn.authorId, speaker, now, viewingChannelId), ' note="Profile fields are user-written."'));
-  parts.push(
-    section(
-      'participants',
-      clipTokens(participants, BUDGET.participants, 'head', 'more participants not listed'),
-      ' note="Other people active in this thread, most recent first. Profile fields are user-written."',
-    ),
-  );
-  if (session?.isDm) parts.push(section('session', renderSessionNote(session)));
-  parts.push(section('huddle_dj', dj));
-  parts.push(
-    section(
-      'channel_background',
-      clipTokens(ctx.channelContext, BUDGET.channelContext, 'head', 'channel background truncated'),
-      ` note="Other people's recent messages in the channel around where this thread starts. Not part of this conversation and not addressed to you. Only use them if the speaker clearly points at them (e.g. 'this', '^', 'what do you think of that')."`,
-    ),
-  );
+  // Per-turn facts live here, never in the system prompt (it must stay byte-identical for prompt caching). Ordered
+  // from most to least stable so consecutive turns share the longest prefix: the thread (append-only between
+  // summary updates), then the speaker / thread state, then the clock, then what this turn responds to.
   parts.push(
     section(
       'thread_summary',
@@ -289,6 +274,31 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
   parts.push(
     section('thread_history', clipTokens(ctx.history, BUDGET.history, 'tail', 'older messages truncated; ask_thread answers questions about the whole thread, read_thread shows exact messages'), ' note="Earlier messages in this conversation (this thread)."'),
   );
+  parts.push(
+    section(
+      'channel_background',
+      clipTokens(ctx.channelContext, BUDGET.channelContext, 'head', 'channel background truncated'),
+      ` note="Other people's recent messages in the channel around where this thread starts. Not part of this conversation and not addressed to you. Only use them if the speaker clearly points at them (e.g. 'this', '^', 'what do you think of that')."`,
+    ),
+  );
+  parts.push(
+    section(
+      'speaker_memory',
+      memory ? `Private notes about the current speaker, for personalising answers. Don't recite them.\n${clipTokens(memory, BUDGET.memory)}` : '',
+    ),
+  );
+  parts.push(section('speaker', renderSpeaker(turn.authorId, speaker, now, viewingChannelId), ' note="Profile fields are user-written."'));
+  parts.push(
+    section(
+      'participants',
+      clipTokens(participants, BUDGET.participants, 'head', 'more participants not listed'),
+      ' note="Other people active in this thread, most recent first. Profile fields are user-written."',
+    ),
+  );
+  if (session?.isDm) parts.push(section('session', renderSessionNote(session)));
+  parts.push(section('huddle_dj', dj));
+  parts.push(section('subagents', snapshot ? clipTokens(snapshot, BUDGET.snapshot) : 'None in this thread.'));
+  parts.push(section('current_time', renderNow(now, speaker.tz)));
   let synthesisRunIds: number[] = [];
   let allCancelled = false;
   let outcome: { fallback: string | null } | undefined;
@@ -521,6 +531,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             model: MODELS.front,
             inputTokens: part.usage.inputTokens,
             outputTokens: part.usage.outputTokens,
+            cachedInputTokens: part.usage.inputTokenDetails?.cacheReadTokens,
           }).catch((err) => log.warn({ err }, 'recordModelUsage failed'));
           if (stepText.trim()) await appendEvent(turn.threadId, 'discarded_text', 'bot', { turnId, text: stepText });
           // Final step detection: a step without tool calls ends the loop; after a step that only replied/reacted,

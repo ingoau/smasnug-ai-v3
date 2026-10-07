@@ -142,10 +142,18 @@ export async function slidingWindow(key: string, max: number, windowMs: number, 
 }
 
 /** Record model token usage (per user/thread) for limits and cost. */
-export async function recordModelUsage(opts: { userId?: string; threadId?: string; model: string; inputTokens?: number; outputTokens?: number }): Promise<void> {
+export async function recordModelUsage(opts: {
+  userId?: string;
+  threadId?: string;
+  model: string;
+  inputTokens?: number;
+  outputTokens?: number;
+  /** Of the input tokens, how many the provider's prompt cache served (when reported). */
+  cachedInputTokens?: number;
+}): Promise<void> {
   await sql`
-    insert into usage (user_id, thread_id, kind, model, input_tokens, output_tokens)
-    values (${opts.userId ?? null}, ${opts.threadId ?? null}, 'model', ${opts.model}, ${opts.inputTokens ?? null}, ${opts.outputTokens ?? null})`.catch(
+    insert into usage (user_id, thread_id, kind, model, input_tokens, output_tokens, cached_input_tokens)
+    values (${opts.userId ?? null}, ${opts.threadId ?? null}, 'model', ${opts.model}, ${opts.inputTokens ?? null}, ${opts.outputTokens ?? null}, ${opts.cachedInputTokens ?? null})`.catch(
     (err) => log.warn({ err }, 'usage insert failed'),
   );
 }

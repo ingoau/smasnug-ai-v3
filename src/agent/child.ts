@@ -199,6 +199,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
             inputTokens: part.usage.inputTokens,
             outputTokens: part.usage.outputTokens,
             reasoningTokens: part.usage.outputTokenDetails?.reasoningTokens,
+            cachedTokens: part.usage.inputTokenDetails?.cacheReadTokens,
           }).catch(() => {});
           void recordModelUsage({
             userId: sa.ownerId,
@@ -206,6 +207,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
             model: modelId,
             inputTokens: part.usage.inputTokens,
             outputTokens: part.usage.outputTokens,
+            cachedInputTokens: part.usage.inputTokenDetails?.cacheReadTokens,
           }).catch((err) => log.warn({ err }, 'recordModelUsage failed'));
         } else if (part.type === 'error') throw part.error;
         else if (part.type === 'abort') throw controller.signal.reason ?? new Error('aborted');

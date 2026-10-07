@@ -124,7 +124,7 @@ export async function processThreadSummary(job: ThreadSummaryJob, opts: { abortS
         abortSignal: AbortSignal.any(signals),
       });
       calls++;
-      void recordModelUsage({ threadId, model: MODELS.child, inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens }).catch((err) =>
+      void recordModelUsage({ threadId, model: MODELS.child, inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens, cachedInputTokens: res.usage.inputTokenDetails?.cacheReadTokens }).catch((err) =>
         log.warn({ err }, 'recordModelUsage failed'),
       );
       const summary = capSummary(res.text, limits.threadSummaryMaxTokens);
