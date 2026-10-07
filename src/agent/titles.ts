@@ -16,7 +16,7 @@ import { sql } from '../db/index.js';
 import { recordModelUsage } from '../features/guard.js';
 import { log } from '../log.js';
 import { chatModel, MODELS } from '../models.js';
-import { loadSessionInfo, normalizeSessionTitle, setSessionTitle, SESSION_TITLE_MAX } from '../pipeline/agent-session.js';
+import { cleanTitle, fitTitle, loadSessionInfo, setSessionTitle, SESSION_TITLE_MAX, titleBackoffActive } from '../pipeline/agent-session.js';
 import { scheduleCardRender } from './cards.js';
 
 /** A titled DM conversation is checked for a topic change every this many user turns. */
@@ -79,7 +79,7 @@ const lines = (msgs: string[]) => msgs.map((m) => `- ${clip(m, MSG_CHARS)}`).joi
 /** The session-title call: system + prompt. `current` set → a topic-change check that may answer KEEP. */
 export function sessionTitlePrompt(o: { current: string | null; firstUser: string[]; recentUser: string[]; botReply: string | null }): { system: string; prompt: string } {
   const rules = [
-    `You name a chat conversation for the user's sidebar. Reply with the title only: at most ${SESSION_TITLE_MAX} characters, sentence case, no quotes, no emoji, no trailing period, in the language of the conversation.`,
+    `You name a chat conversation for the user's sidebar. Reply with the title only: at most ${SESSION_TITLE_MAX} characters (about 5 words; count them), sentence case, no quotes, no emoji, no "…", no trailing period, in the language of the conversation.`,
     'Name the topic or task (e.g. "Pico W pinout question", "Trip budget for Berlin"), not the greeting or the bot.',
     o.current
       ? `It is currently titled "${o.current}". If the conversation is still mainly about that, reply exactly ${KEEP}. Only a clearly different main topic gets a new title.`
@@ -108,8 +108,8 @@ export function cardTitlePrompt(o: { request: string | null; tasks: { title: str
   return { system, prompt };
 }
 
-/** The model's answer: KEEP (or nothing usable) → null, else the cleaned title. */
-export function parseTitleAnswer(raw: string): string | null {
+/** The model's answer, cleaned but not shortened: KEEP (or nothing usable) → null. */
+export function cleanTitleAnswer(raw: string): string | null {
   const line =
     raw
       .split('\n')
@@ -117,8 +117,22 @@ export function parseTitleAnswer(raw: string): string | null {
       .find(Boolean) ?? '';
   const cleaned = line.replace(/^(?:title\s*:\s*)/i, '');
   if (!cleaned || new RegExp(`^["'“]?${KEEP}["'”]?\\.?$`, 'i').test(cleaned)) return null;
-  const title = normalizeSessionTitle(cleaned).replace(/\.$/, '');
+  const title = cleanTitle(cleaned).replace(/\.$/, '');
   return title || null;
+}
+
+/** The model's answer: KEEP (or nothing usable) → null, else the cleaned title, at most `max` chars (word boundary). */
+export function parseTitleAnswer(raw: string, max = SESSION_TITLE_MAX): string | null {
+  const t = cleanTitleAnswer(raw);
+  return t ? fitTitle(t, max) || null : null;
+}
+
+/** The follow-up asking for a shorter title (one retry when the first answer is too long). */
+export function shortenPrompt(o: { system: string; prompt: string }, title: string, max: number): { system: string; prompt: string } {
+  return {
+    system: o.system,
+    prompt: `${o.prompt}\n\nYour title "${title}" has ${title.length} characters; the limit is ${max}. Reply with a shorter title only (fewer words; count items instead of naming them).`,
+  };
 }
 
 // ---------- The model call (replaceable in tests) ----------
@@ -140,12 +154,24 @@ export const titleModel = {
   },
 };
 
-async function generate(o: { system: string; prompt: string; userId?: string; threadId: string }): Promise<string | null> {
-  const res = await titleModel.generate(o);
-  void recordModelUsage({ userId: o.userId, threadId: o.threadId, model: MODELS.front, inputTokens: res.inputTokens, outputTokens: res.outputTokens }).catch((err) =>
-    log.warn({ err }, 'recordModelUsage failed'),
-  );
-  return parseTitleAnswer(res.text);
+/**
+ * One title call. An answer over `max` chars gets one follow-up asking for a shorter one; if that is still too long,
+ * it is cut at a word boundary (fitTitle: no "…", no dangling "and"). KEEP → null.
+ */
+export async function generateTitle(o: { system: string; prompt: string; max: number; userId?: string; threadId: string }): Promise<string | null> {
+  const ask = async (q: { system: string; prompt: string }) => {
+    const res = await titleModel.generate(q);
+    void recordModelUsage({ userId: o.userId, threadId: o.threadId, model: MODELS.front, inputTokens: res.inputTokens, outputTokens: res.outputTokens }).catch((err) =>
+      log.warn({ err }, 'recordModelUsage failed'),
+    );
+    return cleanTitleAnswer(res.text);
+  };
+  const first = await ask(o);
+  if (!first || first.length <= o.max) return first;
+  const second = await ask(shortenPrompt(o, first, o.max)).catch((err) => (log.warn({ err }, 'shorter-title retry failed'), null));
+  const best = second && second.length < first.length ? second : first;
+  log.info({ threadId: o.threadId, first, second, max: o.max }, 'title over the limit; asked once more');
+  return fitTitle(best, o.max) || null;
 }
 
 // ---------- Jobs ----------
@@ -158,9 +184,11 @@ export async function processTitleJob(job: TitleJob): Promise<void> {
 /** DM session title after a turn (see the module comment). Returns what happened (tests, logs). */
 export async function processSessionTitle(threadId: string, turnId: number): Promise<string> {
   const info = await loadSessionInfo(threadId);
-  const [meta] = await sql<{ titleTurnId: number | null; authorId: string | null }[]>`
+  const [meta] = await sql<{ titleTurnId: number | null; authorId: string | null; titleFailures: number | null; titleFailedAt: Date | null }[]>`
     select (select title_turn_id from agent_sessions where thread_id = ${threadId}) as title_turn_id,
-           (select author_id from turns where id = ${turnId}) as author_id`;
+           (select author_id from turns where id = ${turnId}) as author_id,
+           (select title_failures from agent_sessions where thread_id = ${threadId}) as title_failures,
+           (select title_failed_at from agent_sessions where thread_id = ${threadId}) as title_failed_at`;
   const [{ n } = { n: 0 }] = info.title
     ? await sql<{ n: number }[]>`
         select count(*)::int as n from turns
@@ -174,6 +202,8 @@ export async function processSessionTitle(threadId: string, turnId: number): Pro
   const texts = human.map((m) => m.text);
   const decision = sessionTitleDecision({ isDm: info.isDm, title: info.title, titleBy: info.titleBy, substantive: texts.some(isSubstantive), userTurnsSinceTitle: n });
   if (decision.action === 'skip') return `skip:${decision.reason}`;
+  // Slack refused the last rename(s): no model call every turn, try again after the backoff.
+  if (titleBackoffActive({ failures: Number(meta?.titleFailures ?? 0), failedAt: meta?.titleFailedAt ?? null })) return 'skip:backoff';
   const [reply] = await sql<{ text: string }[]>`
     select text from messages where thread_id = ${threadId} and not deleted and (user_id = ${bot.userId} or bot_id = ${bot.botId})
     order by ts::numeric desc limit 1`;
@@ -184,7 +214,7 @@ export async function processSessionTitle(threadId: string, turnId: number): Pro
     recentUser: decision.action === 'check' ? substantive.slice(3).slice(-3) : [],
     botReply: reply?.text ?? null,
   });
-  const title = await generate({ system, prompt, userId: meta?.authorId ?? undefined, threadId });
+  const title = await generateTitle({ system, prompt, max: SESSION_TITLE_MAX, userId: meta?.authorId ?? undefined, threadId });
   if (!title || title === info.title) return 'keep';
   const res = await setSessionTitle({ threadId, turnId, title });
   log.info({ threadId, turnId, title, res }, 'session title job');
@@ -210,7 +240,7 @@ export async function processCardTitle(cardId: number): Promise<string> {
   }
   request ??= runs[0]!.instructions;
   const { system, prompt } = cardTitlePrompt({ request, tasks: runs.map((r) => ({ title: r.title, status: r.status, result: r.output || r.result })) });
-  const title = await generate({ system, prompt, userId: runs[0]!.ownerId, threadId: card.threadId });
+  const title = await generateTitle({ system, prompt, max: limits.cardTitleMaxChars, userId: runs[0]!.ownerId, threadId: card.threadId });
   if (!title) return 'keep';
   // Only while nothing new runs on it (a next round gets its own title after its write-up).
   const [set] = await sql`

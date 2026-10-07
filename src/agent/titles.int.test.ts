@@ -119,6 +119,29 @@ describe.skipIf(!INTEGRATION)('background titles', () => {
     expect(await renames(t.channelId)).toEqual(['Pico W pinout question', 'Resume review']);
   });
 
+  it('a refused rename backs off: no model call on the next turns until the backoff is over', async () => {
+    const t = await thread();
+    const remove = fake.addFakeHandler((method, args) => {
+      if (method === 'agents.sessions.rename' && args.channel_id === t.channelId) throw fake.fakeSlackError('invalid_name');
+    });
+    try {
+      const first = await exchange(t, 'what pins does the Pico W use for I2C?');
+      expect(await T.processSessionTitle(t.id, first)).toBe('Not renamed: Slack refused (invalid_name).');
+      expect(asked).toHaveLength(1);
+      expect(await session(t.id)).toMatchObject({ title: null, titleFailures: 1 });
+      const next = await exchange(t, 'and for SPI?');
+      expect(await T.processSessionTitle(t.id, next)).toBe('skip:backoff');
+      expect(asked).toHaveLength(1);
+    } finally {
+      remove();
+    }
+    await sql`update agent_sessions set title_failed_at = now() - interval '11 minutes' where thread_id = ${t.id}`;
+    const later = await exchange(t, 'and UART?');
+    expect(await T.processSessionTitle(t.id, later)).toBe('Conversation titled "Pico W pinout question".');
+    expect(asked).toHaveLength(2);
+    expect(await session(t.id)).toMatchObject({ titleFailures: 0, titleFailedAt: null });
+  });
+
   it("never overrides a user-chosen title (no model call either), and channel threads aren't titled", async () => {
     const t = await thread();
     await sql`insert into agent_sessions (thread_id, title, title_by, user_renamed_at) values (${t.id}, 'My robot project', 'user', now())`;

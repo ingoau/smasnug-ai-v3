@@ -47,20 +47,83 @@ export async function loadSessionInfo(threadId: string): Promise<SessionInfo> {
   return { isDm: Boolean(row?.isDm), title: row?.title ?? null, titleBy: row?.titleBy ?? null };
 }
 
-/** One line, no Slack markup, at most SESSION_TITLE_MAX chars (cut at a word boundary when possible). */
-export function normalizeSessionTitle(raw: string): string {
-  let t = raw
+/** Words a cut title must not end on ("Simulated 100,000 dice rolls and"). */
+/** Where a clause of a title starts (a cut title ends before its last, incomplete one). */
+const CLAUSE_BREAK = /[,;:](?=\s)|\s(?:and|or|but|with|then|plus|while|after|before|using|via|-|–|—)\s/gi;
+const DANGLING = /\s+(?:and|or|but|nor|with|without|of|for|to|in|on|at|by|from|into|onto|via|vs\.?|versus|plus|about|as|than|then|the|a|an|my|your|its|their|this|that|&|\+|-|–|—)$/i;
+
+/**
+ * One line, no Slack markup, no ellipsis (agents.sessions.rename rejects "…" with `invalid_name`), emoji or invisible
+ * characters, no surrounding quotes. Not shortened (fitTitle does that).
+ */
+export function cleanTitle(raw: string): string {
+  return raw
     .replace(/<[^>]*>/g, ' ') // mentions, links, broadcasts: never in a title
     .replace(/[*_`~]/g, '')
+    .replace(/…|\.{3,}/g, ' ')
+    .replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200B}-\u{200F}\u{2028}-\u{202F}\u{2060}-\u{206F}\u{FEFF}]/gu, ' ')
+    .replace(/[\p{Cc}\p{Cf}]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+    .replace(/^["'“”‘’«»]+|["'“”‘’«»]+$/g, '')
     .trim();
-  if (t.length <= SESSION_TITLE_MAX) return t;
-  t = t.slice(0, SESSION_TITLE_MAX - 1);
-  const space = t.lastIndexOf(' ');
-  if (space >= SESSION_TITLE_MAX / 2) t = t.slice(0, space);
-  return `${t.replace(/[\s,;:.-]+$/, '')}…`;
+}
+
+/**
+ * At most `max` chars, cut at a word boundary and never with "…": trailing punctuation, a dangling connector ("and",
+ * "with", "of"…) and an unclosed parenthesis are dropped, so a cut title still reads as a phrase.
+ */
+export function fitTitle(t: string, max: number): string {
+  if (t.length <= max) return t;
+  let cut = t.slice(0, max + 1);
+  const space = cut.lastIndexOf(' ');
+  cut = space > 0 ? cut.slice(0, space) : t.slice(0, max);
+  // The clause the cut ran into is incomplete ("rolls and plotted"): end before it when enough is left.
+  let brk = -1;
+  for (const m of cut.matchAll(CLAUSE_BREAK)) brk = m.index;
+  if (brk >= max / 3) cut = cut.slice(0, brk);
+  for (;;) {
+    let next = cut.replace(/[\s,;:.!?\-–—&+/(]+$/, '').replace(DANGLING, '');
+    const open = next.lastIndexOf('(');
+    if (open > 0 && next.indexOf(')', open) < 0) next = next.slice(0, open);
+    if (next === cut) break;
+    cut = next;
+  }
+  return cut.trim() || t.slice(0, max).trim();
+}
+
+/** One line, no Slack markup, at most SESSION_TITLE_MAX chars, cut at a word boundary (never with "…"). */
+export function normalizeSessionTitle(raw: string): string {
+  return fitTitle(cleanTitle(raw), SESSION_TITLE_MAX);
+}
+
+/**
+ * The stricter retry after Slack said `invalid_name` (documented as "not valid for a channel name"; no character set
+ * is documented): plain ASCII letters, digits, spaces and a few punctuation marks; accents folded ("Café" → "Cafe").
+ */
+export function asciiSessionTitle(raw: string): string {
+  const t = cleanTitle(raw)
+    .normalize('NFKD')
+    .replace(/[̀-ͯ]/g, '')
+    .replace(/[‘’]/g, "'")
+    .replace(/[–—]/g, '-')
+    .replace(/[^A-Za-z0-9 \-_,.'&()!?]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return fitTitle(t, SESSION_TITLE_MAX);
+}
+
+const TITLE_BACKOFF_BASE_MS = 10 * 60_000;
+const TITLE_BACKOFF_MAX_MS = 24 * 60 * 60_000;
+
+/**
+ * Pure: whether the background title job skips its model call because the last renames failed: 10 min after one
+ * failure, ×4 per further failure in a row, at most a day. A successful rename resets the count.
+ */
+export function titleBackoffActive(o: { failures: number; failedAt: Date | null }, now = Date.now()): boolean {
+  if (!o.failures || !o.failedAt) return false;
+  const wait = Math.min(TITLE_BACKOFF_MAX_MS, TITLE_BACKOFF_BASE_MS * 4 ** (o.failures - 1));
+  return now - new Date(o.failedAt).getTime() < wait;
 }
 
 /**
@@ -68,18 +131,18 @@ export function normalizeSessionTitle(raw: string): string {
  * Returns the model-facing result.
  */
 export async function setSessionTitle(o: { threadId: string; turnId: number; title: string }): Promise<string> {
-  const title = normalizeSessionTitle(o.title);
-  if (!title) return 'Not renamed: the title was empty.';
+  const claimedTitle = normalizeSessionTitle(o.title);
+  if (!claimedTitle) return 'Not renamed: the title was empty.';
   const before = await loadSessionInfo(o.threadId);
   if (!before.isDm) return 'Not renamed: session titles are only for DM conversations.';
   if (before.titleBy === 'user') return `Not renamed: the user named this conversation "${before.title ?? ''}" themselves. Keep their title.`;
-  if (before.title === title) return `Title unchanged: "${title}".`;
+  if (before.title === claimedTitle) return `Title unchanged: "${claimedTitle}".`;
   // Claim atomically: a user rename that just landed, or an earlier call in this turn, wins.
   const [prev] = await sql<{ title: string | null; titleBy: string | null; titleTurnId: number | null; botTitleAt: Date | null }[]>`
     select title, title_by, title_turn_id, bot_title_at from agent_sessions where thread_id = ${o.threadId}`;
   const claimed = await sql`
     insert into agent_sessions (thread_id, title, title_by, title_turn_id, bot_title_at)
-    values (${o.threadId}, ${title}, 'bot', ${o.turnId}, now())
+    values (${o.threadId}, ${claimedTitle}, 'bot', ${o.turnId}, now())
     on conflict (thread_id) do update set title = excluded.title, title_by = 'bot', title_turn_id = excluded.title_turn_id,
       bot_title_at = now(), updated_at = now()
     where agent_sessions.title_by is distinct from 'user' and agent_sessions.title_turn_id is distinct from excluded.title_turn_id
@@ -90,18 +153,33 @@ export async function setSessionTitle(o: { threadId: string; turnId: number; tit
     return `Not renamed: you already titled this conversation this turn ("${now.title ?? ''}").`;
   }
   const { channelId, threadTs } = parseThreadId(o.threadId);
+  let title = claimedTitle;
   try {
-    await renameSession(channelId, threadTs, title, `session-title:${o.threadId}:${o.turnId}`);
+    try {
+      await renameSession(channelId, threadTs, title, `session-title:${o.threadId}:${o.turnId}`);
+    } catch (err) {
+      // Slack has no documented character set for titles: retry once with a strict ASCII version.
+      const ascii = asciiSessionTitle(title);
+      if (slackErrorCode(err) !== 'invalid_name' || !ascii || ascii === title) throw err;
+      log.info({ threadId: o.threadId }, 'session title refused (invalid_name); retrying in plain ASCII');
+      await sql`update agent_sessions set title = ${ascii} where thread_id = ${o.threadId} and title_by = 'bot' and title_turn_id = ${o.turnId}`;
+      await renameSession(channelId, threadTs, ascii, `session-title:${o.threadId}:${o.turnId}:ascii`);
+      title = ascii;
+    }
   } catch (err) {
     const code = slackErrorCode(err) ?? 'error';
     log.warn({ err, threadId: o.threadId, code }, 'renaming the agent session failed');
-    // Put the previous state back (only if nothing changed it meanwhile), so a later turn can try again.
+    // Put the previous state back (only if nothing changed it meanwhile), so a later turn can try again, and count
+    // the failure: the title job backs off instead of paying for a model call every turn (titleBackoffActive).
     await sql`
       update agent_sessions set title = ${prev?.title ?? null}, title_by = ${prev?.titleBy ?? null},
         title_turn_id = ${prev?.titleTurnId ?? null}, bot_title_at = ${prev?.botTitleAt ?? null}, updated_at = now()
       where thread_id = ${o.threadId} and title_by = 'bot' and title_turn_id = ${o.turnId}`.catch(() => {});
+    await sql`
+      update agent_sessions set title_failures = title_failures + 1, title_failed_at = now() where thread_id = ${o.threadId}`.catch(() => {});
     return `Not renamed: Slack refused (${code}).`;
   }
+  await sql`update agent_sessions set title_failures = 0, title_failed_at = null where thread_id = ${o.threadId} and title_failures > 0`.catch(() => {});
   await appendEvent(o.threadId, 'session_titled', 'bot', { turnId: o.turnId, title }).catch(() => {});
   // A user rename that arrived between our claim and our rename was overwritten in Slack by ours, while the DB says
   // the user's title wins: put theirs back.

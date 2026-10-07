@@ -170,11 +170,35 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       expect(await s.setSessionTitle({ threadId: t.id, turnId: 3, title: 'Pico power' })).toMatch(/^Conversation titled/);
     });
 
+    it('invalid_name: retried once in plain ASCII; failures are counted for the backoff and reset by a success', async () => {
+      const t = await thread(true);
+      let refuse: (title: string) => boolean = (title) => /[^\x20-\x7e]/.test(title);
+      const remove = fake.addFakeHandler((method, args) => {
+        if (method === 'agents.sessions.rename' && args.channel_id === t.channelId && refuse(String(args.title))) throw fake.fakeSlackError('invalid_name');
+      });
+      try {
+        expect(await s.setSessionTitle({ threadId: t.id, turnId: 1, title: 'Café tips — Zürich' })).toBe('Conversation titled "Cafe tips - Zurich".');
+        expect((await calls(t.channelId, 'agents.sessions.rename')).map((c) => c.args.title)).toEqual(['Café tips — Zürich', 'Cafe tips - Zurich']);
+        expect(await row(t.id)).toMatchObject({ title: 'Cafe tips - Zurich', titleBy: 'bot', titleFailures: 0 });
+        refuse = () => true;
+        expect(await s.setSessionTitle({ threadId: t.id, turnId: 2, title: 'Crêpes' })).toBe('Not renamed: Slack refused (invalid_name).');
+        expect(await s.setSessionTitle({ threadId: t.id, turnId: 3, title: 'Plain' })).toBe('Not renamed: Slack refused (invalid_name).');
+        const r = await row(t.id);
+        expect(r).toMatchObject({ title: 'Cafe tips - Zurich', titleBy: 'bot', titleFailures: 2 });
+        expect(r!.titleFailedAt).toBeInstanceOf(Date);
+        refuse = () => false;
+        expect(await s.setSessionTitle({ threadId: t.id, turnId: 4, title: 'Plain' })).toBe('Conversation titled "Plain".');
+        expect(await row(t.id)).toMatchObject({ title: 'Plain', titleFailures: 0, titleFailedAt: null });
+      } finally {
+        remove();
+      }
+    });
+
     it('normalizes titles: one line, no markup, ≤ 40 chars', () => {
       expect(s.normalizeSessionTitle('  "Pico W\n pinout <@U123> *question*"  ')).toBe('Pico W pinout question');
       const long = s.normalizeSessionTitle('Comparing the three cheapest microcontroller boards for a robot');
       expect(long.length).toBeLessThanOrEqual(40);
-      expect(long).toBe('Comparing the three cheapest…');
+      expect(long).toBe('Comparing the three cheapest'); // word boundary, no "…" (Slack rejects it: invalid_name)
       expect(s.normalizeSessionTitle('<!channel>')).toBe('');
     });
   });
