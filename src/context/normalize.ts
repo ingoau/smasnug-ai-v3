@@ -23,7 +23,13 @@ export function fromSlack(raw: any): RenderMsg | null {
   }
   const files: SlackFileRef[] = (raw.files ?? [])
     .filter((f: any) => f?.id && f.mode !== 'tombstone' && f.mode !== 'hidden_by_limit')
-    .map((f: any) => ({ id: f.id, name: f.name || f.title || undefined, mimetype: f.mimetype || undefined, urlPrivate: f.url_private || undefined }));
+    .map((f: any) => ({
+      id: f.id,
+      name: f.name || f.title || undefined,
+      mimetype: f.mimetype || undefined,
+      urlPrivate: f.url_private || undefined,
+      ...(typeof f.size === 'number' ? { size: f.size } : {}),
+    }));
   return {
     ts: raw.ts,
     userId: raw.user ?? null,
@@ -44,6 +50,7 @@ export function fromStored(m: StoredMessage | (StoredMessage & Record<string, an
     name: f.name ?? f.title,
     mimetype: f.mimetype,
     urlPrivate: f.urlPrivate ?? f.url_private ?? f.urlPrivateDownload,
+    ...(typeof f.size === 'number' ? { size: f.size } : {}),
   }));
   return {
     ts: m.ts,

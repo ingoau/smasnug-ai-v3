@@ -252,10 +252,9 @@ registerTool({
             getUserNames(userIdsIn(msgs)),
             getBotIdentity().catch(() => undefined),
           ]);
-          // No image ids: files from other channels stay plain `[file: …]` placeholders.
+          // No file ids: files from other channels stay plain `[file: …]` placeholders.
           const fenv: FormatEnv = {
             names,
-            imageIds: new Map(),
             self: { ...self, name: env.BOT_DISPLAY_NAME },
             maxChars: limits.readMessageTruncateTokens * 4,
           };

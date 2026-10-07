@@ -9,7 +9,7 @@ export const EXTRAS = {
    */
   defaultReactTs: 'defaultReactTs',
   /**
-   * `QueueUserImage` — OPTIONAL fallback for models that reject images inside tool results. When set, `read_image`
+   * `QueueUserImage` — OPTIONAL fallback for models that reject images inside tool results. When set, `read_file`
    * does not return the image as a tool-result part; it calls this function and returns "image loaded" text. The
    * agent loop must then append the queued images as a user message (image parts) before the next model step,
    * e.g. in `prepareStep`. Leave it UNSET for GPT-6 Luna: images in tool results were verified to work live.
@@ -18,7 +18,7 @@ export const EXTRAS = {
 } as const;
 
 export interface QueuedImage {
-  /** The thread-scoped id the model asked for, e.g. 'img_3'. */
+  /** The file id the model asked for, e.g. 'file_k3x9q2mf7a'. */
   id: string;
   /** Image MIME type after processing: 'image/jpeg' | 'image/png'. */
   mediaType: string;

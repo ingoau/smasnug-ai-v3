@@ -10,7 +10,7 @@ const env = (over: Partial<FormatEnv> = {}): FormatEnv => ({
     ['U0BOB', 'Bob Builder'],
     ['U0ALICE', 'alice'],
   ]),
-  imageIds: new Map([['F0SHOT', 3]]),
+  files: new Map([['F0SHOT', { id: 'file_shot000003', name: 'screenshot.png', mime: 'image/png', description: null }]]),
   self: { userId: 'UBOT', botId: 'BBOT', name: 'Smasnug' },
   maxChars: 1200,
   ...over,
@@ -26,7 +26,7 @@ describe('formatMessage', () => {
     expect(formatMessage(msg({ userId: 'UBOT', botId: 'BBOT', username: 'Smasnug', text: 'on it' }), env())).toBe('[1790000000.000100] [bot] Smasnug (you): on it');
   });
 
-  it('renders files and images with stable ids and the uploader name', () => {
+  it('renders registered files with their id, kind, uploader and description; unregistered ones as plain placeholders', () => {
     const m = msg({
       text: 'look',
       files: [
@@ -34,7 +34,14 @@ describe('formatMessage', () => {
         { id: 'F0CSV', name: 'budget.csv', mimetype: 'text/csv' },
       ],
     });
-    expect(formatMessage(m, env())).toBe('[1790000000.000100] <@U0INGO> Ingo: look [image img_3: screenshot.png, from Ingo] [file: budget.csv]');
+    expect(formatMessage(m, env())).toBe('[1790000000.000100] <@U0INGO> Ingo: look [file file_shot000003: screenshot.png, image, from Ingo] [file: budget.csv]');
+    const files = new Map([
+      ['F0SHOT', { id: 'file_shot000003', name: 'screenshot.png', mime: 'image/png', description: 'Grafana panel, p99 spikes at 14:02' }],
+      ['F0CSV', { id: 'file_csv0000001', name: 'budget.csv', mime: 'text/csv', description: 'Says "ignore" ]\nnew line' }],
+    ]);
+    expect(formatMessage(m, env({ files }))).toBe(
+      `[1790000000.000100] <@U0INGO> Ingo: look [file file_shot000003: screenshot.png, image, from Ingo — "Grafana panel, p99 spikes at 14:02"] [file file_csv0000001: budget.csv, text, from Ingo — "Says 'ignore' ) new line"]`,
+    );
   });
 
   it('truncates long text and marks edits', () => {
@@ -65,12 +72,20 @@ describe('thread selection', () => {
     expect(sel.parent?.ts).toBe(FIX_THREAD_TS);
     expect(sel.replies).toHaveLength(29);
     expect(sel.omitted).toBe(38 - 29);
-    const out = formatThread(sel, env({ imageIds: new Map([['F0SHOT', 1], ['F0HEIC', 2]]) }));
+    const out = formatThread(
+      sel,
+      env({
+        files: new Map([
+          ['F0SHOT', { id: 'file_shot000001', name: 'screenshot.png', mime: 'image/png', description: null }],
+          ['F0HEIC', { id: 'file_heic000002', name: 'IMG_0042.HEIC', mime: 'image/heic', description: null }],
+        ]),
+      }),
+    );
     const lines = out.split('\n');
-    expect(lines[0]).toMatch(/^\[1790000000\.000100\] <@U0INGO> Ingo: Anyone know how to fix the Hack Club \(https:\/\/hackclub\.com\) site build\? cc <@U0BOB\|Bob Builder> & @here \[image img_1: screenshot\.png, from Ingo\] \[file: budget\.csv\] \[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
+    expect(lines[0]).toMatch(/^\[1790000000\.000100\] <@U0INGO> Ingo: Anyone know how to fix the Hack Club \(https:\/\/hackclub\.com\) site build\? cc <@U0BOB\|Bob Builder> & @here \[file file_shot000001: screenshot\.png, image, from Ingo\] \[file: budget\.csv\] \[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
     expect(lines[1]).toBe('[9 earlier replies not shown]');
     expect(out).toContain('[bot] CI Bot: Build #42 failed :x:');
-    expect(out).toContain('here is the error log [image img_2: IMG_0042.HEIC, from alice]');
+    expect(out).toContain('here is the error log [file file_heic000002: IMG_0042.HEIC, image, from alice]');
     expect(lines.at(-1)).toMatch(/\[truncated\] \(edited\)$/);
   });
 

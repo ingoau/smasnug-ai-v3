@@ -166,8 +166,12 @@ export function describeToolStep(toolName: string, input: unknown): string {
       return 'Reading a Slack channel';
     case 'read_channel':
       return 'Reading the channel';
-    case 'read_image':
-      return q('id') ? `Looking at ${q('id')}` : 'Looking at an image';
+    case 'read_file':
+      return q('file_id') ? `Opening ${q('file_id')}` : 'Opening a file';
+    case 'ask_file':
+      return q('file_id') ? `Reading ${q('file_id')}` : 'Reading a file';
+    case 'create_file':
+      return q('name') ? `Writing ${q('name')}` : 'Writing a file';
     default: {
       const first = Object.values(i).find((v) => typeof v === 'string') as string | undefined;
       return first ? `${toolName}: ${oneLine(first, 50)}` : `Using ${toolName}`;

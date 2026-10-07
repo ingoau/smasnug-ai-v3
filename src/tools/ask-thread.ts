@@ -53,8 +53,8 @@ async function loadThread(ctx: ToolContext, permalink: string | undefined): Prom
 /** Render the thread for the answering model: context format, large per-message cut, overall cap. */
 async function renderTranscript(t: LoadedThread): Promise<{ text: string; shown: number; omitted: number }> {
   const [names, self] = await Promise.all([getUserNames(userIdsIn(t.msgs)), getBotIdentity().catch(() => undefined)]);
-  // No image ids: the answering model can't open images; files stay `[file: …]` placeholders.
-  const fenv: FormatEnv = { names, imageIds: new Map(), self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.askThreadMessageTokens * 4 };
+  // No file ids: the answering model can't open files; they stay `[file: …]` placeholders.
+  const fenv: FormatEnv = { names, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.askThreadMessageTokens * 4 };
   const lines = t.msgs.filter((m) => !m.deleted).map((m) => ({ ts: m.ts, line: formatMessage({ ...m, replyCount: undefined }, fenv) }));
   return fitThread(lines, t.rootTs, limits.askThreadMaxTokens * 4);
 }

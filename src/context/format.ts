@@ -1,8 +1,8 @@
 /**
- * Pure formatting of Slack messages for model context. No I/O — callers resolve names / image ids first.
+ * Pure formatting of Slack messages for model context. No I/O — callers resolve names / file ids first.
  *
  * Line format (one message; text may span lines):
- *   [1727950000.123456] <@U123> Ingo: hello <@U456|Bob> [file: budget.csv] [image img_3: screenshot.png, from Ingo]
+ *   [1727950000.123456] <@U123> Ingo: hello <@U456|Bob> [file file_k3x9q2mf7a: screenshot.png, image, from Ingo — "Grafana panel"]
  *   [1727950001.000200] [bot] Gorkie: …
  *   [1727950002.000300] [bot] Smasnug (you): … [reactions: :+1: ×2 (Ingo, Sam), :eyes: (you)]
  *   [1727950003.000400] [bot] Smasnug (you): which board? [buttons: ESP32 | Pico; Ingo pressed "Pico"]
@@ -10,6 +10,7 @@
  * The bracketed number is the message ts (used by react / read_thread before_ts / read_channel before_ts).
  */
 import type { MessageReaction, SlackFileRef } from '../core/types.js';
+import { contextFileLabel, type ContextFile } from '../files/format.js';
 
 export interface RenderMsg {
   ts: string;
@@ -32,8 +33,11 @@ export interface RenderMsg {
 export interface FormatEnv {
   /** userId → display name (authors, mentions). Missing ids render without a name. */
   names: Map<string, string>;
-  /** Slack file id → thread image number (img_N). */
-  imageIds: Map<string, number>;
+  /**
+   * Slack file id → its file-store entry in this thread (src/files/store.ts registerSlackFiles). Files without one
+   * (e.g. other threads' messages) render as a plain `[file: name]`.
+   */
+  files?: Map<string, ContextFile>;
   /** The bot itself, so its own messages are labelled "(you)". */
   self?: { userId?: string; botId?: string; name: string };
   /** Message text longer than this is cut with " [truncated]". */
@@ -99,10 +103,9 @@ export function truncateText(s: string, maxChars: number): string {
 }
 
 export function fileLabel(f: SlackFileRef, from: string, env: FormatEnv): string {
-  const name = f.name || 'file';
-  const n = env.imageIds.get(f.id);
-  if (isImageFile(f) && n !== undefined) return `[image img_${n}: ${name}, from ${from}]`;
-  return `[file: ${name}]`;
+  const registered = env.files?.get(f.id);
+  if (registered) return contextFileLabel(registered, from);
+  return `[file: ${f.name || 'file'}]`;
 }
 
 /** Reactions shown per message, and names shown per reaction. */

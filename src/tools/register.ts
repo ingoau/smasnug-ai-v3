@@ -12,10 +12,10 @@ import './read-history.js';
 import './public-thread.js';
 import './ask-thread.js';
 import './public-channel.js';
-import './read-image.js';
+import '../files/tools.js';
 import './emoji.js';
 import './canvases.js';
-import { pruneImageCache } from './read-image.js';
+import { pruneImageCache } from '../files/images.js';
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
   [QUEUE.threadSummary]: async (job) => {

@@ -16,7 +16,9 @@ import { renderThreadContext } from '../context/thread.js';
 import './index.js';
 import { EXTRAS, type QueuedImage } from './extras.js';
 import { fetchPage, formatPage } from './fetch-url.js';
-import { loadThreadImage, IMAGE_CACHE_DIR } from './read-image.js';
+import { IMAGE_CACHE_DIR, loadImageForModel } from '../files/images.js';
+import { fileStore } from '../files/store.js';
+import { settleDescriptions } from '../files/describe.js';
 import { cleanEmojiName, semojiSearch } from './emoji.js';
 import { buildExaRequest, formatExaResults, webSearchSources, webSearchTool, EXA_SEARCH_URL, type WebSearchOutput } from './web-search.js';
 
@@ -78,6 +80,7 @@ afterAll(async () => {
   server.close();
   await sql`delete from threads where channel_id = ${channel}`;
   await sql`delete from messages where channel_id = ${channel}`;
+  await sql`delete from files where channel_id = ${channel}`;
   await sql.end();
   redis.disconnect();
 });
@@ -87,8 +90,8 @@ describe('registry', () => {
     const front = Object.keys(toolsFor('front', baseCtx())).sort();
     const child = Object.keys(toolsFor('child', baseCtx())).sort();
     const gate = Object.keys(toolsFor('gate', baseCtx()));
-    for (const n of ['ask_thread', 'fetch_url', 'web_search', 'slack_search', 'read_thread', 'read_public_thread', 'read_public_channel', 'read_channel', 'read_image', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
-    expect(child).toEqual(['ask_thread', 'fetch_url', 'read_canvas', 'read_channel', 'read_image', 'read_public_channel', 'read_public_thread', 'read_thread', 'slack_search', 'slack_semantic_search', 'web_search']);
+    for (const n of ['ask_thread', 'fetch_url', 'web_search', 'slack_search', 'read_thread', 'read_public_thread', 'read_public_channel', 'read_channel', 'read_file', 'ask_file', 'create_file', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
+    expect(child).toEqual(['ask_file', 'ask_thread', 'create_file', 'fetch_url', 'read_canvas', 'read_channel', 'read_file', 'read_public_channel', 'read_public_thread', 'read_thread', 'slack_search', 'slack_semantic_search', 'web_search']);
     expect(gate).toEqual([]);
     // A normal client tool (Exa), not a provider/server tool.
     const ws = toolsFor('front', baseCtx()).web_search as any;
@@ -123,7 +126,7 @@ describe('read_thread / read_channel', () => {
     expect(out).toMatch(/\[replies 5–9 of \d+ replies; older: read_thread before_ts=1790000007\.000100; newer: read_thread after_ts=1790000011\.000100\]/);
     const all: string = await exec(toolsFor('front', baseCtx()).read_thread, { before_ts: '1790000004.000100', limit: 10 });
     expect(all).toContain('Anyone know how to fix'); // parent included when the window reaches it
-    expect(all).toContain('[image img_1: screenshot.png, from Ingo]');
+    expect(all).toMatch(/\[file file_[a-z0-9]{10}: screenshot\.png, image, from Ingo\]/);
     expect(all).toContain('start of thread');
     // Forwards from the start: the parent first, then the oldest replies.
     const fwd: string = await exec(toolsFor('front', baseCtx()).read_thread, { after_ts: FIX_THREAD_TS, limit: 3 });
@@ -160,56 +163,60 @@ describe('read_thread / read_channel', () => {
   });
 });
 
-describe('read_image', () => {
+describe('read_file (images)', () => {
   const pngOf = (w: number, h: number) => sharp({ create: { width: w, height: h, channels: 3, background: '#cc3366' } }).png().toBuffer();
+  const metaOf = async (slackFileId: string) => {
+    const [r] = await sql<{ id: string }[]>`select id from files where thread_id = ${threadId} and slack_file_id = ${slackFileId}`;
+    return (await fileStore.metadata(r!.id))!;
+  };
 
-  it('only resolves ids from this thread', async () => {
-    const out = await loadThreadImage(`${channel}:1.000000`, 'img_1', async () => Buffer.alloc(0));
-    expect(out).toMatch(/Unknown image/);
-    expect(await loadThreadImage(threadId, 'img_99', async () => Buffer.alloc(0))).toMatch(/Unknown image/);
+  it("context images are file ids of this thread; other threads can't use them", async () => {
+    const shot = await metaOf('F0SHOT');
+    expect(await exec(toolsFor('child', baseCtx({ threadId: `${channel}:1.000000`, speakerId: 'U0BOB' })).read_file, { file_id: shot.id })).toMatch(/is available here/);
+    expect(await exec(toolsFor('child', baseCtx()).read_file, { file_id: 'file_zzzzzzzzzz' })).toMatch(/is available here/);
   });
 
-  it('resizes, converts HEIC and caches by file id', async () => {
+  it('resizes, converts HEIC and caches by Slack file id', async () => {
     await rm(IMAGE_CACHE_DIR + '/F0SHOT.bin', { force: true });
     await rm(IMAGE_CACHE_DIR + '/F0HEIC.bin', { force: true });
     let downloads = 0;
     const big = await pngOf(3000, 1000);
-    const shot = await loadThreadImage(threadId, 'img_1', async (img) => {
-      downloads++;
-      expect(img.fileId).toBe('F0SHOT');
-      return big;
+    const shotMeta = await metaOf('F0SHOT');
+    const shot = await loadImageForModel(shotMeta, {
+      download: async (m) => {
+        downloads++;
+        expect(m.slackFileId).toBe('F0SHOT');
+        return big;
+      },
     });
-    if (typeof shot === 'string') throw new Error(shot);
     expect([shot.width, shot.height]).toEqual([1500, 500]);
     expect(shot.mediaType).toBe('image/png');
-    const again = await loadThreadImage(threadId, 'img_1', async () => {
-      downloads++;
-      return big;
-    });
+    const again = await loadImageForModel(shotMeta, { download: async () => (downloads++, big) });
     expect(downloads).toBe(1);
-    expect(typeof again !== 'string' && again.data).toBe(shot.data);
+    expect(again.data).toBe(shot.data);
 
     const heic = await readFile(path.join(import.meta.dirname, '__fixtures__/sample.heic'));
-    const h = await loadThreadImage(threadId, 'img_2', async () => heic);
-    if (typeof h === 'string') throw new Error(h);
+    const h = await loadImageForModel(await metaOf('F0HEIC'), { download: async () => heic });
     expect(h.mediaType).toBe('image/jpeg');
     expect([h.width, h.height]).toEqual([320, 200]);
   });
 
   it('tool returns an image part by default, or queues a user image when the fallback is set', async () => {
-    // img_1 is cached by the previous test, so no download happens.
-    const t = toolsFor('child', baseCtx()).read_image as any;
-    const out = await exec(t, { id: 'img_1' });
-    const model = await t.toModelOutput({ toolCallId: 'tc1', input: { id: 'img_1' }, output: out });
+    // F0SHOT is cached by the previous test, so no download happens.
+    const id = (await metaOf('F0SHOT')).id;
+    const t = toolsFor('child', baseCtx()).read_file as any;
+    const out = await exec(t, { file_id: id });
+    const model = await t.toModelOutput({ toolCallId: 'tc1', input: { file_id: id }, output: out });
     expect(model.type).toBe('content');
     expect(model.value[1]).toMatchObject({ type: 'file', mediaType: 'image/png', data: { type: 'data' } });
 
     const queued: QueuedImage[] = [];
-    const t2 = toolsFor('front', baseCtx({ extras: { [EXTRAS.queueUserImage]: (img: QueuedImage) => void queued.push(img) } })).read_image as any;
-    const out2 = await exec(t2, { id: 'img_1' });
-    expect(out2).toMatch(/Image img_1 loaded \(1500×500\)/);
-    expect(queued[0]).toMatchObject({ id: 'img_1', mediaType: 'image/png' });
+    const t2 = toolsFor('front', baseCtx({ extras: { [EXTRAS.queueUserImage]: (img: QueuedImage) => void queued.push(img) } })).read_file as any;
+    const out2 = await exec(t2, { file_id: id });
+    expect(out2).toMatch(/Image loaded \(1500×500\)/);
+    expect(queued[0]).toMatchObject({ id, mediaType: 'image/png' });
     expect((await t2.toModelOutput({ toolCallId: 'x', input: {}, output: out2 })).type).toBe('text');
+    await settleDescriptions();
   });
 
   it('GIF → first frame', async () => {

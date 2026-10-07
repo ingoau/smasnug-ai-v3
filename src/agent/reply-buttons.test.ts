@@ -153,7 +153,7 @@ describe('reply buttons: plan card re-render', () => {
 });
 
 describe('reply buttons: context rendering', () => {
-  const env = { names: new Map([['U1', 'Ingo']]), imageIds: new Map(), self: { userId: 'UBOT', botId: 'BBOT', name: 'Smasnug' }, maxChars: 2000 };
+  const env = { names: new Map([['U1', 'Ingo']]), self: { userId: 'UBOT', botId: 'BBOT', name: 'Smasnug' }, maxChars: 2000 };
   it('shows offered buttons on the bot message and marks the press', () => {
     const base = { userId: 'UBOT', botId: 'BBOT', username: null, files: [] };
     expect(formatMessage({ ...base, ts: '1.2', text: 'which board?', buttons: { labels: ['ESP32', 'Pico'] } }, env)).toBe('[1.2] [bot] Smasnug (you): which board? [buttons: ESP32 | Pico]');

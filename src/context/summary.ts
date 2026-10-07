@@ -80,8 +80,8 @@ async function loadParent(channelId: string, rootTs: string): Promise<RenderMsg 
 
 async function formatEnvFor(msgs: RenderMsg[]): Promise<FormatEnv> {
   const [names, self] = await Promise.all([getUserNames(userIdsIn(msgs)), getBotIdentity().catch(() => undefined)]);
-  // No image ids: images stay `[file: …]` placeholders for the summariser.
-  return { names, imageIds: new Map(), self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.threadSummaryMessageTokens * 4 };
+  // No file ids: files stay `[file: …]` placeholders for the summariser.
+  return { names, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.threadSummaryMessageTokens * 4 };
 }
 
 /**

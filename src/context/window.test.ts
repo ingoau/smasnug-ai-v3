@@ -87,7 +87,7 @@ describe('planHistoryWindow', () => {
 });
 
 describe('omitted note', () => {
-  const env: FormatEnv = { names: new Map(), imageIds: new Map(), maxChars: 1000 };
+  const env: FormatEnv = { names: new Map(), maxChars: 1000 };
   it('says how much of the omitted part the summary covers', () => {
     expect(omittedNote(3)).toBe('[3 earlier replies not shown]');
     expect(omittedNote(3, 3)).toBe('[3 earlier replies not shown; summarised in <thread_summary>]');

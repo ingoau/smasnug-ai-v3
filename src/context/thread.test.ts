@@ -6,7 +6,7 @@ import { addFakeHandler } from '../core/slack-fake.js';
 import { threadIdOf } from '../core/events.js';
 import { slackFixtureHandler, FIX_THREAD_TS } from './fixtures.js';
 import { renderMessages, renderThreadContext } from './thread.js';
-import { assignImageIds, getThreadImage } from './images.js';
+import { registerSlackFiles, resolveFile } from '../files/store.js';
 import { getUserInfo } from './users.js';
 import { closeQueues, queue, QUEUE } from '../core/queues.js';
 import { summaryJobId } from './summary.js';
@@ -19,22 +19,25 @@ afterAll(async () => {
   remove();
   await sql`delete from threads where channel_id = ${channel}`;
   await sql`delete from messages where channel_id = ${channel}`;
+  await sql`delete from files where channel_id = ${channel}`;
   await closeQueues();
   await sql.end();
   redis.disconnect();
 });
 
 describe('renderThreadContext', () => {
-  it('backfills, renders parent + the replies that fit the window, channel context and images', async () => {
+  it('backfills, renders parent + the replies that fit the window, channel context and file ids', async () => {
     const newTs = `${Number(FIX_THREAD_TS.split('.')[0]) + 40}.000100`; // last reply = the turn's new message
     const ctx = await renderThreadContext(threadId, { newMessageTs: [newTs] });
 
-    const [t] = await sql`select backfilled, next_image_n from threads where id = ${threadId}`;
+    const [t] = await sql`select backfilled from threads where id = ${threadId}`;
     expect(t!.backfilled).toBe(true);
 
     const lines = ctx.history.split('\n');
     expect(lines[0]).toContain('<@U0INGO> Ingo: Anyone know how to fix');
-    expect(lines[0]).toContain('[image img_1: screenshot.png, from Ingo]');
+    const shot = /\[file (file_[a-z0-9]{10}): screenshot\.png, image, from Ingo\]/.exec(lines[0]!)?.[1];
+    expect(shot).toBeDefined();
+    expect(lines[0]).toMatch(/\[file file_[a-z0-9]{10}: budget\.csv, text, from Ingo\]/);
     // 38 visible replies - 1 new = 37: all fit (limits.contextReplies = 40), so nothing is omitted, but they're past
     // the compaction point (0.8 × 40), so a background summary update was requested for all but the newest 20.
     expect(lines[1]).toContain('reply number 1');
@@ -44,7 +47,8 @@ describe('renderThreadContext', () => {
     expect(job?.data).toEqual({ threadId, targetTs: `${Number(FIX_THREAD_TS.split('.')[0]) + 19}.000100` });
     await job?.remove();
     expect(ctx.history).toContain('[bot] CI Bot: Build #42 failed');
-    expect(ctx.history).toContain('[image img_2: IMG_0042.HEIC, from alice]');
+    const heic = /\[file (file_[a-z0-9]{10}): IMG_0042\.HEIC, image, from alice\]/.exec(ctx.history)?.[1];
+    expect(heic).toBeDefined();
     expect(ctx.history).not.toContain('deleted');
     expect(ctx.history).not.toContain('has joined');
     expect(ctx.history).not.toContain(newTs);
@@ -56,8 +60,8 @@ describe('renderThreadContext', () => {
 
     // Second render: no new backfill, same ids.
     const again = await renderThreadContext(threadId, { newMessageTs: [] });
-    expect(again.history).toContain('[image img_1: screenshot.png');
-    expect(again.history).toContain('[image img_2: IMG_0042.HEIC');
+    expect(again.history).toContain(`[file ${shot}: screenshot.png`);
+    expect(again.history).toContain(`[file ${heic}: IMG_0042.HEIC`);
     expect(again.history).not.toContain('not shown');
     expect(again.history.split('\n')).toHaveLength(1 + 38);
 
@@ -97,23 +101,32 @@ describe('renderThreadContext', () => {
   it('renderMessages renders inbox messages in the same format', async () => {
     const ts = `${Number(FIX_THREAD_TS.split('.')[0]) + 39}.000100`;
     const out = await renderMessages(threadId, [ts]);
-    expect(out).toBe(`[${ts}] <@U0ALICE> alice: here is the error log [image img_2: IMG_0042.HEIC, from alice]`);
+    const [heic] = await sql<{ id: string }[]>`select id from files where thread_id = ${threadId} and slack_file_id = 'F0HEIC'`;
+    expect(out).toBe(`[${ts}] <@U0ALICE> alice: here is the error log [file ${heic!.id}: IMG_0042.HEIC, image, from alice]`);
   });
 
-  it('image ids are stable, scoped per thread and race-safe', async () => {
-    const img = await getThreadImage(threadId, 'img_2');
-    expect(img?.fileId).toBe('F0HEIC');
-    expect(img?.urlPrivate).toContain('files.slack.com');
-    expect(await getThreadImage(`${channel}:1.000000`, 'img_2')).toBeNull();
+  it('uploads are registered with metadata only, stable, scoped per thread and race-safe', async () => {
+    const [heic] = await sql<any[]>`select * from files where thread_id = ${threadId} and slack_file_id = 'F0HEIC'`;
+    expect(heic).toMatchObject({ origin: 'upload', ownerId: 'U0ALICE', channelId: channel, name: 'IMG_0042.HEIC', content: null, description: null });
+    expect(heic.slackUrl).toContain('files.slack.com');
+    // Another thread: its own registration (and id); this thread's id isn't usable there by a non-owner.
+    const other = `${channel}:1.000000`;
+    const there = await registerSlackFiles(other, [{ ts: '1.000000', userId: 'U0ALICE', botId: null, username: null, text: '', files: [{ id: 'F0HEIC', name: 'IMG_0042.HEIC', mimetype: 'image/heic' }] }]);
+    expect(there.get('F0HEIC')?.id).not.toBe(heic.id);
+    expect(await resolveFile(heic.id, { threadId: other, speakerId: 'U0BOB' })).toHaveProperty('error');
+    expect(await resolveFile(heic.id, { threadId: other, speakerId: 'U0ALICE' })).toMatchObject({ id: heic.id });
+    expect(await resolveFile(heic.id, { threadId, speakerId: 'U0BOB' })).toMatchObject({ id: heic.id });
 
-    const files = Array.from({ length: 10 }, (_, i) => ({ id: `FRACE${i}`, name: `p${i}.png`, mimetype: 'image/png' }));
+    const files = Array.from({ length: 10 }, (_, i) => ({ id: `FRACE${i}`, name: `p${i}.png`, mimetype: 'image/png', size: 100 + i }));
     const msgs = files.map((f, i) => ({ ts: `1790000500.00000${i}`, userId: 'U0BOB', botId: null, username: null, text: '', files: [f] }));
-    const results = await Promise.all([assignImageIds(threadId, msgs), assignImageIds(threadId, [...msgs].reverse()), assignImageIds(threadId, msgs.slice(3))]);
-    const ns = files.map((f) => results[0].get(f.id));
-    expect(new Set(ns).size).toBe(10);
-    for (const r of results) for (const [k, v] of r) expect(results[0].get(k)).toBe(v);
-    const [t] = await sql`select next_image_n from threads where id = ${threadId}`;
-    expect(t!.nextImageN).toBe(13);
+    const results = await Promise.all([registerSlackFiles(threadId, msgs), registerSlackFiles(threadId, [...msgs].reverse()), registerSlackFiles(threadId, msgs.slice(3))]);
+    const ids = files.map((f) => results[0].get(f.id)?.id);
+    expect(new Set(ids).size).toBe(10);
+    for (const r of results) for (const [k, v] of r) expect(results[0].get(k)?.id).toBe(v.id);
+    const [n] = await sql<{ n: number }[]>`select count(*)::int as n from files where thread_id = ${threadId} and slack_file_id like 'FRACE%'`;
+    expect(n!.n).toBe(10);
+    const [size] = await sql<{ size: string }[]>`select size from files where thread_id = ${threadId} and slack_file_id = 'FRACE3'`;
+    expect(Number(size!.size)).toBe(103);
   });
 
   it('getUserInfo returns name, tz and avatar (cached)', async () => {

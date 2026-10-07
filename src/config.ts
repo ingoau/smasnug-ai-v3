@@ -107,6 +107,20 @@ export const limits = {
   askThreadMaxTokens: 80_000,
   /** ask_thread: the answering model call's timeout. */
   askThreadTimeoutMs: 90_000,
+  // file store (src/files/)
+  /** Largest file stored (created files, and uploads' content; bigger uploads: images are still viewable, others not). */
+  fileMaxBytes: 5 * 1024 * 1024,
+  /** read_file: text page size (chars). */
+  fileReadPageChars: 24_000,
+  /** ask_file: the file text given to the answering model at most (≈tokens; the head, with a note). */
+  askFileMaxTokens: 60_000,
+  askFileTimeoutMs: 90_000,
+  /** ask_file calls per front turn / subagent run (batches: one call per screenshot, in parallel). */
+  askFileMaxCallsPerTurn: 12,
+  /** create_file calls per front turn / subagent run. */
+  createFileMaxPerTurn: 20,
+  /** Files the bot made are deleted this long after creation (uploads follow message retention). */
+  createdFileRetentionMs: 30 * 24 * 60 * 60 * 1000,
   disengageAfterMessages: 25,
   /** Full disengagement after this long without being addressed and without a bot reply. */
   disengageAfterMs: 7 * 24 * 60 * 60 * 1000,

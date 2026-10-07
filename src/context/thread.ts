@@ -1,7 +1,7 @@
 // OWNER: tools/context module.
 /**
  * Thread context for front-agent turns. Format (see format.ts): one message per line, prefixed with its ts:
- *   [1727950000.123456] <@U123> Ingo: text [file: budget.csv] [image img_3: screenshot.png, from Ingo]
+ *   [1727950000.123456] <@U123> Ingo: text [file file_k3x9q2mf7a: screenshot.png, image, from Ingo — "Grafana panel"]
  *   [42 earlier replies not shown]
  *   [1727950100.000200] [bot] Smasnug (you): …
  * Tell the model in the system prompt that the bracketed number is the message ts (for react / read_thread).
@@ -18,7 +18,7 @@ import { estimateRenderedChars } from '../tools/paging.js';
 import { loadThreadSummary, requestThreadSummary } from './summary.js';
 import { planHistoryWindow, type HistoryWindow } from './window.js';
 import { wantsChannelBackground } from './channel-background.js';
-import { assignImageIds } from './images.js';
+import { registerSlackFiles } from '../files/store.js';
 import { fetchHistoryAfter, fetchHistoryBefore, fetchReplies, fromStored, storeMessages } from './slack-messages.js';
 import { getUserNames } from './users.js';
 
@@ -139,19 +139,19 @@ async function loadChannelContext(thread: ThreadRow): Promise<RenderMsg[]> {
   return [...before, ...after];
 }
 
-/** Build the FormatEnv for a set of messages: user names, image ids (assigned now), bot identity. */
+/** Build the FormatEnv for a set of messages: user names, file ids (registered now), bot identity. */
 export async function formatEnvFor(threadId: string, msgs: RenderMsg[], maxChars = HISTORY_CHARS): Promise<FormatEnv> {
-  const [names, imageIds, self] = await Promise.all([
+  const [names, files, self] = await Promise.all([
     getUserNames(userIdsIn(msgs)),
-    assignImageIds(threadId, msgs),
+    registerSlackFiles(threadId, msgs),
     getBotIdentity().catch(() => undefined),
   ]);
-  return { names, imageIds, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars };
+  return { names, files, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars };
 }
 
 /**
  * Render a thread for a front-agent turn. Backfills from conversations.replies on first use of a thread
- * (threads.backfilled), and assigns stable `img_N` ids to images (thread_images).
+ * (threads.backfilled), and registers the shown messages' Slack files in the file store (stable `file_…` ids).
  */
 export async function renderThreadContext(threadId: string, opts: { newMessageTs: string[]; timing?: TurnTiming }): Promise<RenderedThreadContext> {
   const span = <T,>(name: string, fn: () => Promise<T>) => (opts.timing ? opts.timing.span(name, fn) : fn());
@@ -228,7 +228,7 @@ export async function renderMessages(threadId: string, ts: string[]): Promise<st
   return formatMessages(msgs, fenv);
 }
 
-/** Render raw Slack API messages (read_thread / read_channel) in the context format; registers their images. */
+/** Render raw Slack API messages (read_thread / read_channel) in the context format; registers their files. */
 export async function renderRawMessages(threadId: string, msgs: RenderMsg[]): Promise<string> {
   await ensureThread(threadId);
   const fenv = await formatEnvFor(threadId, msgs, READ_CHARS);

@@ -1,7 +1,8 @@
 /**
  * Daily retention. Keep only what's needed: thread data, runs, subagent histories and usage go after ~30 days;
  * short-lived coordination rows after ~2 days. Per-user memory is the exception (expires by last_used).
- * sent_messages / reports are kept so reports keep their original sender. Bot reports (report_user) go 30 days
+ * sent_messages / reports are kept so reports keep their original sender. Files the bot made go 30 days after
+ * creation, uploads with the messages they came on. Bot reports (report_user) go 30 days
  * after review; pending ones are kept until reviewed.
  */
 import { readdir, stat, unlink, rmdir } from 'node:fs/promises';
@@ -62,6 +63,16 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
   );
   // Copies of messages deleted in Slack: drop the content right away.
   await run('messages_deleted_content', sql`update messages set text = '', files = '[]' where deleted and (text <> '' or files <> '[]') returning ts`);
+  // File store (src/files/): files the bot made go 30 days after creation; uploads go with message retention, and
+  // right away when their Slack message was deleted (normally done at deletion time; this catches stragglers).
+  await run('files_created', sql`delete from files where origin = 'created' and created_at < ${older(secs(limits.createdFileRetentionMs))} returning id`);
+  await run('files_uploads', sql`delete from files where origin = 'upload' and created_at < ${older(long)} returning id`);
+  await run(
+    'files_uploads_deleted',
+    sql`delete from files f where f.origin = 'upload' and f.message_ts is not null and exists (
+          select 1 from messages m where m.channel_id = f.channel_id and m.ts = f.message_ts and m.deleted)
+        returning f.id`,
+  );
   await run('usage', sql`delete from usage where created_at < ${older(long)} returning id`);
   await run(
     'bot_reports',

@@ -47,4 +47,6 @@ export interface SlackFileRef {
   name?: string;
   mimetype?: string;
   urlPrivate?: string;
+  /** Bytes, as Slack reports it (file store metadata before the content is fetched). */
+  size?: number;
 }

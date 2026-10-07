@@ -162,8 +162,8 @@ registerTool({
             getUserNames(userIdsIn([...(parent ? [parent] : []), ...slice])),
             getBotIdentity().catch(() => undefined),
           ]);
-          // No image ids: files from other threads stay plain `[file: …]` placeholders (read_image is per-thread).
-          const fenv: FormatEnv = { names, imageIds: new Map(), self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.readMessageTruncateTokens * 4 };
+          // No file ids: files from other threads stay plain `[file: …]` placeholders (the file store is thread-scoped).
+          const fenv: FormatEnv = { names, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.readMessageTruncateTokens * 4 };
           const mark = (m: RenderMsg) => formatMessage({ ...m, replyCount: undefined }, fenv) + (linkedTs && m.ts === linkedTs && m.ts !== rootTs ? '  ← linked message' : '');
           const lines = [`Thread in ${chLabel}, root ${rootTs}, ${total} ${total === 1 ? 'reply' : 'replies'}.`];
           // So a specific message can be cited (the ts in brackets, without the dot).

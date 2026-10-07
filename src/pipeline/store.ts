@@ -1,6 +1,8 @@
 /** Stored copies of Slack messages and thread rows. */
 import { sql, type Sql } from '../db/index.js';
 import type { SlackFileRef, StoredMessage } from '../core/types.js';
+import { removeMessageFiles } from '../files/store.js';
+import { log } from '../log.js';
 
 export interface ThreadRow {
   id: string;
@@ -28,7 +30,7 @@ export interface SlackMessage {
   bot_profile?: { name?: string };
   subtype?: string;
   text?: string;
-  files?: { id: string; name?: string; mimetype?: string; url_private?: string }[];
+  files?: { id: string; name?: string; mimetype?: string; url_private?: string; size?: number; mode?: string }[];
   edited?: { ts: string; user?: string };
 }
 
@@ -37,9 +39,10 @@ export function isBotMessage(m: SlackMessage): boolean {
 }
 
 export function fileRefs(m: SlackMessage): SlackFileRef[] {
+  // Tombstones: a file deleted from the message (Slack keeps a placeholder).
   return (m.files ?? [])
-    .filter((f) => f && f.id)
-    .map((f) => ({ id: f.id, name: f.name, mimetype: f.mimetype, urlPrivate: f.url_private }));
+    .filter((f) => f && f.id && f.mode !== 'tombstone' && f.mode !== 'hidden_by_limit')
+    .map((f) => ({ id: f.id, name: f.name, mimetype: f.mimetype, urlPrivate: f.url_private, ...(typeof f.size === 'number' ? { size: f.size } : {}) }));
 }
 
 const slackTsDate = (ts: string) => new Date(Math.round(Number(ts) * 1000));
@@ -100,24 +103,35 @@ export async function insertTombstone(channelId: string, ts: string, threadId: s
 export async function applyEdit(channelId: string, m: SlackMessage): Promise<{ threadId: string | null; userId: string | null; changed: boolean } | undefined> {
   const files = fileRefs(m);
   const text = m.text ?? '';
+  // The files it had: uploads removed from the message leave the file store too.
+  const [before] = await sql<{ files: SlackFileRef[] }[]>`select files from messages where channel_id = ${channelId} and ts = ${m.ts} and not deleted`;
   const [row] = await sql<{ threadId: string | null; userId: string | null }[]>`
     update messages set text = ${text}, files = ${sql.json(files as any)},
       edited_at = ${m.edited ? slackTsDate(m.edited.ts) : sql`edited_at`}
     where channel_id = ${channelId} and ts = ${m.ts} and not deleted
       and (text is distinct from ${text} or files is distinct from ${sql.json(files as any)}::jsonb)
     returning thread_id, user_id`;
-  if (row) return { ...row, changed: true };
+  if (row) {
+    const kept = new Set(files.map((f) => f.id));
+    const removed = (Array.isArray(before?.files) ? before.files : []).map((f) => f?.id).filter((id): id is string => !!id && !kept.has(id));
+    if (removed.length) await removeMessageFiles(channelId, m.ts, removed).catch((err) => log.warn({ err }, 'removing edited-out files failed'));
+    return { ...row, changed: true };
+  }
   const [same] = await sql<{ threadId: string | null; userId: string | null }[]>`
     select thread_id, user_id from messages where channel_id = ${channelId} and ts = ${m.ts} and not deleted`;
   return same ? { ...same, changed: false } : undefined;
 }
 
-/** Retention: a deleted Slack message clears our stored copy. */
+/** Retention: a deleted Slack message clears our stored copy, and its uploads leave the file store. */
 export async function applyDelete(channelId: string, ts: string): Promise<{ threadId: string | null; userId: string | null } | undefined> {
+  const [before] = await sql<{ files: SlackFileRef[] }[]>`select files from messages where channel_id = ${channelId} and ts = ${ts}`;
   const [row] = await sql<{ threadId: string | null; userId: string | null }[]>`
     update messages set text = '', files = '[]'::jsonb, deleted = true
     where channel_id = ${channelId} and ts = ${ts}
     returning thread_id, user_id`;
+  const slackIds = (Array.isArray(before?.files) ? before.files : []).map((f) => f?.id).filter((id): id is string => !!id);
+  await removeMessageFiles(channelId, ts).catch((err) => log.warn({ err }, 'removing deleted message files failed'));
+  if (slackIds.length) await removeMessageFiles(channelId, ts, slackIds).catch((err) => log.warn({ err }, 'removing deleted message posts failed'));
   return row;
 }
 
