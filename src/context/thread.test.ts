@@ -132,10 +132,12 @@ describe('renderThreadContext', () => {
     expect(Number(size!.size)).toBe(103);
   });
 
-  it('getUserInfo returns name, tz and avatar (cached)', async () => {
+  it('getUserInfo returns name and tz (written through to the directory, no avatar stored)', async () => {
     const u = await getUserInfo('U0BOB');
-    expect(u).toMatchObject({ name: 'Bob Builder', tz: 'America/New_York', image: 'https://avatars.slack-edge.com/bob_192.png', isBot: false });
-    expect(await redis.get('slack:user:v3:U0BOB')).toContain('Bob Builder');
+    expect(u).toMatchObject({ name: 'Bob Builder', tz: 'America/New_York', isBot: false });
+    const [row] = await sql<{ realName: string; tz: string }[]>`select real_name, tz from directory_people where id = 'U0BOB'`;
+    expect(row).toEqual({ realName: 'Bob Builder', tz: 'America/New_York' });
+    expect(await redis.keys('slack:user:*')).toEqual([]);
   });
 });
 

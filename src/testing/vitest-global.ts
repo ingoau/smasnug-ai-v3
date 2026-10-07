@@ -40,6 +40,8 @@ export default async function setup(): Promise<void> {
     const { sql } = await import('../db/index.js');
     try {
       await migrate();
+      // The directory is the profile store (users.info results live there now): fresh per run, like the test Redis.
+      await sql`truncate directory_people, directory_channels, directory_crawls`;
     } finally {
       await sql.end({ timeout: 2 }).catch(() => {});
     }

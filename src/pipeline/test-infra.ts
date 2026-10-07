@@ -61,6 +61,6 @@ export async function setupTestInfra(opts: { name?: string; redisDb?: number; re
 export async function resetTestState() {
   const { sql } = await import('../db/index.js');
   const { redis } = await import('../core/redis.js');
-  await sql`truncate threads, messages, slack_events_seen, idempotency_keys, usage cascade`;
+  await sql`truncate threads, messages, slack_events_seen, idempotency_keys, usage, directory_people, directory_channels, directory_crawls cascade`;
   await redis.flushdb();
 }

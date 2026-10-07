@@ -35,6 +35,7 @@ import {
   type PendingSendRow,
   type SendOutcome,
 } from './logic.js';
+import { rememberSlackUser } from '../../tools/directory/store.js';
 import { resumeSuspendedSession } from '../../pipeline/agent-session.js';
 
 export const SEND_TEXT_MAX = 6000;
@@ -99,6 +100,7 @@ async function prepareSend(ctx: ToolContext, destination: string, rawText: strin
   let label: string;
   if (dest.kind === 'user') {
     const u = await slackCall<any>('users.info', { user: dest.id }).catch(() => undefined);
+    if (u?.user) await rememberSlackUser(u.user); // directory write-through
     if (!u?.user || u.user.deleted) return `There's no active user ${dest.id}.`;
     destId = dest.id;
     label = `a DM to <@${dest.id}>`;

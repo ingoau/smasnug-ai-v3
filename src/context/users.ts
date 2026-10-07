@@ -1,10 +1,16 @@
 /**
- * Slack user lookups (users.info, needs only users:read), cached in Redis for ~1 day. Shared helper: other modules
- * need tz and avatar; the front agent's turn message shows profile details (pronouns, title, status, admin/owner).
+ * Slack user lookups. The workspace directory (src/tools/directory/, `directory_people`) is the one profile store:
+ * a lookup reads it and calls users.info (users:read) only when the person is missing or the row hasn't been
+ * refreshed for `limits.directoryProfileMaxAgeMs` (24 h; crawls, events and lookups refresh it), then writes the
+ * result through. Shared helper: other modules need tz; the front agent's turn message shows profile details
+ * (pronouns, title, status, admin/owner).
  */
+import { limits } from '../config.js';
 import { redis } from '../core/redis.js';
 import { SlackBusyError, slackCall, type SlackCallOpts } from '../core/slack.js';
 import { log } from '../log.js';
+import type { DirectoryPerson } from '../tools/directory/fields.js';
+import { getPeople, rememberSlackUser, type PersonRow } from '../tools/directory/store.js';
 
 export interface UserInfo {
   id: string;
@@ -17,7 +23,7 @@ export interface UserInfo {
   tz?: string;
   /** Offset from UTC in seconds. */
   tzOffset?: number;
-  /** Avatar URL (192px). */
+  /** Avatar URL (192px). Only on a fresh users.info answer: the directory doesn't store avatars. */
   image?: string;
   isBot: boolean;
   /** An app's user account (users.info `is_app_user`). */
@@ -38,10 +44,9 @@ export interface UserInfo {
   locale?: string;
 }
 
-const TTL_S = 24 * 60 * 60;
+/** A failed lookup (e.g. user_not_found) isn't retried for this long. */
 const NEG_TTL_S = 10 * 60;
-/** v3: entries carry the locale too; v2 entries (profile details, no locale) simply age out. */
-const key = (id: string) => `slack:user:v3:${id}`;
+const missKey = (id: string) => `directory:miss:${id}`;
 
 export function userInfoFromSlack(u: any): UserInfo {
   const p = u?.profile ?? {};
@@ -67,38 +72,94 @@ export function userInfoFromSlack(u: any): UserInfo {
   };
 }
 
+/** A directory row as UserInfo (same field semantics as userInfoFromSlack; no avatar). */
+export function userInfoFromPerson(p: DirectoryPerson): UserInfo {
+  return {
+    id: p.id,
+    name: p.displayName || p.realName || p.handle || p.id,
+    realName: p.realName || undefined,
+    handle: p.handle || undefined,
+    tz: p.tz || undefined,
+    tzOffset: typeof p.tzOffset === 'number' ? p.tzOffset : undefined,
+    isBot: p.isBot,
+    isAppUser: p.isAppUser ? true : undefined,
+    deleted: p.deleted,
+    pronouns: p.pronouns || undefined,
+    title: p.title || undefined,
+    statusText: p.statusText || undefined,
+    statusEmoji: p.statusEmoji || undefined,
+    statusExpiration: p.statusExpiration && p.statusExpiration > 0 ? p.statusExpiration : undefined,
+    isAdmin: p.isAdmin ? true : undefined,
+    isOwner: p.isOwner || p.isPrimaryOwner ? true : undefined,
+    locale: p.locale || undefined,
+  };
+}
+
+/** Fresh enough to answer without users.info. */
+export function isFreshProfile(row: Pick<PersonRow, 'syncedAt'>, now = Date.now(), maxAgeMs: number = limits.directoryProfileMaxAgeMs): boolean {
+  return now - new Date(row.syncedAt).getTime() < maxAgeMs;
+}
+
 /** Rate-limit options for the lookup (SlackCallOpts subset): a tool inside a subagent step passes a wait cap. */
 export type UserLookupOpts = Pick<SlackCallOpts, 'maxWaitMs' | 'priority' | 'onWait'>;
 
-/**
- * users.info with a Redis cache. Returns null if the user can't be looked up (cached briefly). With `maxWaitMs`, a
- * lookup the shared rate limiter would hold longer returns null without caching (names are a nicety).
- */
-export async function getUserInfo(userId: string, opts: UserLookupOpts = {}): Promise<UserInfo | null> {
-  const cached = await redis.get(key(userId));
-  if (cached) return cached === 'null' ? null : (JSON.parse(cached) as UserInfo);
+async function directoryRows(ids: string[]): Promise<Map<string, PersonRow>> {
   try {
-    const res = await slackCall<any>('users.info', { user: userId, include_locale: true }, opts);
-    const info = userInfoFromSlack(res.user);
-    await redis.set(key(userId), JSON.stringify(info), 'EX', TTL_S);
-    return info;
+    return await getPeople(ids);
   } catch (err) {
-    if (err instanceof SlackBusyError) {
-      log.info({ userId, waitMs: err.waitMs }, 'users.info skipped: rate limited');
-      return null;
-    }
-    log.warn({ err, userId }, 'users.info failed');
-    await redis.set(key(userId), 'null', 'EX', NEG_TTL_S);
-    return null;
+    log.warn({ err }, 'directory read failed; falling back to users.info');
+    return new Map();
   }
 }
 
-/** Names for many users at once (parallel, cached). */
+/** users.info for a missing / stale row, written through. A stale row is still better than nothing on failure. */
+async function fetchUserInfo(userId: string, stale: PersonRow | undefined, opts: UserLookupOpts): Promise<UserInfo | null> {
+  if (!stale && (await redis.get(missKey(userId)).catch(() => null))) return null;
+  try {
+    const res = await slackCall<any>('users.info', { user: userId, include_locale: true }, opts);
+    await rememberSlackUser(res.user);
+    return userInfoFromSlack({ ...res.user, id: res.user?.id ?? userId });
+  } catch (err) {
+    if (err instanceof SlackBusyError) {
+      log.info({ userId, waitMs: err.waitMs }, 'users.info skipped: rate limited');
+    } else {
+      log.warn({ err, userId }, 'users.info failed');
+      if (!stale) await redis.set(missKey(userId), '1', 'EX', NEG_TTL_S).catch(() => {});
+    }
+    return stale ? userInfoFromPerson(stale) : null;
+  }
+}
+
+/**
+ * A user's profile: from the directory when present and fresh, else users.info (written through). Returns null if
+ * the user can't be looked up (failures aren't retried for a few minutes). With `maxWaitMs`, a lookup the shared rate
+ * limiter would hold longer returns the stale row or null (names are a nicety).
+ */
+export async function getUserInfo(userId: string, opts: UserLookupOpts = {}): Promise<UserInfo | null> {
+  const row = (await directoryRows([userId])).get(userId);
+  if (row && isFreshProfile(row)) return userInfoFromPerson(row);
+  return fetchUserInfo(userId, row, opts);
+}
+
+/** Profiles for many users: one directory query, users.info (in parallel) only for the missing / stale ones. */
+export async function getUserInfos(ids: string[], opts: UserLookupOpts = {}): Promise<Map<string, UserInfo>> {
+  const out = new Map<string, UserInfo>();
+  const uniq = [...new Set(ids)].filter(Boolean);
+  if (!uniq.length) return out;
+  const rows = await directoryRows(uniq);
+  await Promise.all(
+    uniq.map(async (id) => {
+      const row = rows.get(id);
+      const info = row && isFreshProfile(row) ? userInfoFromPerson(row) : await fetchUserInfo(id, row, opts);
+      if (info) out.set(id, info);
+    }),
+  );
+  return out;
+}
+
+/** Names for many users at once (see getUserInfos). */
 export async function getUserNames(ids: string[], opts: UserLookupOpts = {}): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  const infos = await Promise.all(ids.map((id) => getUserInfo(id, opts)));
-  infos.forEach((info, i) => {
-    if (info) out.set(ids[i]!, info.name);
-  });
+  for (const [id, info] of await getUserInfos(ids, opts)) out.set(id, info.name);
   return out;
 }

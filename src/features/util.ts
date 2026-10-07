@@ -5,6 +5,7 @@ import { parseThreadId } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { fakeCall } from '../core/slack-fake.js';
 import { log } from '../log.js';
+import { rememberSlackUser } from '../tools/directory/store.js';
 
 export function isAdmin(userId: string | undefined): boolean {
   return !!userId && !!env.ADMIN_USER_ID && userId === env.ADMIN_USER_ID;
@@ -110,6 +111,7 @@ export async function userProfile(userId: string): Promise<UserProfile> {
   if (hit && Date.now() - hit.at < PROFILE_TTL_MS) return hit.profile;
   try {
     const res = await slackCall<any>('users.info', { user: userId });
+    await rememberSlackUser(res.user); // the directory is the one profile store (write-through)
     const u = res.user ?? {};
     const p = u.profile ?? {};
     const profile: UserProfile = {
