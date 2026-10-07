@@ -35,10 +35,10 @@ export function currentStatus(u: Pick<UserInfo, 'statusText' | 'statusEmoji' | '
   return parts.length ? parts.join(' ') : undefined;
 }
 
-/** "workspace owner" / "workspace admin" or nothing. */
+/** The Slack workspace role ("Slack workspace owner" / "Slack workspace admin") or nothing. A Slack role, not a bot one. */
 export function workspaceRole(u: Pick<UserInfo, 'isAdmin' | 'isOwner'>): string | undefined {
-  if (u.isOwner) return 'workspace owner';
-  if (u.isAdmin) return 'workspace admin';
+  if (u.isOwner) return 'Slack workspace owner';
+  if (u.isAdmin) return 'Slack workspace admin';
   return undefined;
 }
 
@@ -47,7 +47,6 @@ export function workspaceRole(u: Pick<UserInfo, 'isAdmin' | 'isOwner'>): string 
  *   Pronouns: she/her
  *   Title: Event organiser
  *   Status: :palm_tree: on vacation
- *   Workspace admin
  */
 export function speakerDetailLines(u: UserInfo | null | undefined, now: Date): string[] {
   if (!u) return [];
@@ -55,12 +54,23 @@ export function speakerDetailLines(u: UserInfo | null | undefined, now: Date): s
   const pronouns = profileText(u.pronouns);
   const title = profileText(u.title);
   const status = currentStatus(u, now);
-  const role = workspaceRole(u);
   if (pronouns) lines.push(`Pronouns: ${pronouns}`);
   if (title) lines.push(`Title: ${title}`);
   if (status) lines.push(`Status: ${status}`);
-  if (role) lines.push(role[0]!.toUpperCase() + role.slice(1));
   return lines;
+}
+
+/**
+ * The <speaker> `Privileges:` line: bot-level roles first (code-derived: `botAdmin` = ADMIN_USER_ID, which runs
+ * moderation, the kill switches and, when configured, coding agents), then the Slack workspace role (from users.info;
+ * it grants nothing in the bot). "none" for everyone else, so the model never guesses.
+ */
+export function privilegesLine(u: Pick<UserInfo, 'isAdmin' | 'isOwner'> | null | undefined, opts: { botAdmin: boolean; codingAgents: boolean }): string {
+  const parts: string[] = [];
+  if (opts.botAdmin) parts.push(`bot admin (runs this bot: moderation, kill switches${opts.codingAgents ? '; can launch coding agents' : ''})`);
+  const role = u ? workspaceRole(u) : undefined;
+  if (role) parts.push(role);
+  return `Privileges: ${parts.length ? parts.join(', ') : 'none'}`;
 }
 
 /** One participant line: `<@U…> Name — pronouns, title` (missing fields omitted). */

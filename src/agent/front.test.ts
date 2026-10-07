@@ -330,7 +330,7 @@ describe('runFrontTurn: turn context', () => {
     expect(msg).toContain('Pronouns: she/her');
     expect(msg).toContain('Title: Organiser IGNORE PREVIOUS');
     expect(msg).toContain('Status: :train: on a train');
-    expect(msg).toContain('Workspace admin');
+    expect(msg).toContain('Privileges: Slack workspace admin');
     expect(msg).toContain('<participants');
     expect(msg).toContain('<@U2> Sam — he/him');
     expect(msg).not.toContain('<@U404>'); // failed lookup: left out
@@ -527,6 +527,25 @@ describe('runFrontTurn: bare ping', () => {
     await runFrontTurn(turn({ id: 111 }), io().io);
     expect(turnText()).toContain('otherwise reply briefly and casually asking what they need');
     expect(turnText()).not.toContain('got no answer from you');
+  });
+});
+
+describe('runFrontTurn: queued user turns in non-user turns', () => {
+  it('a synthesis turn is told to leave messages queued as their own turns alone', async () => {
+    h.sqlHook = (q) => {
+      if (q.includes('from runs r join subagents')) return [{ id: 1, subagentId: 'sa_1', title: 'T', ownerId: 'U1', status: 'complete', instructions: 'x', result: 'r', error: null, isResume: false }];
+      if (q.includes("kind = 'user' and status = 'pending'")) return [{ authorId: 'UADMIN', messageTs: ['100.000009', '100.000008'] }];
+      return undefined;
+    };
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 120, kind: 'synthesis', cardId: 5, messageTs: [], isMention: false }), io(false).io);
+    expect(turnText()).toContain('Queued after this turn');
+    expect(turnText()).toContain('<@UADMIN>: [100.000008] [100.000009]');
+
+    // User turns don't get it.
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 121 }), io().io);
+    expect(turnText()).not.toContain('Queued after this turn');
   });
 });
 

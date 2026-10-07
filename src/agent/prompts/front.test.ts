@@ -34,3 +34,12 @@ describe('frontSystemPrompt About you', () => {
     expect(p).toMatch(/Behaviour changes are shipped by the maintainer/);
   });
 });
+
+describe('CODING_AGENTS_PROMPT', () => {
+  it('says plainly that the current speaker is the bot admin and may launch coding agents', async () => {
+    const { CODING_AGENTS_PROMPT } = await import('./front.js');
+    expect(CODING_AGENTS_PROMPT).toMatch(/current speaker IS the bot admin/);
+    expect(CODING_AGENTS_PROMPT).toMatch(/may launch coding agents/);
+    expect(CODING_AGENTS_PROMPT).toMatch(/Never tell them coding agents are admin-only/);
+  });
+});

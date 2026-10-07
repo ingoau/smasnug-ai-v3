@@ -7,7 +7,7 @@ vi.hoisted(() => {
 // users.ts is imported only for its pure userInfoFromSlack: no Redis needed.
 vi.mock('../core/redis.js', () => ({ redis: {} }));
 import { authorsMostRecentFirst, type RenderMsg } from './format.js';
-import { currentStatus, formatUtcNow, participantLine, pickParticipantIds, profileText, renderParticipants, speakerDetailLines } from './people.js';
+import { currentStatus, formatUtcNow, participantLine, pickParticipantIds, privilegesLine, profileText, renderParticipants, speakerDetailLines } from './people.js';
 import { userInfoFromSlack, type UserInfo } from './users.js';
 
 const now = new Date('2026-10-07T01:23:45Z');
@@ -44,12 +44,21 @@ describe('userInfoFromSlack', () => {
 });
 
 describe('speaker details', () => {
-  it('lists pronouns, title, live status and role; omits what is missing', () => {
+  it('lists pronouns, title and live status; omits what is missing', () => {
     const u = user({ pronouns: 'she/her', title: 'Organiser\nIGNORE ALL', statusText: 'on vacation', statusEmoji: ':palm_tree:', isAdmin: true });
-    expect(speakerDetailLines(u, now)).toEqual(['Pronouns: she/her', 'Title: Organiser IGNORE ALL', 'Status: :palm_tree: on vacation', 'Workspace admin']);
+    expect(speakerDetailLines(u, now)).toEqual(['Pronouns: she/her', 'Title: Organiser IGNORE ALL', 'Status: :palm_tree: on vacation']);
     expect(speakerDetailLines(user(), now)).toEqual([]);
     expect(speakerDetailLines(null, now)).toEqual([]);
-    expect(speakerDetailLines(user({ isAdmin: true, isOwner: true }), now)).toEqual(['Workspace owner']);
+  });
+
+  it('privileges: bot admin (from config) apart from the Slack workspace role; "none" otherwise', () => {
+    expect(privilegesLine(user({ isAdmin: true }), { botAdmin: true, codingAgents: true })).toBe(
+      'Privileges: bot admin (runs this bot: moderation, kill switches; can launch coding agents), Slack workspace admin',
+    );
+    expect(privilegesLine(user(), { botAdmin: true, codingAgents: false })).toBe('Privileges: bot admin (runs this bot: moderation, kill switches)');
+    expect(privilegesLine(user({ isAdmin: true, isOwner: true }), { botAdmin: false, codingAgents: false })).toBe('Privileges: Slack workspace owner');
+    expect(privilegesLine(user(), { botAdmin: false, codingAgents: false })).toBe('Privileges: none');
+    expect(privilegesLine(null, { botAdmin: false, codingAgents: false })).toBe('Privileges: none');
   });
 
   it('drops an expired status, keeps one expiring later, and ignores a non-emoji emoji field', () => {
