@@ -19,6 +19,7 @@ import { env, limits } from '../config.js';
 import { registerTool, type Role, type ToolContext } from '../core/tools.js';
 import { takeLimit } from '../features/guard.js';
 import { log } from '../log.js';
+import { classifyProviderFailure, ProviderCooldown } from '../models.js';
 import { errMsg, truncateChars, untrusted } from './util.js';
 
 export const WEB_SEARCH_TOOL = 'web_search';
@@ -138,16 +139,35 @@ export interface WebSearchDeps {
   fetch?: typeof fetch;
   /** Overrides the per-mode timeout (tests). */
   timeoutMs?: number;
+  /** Overrides the process-wide Hack Club proxy cooldown (tests). */
+  hackclubCooldown?: ProviderCooldown;
+}
+
+/**
+ * The Hack Club Exa proxy shares the Hack Club AI daily budget: a 402, or a 429 that mentions the spending limit,
+ * skips it until UTC midnight; other 429s / 401 / 403 skip it briefly (same rules as chat models, `src/models.ts`).
+ */
+const hackclubExaCooldown = new ProviderCooldown('hack club exa proxy');
+
+/** Test hook. */
+export function resetWebSearchCooldown(): void {
+  hackclubExaCooldown.reset();
 }
 
 /** Runs one search for a tool call. Never throws: errors come back as a short message for the model. */
 export async function runWebSearch(ctx: Pick<ToolContext, 'speakerId' | 'threadId' | 'abortSignal'>, input: WebSearchInput, deps: WebSearchDeps = {}): Promise<WebSearchOutput | string> {
   const apiKey = 'apiKey' in deps ? deps.apiKey : env.EXA_API_KEY;
   const hackclubKey = 'hackclubKey' in deps ? deps.hackclubKey : 'apiKey' in deps ? undefined : env.HACKCLUB_AI_KEY;
+  const cooldown = deps.hackclubCooldown ?? hackclubExaCooldown;
   const endpoints: { name: string; url: string; headers: Record<string, string> }[] = [
-    ...(hackclubKey ? [{ name: 'hackclub', url: env.HACKCLUB_AI_URL + HACKCLUB_EXA_SEARCH_PATH, headers: { authorization: `Bearer ${hackclubKey}` } }] : []),
+    ...(hackclubKey && !cooldown.active()
+      ? [{ name: 'hackclub', url: env.HACKCLUB_AI_URL + HACKCLUB_EXA_SEARCH_PATH, headers: { authorization: `Bearer ${hackclubKey}` } }]
+      : []),
     ...(apiKey ? [{ name: 'exa', url: EXA_SEARCH_URL, headers: { 'x-api-key': apiKey } }] : []),
   ];
+  if (!endpoints.length && hackclubKey) {
+    return 'Web search is unavailable right now (the search provider is rate limited or out of daily quota). Answer with what you have, or use fetch_url on a known URL.';
+  }
   if (!endpoints.length) return "Web search isn't configured (no EXA_API_KEY). Answer from what you know or use fetch_url on a known URL.";
   if (input.start_published_date && !normalizeStartDate(input.start_published_date)) return 'start_published_date must be a date like 2026-09-01.';
   const over = await takeLimit('websearch', ctx.speakerId, ctx.threadId);
@@ -169,7 +189,12 @@ export async function runWebSearch(ctx: Pick<ToolContext, 'speakerId' | 'threadI
       });
       if (!res.ok) {
         const detail = await res.text().catch(() => '');
-        log.warn({ via: ep.name, status: res.status, detail: detail.slice(0, 300), type: body.type }, 'web search failed');
+        if (ep.name === 'hackclub') {
+          const retryAfterSec = Number(res.headers.get('retry-after')) || undefined;
+          cooldown.note(classifyProviderFailure({ status: res.status, text: detail, retryAfterSec }), { status: res.status, detail: detail.slice(0, 300), type: body.type });
+        } else {
+          log.warn({ via: ep.name, status: res.status, detail: detail.slice(0, 300), type: body.type }, 'web search failed');
+        }
         failure = `Web search failed (HTTP ${res.status}). Try a different query, or answer with what you have.`;
         continue;
       }

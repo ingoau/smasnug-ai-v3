@@ -24,32 +24,144 @@ type CallOptions = Parameters<LanguageModelV4['doGenerate']>[0];
 type StreamResult = Awaited<ReturnType<LanguageModelV4['doStream']>>;
 type StreamPart = StreamResult['stream'] extends ReadableStream<infer P> ? P : never;
 
-/** While set, calls skip the primary (Hack Club's daily budget is spent, or it rate limited / refused us). */
-let primaryCooldownUntil = 0;
+/**
+ * Hack Club AI's daily budget ($3/day per user, resets at UTC midnight) runs out with a 402, or with a 429 whose
+ * message says the request "would exceed the OpenRouter top-up wait spending limit". Matched on the error text so a
+ * budget 429 isn't treated as an ordinary rate limit. Kept specific: no bare "limit" / "rate limit" / "quota".
+ */
+export const BUDGET_EXHAUSTED_RE =
+  /spending[ _-]limit|top[ -]?up|\bbudget\b|insufficient[ _](?:credits?|balance|funds)|out of credits?|credits? (?:exhausted|depleted)/i;
 
-function statusOf(err: unknown): number | undefined {
-  const e = err as { statusCode?: number; status?: number; data?: { error?: { code?: number } } };
-  return e?.statusCode ?? e?.status ?? e?.data?.error?.code;
+export type ProviderFailureKind = 'budget' | 'rate_limit' | 'auth' | 'other';
+
+export interface ProviderFailure {
+  kind: ProviderFailureKind;
+  /** Skip the provider until this time (ms); `now` (no cooldown) for 'other'. */
+  until: number;
+  reason: string;
 }
 
-function noteFailure(err: unknown, modelId: string): void {
-  const status = statusOf(err);
-  const now = Date.now();
-  if (status === 402) {
-    // $3/day per account, resets at UTC midnight.
-    const midnight = new Date(now);
-    midnight.setUTCHours(24, 0, 0, 0);
-    primaryCooldownUntil = midnight.getTime();
-  } else if (status === 429) {
-    const retryAfter = Number((err as { responseHeaders?: Record<string, string> })?.responseHeaders?.['retry-after']);
-    primaryCooldownUntil = now + (Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 60_000);
-  } else if (status === 401 || status === 403) {
-    primaryCooldownUntil = now + 10 * 60_000;
+/** Start of the next UTC day (when Hack Club's daily budget resets). */
+export function nextUtcMidnight(now: number): number {
+  const d = new Date(now);
+  d.setUTCHours(24, 0, 0, 0);
+  return d.getTime();
+}
+
+/**
+ * Classifies a failed provider call from its HTTP status (if any), its error text and Retry-After:
+ *  - budget: 402, or a 4xx / status-less error whose text matches BUDGET_EXHAUSTED_RE → skip until UTC midnight;
+ *  - rate_limit: any other 429 → Retry-After seconds, else 60 s;
+ *  - auth: 401 / 403 → 10 min;
+ *  - other: no cooldown.
+ */
+export function classifyProviderFailure(f: { status?: number; text?: string; retryAfterSec?: number }, now = Date.now()): ProviderFailure {
+  const { status, text = '' } = f;
+  if (status === 402) return { kind: 'budget', until: nextUtcMidnight(now), reason: 'HTTP 402 (daily budget spent)' };
+  if ((status === undefined || (status >= 400 && status < 500)) && BUDGET_EXHAUSTED_RE.test(text)) {
+    return { kind: 'budget', until: nextUtcMidnight(now), reason: `${status ? `HTTP ${status}` : 'error'} mentions a spending limit (daily budget spent)` };
   }
-  log.warn(
-    { modelId, status, cooldownMs: Math.max(0, primaryCooldownUntil - now), err: (err as Error)?.message },
-    'hack club ai failed, falling back to openrouter',
-  );
+  if (status === 429) {
+    const s = f.retryAfterSec;
+    return { kind: 'rate_limit', until: now + (s !== undefined && Number.isFinite(s) && s > 0 ? s * 1000 : 60_000), reason: 'HTTP 429 (rate limited)' };
+  }
+  if (status === 401 || status === 403) return { kind: 'auth', until: now + 10 * 60_000, reason: `HTTP ${status} (refused)` };
+  return { kind: 'other', until: now, reason: status ? `HTTP ${status}` : 'error' };
+}
+
+/** HTTP status of an AI SDK APICallError, or the numeric `code` of an OpenRouter error object / stream error part. */
+export function errorStatus(err: unknown): number | undefined {
+  const e = err as { statusCode?: unknown; status?: unknown; code?: unknown; data?: { error?: { code?: unknown } } } | null;
+  for (const v of [e?.statusCode, e?.status, e?.data?.error?.code, e?.code]) if (typeof v === 'number') return v;
+  return undefined;
+}
+
+/**
+ * Everything an error says about itself, joined for matching: `message`, the parsed body's `error.message` /
+ * `error.metadata.raw` (APICallError `data`), the raw `responseBody`, and a nested `error` / `metadata.raw` (OpenRouter
+ * error objects in stream error parts).
+ */
+export function errorText(err: unknown): string {
+  if (typeof err === 'string') return err;
+  const e = err as {
+    message?: unknown;
+    responseBody?: unknown;
+    data?: { error?: { message?: unknown; metadata?: { raw?: unknown } } };
+    error?: { message?: unknown } | string;
+    metadata?: { raw?: unknown };
+  } | null;
+  const parts = [
+    e?.message,
+    e?.data?.error?.message,
+    e?.data?.error?.metadata?.raw,
+    e?.metadata?.raw,
+    e?.responseBody,
+    typeof e?.error === 'string' ? e.error : e?.error?.message,
+  ];
+  const out: string[] = [];
+  for (const p of parts) if (typeof p === 'string' && p && !out.some((o) => o.includes(p))) out.push(p);
+  return out.join(' | ');
+}
+
+/** `Retry-After` (seconds) from an APICallError's response headers. */
+function retryAfterOf(err: unknown): number | undefined {
+  const v = Number((err as { responseHeaders?: Record<string, string> } | null)?.responseHeaders?.['retry-after']);
+  return Number.isFinite(v) && v > 0 ? v : undefined;
+}
+
+export function classifyProviderError(err: unknown, now = Date.now()): ProviderFailure {
+  return classifyProviderFailure({ status: errorStatus(err), text: errorText(err), retryAfterSec: retryAfterOf(err) }, now);
+}
+
+/**
+ * When to skip a primary provider. A cooldown only ever extends (a late rate-limit 429 can't shorten a budget skip),
+ * and a budget skip is logged once per window rather than on every in-flight call that hits it.
+ */
+export class ProviderCooldown {
+  private until = 0;
+  private budgetLoggedUntil = 0;
+  constructor(readonly provider: string) {}
+
+  active(now = Date.now()): boolean {
+    return now < this.until;
+  }
+
+  /** When the current cooldown ends (0 if none was ever set). */
+  get skipUntil(): number {
+    return this.until;
+  }
+
+  /** Records a classified failure and logs it (budget: once per window). */
+  note(f: ProviderFailure, fields: Record<string, unknown> = {}, now = Date.now()): ProviderFailure {
+    this.until = Math.max(this.until, f.until);
+    if (f.kind === 'budget') {
+      if (this.budgetLoggedUntil === f.until) return f;
+      this.budgetLoggedUntil = f.until;
+      log.warn(
+        { provider: this.provider, ...fields, reason: f.reason, skipUntil: new Date(f.until).toISOString() },
+        `${this.provider}: daily budget exhausted, skipping it until UTC midnight`,
+      );
+    } else {
+      log.warn(
+        { provider: this.provider, ...fields, kind: f.kind, reason: f.reason, cooldownMs: Math.max(0, this.until - now) },
+        `${this.provider} failed, falling back`,
+      );
+    }
+    return f;
+  }
+
+  reset(): void {
+    this.until = 0;
+    this.budgetLoggedUntil = 0;
+  }
+}
+
+/** Hack Club AI chat completions: while active, calls go straight to OpenRouter. */
+const primaryCooldown = new ProviderCooldown('hack club ai');
+
+function noteFailure(err: unknown, modelId: string): void {
+  const message = typeof (err as Error)?.message === 'string' ? (err as Error).message : errorText(err);
+  primaryCooldown.note(classifyProviderError(err), { modelId, status: errorStatus(err), err: message.slice(0, 300) });
 }
 
 function aborted(options: CallOptions): boolean {
@@ -64,7 +176,7 @@ const PREAMBLE = new Set(['stream-start', 'response-metadata', 'raw', 'text-star
  * text or a tool call has streamed, errors surface as usual.
  */
 export function withFallback(primary: LanguageModelV4, fallback: LanguageModelV4): LanguageModelV4 {
-  const usePrimary = () => Date.now() >= primaryCooldownUntil;
+  const usePrimary = () => !primaryCooldown.active();
   return {
     specificationVersion: 'v4',
     provider: primary.provider,
@@ -142,5 +254,5 @@ export function chatModel(modelId: string): LanguageModelV4 {
 
 /** Test hook. */
 export function resetProviderCooldown(): void {
-  primaryCooldownUntil = 0;
+  primaryCooldown.reset();
 }
