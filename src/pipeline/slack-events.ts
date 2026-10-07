@@ -8,6 +8,7 @@ import { handleReactionEvent } from './reactions.js';
 import { handleAgentSessionStopped } from './stop.js';
 import { handleSessionTitleChanged } from './agent-session.js';
 import { handleAppContextChanged } from './view-context.js';
+import { handleDirectoryEvent } from '../tools/directory/events.js';
 
 export interface SlackEnvelopeJob {
   kind: 'event' | 'interactive' | 'slash';
@@ -25,6 +26,10 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
       switch (event?.type) {
         case 'message':
           if (!event.subtype && event.channel && event.ts) markMessage(event.channel, event.ts, { intake_start: Date.now() });
+          // Topic / purpose / name changes in public channels the bot is in: the directory row too.
+          if (event.subtype === 'channel_topic' || event.subtype === 'channel_purpose' || event.subtype === 'channel_name') {
+            await handleDirectoryEvent(event).catch((err) => log.warn({ err }, 'directory channel update failed'));
+          }
           return handleMessageEvent(event);
         case 'app_home_opened':
           return handleAppHomeOpened(event);
@@ -40,6 +45,16 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
           return handleReactionEvent(event);
         case 'app_mention':
           return; // duplicates the `message` event, which is what triggers turns
+        // Workspace directory (src/tools/directory/): profile and public-channel changes.
+        case 'user_change':
+        case 'team_join':
+        case 'channel_created':
+        case 'channel_rename':
+        case 'channel_archive':
+        case 'channel_unarchive':
+        case 'channel_deleted':
+          await handleDirectoryEvent(event);
+          return;
         default:
           log.debug({ type: event?.type }, 'ignoring event');
           return;

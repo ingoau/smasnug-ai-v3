@@ -7,6 +7,7 @@ import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { markMessage, slackTsMs } from '../core/timing.js';
 import type { SlackEnvelopeJob } from '../pipeline/slack-events.js';
+import { slimSlackUser } from '../tools/directory/fields.js';
 
 interface SocketEvent {
   ack: (response?: Record<string, unknown>) => Promise<void>;
@@ -39,6 +40,9 @@ export async function handleEnvelope(e: SocketEvent, receivedAt = Date.now()) {
     log.info({ key, retry: e.retry_num, reason: e.retry_reason }, 'duplicate envelope dropped');
     return;
   }
+  // Profile events: only the fields the directory stores are queued (no email, phone, avatars…).
+  const pev = e.body?.event;
+  if ((pev?.type === 'user_change' || pev?.type === 'team_join') && pev.user) pev.user = slimSlackUser(pev.user);
   try {
     await enqueue(QUEUE.slackEvents, { kind, body: e.body, receivedAt } satisfies SlackEnvelopeJob, { jobId: `se-${key.replaceAll(':', '_')}` });
     const ev = e.body?.event;

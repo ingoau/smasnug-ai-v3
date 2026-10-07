@@ -68,6 +68,15 @@ settings:
       - agent_session_title_changed  # user renamed a session: never overwritten (DM titles)
       - reaction_added               # reactions shown in context (messages.reactions); never start a turn
       - reaction_removed
+      # Workspace directory (src/tools/directory/): live profile + public-channel updates. users:read / channels:read
+      # cover them (no new scopes). Topic / purpose changes arrive as message.channels subtypes.
+      - user_change
+      - team_join
+      - channel_created
+      - channel_rename
+      - channel_archive
+      - channel_unarchive
+      - channel_deleted
   interactivity:
     is_enabled: true
   org_deploy_enabled: false
