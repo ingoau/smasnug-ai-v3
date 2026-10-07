@@ -14,6 +14,11 @@ export interface TurnRow {
    * offer, or a two-party / conversation-partner follow-up that passed the gate. Framed as "talking with you".
    */
   addressed?: boolean;
+  /**
+   * Not a mention: the relevance gate said yes to its messages (pipeline/fire.ts). Framed as "a relevance check judged
+   * this is meant for you" unless `addressed` (which wins).
+   */
+  gated?: boolean;
   messageTs: string[];
   cardId: number | null;
   status: 'pending' | 'running' | 'done' | 'cancelled' | 'error';

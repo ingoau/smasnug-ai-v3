@@ -465,6 +465,18 @@ describe('runFrontTurn: conversation state', () => {
     expect(turnText()).toContain('This is an unmentioned follow-up');
   });
 
+  it('frames a turn that passed the relevance gate as meant for the bot, not as an optional follow-up', async () => {
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 103, isMention: false, gated: true }), io(false).io);
+    expect(turnText()).toContain('a relevance check judged that <new_messages> from <@U1> is meant for you');
+    expect(turnText()).toContain('unless it is clearly not for you');
+    expect(turnText()).not.toContain('respond only if it is addressed to you');
+    // Addressed wins (an answer to the bot / a partner follow-up that also passed the gate).
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 104, isMention: false, gated: true, addressed: true }), io(false).io);
+    expect(turnText()).toContain('is talking with you in this thread');
+  });
+
   it('every delivered reply updates the thread (idle clock, partner, awaited answer)', async () => {
     const queries: string[] = [];
     h.sqlHook = (q) => void queries.push(q) as any;

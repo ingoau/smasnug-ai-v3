@@ -15,7 +15,7 @@ import { loadMessages } from './store.js';
 import { addToBatch } from './debounce.js';
 import { appendEvent } from '../core/events.js';
 
-const TURN_COLS = sql`id::int as id, thread_id, author_id, kind, is_mention, addressed, message_ts, card_id::int as card_id, status, phase`;
+const TURN_COLS = sql`id::int as id, thread_id, author_id, kind, is_mention, addressed, gated, message_ts, card_id::int as card_id, status, phase`;
 
 /** A message with the intake reason it was batched for (rules.ts BatchReason). */
 export interface ReasonedTs {
@@ -47,10 +47,13 @@ export async function requestTurn(opts: {
   isMention?: boolean;
   /** User turns: framed as talking with the bot without a mention (TurnRow.addressed). */
   addressed?: boolean;
+  /** User turns: the relevance gate said yes (TurnRow.gated). */
+  gated?: boolean;
 }): Promise<number> {
   const id = await sql.begin(async (tx) => {
     await lockThread(tx, opts.threadId);
-    if (opts.kind === 'user') return addToPendingTurnTx(tx, opts.threadId, opts.authorId, opts.messageTs ?? [], opts.isMention ?? false, opts.addressed ?? false);
+    if (opts.kind === 'user')
+      return addToPendingTurnTx(tx, opts.threadId, opts.authorId, opts.messageTs ?? [], opts.isMention ?? false, { addressed: opts.addressed, gated: opts.gated });
     const [row] = await tx<{ id: number }[]>`
       insert into turns (thread_id, author_id, kind, is_mention, message_ts, card_id)
       values (${opts.threadId}, ${opts.authorId}, ${opts.kind}, ${opts.isMention ?? false}, ${opts.messageTs ?? []}::text[], ${opts.cardId ?? null})
@@ -78,21 +81,30 @@ export async function insertTurnTx(
   return row!.id;
 }
 
-/** Append to the author's pending user turn, or create one. Caller holds the thread row lock. */
-async function addToPendingTurnTx(tx: Tx, threadId: string, authorId: string, ts: string[], isMention: boolean, addressed = false): Promise<number> {
+/** Append to the author's pending user turn, or create one. Caller holds the thread row lock. Flags only ever turn on. */
+async function addToPendingTurnTx(
+  tx: Tx,
+  threadId: string,
+  authorId: string,
+  ts: string[],
+  isMention: boolean,
+  flags: { addressed?: boolean; gated?: boolean } = {},
+): Promise<number> {
+  const addressed = flags.addressed ?? false;
+  const gated = flags.gated ?? false;
   const [pending] = await tx<{ id: number; messageTs: string[] }[]>`
     select id::int as id, message_ts from turns
     where thread_id = ${threadId} and author_id = ${authorId} and kind = 'user' and status = 'pending'
     order by id limit 1 for update`;
   if (pending) {
     await tx`update turns set message_ts = ${mergeTs(pending.messageTs, ts)}::text[], is_mention = is_mention or ${isMention},
-               addressed = addressed or ${addressed}
+               addressed = addressed or ${addressed}, gated = gated or ${gated}
              where id = ${pending.id}`;
     return pending.id;
   }
   const [row] = await tx<{ id: number }[]>`
-    insert into turns (thread_id, author_id, kind, is_mention, addressed, message_ts)
-    values (${threadId}, ${authorId}, 'user', ${isMention}, ${addressed}, ${mergeTs([], ts)}::text[])
+    insert into turns (thread_id, author_id, kind, is_mention, addressed, gated, message_ts)
+    values (${threadId}, ${authorId}, 'user', ${isMention}, ${addressed}, ${gated}, ${mergeTs([], ts)}::text[])
     returning id::int as id`;
   return row!.id;
 }
@@ -127,7 +139,7 @@ export async function scheduleMessages(
   authorId: string,
   ts: string[],
   isMention: boolean,
-  opts: { allowInbox?: boolean; addressed?: boolean; items?: ReasonedTs[] } = {},
+  opts: { allowInbox?: boolean; addressed?: boolean; gated?: boolean; items?: ReasonedTs[] } = {},
 ): Promise<ScheduleResult> {
   if (opts.allowInbox !== false) {
     const turnId = await pushToRunningTurn(threadId, authorId, ts, isMention, opts.items);
@@ -135,7 +147,7 @@ export async function scheduleMessages(
   }
   const turnId = await sql.begin(async (tx) => {
     await lockThread(tx, threadId);
-    return addToPendingTurnTx(tx, threadId, authorId, ts, isMention, opts.addressed ?? false);
+    return addToPendingTurnTx(tx, threadId, authorId, ts, isMention, { addressed: opts.addressed, gated: opts.gated });
   });
   await ensureThreadRun(threadId);
   return { kind: 'turn', turnId };
@@ -210,7 +222,7 @@ export async function finishTurn(turnId: number, status: 'done' | 'error' | 'can
       turn.authorId,
       items.map((i) => i.ts),
       isMention,
-      !isMention && batchIsAddressed(reasons),
+      { addressed: !isMention && batchIsAddressed(reasons) },
     );
     return { threadId: t.threadId, authorId: turn.authorId, regate: null, followUp };
   });

@@ -506,6 +506,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
       await debounce.addToBatch(THREAD, 'U2', '1.5', 'gate');
       await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 2 }));
       expect(await turns()).toMatchObject([{ authorId: 'U2', messageTs: ['1.5'], isMention: false }]);
+      expect((await sql`select addressed, gated from turns`)[0]).toEqual({ addressed: false, gated: true });
       const decisions = await sql`select payload from thread_events where thread_id = ${THREAD} and type = 'gate_decision' order by id`;
       expect(decisions.map((d) => d.payload.decision)).toEqual(['no', 'yes']);
       gate.mockRestore();
@@ -521,8 +522,8 @@ describe.skipIf(!infra)('pipeline integration', () => {
       await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 1 }));
       expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.6 });
       expect(gate.mock.calls[0]![0].note).toMatch(/just talking with/);
-      const [t] = await sql`select addressed, is_mention from turns where thread_id = ${THREAD}`;
-      expect(t).toEqual({ addressed: true, isMention: false });
+      const [t] = await sql`select addressed, gated, is_mention from turns where thread_id = ${THREAD}`;
+      expect(t).toEqual({ addressed: true, gated: true, isMention: false });
 
       await sql`update threads set last_addressed_at = now() - interval '4 hours', last_bot_reply_at = null where id = ${THREAD}`;
       await storeMsg('U3', '1.7', 'anyone?');
@@ -548,7 +549,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
       await processDebounce(job({ threadId: THREAD, authorId: 'U1', seq: 1 }));
       expect(gate).not.toHaveBeenCalled();
       expect(await turns()).toMatchObject([{ authorId: 'U1', messageTs: ['1.8'], isMention: false }]);
-      expect((await sql`select addressed from turns`)[0]!.addressed).toBe(true);
+      expect((await sql`select addressed, gated from turns`)[0]).toEqual({ addressed: true, gated: false });
       gate.mockRestore();
     });
 

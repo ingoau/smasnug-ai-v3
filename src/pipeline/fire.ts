@@ -93,8 +93,14 @@ export async function processDebounce(job: Job<DebounceJob>) {
   }
 
   // The inbox was just checked above; only re-check after a (slow) gate call. An answer to the bot's question, or a
-  // partner follow-up that passed the gate, is framed as talking with the bot (TurnRow.addressed).
-  const res = await scheduleMessages(threadId, authorId, ts, isMention, { allowInbox: needsGate, addressed: !isMention && batchIsAddressed(reasons), items });
+  // partner follow-up that passed the gate, is framed as talking with the bot (TurnRow.addressed); any other batch
+  // that passed the gate as judged to be meant for the bot (TurnRow.gated).
+  const res = await scheduleMessages(threadId, authorId, ts, isMention, {
+    allowInbox: needsGate,
+    addressed: !isMention && batchIsAddressed(reasons),
+    gated: !isMention && needsGate,
+    items,
+  });
   for (const t of ts) markMessage(channelId, t, { debounce_fired: firedAt, turn_created: Date.now() });
   if (res.kind === 'inbox') await appendEvent(threadId, 'inbox_push', authorId, { turnId: res.turnId, messageTs: ts });
 }

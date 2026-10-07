@@ -399,7 +399,9 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
           ? 'You were mentioned / messaged directly: respond to <new_messages> using your tools.'
           : turn.addressed
             ? `<@${turn.authorId}> is talking with you in this thread (no @mention needed): respond to <new_messages> using your tools.`
-            : 'This is an unmentioned follow-up: respond only if it is addressed to you or you clearly add something; otherwise do nothing.',
+            : turn.gated
+              ? `No @mention, but a relevance check judged that <new_messages> from <@${turn.authorId}> is meant for you (or that you clearly have something to add): respond using your tools, unless it is clearly not for you.`
+              : "This is an unmentioned follow-up in a thread you're following along: respond only if it is addressed to you or you clearly add something; otherwise do nothing.",
     );
   }
   return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, allCancelled, ...(outcome ? { outcome } : {}) };
