@@ -51,7 +51,7 @@ export const slackWaitLabel = (ms: number) => `${SLACK_WAIT_LABEL} (${Math.max(1
 const active = new Map<number, AbortController>();
 
 class RunAbort extends Error {
-  constructor(readonly kind: 'timeout' | 'shutdown' | 'gone') {
+  constructor(readonly kind: 'timeout' | 'shutdown' | 'gone' | 'cancel') {
     super(kind);
   }
 }
@@ -96,7 +96,11 @@ export async function processSubagentRun(runId: number): Promise<void> {
     sql<{ cancelRequested: boolean }[]>`update runs set heartbeat_at = now() where id = ${run.id} and status = 'running' returning cancel_requested`
       .then((rows) => {
         if (rows.length === 0) controller.abort(new RunAbort('gone'));
-        else if (rows[0]!.cancelRequested) cancelRequested = true;
+        else if (rows[0]!.cancelRequested) {
+          // Cancel mid-step: abort the model call and the tools in flight (tools refuse to start once aborted).
+          cancelRequested = true;
+          controller.abort(new RunAbort('cancel'));
+        }
       })
       .catch((err) => log.warn({ err, runId: run.id }, 'heartbeat failed'));
   }, limits.heartbeatMs);
@@ -279,6 +283,8 @@ export async function processSubagentRun(runId: number): Promise<void> {
     if (reason instanceof RunAbort) {
       if (reason.kind === 'timeout') {
         await finishRun(run, { status: 'error', error: `Timed out after ${Math.round(maxDurationMs / 60000)} min` }, { tokens, history: compactHistory(messages) });
+      } else if (reason.kind === 'cancel') {
+        await finishRun(run, { status: 'cancelled' }, { tokens, history: compactHistory(messages) });
       }
       // shutdown: onShutdown marks it errored; gone: someone else finished it.
       return;

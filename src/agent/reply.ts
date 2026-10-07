@@ -759,6 +759,24 @@ export class ReplyManager {
     }
   }
 
+  /**
+   * After `!stop` aborted the turn mid-reply (the reply tool never ran): close each stream it opened (Slack may
+   * already have) keeping what was shown, and record it as a stopped reply, as finish() does. Never throws.
+   */
+  async closeStopped(): Promise<void> {
+    for (const e of this.entries.values()) {
+      if (e.finished) continue;
+      e.finished = true;
+      if (e.timer) clearTimeout(e.timer);
+      e.timer = null;
+      await e.chain.catch(() => {});
+      if (!e.streamTs) continue;
+      await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after stop failed'));
+      await this.dropActivityCards(e, e.streamed);
+      await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, stopped: true, streamed: e.streamed }).catch(() => {});
+    }
+  }
+
   /** On a model/API failure (or stop): close any open stream, with a short note if given. Returns true if one was open. */
   async abortOpenStreams(note?: string): Promise<boolean> {
     let any = false;

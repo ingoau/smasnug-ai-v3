@@ -2,7 +2,8 @@
  * `@bot !stop` (anyone; guidelines rule 2): stop the current response. The native stop button (Agents & AI Apps
  * `agent_session_stopped`) is gone: the app no longer subscribes to the event (people clicked it by accident), but the
  * handler keeps its event shape and still works if the event arrives.
- * - the running front turn in the thread ends at its next step boundary (Redis flag checked via TurnIO.stopRequested),
+ * - the running front turn in the thread is aborted mid-step (Redis flag polled via TurnIO.stopRequested; the model
+ *   call and its tools get an AbortSignal, and no tool starts once it fired),
  * - the user's not-yet-started turns (pending turns, inbox rows, open debounce batch) are dropped,
  * then the session goes back to `active` and the bot confirms with "Stopped.". The thread stays engaged and
  * background subagents keep running (the agent can cancel them or leave the thread with its tools when asked).

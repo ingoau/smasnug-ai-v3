@@ -812,6 +812,35 @@ describe('runFrontTurn: native stop', () => {
     expect(h.events.some((e) => e.type === 'turn_stopped')).toBe(true);
   });
 
+  it('a stop mid-step aborts the model call: the side-effecting tool it was writing never runs', async () => {
+    // A long tool call (like create_canvas with a big body) is still streaming when the user stops.
+    const json = JSON.stringify({ emoji: 'thumbsup', note: 'x'.repeat(200) });
+    const deltas = [];
+    for (let i = 0; i < json.length; i += 5) deltas.push({ type: 'tool-input-delta', id: 'r1', delta: json.slice(i, i + 5) });
+    const slowReact = [
+      { type: 'stream-start', warnings: [] },
+      { type: 'tool-input-start', id: 'r1', toolName: 'react' },
+      ...deltas,
+      { type: 'tool-input-end', id: 'r1' },
+      { type: 'tool-call', toolCallId: 'r1', toolName: 'react', input: json },
+      { type: 'finish', usage, finishReason: { unified: 'tool-calls', raw: 'tool_calls' } },
+    ];
+    h.model = mockModel([slowReact, textStep('')], 30); // ~1.3 s of streaming
+    let stop = false;
+    const timer = setTimeout(() => (stop = true), 150);
+    const started = Date.now();
+    try {
+      await expect(runFrontTurn(turn({ id: 27 }), { ...io().io, stopRequested: async () => stop })).resolves.toBeUndefined();
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(Date.now() - started).toBeLessThan(1200);
+    expect(h.slack.map((c) => c.method)).not.toContain('reactions.add');
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+    expect(h.events.some((e) => e.type === 'turn_stopped')).toBe(true);
+    expect(h.events.some((e) => e.type === 'error')).toBe(false);
+  });
+
   it('does not call the model when stop was already requested, and posts no fallback', async () => {
     h.model = mockModel([replyStep('hello')]);
     await runFrontTurn(turn({ id: 23 }), { ...io().io, stopRequested: async () => true });

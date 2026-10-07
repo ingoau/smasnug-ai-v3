@@ -61,8 +61,8 @@ export interface TurnIO {
    */
   sessionReleased?(): void;
   /**
-   * True once someone stopped this thread (`@bot !stop`) while this turn was running. The turn
-   * then ends at its next step boundary, delivers no further replies and posts no fallback.
+   * True once someone stopped this thread (`@bot !stop`) while this turn was running. Polled during the turn
+   * (STOP_POLL_MS): the model call and its tools are aborted at once; no further replies, no fallback.
    */
   stopRequested?(): Promise<boolean>;
   /** DM / agent-container turns: the channel the speaker is currently viewing next to the container, if known. */
@@ -72,6 +72,8 @@ export interface TurnIO {
 }
 
 const MAX_STEPS = 12;
+/** How often a running turn checks for `!stop` between step boundaries (the check is one Redis GET). */
+export const STOP_POLL_MS = 500;
 
 /** Per-section token budgets for the prompt. */
 export const BUDGET = {
@@ -601,10 +603,16 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const { channelId, threadTs } = parseThreadId(turn.threadId);
   const turnId = Number(turn.id);
   let stopped = false;
+  // `!stop` aborts the model call and the tools in flight at once (not only at the next step boundary): the signal
+  // goes to streamText and every tool (core/tools.ts refuses calls once it is aborted). Polled while the turn runs.
+  const stopAbort = new AbortController();
   const checkStop = async (): Promise<boolean> => {
     if (!stopped && io.stopRequested) stopped = await io.stopRequested().catch((err) => (log.warn({ err }, 'stopRequested check failed'), false));
+    if (stopped && !stopAbort.signal.aborted) stopAbort.abort(new TurnStopped());
     return stopped;
   };
+  const stopPoll = io.stopRequested ? setInterval(() => void checkStop(), STOP_POLL_MS) : null;
+  stopPoll?.unref();
   // Cards only where a reply is expected (DMs, mentions, reminder turns, write-ups): a silent unmentioned turn
   // would otherwise post and delete a message in the thread, which can notify its followers.
   const activityCards = Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks' && (io.isMention || Boolean(turn.addressed) || turn.kind === 'synthesis');
@@ -663,7 +671,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     [EXTRAS.defaultReactTs]: latestTs(turn.messageTs),
     // EXTRAS.queueUserImage deliberately unset: Luna accepts images in tool results.
   };
-  const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, extras });
+  const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, abortSignal: stopAbort.signal, extras });
   recordReactVisibility(tools, state);
   // Naming a card only makes sense when writing up its results.
   if (turn.kind !== 'synthesis') delete tools.set_card_title;
@@ -723,6 +731,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       instructions: system,
       messages,
       tools,
+      abortSignal: stopAbort.signal,
       // A step without tool calls ends the loop, and so does a step whose reply / reaction went out with nothing
       // else in it still needing a look (turn-end.ts; `continue_turn: true` keeps going); end_turn ends a silent turn.
       // A stop request (`!stop`) ends it at the next step boundary.
@@ -827,14 +836,18 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
         }
         case 'error':
           throw part.error;
+        case 'abort':
+          throw new TurnStopped();
         default:
           break;
       }
     }
     timing.mark('loop_done');
   } catch (err) {
-    if (!(err instanceof TurnStopped)) failed = err;
+    // An abort error after a stop is the stop itself.
+    if (!(err instanceof TurnStopped) && !stopAbort.signal.aborted) failed = err;
   } finally {
+    if (stopPoll) clearInterval(stopPoll);
     const reported = summarizeToolCalls(turnCalls);
     if (reported.length) await appendEvent(turn.threadId, 'turn_tools', 'bot', { turnId, calls: reported }).catch((err) => log.warn({ err }, 'turn_tools event failed'));
     // An activity message no reply took over (silent turn, error, stop) leaves nothing behind.
@@ -869,7 +882,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   if (stopped || (await checkStop())) {
     // The user pressed stop: the pipeline confirms ("Stopped."). Close anything still open quietly; no error note,
     // no fallback (except an outcome turn's factual confirmation). Streams Slack already halted just make
-    // stopStream fail, which is fine.
+    // stopStream fail, which is fine. A reply aborted mid-stream keeps what was shown.
+    await replies.closeStopped().catch(() => {});
     await replies.abortOpenStreams().catch(() => {});
     await appendEvent(turn.threadId, 'turn_stopped', 'system', { turnId, ...(failed ? { error: String((failed as any)?.message ?? failed) } : {}) }).catch(() => {});
     await postOutcomeFallback().catch((err) => log.warn({ err, turnId }, 'outcome fallback failed'));
