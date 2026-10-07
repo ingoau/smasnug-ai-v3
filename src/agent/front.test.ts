@@ -86,7 +86,7 @@ await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
 await import('./session-title.js');
-const { runFrontTurn } = await import('./front.js');
+const { runFrontTurn, barePingKind, barePingInstruction } = await import('./front.js');
 const { streamArgsText } = await import('./slack-markdown.js');
 
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
@@ -517,6 +517,29 @@ describe('runFrontTurn: bare ping', () => {
     expect(turnText()).not.toContain('casually asking');
   });
 
+  it('a pointer ping ("^") also acts on the unanswered earlier request; a pointer message is not itself a request', async () => {
+    h.sqlHook = (q) => {
+      if (q.includes('order by ts::numeric desc limit 1') && q.includes('bot_id is null')) return [{ ts: '100.000001', text: 'make me a landing page for the club', files: [] }];
+      if (q.includes('as answered')) return [{ answered: false }];
+      if (q.includes('from messages where channel_id') && q.includes('and ts in')) return [{ text: '<@UBOT> ^', files: [] }];
+      return undefined;
+    };
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 112 }), io().io);
+    expect(turnText()).toContain('Their earlier message [100.000001] in <thread_history> got no answer from you');
+
+    h.sqlHook = (q) => {
+      if (q.includes('order by ts::numeric desc limit 1') && q.includes('bot_id is null')) return [{ ts: '100.000001', text: '<@UBOT> ^^', files: [] }];
+      if (q.includes('as answered')) return [{ answered: false }];
+      if (q.includes('from messages where channel_id') && q.includes('and ts in')) return [{ text: '<@UBOT> this', files: [] }];
+      return undefined;
+    };
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 113 }), io().io);
+    expect(turnText()).not.toContain('got no answer from you');
+    expect(turnText()).toContain('which message they mean');
+  });
+
   it('asks what they need when the earlier request was answered (or there is none)', async () => {
     h.sqlHook = (q) => {
       if (q.includes('order by ts::numeric desc limit 1') && q.includes('bot_id is null')) return [{ ts: '100.000001', text: 'can you check the pico w price', files: [] }];
@@ -527,6 +550,63 @@ describe('runFrontTurn: bare ping', () => {
     await runFrontTurn(turn({ id: 111 }), io().io);
     expect(turnText()).toContain('otherwise reply briefly and casually asking what they need');
     expect(turnText()).not.toContain('got no answer from you');
+  });
+});
+
+describe('barePingKind', () => {
+  it('only mentions (and punctuation / politeness): a plain bare ping', () => {
+    for (const t of ['<@UBOT>', '<@UBOT|bot> ?', '<@UBOT> pls', '<@UBOT> please!', '<@UBOT> <@U2>', '']) expect(barePingKind(t), t).toBe('plain');
+  });
+
+  it('mentions plus a pointer at an earlier message: a pointer ping', () => {
+    for (const t of [
+      '<@UBOT> ^',
+      '<@UBOT> ^^',
+      '^^^ <@UBOT>',
+      '<@UBOT> ↑',
+      '<@UBOT> ⬆️',
+      '<@UBOT> ⬆',
+      '<@UBOT> :point_up:',
+      '<@UBOT> :point_up_2:',
+      '<@UBOT> :point_up::skin-tone-3:',
+      '<@UBOT> :arrow_up:',
+      '<@UBOT> this',
+      '<@UBOT> THIS?',
+      '<@UBOT> that pls',
+      '<@UBOT> above',
+      '<@UBOT> see above',
+      '<@UBOT> this ^',
+      '<@UBOT> this^',
+      '<@UBOT> please ^?',
+      '<@UBOT>^',
+    ])
+      expect(barePingKind(t), t).toBe('pointer');
+  });
+
+  it('anything else is a request of its own', () => {
+    for (const t of [
+      '<@UBOT> hi',
+      '<@UBOT> do this',
+      '<@UBOT> is this true',
+      '<@UBOT> see',
+      '<@UBOT> above the fold?',
+      '<@UBOT> ^ but in python',
+      '<@UBOT> :eyes:',
+      '<@UBOT> :point_up: also check the docs',
+      '<@UBOT> yes',
+    ])
+      expect(barePingKind(t), t).toBeNull();
+  });
+});
+
+describe('barePingInstruction', () => {
+  it('points at the unanswered request for both kinds; a pointer without one may mean the channel message the thread starts under', () => {
+    expect(barePingInstruction({ ts: '1.5' }, 'pointer')).toContain('Their earlier message [1.5] in <thread_history> got no answer from you');
+    expect(barePingInstruction({ ts: '1.5' }, 'pointer')).toContain('pointing at an earlier message');
+    expect(barePingInstruction({ ts: '1.5' })).toContain('with no new request in the message');
+    expect(barePingInstruction(null, 'pointer')).toContain('which message they mean');
+    expect(barePingInstruction(null, 'pointer')).not.toContain('Do not answer messages from <channel_background>');
+    expect(barePingInstruction(null)).toContain('Do not answer messages from <channel_background>');
   });
 });
 

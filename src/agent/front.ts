@@ -390,11 +390,11 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     if (sched && (sched.source === 'send' || sched.source === 'coding_launch' || sched.source === 'huddlefm')) outcome = { fallback: sched.fallback };
   } else {
     parts.push(section('new_messages', clipTokens(ctx.newMessages, BUDGET.newMessages), ` from="<@${turn.authorId}>" note="The message(s) you are responding to now."`));
-    const barePing = turn.isMention && (await isBarePing(turn).catch(() => false));
+    const barePing = turn.isMention ? await isBarePing(turn).catch(() => null) : null;
     const unanswered = barePing ? await unansweredEarlierRequest(turn, self?.userId).catch((err) => (log.warn({ err }, 'unansweredEarlierRequest failed'), null)) : null;
     parts.push(
       barePing
-        ? barePingInstruction(unanswered)
+        ? barePingInstruction(unanswered, barePing)
         : turn.isMention
           ? 'You were mentioned / messaged directly: respond to <new_messages> using your tools.'
           : turn.addressed
@@ -425,15 +425,57 @@ export function renderSessionNote(s: SessionInfo): string {
   return 'Untitled. Once the request is clear, title it with set_session_title alongside your reply.';
 }
 
-/** The turn instruction for a bare ping: act on the speaker's own unanswered request if there is one, else ask. */
-export function barePingInstruction(unanswered: { ts: string } | null): string {
+/**
+ * The turn instruction for a bare ping: act on the speaker's own unanswered request if there is one, else help with
+ * what the history makes clear, or ask. A pointer ("^", "this") may also mean the channel message the thread starts
+ * under, so it doesn't rule out <channel_background>.
+ */
+export function barePingInstruction(unanswered: { ts: string } | null, kind: BarePing = 'plain'): string {
   const bg = 'Do not answer messages from <channel_background>; they belong to other conversations.';
+  const pointer = kind === 'pointer';
+  const what = pointer ? 'pointing at an earlier message ("^", "this"…), with no request of its own' : 'with no request in the message';
   if (unanswered)
-    return `The speaker just pinged you again, with no new request in the message. Their earlier message [${unanswered.ts}] in <thread_history> got no answer from you. If it asks for something, that is what they want: do it now instead of asking what they need. ${bg}`;
-  return `The speaker just pinged you, with no request in the message. ${bg} If <thread_history> makes it clear what they want from you, help with that; otherwise reply briefly and casually asking what they need.`;
+    return `The speaker just pinged you again, ${pointer ? what : 'with no new request in the message'}. Their earlier message [${unanswered.ts}] in <thread_history> got no answer from you. If it asks for something, that is what they want: do it now instead of asking what they need. ${bg}`;
+  if (pointer)
+    return `The speaker just pinged you, ${what}. Work out from <thread_history> which message they mean (normally the one right above theirs; only when the thread has just started can it be the channel message it starts under, in <channel_background>) and help with what it asks or says; if it's unclear, reply briefly and casually asking what they need.`;
+  return `The speaker just pinged you, ${what}. ${bg} If <thread_history> makes it clear what they want from you, help with that; otherwise reply briefly and casually asking what they need.`;
 }
 
 const ONLY_MENTIONS = /<@[UW][A-Z0-9]+(?:\|[^>]*)?>/g;
+
+/** A bare ping: only @mentions ('plain'), or @mentions plus a pointer at an earlier message ('pointer'). */
+export type BarePing = 'plain' | 'pointer';
+
+/** Words that only point at an earlier message, or are politeness around such a pointer. */
+const POINTER_WORDS = new Set(['this', 'that', 'above']);
+const POLITE_WORDS = new Set(['pls', 'plz', 'please']);
+/** "^", "^^", "↑", "⬆️", ":point_up:", ":point_up_2:", ":arrow_up:" (also with a skin tone). */
+const POINTER_SYMBOL = /^(?:\^+|↑+|⬆\uFE0F?|:(?:point_up|point_up_2|arrow_up):(?::skin-tone-[2-6]:)?)$/;
+
+/**
+ * Whether a message's text is a bare ping: nothing but @mentions, optionally with a pointer at an earlier message
+ * ("^", "^^", "↑", "⬆️", ":point_up:", ":point_up_2:", ":arrow_up:", "this", "that", "above", "see above") and
+ * "pls" / "please" / "?". Null when it says anything else. Pure.
+ */
+export function barePingKind(text: string): BarePing | null {
+  const tokens = text
+    .replace(ONLY_MENTIONS, ' ')
+    .replace(/(?::[a-z0-9_+'-]+:)+/gi, (m) => ` ${m} `)
+    .replace(/\^+|↑+|⬆\uFE0F?/g, (m) => ` ${m} `)
+    .replace(/[.,!?…]+/g, ' ')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  let pointer = false;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!;
+    if (POLITE_WORDS.has(t)) continue;
+    if (POINTER_WORDS.has(t) || POINTER_SYMBOL.test(t)) pointer = true;
+    else if (t === 'see' && tokens[i + 1] === 'above') pointer = true;
+    else return null;
+  }
+  return pointer ? 'pointer' : 'plain';
+}
 
 /**
  * The speaker's most recent earlier message in this thread (before the turn's messages), when it has content (not
@@ -447,7 +489,7 @@ export async function unansweredEarlierRequest(turn: TurnRow, botUserId: string 
     where thread_id = ${turn.threadId} and user_id = ${turn.authorId} and bot_id is null and not deleted and ts::numeric < ${first}::numeric
     order by ts::numeric desc limit 1`;
   if (!prev) return null;
-  const hasContent = (Array.isArray(prev.files) && prev.files.length > 0) || Boolean(prev.text.replace(ONLY_MENTIONS, '').replace(/[\s.,!?]+/g, ''));
+  const hasContent = (Array.isArray(prev.files) && prev.files.length > 0) || !barePingKind(prev.text);
   if (!hasContent) return null;
   const [answered] = await sql<{ answered: boolean }[]>`
     select exists (
@@ -457,14 +499,20 @@ export async function unansweredEarlierRequest(turn: TurnRow, botUserId: string 
   return answered?.answered ? null : { ts: prev.ts };
 }
 
-/** True when the turn's messages are nothing but @mentions (a bare ping with no request). */
-async function isBarePing(turn: TurnRow): Promise<boolean> {
-  if (!turn.messageTs.length) return false;
+/** The turn's bare-ping kind when all its messages are bare pings without files (barePingKind), else null. */
+async function isBarePing(turn: TurnRow): Promise<BarePing | null> {
+  if (!turn.messageTs.length) return null;
   const { channelId } = parseThreadId(turn.threadId);
   const rows = await sql<{ text: string; files: unknown[] }[]>`
     select text, files from messages where channel_id = ${channelId} and ts in ${sql(turn.messageTs)} and not deleted`;
-  if (!rows.length) return false;
-  return rows.every((r) => !(Array.isArray(r.files) && r.files.length) && !r.text.replace(/<@[UW][A-Z0-9]+(?:\|[^>]*)?>/g, '').replace(/[\s.,!?]+/g, ''));
+  if (!rows.length) return null;
+  let kind: BarePing = 'plain';
+  for (const r of rows) {
+    const k = Array.isArray(r.files) && r.files.length ? null : barePingKind(r.text);
+    if (!k) return null;
+    if (k === 'pointer') kind = 'pointer';
+  }
+  return kind;
 }
 
 function latestTs(ts: string[]): string | undefined {
