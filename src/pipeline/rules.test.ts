@@ -77,14 +77,14 @@ describe('batch helpers', () => {
 });
 
 describe('gate threshold and idle clock', () => {
-  const t = { base: 0.8, partner: 0.5, cooling: 0.9 };
+  const t = { base: 0.8, partner: 0.6, cooling: 0.9 };
   const now = new Date('2026-10-03T12:00:00Z');
   const ago = (ms: number) => new Date(now.getTime() - ms);
   it('partner < base < cooling; a partner keeps the low threshold even when the thread cooled', () => {
     expect(gateThreshold({ partner: false, cooling: false }, t)).toBe(0.8);
-    expect(gateThreshold({ partner: true, cooling: false }, t)).toBe(0.5);
+    expect(gateThreshold({ partner: true, cooling: false }, t)).toBe(0.6);
     expect(gateThreshold({ partner: false, cooling: true }, t)).toBe(0.9);
-    expect(gateThreshold({ partner: true, cooling: true }, t)).toBe(0.5);
+    expect(gateThreshold({ partner: true, cooling: true }, t)).toBe(0.6);
   });
   it('any bot reply counts as activity: the idle clock runs from the later of address and reply', () => {
     expect(lastEngagedAt({ lastAddressedAt: null, lastBotReplyAt: null })).toBeNull();

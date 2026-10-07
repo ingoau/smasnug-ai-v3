@@ -519,7 +519,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const gate = vi.spyOn(gateImpl, 'run').mockResolvedValue({ respond: true, raw: '0.6', probability: 0.6, latencyMs: 5, model: 'test' });
       await debounce.addToBatch(THREAD, 'U2', '1.6', 'partner');
       await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 1 }));
-      expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.5 });
+      expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.6 });
       expect(gate.mock.calls[0]![0].note).toMatch(/just talking with/);
       const [t] = await sql`select addressed, is_mention from turns where thread_id = ${THREAD}`;
       expect(t).toEqual({ addressed: true, isMention: false });
@@ -532,7 +532,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(gate.mock.calls[1]![0].note).toBeUndefined();
       const decisions = await sql`select payload from thread_events where thread_id = ${THREAD} and type = 'gate_decision' order by id`;
       expect(decisions.map((d) => [d.payload.threshold, d.payload.partner ?? false, d.payload.cooling ?? false])).toEqual([
-        [0.5, true, false],
+        [0.6, true, false],
         [0.9, false, true],
       ]);
       const ts = await sql`select addressed from turns where thread_id = ${THREAD} and author_id = 'U3'`;

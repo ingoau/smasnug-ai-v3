@@ -52,7 +52,7 @@ describe.skipIf(!LIVE)('gate (live): the bot\'s conversation partner', () => {
   ])('$name', async ({ next, expected }) => {
     const { runGate } = await import('./gate.js');
     const { partnerGateNote } = await import('./fire.js');
-    const r = await runGate({ context: convo, newMessages: [msg('UALICE', next)], botUserId: 'UBOT', threshold: 0.5, note: partnerGateNote('smasnug ai') });
+    const r = await runGate({ context: convo, newMessages: [msg('UALICE', next)], botUserId: 'UBOT', threshold: 0.6, note: partnerGateNote('smasnug ai') });
     console.log(JSON.stringify({ next, raw: r.raw, probability: r.probability, fallback: r.fallback, error: r.error }));
     expect(r.error).toBeUndefined();
     expect(r.respond).toBe(expected);
