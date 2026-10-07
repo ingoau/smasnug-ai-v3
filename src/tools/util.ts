@@ -4,9 +4,20 @@
 export const approxTokens = (s: string) => Math.ceil(s.length / 4);
 
 /** Truncate to ~maxChars at a whitespace boundary, appending `suffix`. Returns the input unchanged if short enough. */
+/**
+ * `s` cut to at most `max` UTF-16 units without splitting a surrogate pair: a dangling high surrogate (half an emoji)
+ * is dropped. A lone surrogate can't be stored in Postgres json (22P02) and shows as garbage in Slack.
+ */
+export function sliceUnits(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, Math.max(0, max));
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+}
+
 export function truncateChars(s: string, maxChars: number, suffix = ' [truncated]'): string {
   if (s.length <= maxChars) return s;
-  let cut = s.slice(0, maxChars);
+  let cut = sliceUnits(s, maxChars);
   const ws = cut.search(/\s\S*$/);
   if (ws > maxChars * 0.8) cut = cut.slice(0, ws);
   return cut.trimEnd() + suffix;

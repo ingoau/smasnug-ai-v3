@@ -12,6 +12,7 @@
 import { capitalize, stepTitle, summarizeSteps, type CardStep } from './card-steps.js';
 import { cleanRichElements, markdownToRich, type RichTextElement, type RichTextInline } from './rich-text.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
+import { sliceUnits } from '../tools/util.js';
 import { buttonsBlock, type ButtonsActionsBlock, type ButtonsState, type ContextBlock } from './reply-buttons.js';
 import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS, replyBlocks, type ReplyBlock } from './slack-markdown.js';
 
@@ -141,7 +142,7 @@ export function frozenTitle(title: string | null | undefined, runCount: number):
 
 function clip(s: string, max: number) {
   const t = s.trim();
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+  return t.length > max ? `${sliceUnits(t, max - 1)}…` : t;
 }
 
 function richText(text: string, style?: { bold?: boolean }): RichTextBlock {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ModelMessage } from 'ai';
-import { addSource, urlsInText, chooseDelivery, clipTokens, compactHistory, describeToolStep, isNearDuplicate, splitResult, type RunSource } from './util.js';
+import { addSource, urlsInText, chooseDelivery, clipTokens, compactHistory, describeToolStep, isNearDuplicate, oneLine, splitResult, type RunSource } from './util.js';
+import { sliceUnits, truncateChars } from '../tools/util.js';
 
 describe('chooseDelivery', () => {
   it('streams when nothing runs, posts whole while runs are active, streams synthesis', () => {
@@ -106,5 +107,26 @@ describe('addSource', () => {
 
   it('finds URLs in result text', () => {
     expect(urlsInText('See [docs](https://a.com/x). Also https://b.org/y, and **https://c.net/z**.')).toEqual(['https://a.com/x', 'https://b.org/y', 'https://c.net/z']);
+  });
+});
+
+describe('cutting text never splits an emoji (a lone surrogate breaks Postgres json writes)', () => {
+  const isWellFormed = (s: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(s);
+  it('sliceUnits drops a dangling high surrogate', () => {
+    expect(sliceUnits('ab🎮cd', 3)).toBe('ab');
+    expect(sliceUnits('ab🎮cd', 4)).toBe('ab🎮');
+    expect(sliceUnits('abc', 10)).toBe('abc');
+  });
+  it('oneLine, truncateChars and compactHistory stay well-formed wherever they cut', () => {
+    const text = 'Run a game jam 🎮🎮 in town 🎉 '.repeat(30);
+    for (let n = 1; n < 40; n++) {
+      expect(isWellFormed(oneLine(text, n))).toBe(true);
+      expect(isWellFormed(truncateChars(text, n))).toBe(true);
+    }
+    for (let pad = 0; pad < 4; pad++) {
+      const msgs: ModelMessage[] = [{ role: 'tool', content: [{ type: 'tool-result', toolCallId: 't', toolName: 'web_search', output: { type: 'text', value: 'x'.repeat(pad) + text } }] }];
+      const out = compactHistory(msgs) as any;
+      expect(isWellFormed(out[0].content[0].output.value)).toBe(true);
+    }
   });
 });

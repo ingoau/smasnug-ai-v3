@@ -1,5 +1,6 @@
 /** Pure helpers for the agent module (no I/O; unit-tested). */
 import type { ModelMessage } from 'ai';
+import { sliceUnits } from '../tools/util.js';
 
 // ---------- Reply delivery ----------
 
@@ -41,7 +42,7 @@ export function clipTokens(text: string, budget: number, keep: 'head' | 'tail' =
 
 export function oneLine(s: string, max = 100): string {
   const t = s.replace(/\s+/g, ' ').trim();
-  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+  return t.length > max ? `${sliceUnits(t, max - 1)}…` : t;
 }
 
 // ---------- Subagent results ----------
@@ -79,7 +80,7 @@ const COMPACT_KEEP_CHARS = 400;
 function compactValue(v: unknown): string {
   const s = typeof v === 'string' ? v : JSON.stringify(v);
   if (s === undefined) return '';
-  return s.length > COMPACT_KEEP_CHARS ? `${s.slice(0, COMPACT_KEEP_CHARS)}… [compacted]` : s;
+  return s.length > COMPACT_KEEP_CHARS ? `${sliceUnits(s, COMPACT_KEEP_CHARS)}… [compacted]` : s;
 }
 
 /**

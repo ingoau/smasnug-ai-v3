@@ -174,7 +174,7 @@ Subagents are persistent sessions within a thread; each piece of work on one is 
 **History.** Subagent history is persisted (Postgres). When a run ends, old tool results are compacted to summaries so long-lived subagents don't grow without bound.
 **Front agent snapshot.** Every turn includes a list of the thread's subagents, running and idle, with owner, status and a one-line summary, so the agent can reuse an idle subagent instead of starting from scratch.
 **Expiry.** Idle subagents expire after about 24 hours and drop out of the snapshot. A later follow-up spawns a fresh one, seeded with the old summary.
-**Deploys and crashes.** Workers heartbeat while running. A sweeper marks runs with stale heartbeats as errored and updates their cards. On shutdown, in-flight runs are marked errored before exit. Runs are not resumed after a restart.
+**Deploys and crashes.** Workers heartbeat while running. A sweeper marks runs with stale heartbeats as errored ("Worker stopped") and updates their cards; it is only for runs whose process is gone. A run whose own loop fails (an error escaping it, e.g. a write that keeps failing) is finished as errored on the spot, and a final write that fails with the run's history is retried without it, so a live process never leaves a run `running` for the sweeper. JSON parameters are written well-formed (`src/db/json.ts`: a lone UTF-16 surrogate, i.e. text cut inside an emoji, becomes U+FFFD; Postgres rejects it, 22P02), and the truncation helpers never cut inside an emoji. On shutdown, in-flight runs are marked errored before exit. Runs are not resumed after a restart.
 ## Slack UX
 Everything the user sees is produced through tools, and code decides how it's delivered.
 ### Reply tool and delivery

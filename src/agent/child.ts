@@ -166,6 +166,32 @@ export async function processSubagentRun(runId: number): Promise<void> {
   if (!run) return; // already handled, cancelled while queued, or swept
   run.id = Number(run.id);
   run.cardId = run.cardId ? Number(run.cardId) : null;
+  try {
+    await runClaimed(run);
+  } catch (err) {
+    // Nothing runs this run any more (e.g. a write that kept failing). Finish it now: left 'running', its heartbeat
+    // stops and the stale-run sweeper would fail it ~45 s later as "Worker stopped", although no worker stopped.
+    log.error({ err, runId: run.id }, 'subagent run crashed');
+    await failRuns({ runIds: [run.id] }, shortError(err));
+  }
+}
+
+/**
+ * Finish a run; if saving fails with its history (e.g. content Postgres rejects), save the outcome without it rather
+ * than lose the result.
+ */
+async function finishSafely(run: RunRow, outcome: Parameters<typeof finishRun>[1], extra: Parameters<typeof finishRun>[2] & {}): ReturnType<typeof finishRun> {
+  try {
+    return await finishRun(run, outcome, extra);
+  } catch (err) {
+    if (!extra.history) throw err;
+    log.error({ err, runId: run.id }, 'saving the run failed; saving it without its history');
+    return finishRun(run, outcome, { ...extra, history: undefined });
+  }
+}
+
+/** The claimed run's loop (processSubagentRun): returns once the run is finished (or handed back on shutdown). */
+async function runClaimed(run: RunRow): Promise<void> {
   await appendEvent(run.threadId, 'run_started', `subagent:${run.subagentId}`, { runId: run.id });
   await scheduleCardRender(run.cardId);
 
@@ -180,25 +206,11 @@ export async function processSubagentRun(runId: number): Promise<void> {
   }
 
   const controller = new AbortController();
-  active.set(run.id, controller);
   // Code sandbox subagents (src/sandbox/) get the longer run cap: builds and analyses take a while.
   const sandbox = !!sa.sandbox && sandboxConfigured();
   const maxDurationMs = sandbox ? limits.sandboxRunMaxDurationMs : limits.runMaxDurationMs;
-  const timeout = setTimeout(() => controller.abort(new RunAbort('timeout')), maxDurationMs);
   const wrapUpAt = Date.now() + maxDurationMs - WRAP_UP_BEFORE_TIMEOUT_MS;
   let cancelRequested = false;
-  const heartbeat = setInterval(() => {
-    sql<{ cancelRequested: boolean }[]>`update runs set heartbeat_at = now() where id = ${run.id} and status = 'running' returning cancel_requested`
-      .then((rows) => {
-        if (rows.length === 0) controller.abort(new RunAbort('gone'));
-        else if (rows[0]!.cancelRequested) {
-          // Cancel mid-step: abort the model call and the tools in flight (tools refuse to start once aborted).
-          cancelRequested = true;
-          controller.abort(new RunAbort('cancel'));
-        }
-      })
-      .catch((err) => log.warn({ err, runId: run.id }, 'heartbeat failed'));
-  }, limits.heartbeatMs);
 
   const { channelId, threadTs } = parseThreadId(run.threadId);
   const tools = toolsFor('child', {
@@ -303,11 +315,27 @@ export async function processSubagentRun(runId: number): Promise<void> {
   }, ELAPSED_TICK_MS);
   elapsedTicker.unref();
 
+  // Timers and the shutdown registry start right before the try, so its finally always clears them.
+  active.set(run.id, controller);
+  const timeout = setTimeout(() => controller.abort(new RunAbort('timeout')), maxDurationMs);
+  const heartbeat = setInterval(() => {
+    sql<{ cancelRequested: boolean }[]>`update runs set heartbeat_at = now() where id = ${run.id} and status = 'running' returning cancel_requested`
+      .then((rows) => {
+        if (rows.length === 0) controller.abort(new RunAbort('gone'));
+        else if (rows[0]!.cancelRequested) {
+          // Cancel mid-step: abort the model call and the tools in flight (tools refuse to start once aborted).
+          cancelRequested = true;
+          controller.abort(new RunAbort('cancel'));
+        }
+      })
+      .catch((err) => log.warn({ err, runId: run.id }, 'heartbeat failed'));
+  }, limits.heartbeatMs);
+
   try {
     let finalText = '';
     for (let step = 0; ; step++) {
       if (await checkCancel()) {
-        await finishRun(run, { status: 'cancelled' }, { tokens, history: compactHistory(messages) });
+        await finishSafely(run, { status: 'cancelled' }, { tokens, history: compactHistory(messages) });
         return;
       }
       const inbox = await drainSubagentInbox(sa.id);
@@ -392,7 +420,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
         await saveSources().catch((err) => log.warn({ err, runId: run.id }, 'saving run sources failed'));
       }
       const { result: full, output } = splitResult(finalText);
-      const done = await finishRun(
+      const done = await finishSafely(
         run,
         { status: 'complete', result: full || '(no result text)', output },
         { tokens, history: compactHistory(messages) },
@@ -404,15 +432,15 @@ export async function processSubagentRun(runId: number): Promise<void> {
     const reason = controller.signal.aborted ? controller.signal.reason : err;
     if (reason instanceof RunAbort) {
       if (reason.kind === 'timeout') {
-        await finishRun(run, { status: 'error', error: `Timed out after ${Math.round(maxDurationMs / 60000)} min` }, { tokens, history: compactHistory(messages) });
+        await finishSafely(run, { status: 'error', error: `Timed out after ${Math.round(maxDurationMs / 60000)} min` }, { tokens, history: compactHistory(messages) });
       } else if (reason.kind === 'cancel') {
-        await finishRun(run, { status: 'cancelled' }, { tokens, history: compactHistory(messages) });
+        await finishSafely(run, { status: 'cancelled' }, { tokens, history: compactHistory(messages) });
       }
       // shutdown: onShutdown marks it errored; gone: someone else finished it.
       return;
     }
     log.error({ err, runId: run.id }, 'subagent run failed');
-    await finishRun(run, { status: 'error', error: shortError(err) }, { tokens, history: compactHistory(messages) });
+    await finishSafely(run, { status: 'error', error: shortError(err) }, { tokens, history: compactHistory(messages) });
   } finally {
     clearTimeout(timeout);
     clearInterval(heartbeat);
