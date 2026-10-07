@@ -11,6 +11,7 @@ import { threadIdOf } from '../core/events.js';
 import { toolsFor, type ToolContext } from '../core/tools.js';
 import './index.js';
 import { filterPublicMatches, isPublicChannelInfo, isPublicChannelMatch } from './slack-search.js';
+import { forgetChannelVisibility } from './test-visibility.js';
 
 const channel = `C${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const rootTs = '1790000000.000100';
@@ -92,8 +93,7 @@ removers.push(addFakeHandler((method, args) => (method === 'search.messages' && 
 
 beforeEach(async () => {
   infoCalls = [];
-  const keys = await redis.keys('slack:chanvis:C0*');
-  if (keys.length) await redis.del(...keys);
+  await forgetChannelVisibility('C0*');
 });
 
 afterAll(async () => {

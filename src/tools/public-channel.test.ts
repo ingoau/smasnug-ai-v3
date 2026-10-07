@@ -12,6 +12,7 @@ import { toolsFor, type ToolContext } from '../core/tools.js';
 import { HAVEN, havenChannelHistory, havenFixtureHandler, havenSearchMatches } from '../context/fixtures.js';
 import './index.js';
 import { MISSING_SCOPE_MESSAGE, resolveChannelTarget } from './public-channel.js';
+import { forgetChannelVisibility } from './test-visibility.js';
 
 const channel = `C${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const threadTs = '1790000000.000100';
@@ -54,8 +55,7 @@ removers.push(
 beforeEach(async () => {
   historyCalls.length = 0;
   scopeError = null;
-  const keys = await redis.keys('slack:chanvis:C0*');
-  if (keys.length) await redis.del(...keys);
+  await forgetChannelVisibility('C0*');
 });
 
 afterAll(async () => {
@@ -211,8 +211,7 @@ describe('read_public_channel', () => {
       return undefined;
     });
     try {
-      const keys = await redis.keys(`slack:chanvis:${dense}`);
-      if (keys.length) await redis.del(...keys);
+      await forgetChannelVisibility(dense);
       const out: string = await exec(toolsFor('child', ctx()).read_public_channel, {
         channel: dense,
         after_ts: `${base}.000100`,
@@ -246,8 +245,7 @@ describe('read_public_channel', () => {
       return undefined;
     });
     try {
-      const keys = await redis.keys(`slack:chanvis:${gappy}`);
-      if (keys.length) await redis.del(...keys);
+      await forgetChannelVisibility(gappy);
       const out: string = await exec(toolsFor('front', ctx()).read_public_channel, {
         channel: gappy,
         after_ts: cursor,

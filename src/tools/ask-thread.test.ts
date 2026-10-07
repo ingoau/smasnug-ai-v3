@@ -5,6 +5,7 @@
  */
 import './test-env.js';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { forgetChannelVisibility } from './test-visibility.js';
 
 const h = vi.hoisted(() => ({ prompts: [] as any[], options: [] as any[], answer: 'Sam picked the CSIT building [1790000002.000100].' }));
 vi.mock('../models.js', async (orig) => {
@@ -79,8 +80,7 @@ beforeEach(async () => {
   h.options.length = 0;
   repliesCalls.length = 0;
   scopeError = null;
-  const keys = await redis.keys('slack:chanvis:C0*');
-  if (keys.length) await redis.del(...keys);
+  await forgetChannelVisibility('C0*');
 });
 
 afterAll(async () => {

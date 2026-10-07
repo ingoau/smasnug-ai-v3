@@ -114,8 +114,9 @@ describe.skipIf(!INTEGRATION)('private-channel links', () => {
   beforeEach(async () => {
     reads.length = 0;
     h.prompts.length = 0;
-    const keys = [...(await redis.keys('slack:conv:v1:*0PL*')), ...(await redis.keys('slack:members:v1:*0PL*')), ...(await redis.keys('slack:chanvis:*0PL*'))];
+    const keys = [...(await redis.keys('slack:conv:v1:*0PL*')), ...(await redis.keys('slack:members:v1:*0PL*'))];
     if (keys.length) await redis.del(...keys);
+    await (await import('./test-visibility.js')).forgetChannelVisibility('*0PL*');
   });
 
   afterAll(async () => {
