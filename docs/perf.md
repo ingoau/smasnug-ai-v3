@@ -99,10 +99,11 @@ thread's first text is within ~0.1s of the single-thread number; subagent runs s
 | change | effect (hi) |
 |---|---|
 | Status set at intake for DMs/mentions (fire-and-forget, both calls in parallel), adopted by the turn; turn-start status never blocks the model | first status 1.38s → 0.18s; −0.3s before the model call |
-| Debounce window 300ms for messages that skip the gate (DM, mention, two-party, stop); 1s for gated, 3s while subagents run | −0.7s |
+| Debounce window 300ms for DMs, mentions, answers to the bot and partner follow-ups (two-party, the bot's latest conversation partner; these go through the gate at a low threshold since round 3), stop; 1s for other gated messages, 3s while subagents run | −0.7s |
 | Debounce fired by an in-process timer (delayed job = crash-safe backup, +1.5s) | −0–100ms (Redis expires blocking timeouts on its 10Hz cron) |
 | No conversations.replies backfill when the thread's parent is the turn's own message; channel-context reads in parallel | −1 Slack round trip (DMs); mentions −1 |
 | ~~Loop ends after a reply-only step (heuristic)~~ replaced: the model calls `end_turn`, usually in the same step as its reply, so the turn still ends without a wrap-up model call | turn end −1.3 s when the model ends in the reply step |
+| A delivered `reply` / `react` ends the turn by code (`src/agent/turn-end.ts`) unless `continue_turn` or a non-terminal call in the same step: prod showed 154/154 turns as `[["reply"],["end_turn"]]`, i.e. the model did not call `end_turn` in the reply step | turn end −~1.9 s (one model step) |
 | First stream flush as soon as ~8 chars are there (80ms cap), then 250ms coalescing | first text −0.2–0.4s |
 | Redundant inbox-push transaction skipped in debounce fire | −~10ms |
 | Per-channel Slack limiter only counts message-creating calls; Postgres pool 10 → 20 | headroom for many threads in one DM channel |
