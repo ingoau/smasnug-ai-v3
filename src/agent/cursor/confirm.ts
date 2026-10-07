@@ -19,7 +19,7 @@ import type { TurnRow } from '../../core/types.js';
 import { sql } from '../../db/index.js';
 import { checkEntry, takeLimit } from '../../features/guard.js';
 import { settleWithOutcome } from '../../features/outcome-turn.js';
-import { deleteOriginal, ephemeral, respond } from '../../features/util.js';
+import { deleteOriginal, ephemeral, respond, withThread } from '../../features/util.js';
 import { resumeSuspendedSession } from '../../pipeline/agent-session.js';
 import { log } from '../../log.js';
 import { postCard } from '../cards.js';
@@ -138,6 +138,7 @@ async function settleLaunch(p: PendingLaunchRow, outcome: LaunchOutcome, transit
 
 export async function handleCodingCancel(ctx: ActionContext): Promise<void> {
   const p = await loadPending(ctx.value);
+  ctx = withThread(ctx, p?.threadId); // answers go to the thread the preview is in
   const d = decideLaunchClick(p, ctx.userId, env.ADMIN_USER_ID);
   if (d !== 'ok') return replyDecision(ctx, d);
   const res = await settleLaunch(p!, { kind: 'cancelled' }, transitionTo(p!.id, 'pending', 'cancelled', 'live'));
@@ -151,6 +152,7 @@ export async function handleCodingCancel(ctx: ActionContext): Promise<void> {
 
 export async function handleCodingLaunch(ctx: ActionContext): Promise<void> {
   const p = await loadPending(ctx.value);
+  ctx = withThread(ctx, p?.threadId); // answers go to the thread the preview is in
   const d = decideLaunchClick(p, ctx.userId, env.ADMIN_USER_ID);
   if (d !== 'ok') return replyDecision(ctx, d);
   // The bot must still be allowed to act in this channel (global pause / suspension are checked by the dispatcher).

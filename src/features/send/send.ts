@@ -21,7 +21,7 @@ import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
 import { peekLimit, takeLimit } from '../guard.js';
 import { getState } from '../state.js';
-import { deleteOriginal, ephemeral, respond, truncate, userProfile } from '../util.js';
+import { deleteOriginal, ephemeral, respond, truncate, userProfile, withThread } from '../util.js';
 import { settleWithOutcome, type OutcomeResult } from '../outcome-turn.js';
 import {
   CLICK_REPLIES,
@@ -308,6 +308,7 @@ async function settleSend(
 
 export async function handleSendCancel(ctx: ActionContext) {
   const p = await loadPending(ctx.value);
+  ctx = withThread(ctx, p?.threadId); // answers go to the thread the preview is in
   const decision = decideClick(p, ctx.userId);
   if (decision !== 'ok') return replyDecision(ctx, decision);
   const res = await settleSend(p!, { kind: 'not_sent', reason: 'cancelled' }, transitionTo(p!.id, 'pending', 'cancelled', 'live'));
@@ -321,6 +322,7 @@ export async function handleSendCancel(ctx: ActionContext) {
 
 export async function handleSendConfirm(ctx: ActionContext) {
   const p = await loadPending(ctx.value);
+  ctx = withThread(ctx, p?.threadId); // answers go to the thread the preview is in
   const decision = decideClick(p, ctx.userId);
   if (decision !== 'ok') return replyDecision(ctx, decision);
 

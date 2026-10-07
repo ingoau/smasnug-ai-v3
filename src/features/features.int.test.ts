@@ -43,14 +43,17 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
   const exec = (t: any, input: object) => t.execute(input, { toolCallId: 'tc', messages: [] });
   const action = (o: { userId: string; actionId: string; value?: string; body?: any; channelId?: string; messageTs?: string }) => ({
     responseUrl: `https://hooks.fake/${rand()}`,
-    body: {},
+    // Send previews are ephemeral messages: Slack marks the container and sends no thread.
+    body: { container: { type: 'message', is_ephemeral: true } },
     ...o,
   });
   const callsSince = async (n: number) => (await fakeCalls()).slice(n);
   /** Outcome turns started for a pending send (src/features/outcome-turn.ts). */
   const outcomeTurns = (pendingId: string) =>
     sql<any[]>`select t.*, i.input, i.fallback from scheduled_turn_inputs i join turns t on t.id = i.turn_id where i.source = 'send' and i.source_ref = ${pendingId}`;
-  const lastResponse = async (n: number) => (await callsSince(n)).filter((c) => c.method === 'response_url').at(-1)?.args;
+  /** The last answer to a click: a response_url post, or an ephemeral in the thread (answers there never use response_url). */
+  const lastResponse = async (n: number) =>
+    (await callsSince(n)).filter((c) => c.method === 'response_url' || (c.method === 'chat.postEphemeral' && !c.args.blocks)).at(-1)?.args;
 
   beforeAll(async () => {
     ({ sql } = await import('../db/index.js'));
@@ -267,7 +270,11 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       const p = await propose(requester);
       let m = (await fakeCalls()).length;
       await send.handleSendCancel(action({ userId: requester, actionId: 'send:cancel', value: p.id }));
-      expect(await lastResponse(m)).toMatchObject({ replace_original: true, text: 'Cancelled.' });
+      // In the preview's thread, not at the root: the ephemeral preview is removed and "Cancelled." posted there.
+      const calls = await callsSince(m);
+      expect(calls.some((c) => c.method === 'response_url' && c.args.delete_original === true)).toBe(true);
+      expect(calls.some((c) => c.method === 'response_url' && c.args.text)).toBe(false);
+      expect(await lastResponse(m)).toMatchObject({ channel: channelId, thread_ts: threadTs, user: requester, text: 'Cancelled.' });
       m = (await fakeCalls()).length;
       await send.handleSendCancel(action({ userId: requester, actionId: 'send:cancel', value: p.id }));
       expect((await lastResponse(m))?.text).toBe('Cancelled.');

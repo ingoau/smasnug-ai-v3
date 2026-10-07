@@ -473,8 +473,13 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       const click = (userId: string, actionId: string) => ({ userId, channelId, threadTs, actionId, value: pv.id, responseUrl: `https://hooks.slack.invalid/${rand()}`, body: {} });
       await F.handleTermsAccept(click('UOTHER', 'preview:terms_accept'));
       expect((await PS.getPreview(pv.id))!.status).toBe('awaiting_terms');
-      await F.handleTermsAccept(click(u, 'preview:terms_accept'));
+      // The terms prompt is an ephemeral: its button payload has no thread; the answer still goes to the thread.
+      n = (await fakeCalls()).length;
+      await F.handleTermsAccept({ userId: u, channelId, actionId: 'preview:terms_accept', value: pv.id, responseUrl: 'https://hooks.slack.invalid/acc', body: { container: { is_ephemeral: true } } });
       expect((await PS.getPreview(pv.id))!.status).toBe('requested');
+      const accepted = await callsSince(n);
+      expect(accepted.filter((c) => c.method === 'response_url').map((c) => c.args)).toEqual([{ url: 'https://hooks.slack.invalid/acc', delete_original: true }]);
+      expect(accepted.find((c) => c.method === 'chat.postEphemeral')!.args).toMatchObject({ channel: channelId, thread_ts: threadTs, user: u, text: expect.stringMatching(/^Thanks\. Deploying/) });
       n = (await fakeCalls()).length;
       await F.deployPreview(pv.id);
       row = await PS.getPreview(pv.id);
@@ -494,15 +499,21 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       n = (await fakeCalls()).length;
       await F.handleClaim(click('UOTHER', 'preview:claim'));
       await F.handleClaim(click(u, 'preview:claim'));
-      const replies = (await callsSince(n)).filter((c) => c.method === 'response_url');
+      // In the thread (chat.postEphemeral), never via response_url (that lands at the channel root).
+      const claimCalls = await callsSince(n);
+      expect(claimCalls.some((c) => c.method === 'response_url')).toBe(false);
+      const replies = claimCalls.filter((c) => c.method === 'chat.postEphemeral');
+      expect(replies.map((c) => [c.args.user, c.args.thread_ts])).toEqual([
+        ['UOTHER', threadTs],
+        [u, threadTs],
+      ]);
       expect(replies[0]!.args.text).toMatch(/Only <@.*> can claim/);
       expect(replies[0]!.args.text).not.toContain('SECRET');
       expect(replies[1]!.args.text).toContain('https://dash.cloudflare.com/claim/SECRET-CLAIM');
-      expect(replies[1]!.args.response_type).toBe('ephemeral');
       // Report → mod channel (when configured) + thanks.
       n = (await fakeCalls()).length;
       await F.handleReport(click('UOTHER', 'preview:report'));
-      expect((await callsSince(n)).some((c) => c.method === 'response_url' && /Thanks, reported/.test(c.args.text))).toBe(true);
+      expect((await callsSince(n)).some((c) => c.method === 'chat.postEphemeral' && c.args.thread_ts === threadTs && /Thanks, reported/.test(c.args.text))).toBe(true);
       // No secret ever reached the thread's events.
       const evs = await sql<any[]>`select payload from thread_events where thread_id = ${t}`;
       expect(JSON.stringify(evs)).not.toContain('SECRET');

@@ -723,11 +723,19 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
       });
     }
     const click = (actionId: 'coding:launch' | 'coding:cancel', value: string, userId = 'UADMIN') => {
-      const ctx = { userId, actionId, value, responseUrl: `https://hooks.slack.test/${value}`, body: {} } as any;
+      // The preview is an ephemeral message: Slack marks its container, and the payload carries no thread.
+      const ctx = { userId, actionId, value, responseUrl: `https://hooks.slack.test/${value}`, body: { container: { type: 'message', is_ephemeral: true } } } as any;
       return actionId === 'coding:launch' ? confirm.handleCodingLaunch(ctx) : confirm.handleCodingCancel(ctx);
     };
-    const responseCalls = async (value: string) =>
-      (await slackFake.fakeCalls()).filter((c) => c.method === 'response_url' && c.args.url === `https://hooks.slack.test/${value}`);
+    /** Answers to clicks: response_url posts, and ephemerals posted in the preview's thread (never at the root). */
+    const responseCalls = async (value: string) => {
+      const [ch, ts] = String((await pendingRow(value))?.threadId ?? ':').split(':');
+      return (await slackFake.fakeCalls()).filter(
+        (c) =>
+          (c.method === 'response_url' && c.args.url === `https://hooks.slack.test/${value}`) ||
+          (c.method === 'chat.postEphemeral' && c.args.channel === ch && c.args.thread_ts === ts && !c.args.blocks),
+      );
+    };
     const responses = async (value: string) => (await responseCalls(value)).filter((c) => !c.args.delete_original).map((c) => c.args.text as string);
     const pendingRow = async (id: string) => (await sql<any[]>`select * from pending_coding_agents where id = ${id}`)[0];
     const outcomeTurns = (pendingId: string) =>
@@ -805,6 +813,10 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
       expect((await pendingRow(p.pendingId)).status).toBe('cancelled');
       await click('coding:launch', p.pendingId);
       expect((await responses(p.pendingId)).at(-1)).toBe('Cancelled. Nothing was started.');
+      // Answers land in the thread (chat.postEphemeral with thread_ts); response_url only removes the preview.
+      const answers = await responseCalls(p.pendingId);
+      expect(answers.filter((c) => c.method === 'response_url').every((c) => c.args.delete_original === true)).toBe(true);
+      expect(answers.filter((c) => c.method === 'chat.postEphemeral').map((c) => c.args.user)).toEqual(['UADMIN', 'UADMIN']);
 
       const p2 = await propose(await newThread());
       await sql`update pending_coding_agents set expires_at = now() - interval '1 second' where id = ${p2.pendingId}`;

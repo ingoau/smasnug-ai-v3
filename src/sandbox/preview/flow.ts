@@ -31,6 +31,8 @@ export const CF_PRIVACY_URL = 'https://www.cloudflare.com/privacypolicy/';
 export const PREVIEW_WITH_WORKER = process.env.PREVIEW_ASSETS_ONLY !== '1';
 
 const threadOf = (row: PreviewRow) => parseThreadId(row.threadId);
+/** Button answers go to the preview's thread (features/util.ts ephemeral), not the channel / DM root. */
+const inThread = (row: PreviewRow) => ({ threadTs: threadOf(row).threadTs });
 
 async function tellRequester(row: PreviewRow, text: string, blocks?: unknown[]): Promise<void> {
   const { channelId, threadTs } = threadOf(row);
@@ -233,11 +235,11 @@ export async function expirePreviews(): Promise<void> {
 export async function handleTermsAccept(ctx: ActionContext): Promise<void> {
   const row = await getPreview(ctx.value ?? '');
   if (!row || row.requesterId !== ctx.userId) return ephemeral(ctx, 'This button is for someone else.');
-  if (row.status !== 'awaiting_terms') return ephemeral(ctx, 'This preview is no longer waiting for an answer.', { replace: true });
+  if (row.status !== 'awaiting_terms') return ephemeral(ctx, 'This preview is no longer waiting for an answer.', { replace: true, ...inThread(row) });
   await acceptTerms(ctx.userId);
   const r = await transition(row.id, ['awaiting_terms'], 'requested', { termsPromptExpiresAt: null });
   if (!r) return;
-  await ephemeral(ctx, `Thanks. Deploying the live preview of “${row.title}”; the link appears in the thread in a minute.`, { replace: true });
+  await ephemeral(ctx, `Thanks. Deploying the live preview of “${row.title}”; the link appears in the thread in a minute.`, { replace: true, ...inThread(row) });
   await enqueueDeploy(r.id);
 }
 
@@ -245,20 +247,21 @@ export async function handleTermsCancel(ctx: ActionContext): Promise<void> {
   const row = await getPreview(ctx.value ?? '');
   if (!row || row.requesterId !== ctx.userId) return ephemeral(ctx, 'This button is for someone else.');
   if (row.status === 'awaiting_terms') await endEarly(row, 'cancelled', 'declined terms');
-  if (!(await deleteOriginal(ctx))) await ephemeral(ctx, 'OK, no preview.', { replace: true });
+  if (!(await deleteOriginal(ctx))) await ephemeral(ctx, 'OK, no preview.', { replace: true, ...inThread(row) });
 }
 
 export async function handleClaim(ctx: ActionContext): Promise<void> {
   const row = await getPreview(ctx.value ?? '');
   if (!row) return ephemeral(ctx, 'This preview no longer exists.');
-  if (row.requesterId !== ctx.userId) return ephemeral(ctx, `Only <@${row.requesterId}> can claim this preview.`);
-  if (row.status !== 'live' || !row.claimExpiresAt || row.claimExpiresAt.getTime() <= Date.now()) return ephemeral(ctx, 'This preview can no longer be claimed.');
+  if (row.requesterId !== ctx.userId) return ephemeral(ctx, `Only <@${row.requesterId}> can claim this preview.`, inThread(row));
+  if (row.status !== 'live' || !row.claimExpiresAt || row.claimExpiresAt.getTime() <= Date.now()) return ephemeral(ctx, 'This preview can no longer be claimed.', inThread(row));
   const url = claimUrlOf(row);
   log.info({ previewId: row.id }, 'preview claim link shown');
-  if (!url) return ephemeral(ctx, "I don't have a claim link for this preview.");
+  if (!url) return ephemeral(ctx, "I don't have a claim link for this preview.", inThread(row));
   await ephemeral(
     ctx,
     `Claim link for “${row.title}”: ${url}\nAnyone with this link can take ownership of the site, so don't share it. Claiming moves it into your own Cloudflare account (sign-up is free; Cloudflare's own age rules apply).`,
+    inThread(row),
   );
 }
 
@@ -275,7 +278,7 @@ export async function handleReport(ctx: ActionContext): Promise<void> {
     ],
     `preview-report:${row.id}:${ctx.userId}`,
   );
-  await ephemeral(ctx, 'Thanks, reported.');
+  await ephemeral(ctx, 'Thanks, reported.', inThread(row));
 }
 
 /** Admin only (mod-channel report post, App Home). */

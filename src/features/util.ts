@@ -1,6 +1,7 @@
 /** Small helpers shared by the features module. */
 import { env } from '../config.js';
 import type { ActionContext } from '../core/actions.js';
+import { parseThreadId } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { fakeCall } from '../core/slack-fake.js';
 import { log } from '../log.js';
@@ -35,8 +36,26 @@ export async function respond(responseUrl: string | undefined, payload: Record<s
   }
 }
 
-/** Reply to the clicking user only: via response_url when available, else chat.postEphemeral. */
-export async function ephemeral(ctx: ActionContext, text: string, opts: { replace?: boolean } = {}) {
+/**
+ * Reply to the clicking user only. A click in a thread (`opts.threadTs`, else the clicked message's thread) is
+ * answered with chat.postEphemeral in that thread: response_url posts (new ephemerals, and replacements of an
+ * ephemeral message) land at the channel / DM root. `replace` there: an ephemeral source message is removed
+ * (delete_original) and the text posted in the thread; a regular message is still replaced in place. Outside a
+ * thread: response_url, else chat.postEphemeral.
+ */
+export async function ephemeral(ctx: ActionContext, text: string, opts: { replace?: boolean; threadTs?: string } = {}) {
+  // A click on a thread's parent message (thread_ts = its own ts) stays a root-level answer.
+  const threadTs = opts.threadTs ?? (ctx.threadTs && ctx.threadTs !== ctx.messageTs ? ctx.threadTs : undefined);
+  if (ctx.channelId && threadTs) {
+    if (opts.replace) {
+      if (isEphemeralSource(ctx)) await deleteOriginal(ctx);
+      else if (await respond(ctx.responseUrl, { replace_original: true, text })) return;
+    }
+    await slackCall('chat.postEphemeral', { channel: ctx.channelId, user: ctx.userId, text, thread_ts: threadTs }).catch((err) =>
+      log.warn({ err }, 'ephemeral in thread failed'),
+    );
+    return;
+  }
   const payload = opts.replace
     ? { replace_original: true, text }
     : { response_type: 'ephemeral', replace_original: false, text };
@@ -59,6 +78,22 @@ export async function ephemeral(ctx: ActionContext, text: string, opts: { replac
  */
 export async function deleteOriginal(ctx: ActionContext): Promise<boolean> {
   return respond(ctx.responseUrl, { delete_original: true });
+}
+
+/**
+ * The interaction with its thread filled in from a row that knows it (a pending send's / launch's thread): a button on
+ * an ephemeral message may not carry its thread, and ephemeral() then answers in that thread, not at the root.
+ */
+export function withThread(ctx: ActionContext, threadId: string | null | undefined): ActionContext {
+  if (!threadId || (ctx.threadTs && ctx.threadTs !== ctx.messageTs)) return ctx;
+  const { channelId, threadTs } = parseThreadId(threadId);
+  if (ctx.channelId && ctx.channelId !== channelId) return ctx;
+  return { ...ctx, channelId, threadTs };
+}
+
+/** The clicked button sits on an ephemeral message (Slack marks its container). */
+export function isEphemeralSource(ctx: Pick<ActionContext, 'body'>): boolean {
+  return ctx.body?.container?.is_ephemeral === true;
 }
 
 export interface UserProfile {
