@@ -104,7 +104,8 @@ async function prepareSend(ctx: ToolContext, destination: string, rawText: strin
     label = `a DM to <@${dest.id}>`;
   } else {
     const id = dest.kind === 'channel' ? dest.id : await resolveChannelName(dest.name);
-    if (!id) return `I can't find a channel named #${(dest as { name: string }).name} (or I'm not allowed to see it).`;
+    if (!id)
+      return `I can't find a channel named #${(dest as { name: string }).name} (or I'm not allowed to see it). Ask the speaker for the channel's link (#channel mention) or its ID (C…) and pass that instead.`;
     await checkChannel(id, ctx.speakerId);
     destId = id;
     label = `<#${id}>`;
@@ -200,12 +201,60 @@ export function sentMessageBlocks(o: { text: string; requesterId: string; sentId
   ];
 }
 
-async function resolveChannelName(name: string): Promise<string | undefined> {
+const BOT_CHANNELS_KEY = 'features:botchans';
+const BOT_CHANNELS_TTL_S = 600;
+/** A cached membership list older than this is re-fetched once when a name isn't in it (the bot joined since). */
+const BOT_CHANNELS_REFRESH_MS = 60_000;
+const MAX_PAGES = 20;
+
+/** The bot's own channels (public + private, not archived): users.conversations, name → id. */
+async function fetchBotChannels(): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const res = await slackCall<any>('users.conversations', {
+      types: 'public_channel,private_channel',
+      exclude_archived: true,
+      limit: 1000,
+      ...(cursor ? { cursor } : {}),
+    });
+    for (const c of res.channels ?? []) if (c?.name && c?.id) out[String(c.name).toLowerCase()] = String(c.id);
+    cursor = res.response_metadata?.next_cursor;
+    if (!cursor) break;
+  }
+  return out;
+}
+
+/**
+ * A channel name among the bot's own memberships (cached ~10 min; re-fetched once on a miss when the copy is over a
+ * minute old). Small, and it covers private channels the bot is in, which a workspace-wide scan may never reach.
+ */
+export async function botChannelId(name: string): Promise<string | undefined> {
+  let cached: { at: number; channels: Record<string, string> } | null = null;
+  try {
+    const raw = await redis.get(BOT_CHANNELS_KEY);
+    if (raw) cached = JSON.parse(raw);
+  } catch {}
+  if (cached?.channels[name]) return cached.channels[name];
+  if (cached && Date.now() - cached.at < BOT_CHANNELS_REFRESH_MS) return undefined;
+  const channels = await fetchBotChannels();
+  await redis.set(BOT_CHANNELS_KEY, JSON.stringify({ at: Date.now(), channels }), 'EX', BOT_CHANNELS_TTL_S).catch(() => {});
+  return channels[name];
+}
+
+/**
+ * `#name` → channel id: the bot's own channels first (botChannelId), then a scan of the workspace's channel list
+ * (cached per name), which may not reach every channel in a very large workspace. The privacy checks (checkChannel)
+ * run on the result either way.
+ */
+export async function resolveChannelName(name: string): Promise<string | undefined> {
+  const mine = await botChannelId(name).catch((err) => (log.warn({ err }, 'users.conversations lookup failed'), undefined));
+  if (mine) return mine;
   const cacheKey = `features:chan:${name}`;
   const cached = await redis.get(cacheKey).catch(() => null);
   if (cached) return cached;
   let cursor: string | undefined;
-  for (let page = 0; page < 20; page++) {
+  for (let page = 0; page < MAX_PAGES; page++) {
     const res = await slackCall<any>('conversations.list', {
       types: 'public_channel,private_channel',
       exclude_archived: true,
