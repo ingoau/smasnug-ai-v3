@@ -20,6 +20,8 @@ const h = vi.hoisted(() => ({
   /** Optional rows for sql queries (keyed by matching the query text). */
   sqlHook: undefined as undefined | ((query: string) => any[] | undefined),
   postedCards: [] as number[],
+  /** Overrides for the mocked renderThreadContext result. */
+  ctx: {} as Record<string, unknown>,
 }));
 
 vi.mock('../db/index.js', () => {
@@ -54,7 +56,7 @@ vi.mock('./subagents.js', () => ({
 }));
 vi.mock('./cards.js', () => ({ postCard: async (id: number) => void h.postedCards.push(id), freezeCard: async () => {}, scheduleCardRender: async () => {} }));
 vi.mock('../context/thread.js', () => ({
-  renderThreadContext: async () => ({ history: '<@U1> Tess: earlier', channelContext: '', newMessages: '<@U1> Tess: hi bot', participantIds: ['U2', 'U1', 'UBOT', 'U404'] }),
+  renderThreadContext: async () => ({ history: '<@U1> Tess: earlier', channelContext: '', newMessages: '<@U1> Tess: hi bot', participantIds: ['U2', 'U1', 'UBOT', 'U404'], ...h.ctx }),
   renderMessages: async (_t: string, ts: string[]) => `<@U1> Tess: INBOX ${ts.join(',')}`,
 }));
 vi.mock('../models.js', () => ({
@@ -140,6 +142,15 @@ function io(isMention = true, inbox: any[][] = []) {
   return { phases, io: { isMention, drainInbox: async () => inbox[n++] ?? [], setPhase: async (p: 'tools' | 'final') => void phases.push(p) } };
 }
 
+/** The first model call's turn message(s) as plain text (everything after the system prompt). */
+function turnText(call = 0): string {
+  const prompt = ((h.model as any).doStreamCalls as any[])[call].prompt as any[];
+  return prompt
+    .slice(1)
+    .flatMap((m) => (Array.isArray(m.content) ? m.content.map((c: any) => c.text ?? '') : [String(m.content)]))
+    .join('\n');
+}
+
 beforeEach(() => {
   h.slack = [];
   h.events = [];
@@ -147,6 +158,7 @@ beforeEach(() => {
   h.slackHook = undefined;
   h.sqlHook = undefined;
   h.postedCards = [];
+  h.ctx = {};
 });
 
 describe('runFrontTurn (mock model)', () => {
@@ -321,6 +333,25 @@ describe('runFrontTurn: turn context', () => {
     expect(later).toContain('Wednesday 2031-01-01 00:00 UTC');
     expect(later).toContain('<@U1> Tess');
     expect(later).not.toContain('<@U2> Sam —'); // the speaker isn't a participant
+  });
+});
+
+describe('runFrontTurn: thread summary', () => {
+  it('puts the rolling summary in <thread_summary> right before <thread_history>, only when there is one', async () => {
+    h.ctx = { summary: '- Sam asked where to hold the jam [1.000100]\n- decided: CSIT', history: '[1 earlier reply not shown; summarised in <thread_summary>]' };
+    h.model = mockModel([replyStep('ok'), textStep('')]);
+    await runFrontTurn(turn({ id: 50 }), io().io);
+    const msg = turnText();
+    const s = msg.indexOf('<thread_summary');
+    expect(s).toBeGreaterThan(-1);
+    expect(msg).toContain('decided: CSIT');
+    expect(msg).toMatch(/<thread_summary note="Automatic summary[^"]*ask_thread/);
+    expect(msg.indexOf('<thread_history')).toBeGreaterThan(s);
+
+    h.ctx = {};
+    h.model = mockModel([replyStep('ok'), textStep('')]);
+    await runFrontTurn(turn({ id: 51 }), io().io);
+    expect(turnText()).not.toContain('<thread_summary');
   });
 });
 

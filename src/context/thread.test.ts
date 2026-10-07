@@ -8,6 +8,8 @@ import { slackFixtureHandler, FIX_THREAD_TS } from './fixtures.js';
 import { renderMessages, renderThreadContext } from './thread.js';
 import { assignImageIds, getThreadImage } from './images.js';
 import { getUserInfo } from './users.js';
+import { closeQueues, queue, QUEUE } from '../core/queues.js';
+import { summaryJobId } from './summary.js';
 
 const channel = `C${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
 const threadId = threadIdOf(channel, FIX_THREAD_TS);
@@ -17,12 +19,13 @@ afterAll(async () => {
   remove();
   await sql`delete from threads where channel_id = ${channel}`;
   await sql`delete from messages where channel_id = ${channel}`;
+  await closeQueues();
   await sql.end();
   redis.disconnect();
 });
 
 describe('renderThreadContext', () => {
-  it('backfills, renders parent + last 29 replies, channel context and images', async () => {
+  it('backfills, renders parent + the replies that fit the window, channel context and images', async () => {
     const newTs = `${Number(FIX_THREAD_TS.split('.')[0]) + 40}.000100`; // last reply = the turn's new message
     const ctx = await renderThreadContext(threadId, { newMessageTs: [newTs] });
 
@@ -32,8 +35,14 @@ describe('renderThreadContext', () => {
     const lines = ctx.history.split('\n');
     expect(lines[0]).toContain('<@U0INGO> Ingo: Anyone know how to fix');
     expect(lines[0]).toContain('[image img_1: screenshot.png, from Ingo]');
-    expect(lines[1]).toBe('[8 earlier replies not shown]'); // 38 visible replies - 1 new - 29 shown
-    expect(lines).toHaveLength(1 + 1 + 29);
+    // 38 visible replies - 1 new = 37: all fit (limits.contextReplies = 40), so nothing is omitted, but they're past
+    // the compaction point (0.8 × 40), so a background summary update was requested for all but the newest 20.
+    expect(lines[1]).toContain('reply number 1');
+    expect(lines).toHaveLength(1 + 37);
+    expect(ctx.summary).toBeUndefined();
+    const job = await queue(QUEUE.threadSummary).getJob(summaryJobId(threadId, `${Number(FIX_THREAD_TS.split('.')[0]) + 19}.000100`));
+    expect(job?.data).toEqual({ threadId, targetTs: `${Number(FIX_THREAD_TS.split('.')[0]) + 19}.000100` });
+    await job?.remove();
     expect(ctx.history).toContain('[bot] CI Bot: Build #42 failed');
     expect(ctx.history).toContain('[image img_2: IMG_0042.HEIC, from alice]');
     expect(ctx.history).not.toContain('deleted');
@@ -54,7 +63,8 @@ describe('renderThreadContext', () => {
     const again = await renderThreadContext(threadId, { newMessageTs: [] });
     expect(again.history).toContain('[image img_1: screenshot.png');
     expect(again.history).toContain('[image img_2: IMG_0042.HEIC');
-    expect(again.history).toContain('[9 earlier replies not shown]');
+    expect(again.history).not.toContain('not shown');
+    expect(again.history.split('\n')).toHaveLength(1 + 38);
 
     // Backfill stored the parent's reactions; they render with names and "(you)" for the bot.
     const [parentRow] = await sql<any[]>`select reactions from messages where channel_id = ${channel} and ts = ${FIX_THREAD_TS}`;

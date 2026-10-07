@@ -161,6 +161,8 @@ export interface ThreadSelection {
   parent?: RenderMsg;
   replies: RenderMsg[];
   omitted: number;
+  /** Of the omitted replies, how many the rolling thread summary covers (unset: no summary involved). */
+  summarised?: number;
 }
 
 /** Pick the parent + the last `maxReplies` replies (deleted dropped); count how many earlier replies were left out. */
@@ -175,9 +177,19 @@ export function selectThread(msgs: RenderMsg[], threadTs: string, maxReplies: nu
 export function formatThread(sel: ThreadSelection, env: FormatEnv): string {
   const lines: string[] = [];
   if (sel.parent) lines.push(formatMessage({ ...sel.parent, replyCount: undefined }, env));
-  if (sel.omitted > 0) lines.push(`[${sel.omitted} earlier ${sel.omitted === 1 ? 'reply' : 'replies'} not shown]`);
+  if (sel.omitted > 0) lines.push(omittedNote(sel.omitted, sel.summarised));
   for (const r of sel.replies) lines.push(formatMessage(r, env));
   return lines.join('\n');
+}
+
+/** `[42 earlier replies not shown…]`, saying how much of it <thread_summary> covers when a summary is involved. */
+export function omittedNote(omitted: number, summarised?: number): string {
+  const n = `${omitted} earlier ${omitted === 1 ? 'reply' : 'replies'} not shown`;
+  if (summarised === undefined) return `[${n}]`;
+  const s = Math.min(Math.max(0, summarised), omitted);
+  if (s === omitted) return `[${n}; summarised in <thread_summary>]`;
+  if (s === 0) return `[${n}; not summarised yet, ask_thread answers questions about them]`;
+  return `[${n}: the oldest ${s} are summarised in <thread_summary>, the newest ${omitted - s} not yet (ask_thread answers questions about them)]`;
 }
 
 /** Every user id a set of messages needs a name for (authors + mentions). */

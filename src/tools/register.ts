@@ -1,6 +1,7 @@
 // Module registration: importing this registers tools/actions. The worker wires processors and maintenance.
 import type { Job } from 'bullmq';
-import type { QueueName } from '../core/queues.js';
+import { QUEUE, type QueueName } from '../core/queues.js';
+import { processThreadSummary, type ThreadSummaryJob } from '../context/summary.js';
 
 // Tool registrations (side-effect imports).
 import './fetch-url.js';
@@ -16,7 +17,11 @@ import './emoji.js';
 import './canvases.js';
 import { pruneImageCache } from './read-image.js';
 
-export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {};
+export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
+  [QUEUE.threadSummary]: async (job) => {
+    await processThreadSummary(job.data as ThreadSummaryJob);
+  },
+};
 
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {

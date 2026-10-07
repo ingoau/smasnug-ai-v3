@@ -21,6 +21,8 @@ export const QUEUE = {
    * Its own queue: these jobs wait on HuddleFM replies that arrive through slack-events.
    */
   huddlefm: 'huddlefm',
+  /** Rolling thread summary update (src/context/summary.ts): { threadId, targetTs }. Never blocks a turn. */
+  threadSummary: 'thread-summary',
   /** Repeatable maintenance: sweeper, expiry, memory extraction, retention */
   maintenance: 'maintenance',
 } as const;

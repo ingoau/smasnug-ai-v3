@@ -13,14 +13,22 @@ import { parseThreadId } from '../core/events.js';
 import type { StoredMessage } from '../core/types.js';
 import { log } from '../log.js';
 import type { TurnTiming } from '../core/timing.js';
-import { authorsMostRecentFirst, compareTs, formatMessages, formatThread, selectThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
+import { authorsMostRecentFirst, compareTs, formatMessages, formatThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
+import { estimateRenderedChars } from '../tools/paging.js';
+import { loadThreadSummary, requestThreadSummary } from './summary.js';
+import { planHistoryWindow, type HistoryWindow } from './window.js';
 import { assignImageIds } from './images.js';
 import { fetchHistoryAfter, fetchHistoryBefore, fetchReplies, fromStored, storeMessages } from './slack-messages.js';
 import { getUserNames } from './users.js';
 
 export interface RenderedThreadContext {
-  /** Parent + last N replies (with `[k earlier replies not shown]`), author-labelled, truncated, file/image placeholders. */
+  /**
+   * Parent + the newest replies that fit the history budget (window.ts; with `[k earlier replies not shown…]` saying
+   * how much of that the summary covers), author-labelled, truncated, file/image placeholders.
+   */
   history: string;
+  /** Rolling summary of the replies not shown (summary.ts), when it covers any of them. */
+  summary?: string;
   /** ~5 channel messages around the thread parent. Empty for DMs. */
   channelContext: string;
   /** The turn's new messages rendered the same way. */
@@ -35,6 +43,7 @@ const HISTORY_CHARS = limits.messageTruncateTokens * 4;
 const CHANNEL_CHARS = limits.channelMessageTruncateTokens * 4;
 const NEW_CHARS = limits.newMessageTruncateTokens * 4;
 const READ_CHARS = limits.readMessageTruncateTokens * 4;
+const HISTORY_BUDGET_CHARS = limits.historyTokens * 4;
 
 interface ThreadRow {
   id: string;
@@ -145,7 +154,10 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
   const thread = await span('ctx_ensure_thread', () => ensureThread(threadId));
   await span('ctx_backfill', () => backfillThread(thread, { rootIsNew: opts.newMessageTs.includes(thread.threadTs) }));
 
-  const all = await span('ctx_load_thread', () => loadThreadMessages(thread));
+  const [all, summary] = await Promise.all([
+    span('ctx_load_thread', () => loadThreadMessages(thread)),
+    span('ctx_summary', () => loadThreadSummary(threadId)).catch((err) => (log.warn({ err, threadId }, 'loadThreadSummary failed'), null)),
+  ]);
   const newSet = new Set(opts.newMessageTs);
   // New messages may live outside the thread rows (e.g. a top-level DM message) — load them by ts too.
   const newMsgs = opts.newMessageTs.length ? await span('ctx_load_new', () => loadByTs(thread.channelId, opts.newMessageTs).then((m) => withButtons(threadId, m))) : [];
@@ -153,17 +165,41 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
   // History = everything before the turn's newest message, minus the new messages themselves. Anything newer
   // arrives via the inbox (renderMessages), so it would be duplicated here.
   const history = all.filter((m) => !newSet.has(m.ts) && (!newest || compareTs(m.ts, newest) < 0 || m.ts === thread.threadTs));
-  const sel = selectThread(history, thread.threadTs, limits.contextReplies);
+  const win = planHistoryWindow(history, thread.threadTs, {
+    coveredTs: summary?.coveredTs,
+    maxChars: HISTORY_BUDGET_CHARS,
+    maxCount: limits.contextReplies,
+    size: (m) => estimateRenderedChars(m, HISTORY_CHARS),
+    compactAt: limits.threadSummaryCompactAt,
+    keepFraction: limits.threadSummaryKeep,
+  });
+  // Background summary update; never blocks the turn (the job is idempotent per target).
+  if (win.compactTo) requestThreadSummary(threadId, win.compactTo).catch((err) => log.warn({ err, threadId }, 'thread summary enqueue failed'));
   const channelMsgs = thread.isDm ? [] : await span('ctx_channel', () => loadChannelContext(thread));
 
-  const shown = [...(sel.parent ? [sel.parent] : []), ...sel.replies, ...newMsgs, ...channelMsgs];
+  const shown = [...(win.parent ? [win.parent] : []), ...win.replies, ...newMsgs, ...channelMsgs];
   const fenv = await span('ctx_format_env', () => formatEnvFor(threadId, shown));
+  const sel = fitRendered(win, fenv);
   return {
     history: formatThread(sel, fenv),
+    ...(summary && sel.summarised > 0 ? { summary: summary.summary } : {}),
     channelContext: formatMessages(channelMsgs, { ...fenv, maxChars: CHANNEL_CHARS }),
     newMessages: formatMessages(newMsgs, { ...fenv, maxChars: NEW_CHARS }),
     participantIds: authorsMostRecentFirst([...(sel.parent ? [sel.parent] : []), ...sel.replies, ...newMsgs]),
   };
+}
+
+/**
+ * The window is planned on estimated sizes; if the real rendering is still over the budget, drop the oldest shown
+ * replies (counted as omitted and not yet summarised), so the section never needs clipping and the omitted note
+ * stays exact.
+ */
+function fitRendered(win: HistoryWindow, fenv: FormatEnv): HistoryWindow {
+  let sel = win;
+  while (sel.replies.length > 1 && formatThread(sel, fenv).length > HISTORY_BUDGET_CHARS) {
+    sel = { ...sel, replies: sel.replies.slice(1), omitted: sel.omitted + 1, unsummarised: sel.unsummarised + 1 };
+  }
+  return sel;
 }
 
 async function loadByTs(channelId: string, ts: string[]): Promise<RenderMsg[]> {

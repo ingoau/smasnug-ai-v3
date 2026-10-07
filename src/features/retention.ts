@@ -49,6 +49,17 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
   await run('cards', sql`delete from cards where created_at < ${older(long)} returning id`);
   await run('reply_buttons', sql`delete from reply_buttons where created_at < ${older(long)} returning id`);
   await run('messages', sql`delete from messages where created_at < ${older(long)} returning ts`);
+  // Rolling thread summaries (src/context/summary.ts) are derived from stored messages: they go once the oldest
+  // message folded in is past the window (rebuilt from what's left on the next turn), and when a reply they cover was
+  // deleted in Slack (checked before that message's content is dropped below).
+  await run('thread_summaries', sql`delete from thread_summaries where oldest_message_at < ${older(long)} returning thread_id`);
+  await run(
+    'thread_summaries_deleted',
+    sql`delete from thread_summaries s where exists (
+          select 1 from messages m where m.thread_id = s.thread_id and m.deleted and (m.text <> '' or m.files <> '[]')
+            and m.ts::numeric <= s.covered_ts::numeric)
+        returning s.thread_id`,
+  );
   // Copies of messages deleted in Slack: drop the content right away.
   await run('messages_deleted_content', sql`update messages set text = '', files = '[]' where deleted and (text <> '' or files <> '[]') returning ts`);
   await run('usage', sql`delete from usage where created_at < ${older(long)} returning id`);

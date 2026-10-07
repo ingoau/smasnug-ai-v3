@@ -64,7 +64,23 @@ export const limits = {
   /** DMs / mentions / two-party follow-ups (no gate): short window, see debounceWindowMs. */
   debounceDirectMs: 300,
   debounceBusyMs: 3000,
-  contextReplies: 29,
+  /** Thread history in the prompt: at most this many replies (plus the parent), within historyTokens (src/context/window.ts). */
+  contextReplies: 40,
+  historyTokens: 8000,
+  /**
+   * Rolling thread summary (src/context/summary.ts) of the replies older than the history window. Once the replies
+   * after the summary use more than threadSummaryCompactAt of the history budget (size or count), a background job
+   * folds the older ones in, leaving threadSummaryKeep of the budget shown.
+   */
+  threadSummaryCompactAt: 0.8,
+  threadSummaryKeep: 0.5,
+  /** Hard length cap of the summary (≈tokens): the model is asked for less, the stored text is cut at this. */
+  threadSummaryMaxTokens: 800,
+  /** Replies folded in per model call (≈tokens of rendered messages); more are done in several calls, oldest first. */
+  threadSummaryChunkTokens: 30_000,
+  /** Per-message cut (≈tokens) in the summariser's input. */
+  threadSummaryMessageTokens: 1500,
+  threadSummaryTimeoutMs: 90_000,
   contextChannelMessages: 5,
   /** Per-message cuts (≈tokens, ~4 chars each) when rendering Slack messages for a model, cut with " [truncated]". */
   /** Thread history in the prompt (the history section's own budget still drops the oldest messages first). */

@@ -24,6 +24,7 @@ const CONCURRENCY: Record<QueueName, number> = {
   [QUEUE.subagentRun]: 50,
   [QUEUE.cardRender]: 20,
   [QUEUE.huddlefm]: 10,
+  [QUEUE.threadSummary]: 5,
   [QUEUE.maintenance]: 4,
 };
 

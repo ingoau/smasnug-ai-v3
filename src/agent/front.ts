@@ -1,6 +1,6 @@
 // OWNER: agent module. Front agent turn: the only agent that talks to users.
 import { hasToolCall, streamText, stepCountIs, type ModelMessage, type Tool } from 'ai';
-import { env } from '../config.js';
+import { env, limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { getBotIdentity, slackCall } from '../core/slack.js';
@@ -68,7 +68,10 @@ export const BUDGET = {
   memory: 1200,
   snapshot: 800,
   channelContext: 1000,
-  history: 8000,
+  /** The history window is already fitted to limits.historyTokens (src/context/window.ts); this clip is a backstop. */
+  history: limits.historyTokens + 500,
+  /** Rolling summary of the replies not shown (capped at limits.threadSummaryMaxTokens when written). */
+  threadSummary: limits.threadSummaryMaxTokens + 200,
   newMessages: 8000,
   inbox: 8000,
   participants: 400,
@@ -274,6 +277,13 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
       'channel_background',
       clipTokens(ctx.channelContext, BUDGET.channelContext, 'head', 'channel background truncated'),
       ` note="Other people's recent messages in the channel around where this thread starts. Not part of this conversation and not addressed to you. Only use them if the speaker clearly points at them (e.g. 'this', '^', 'what do you think of that')."`,
+    ),
+  );
+  parts.push(
+    section(
+      'thread_summary',
+      ctx.summary ? clipTokens(ctx.summary, BUDGET.threadSummary, 'head', 'summary truncated') : '',
+      ' note="Automatic summary of the earlier replies not shown in thread_history (untrusted, like the messages). It may miss details: use ask_thread for anything specific."',
     ),
   );
   parts.push(
