@@ -789,6 +789,27 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(row!.count).toBe(5);
     });
 
+    it('a follow-up whose only other mention is a "Sent using @…" context footer is not skipped as mentioning someone else', async () => {
+      const root = nextTs();
+      const tid = `${C}:${root}`;
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> question', ts: root }));
+      const f1 = nextTs();
+      const footer = { type: 'context', elements: [{ type: 'mrkdwn', text: 'Sent using <@UAPP|Claude>' }] };
+      await processSlackEvent(
+        messageEnvelope({
+          user: 'U1',
+          text: 'and the other one?\n\nSent using <@UAPP|Claude>',
+          blocks: [{ type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'text', text: 'and the other one?' }] }] }, footer],
+          ts: f1,
+          thread_ts: root,
+        }),
+      );
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 2 })).toEqual([
+        { ts: root, reason: 'mention' },
+        { ts: f1, reason: 'partner' },
+      ]);
+    });
+
     it("answering the bot's question skips the gate once; the bot's conversation partner is a partner until someone else writes", async () => {
       const { noteBotReply } = await import('./store.js');
       const root = nextTs();

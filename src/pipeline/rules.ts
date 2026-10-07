@@ -202,6 +202,54 @@ export function mentionedUsers(text: string): string[] {
   return [...text.matchAll(USER_MENTION)].map((m) => m[1]!);
 }
 
+const BODY_BLOCKS = new Set(['rich_text', 'section', 'markdown', 'header']);
+const GROUP_TOKEN = /<!(?:here|channel|everyone|subteam\^[A-Z0-9]+)(?:\|[^>]*)?>/g;
+
+/** Mention tokens (`<@U…>`, `<!here>`, `<!subteam^S…>`) inside a rich_text element tree. */
+function richTextMentions(el: any, out: string[]): void {
+  if (!el || typeof el !== 'object') return;
+  if (el.type === 'user' && typeof el.user_id === 'string') out.push(`<@${el.user_id}>`);
+  else if (el.type === 'usergroup' && typeof el.usergroup_id === 'string') out.push(`<!subteam^${el.usergroup_id}>`);
+  else if (el.type === 'broadcast' && typeof el.range === 'string') out.push(`<!${el.range}>`);
+  if (Array.isArray(el.elements)) for (const c of el.elements) richTextMentions(c, out);
+}
+
+/**
+ * The text whose mentions count for routing (mentionFacts): the message's own body, never its footers. With body
+ * blocks (rich_text, section, markdown, header), only their mentions: a context block like "Sent using @Claude"
+ * (messages sent through Claude's Slack connector, which Slack also folds into `text`) and attachments are left out.
+ * Without body blocks: `text`, minus any mention that only a context block carries.
+ */
+export function mentionText(msg: { text?: string; blocks?: unknown }): string {
+  const text = msg.text ?? '';
+  const blocks = Array.isArray(msg.blocks) ? (msg.blocks as any[]) : [];
+  if (!blocks.length) return text;
+  const body = blocks.filter((b) => BODY_BLOCKS.has(b?.type));
+  if (body.length) {
+    const out: string[] = [];
+    for (const b of body) {
+      if (b.type === 'rich_text') richTextMentions(b, out);
+      else if (b.type === 'markdown' && typeof b.text === 'string') out.push(b.text);
+      else if (b.type === 'section') {
+        if (typeof b.text?.text === 'string') out.push(b.text.text);
+        for (const f of Array.isArray(b.fields) ? b.fields : []) if (typeof f?.text === 'string') out.push(f.text);
+      }
+    }
+    return out.join(' ');
+  }
+  const footer = blocks
+    .filter((b) => b?.type === 'context')
+    .flatMap((b) => (Array.isArray(b.elements) ? b.elements : []))
+    .map((e: any) => (typeof e?.text === 'string' ? e.text : ''))
+    .join(' ');
+  const key = (token: string) => token.replace(/\|[^>]*>$/, '>');
+  const footerTokens = new Set([...footer.matchAll(USER_MENTION), ...footer.matchAll(GROUP_TOKEN)].map((m) => key(m[0])));
+  if (!footerTokens.size) return text;
+  const drop = (m: string) => (footerTokens.has(key(m)) ? '' : m);
+  return text.replace(USER_MENTION, drop).replace(GROUP_TOKEN, drop);
+}
+
+/** Who a message mentions (pass mentionText(msg) for a Slack message, so footers don't count). */
 export function mentionFacts(text: string, botUserId: string) {
   const users = mentionedUsers(text);
   const mentionsBot = users.includes(botUserId);

@@ -35,6 +35,8 @@ export interface SlackMessage {
   edited?: { ts: string; user?: string };
   /** Forwarded messages and link unfurls (normalised and stored, attachmentsFromSlack). */
   attachments?: unknown[];
+  /** Block Kit layout (rich_text body, context footers…); mention routing reads it (rules.ts mentionText). */
+  blocks?: unknown[];
 }
 
 export function isBotMessage(m: SlackMessage): boolean {

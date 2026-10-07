@@ -14,6 +14,7 @@ import {
   isRecentPartner,
   lastEngagedAt,
   mentionFacts,
+  mentionText,
   shouldDisengage,
   threadRootTs,
   type MessageFacts,
@@ -200,6 +201,42 @@ describe('mentionFacts', () => {
     expect(mentionFacts('<@W999> thoughts?', 'UBOT')).toEqual({ mentionsBot: false, mentionsOthers: true });
     expect(mentionFacts('<!here> anyone?', 'UBOT')).toEqual({ mentionsBot: false, mentionsOthers: true });
     expect(mentionFacts('no mentions', 'UBOT')).toEqual({ mentionsBot: false, mentionsOthers: false });
+  });
+});
+
+describe('mentionText (what counts as mentioning someone)', () => {
+  const facts = (msg: { text?: string; blocks?: unknown[] }) => mentionFacts(mentionText(msg), 'UBOT');
+  const richText = (...elements: unknown[]) => ({ type: 'rich_text', elements: [{ type: 'rich_text_section', elements }] });
+  const sentUsing = { type: 'context', elements: [{ type: 'mrkdwn', text: 'Sent using <@UCLAUDE|Claude>' }] };
+
+  it('a message sent through a connector: the "Sent using @…" footer is not a mention', () => {
+    const msg = {
+      text: 'can you also check the second link?\n\nSent using <@UCLAUDE|Claude>',
+      blocks: [richText({ type: 'text', text: 'can you also check the second link?' }), sentUsing],
+    };
+    expect(facts(msg)).toEqual({ mentionsBot: false, mentionsOthers: false });
+  });
+
+  it('mentions in the body still count (rich_text user / usergroup / broadcast, section and markdown text)', () => {
+    expect(facts({ text: '<@UBOT> hi', blocks: [richText({ type: 'user', user_id: 'UBOT' }, { type: 'text', text: ' hi' }), sentUsing] })).toEqual({ mentionsBot: true, mentionsOthers: false });
+    expect(facts({ blocks: [richText({ type: 'text', text: 'ask ' }, { type: 'user', user_id: 'U2' })] })).toEqual({ mentionsBot: false, mentionsOthers: true });
+    expect(facts({ blocks: [richText({ type: 'usergroup', usergroup_id: 'S1' })] }).mentionsOthers).toBe(true);
+    expect(facts({ blocks: [richText({ type: 'broadcast', range: 'here' })] }).mentionsOthers).toBe(true);
+    expect(facts({ blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'cc <@U3>' } }, sentUsing] }).mentionsOthers).toBe(true);
+    expect(facts({ blocks: [{ type: 'markdown', text: 'hey <@UBOT>' }] })).toEqual({ mentionsBot: true, mentionsOthers: false });
+    // Nested lists / quotes.
+    const nested = { type: 'rich_text', elements: [{ type: 'rich_text_list', elements: [{ type: 'rich_text_section', elements: [{ type: 'user', user_id: 'U4' }] }] }] };
+    expect(facts({ blocks: [nested] }).mentionsOthers).toBe(true);
+  });
+
+  it('attachments never count; without blocks the text is used', () => {
+    expect(facts({ text: 'look at this', blocks: [richText({ type: 'text', text: 'look at this' })] }).mentionsOthers).toBe(false);
+    expect(facts({ text: 'hi <@U2>' })).toEqual({ mentionsBot: false, mentionsOthers: true });
+  });
+
+  it('only a footer (no body blocks): its mentions are dropped from the text, others kept', () => {
+    expect(facts({ text: 'thanks!\nSent using <@UCLAUDE>', blocks: [sentUsing] })).toEqual({ mentionsBot: false, mentionsOthers: false });
+    expect(facts({ text: '<@U2> thanks!\nSent using <@UCLAUDE>', blocks: [sentUsing] })).toEqual({ mentionsBot: false, mentionsOthers: true });
   });
 });
 

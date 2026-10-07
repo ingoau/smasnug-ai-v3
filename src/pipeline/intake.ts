@@ -15,7 +15,7 @@ import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
-import { answersOtherOffer, decide, isRecentPartner, isSlackbotUser, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
+import { answersOtherOffer, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
 import { isBotPeerDm } from './dm-peer.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { handleHuddleFmMessage, isFromHuddleFm } from '../features/huddlefm/inbound.js';
@@ -81,7 +81,7 @@ async function handleNewMessage(ev: MessageEvent) {
   const text = ev.text ?? '';
   // A DM with another bot or app (its user posting as a user): never a conversation. Cached per DM channel.
   if (isDm && !isBot && ev.user && (await isBotPeerDm(channelId, ev.user).catch(() => false))) return;
-  const { mentionsBot, mentionsOthers } = isBot ? { mentionsBot: false, mentionsOthers: false } : mentionFacts(text, bot.userId);
+  const { mentionsBot, mentionsOthers } = isBot ? { mentionsBot: false, mentionsOthers: false } : mentionFacts(mentionText(ev), bot.userId);
   if (!isBot && ev.user && shouldRedirectGroupPing({ isDm, threadTs: ev.thread_ts, ts: ev.ts, mentionsBot, text }) && !isBangStop(text, bot.userId)) {
     await redirectGroupPing({ ...ev, user: ev.user }, bot);
     return;
@@ -206,7 +206,7 @@ async function handleEdit(ev: MessageEvent) {
     if (!known && !isBotMessage(msg) && msg.user) {
       const bot = await getBotIdentity();
       const isDm = ev.channel_type === 'im';
-      const mentionsBot = mentionFacts(msg.text ?? '', bot.userId).mentionsBot;
+      const mentionsBot = mentionFacts(mentionText(msg), bot.userId).mentionsBot;
       // A group-ping trigger is answered in a new thread (guidelines), never under the original message.
       if ((isDm || mentionsBot) && !shouldRedirectGroupPing({ isDm, threadTs: msg.thread_ts, ts: msg.ts, mentionsBot, text: msg.text })) {
         await upsertThread({ id: candidate, channelId: ev.channel, threadTs: threadRootTs(msg), isDm });
