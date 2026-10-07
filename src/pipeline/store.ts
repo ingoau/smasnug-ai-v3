@@ -87,15 +87,24 @@ export async function insertTombstone(channelId: string, ts: string, threadId: s
     on conflict (channel_id, ts) do update set text = '', files = '[]'::jsonb, deleted = true`;
 }
 
-/** Apply an edit to a stored copy. Returns the stored row (if we had one). */
-export async function applyEdit(channelId: string, m: SlackMessage): Promise<{ threadId: string | null; userId: string | null } | undefined> {
+/**
+ * Apply an edit to a stored copy, only when the text or files actually differ: Slack sends `message_changed` for a
+ * thread root whenever replies are added (reply count, latest reply), with the same text. Returns the stored row (if
+ * we had one) and whether it changed. Previous texts are not kept.
+ */
+export async function applyEdit(channelId: string, m: SlackMessage): Promise<{ threadId: string | null; userId: string | null; changed: boolean } | undefined> {
   const files = fileRefs(m);
+  const text = m.text ?? '';
   const [row] = await sql<{ threadId: string | null; userId: string | null }[]>`
-    update messages set text = ${m.text ?? ''}, files = ${sql.json(files as any)},
+    update messages set text = ${text}, files = ${sql.json(files as any)},
       edited_at = ${m.edited ? slackTsDate(m.edited.ts) : sql`edited_at`}
     where channel_id = ${channelId} and ts = ${m.ts} and not deleted
+      and (text is distinct from ${text} or files is distinct from ${sql.json(files as any)}::jsonb)
     returning thread_id, user_id`;
-  return row;
+  if (row) return { ...row, changed: true };
+  const [same] = await sql<{ threadId: string | null; userId: string | null }[]>`
+    select thread_id, user_id from messages where channel_id = ${channelId} and ts = ${m.ts} and not deleted`;
+  return same ? { ...same, changed: false } : undefined;
 }
 
 /** Retention: a deleted Slack message clears our stored copy. */

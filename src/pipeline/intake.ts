@@ -148,7 +148,10 @@ async function handleEdit(ev: MessageEvent) {
     await applyDelete(ev.channel, msg.ts);
     return;
   }
-  let threadId = (await applyEdit(ev.channel, msg))?.threadId ?? null;
+  const applied = await applyEdit(ev.channel, msg);
+  let threadId = applied?.threadId ?? null;
+  // Only a real change (text or files) is an edit: Slack re-sends a thread root unchanged whenever replies are added.
+  let changed = Boolean(applied?.changed);
   if (!threadId && msg.edited) {
     // Edit processed before the original message (parallel workers): store the edited version for threads the
     // original will engage or already has. The original's own event still triggers the turn (and keeps this text).
@@ -167,9 +170,10 @@ async function handleEdit(ev: MessageEvent) {
     if (known) {
       await storeMessage(ev.channel, candidate, msg);
       threadId = candidate;
+      changed = true;
     }
   }
-  if (threadId && msg.edited) await appendEvent(threadId, 'message_edited', msg.user ?? null, { ts: msg.ts });
+  if (threadId && msg.edited && changed) await appendEvent(threadId, 'message_edited', msg.user ?? null, { ts: msg.ts });
   // During a debounce window the batch only holds the ts; the turn reads the edited text from the DB.
 }
 

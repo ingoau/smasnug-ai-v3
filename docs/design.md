@@ -133,7 +133,7 @@ The bot always runs on a mention or DM. In threads where it has been mentioned, 
 Every front-agent turn has exactly one speaker, and only one front agent runs per thread at a time. This keeps "current speaker" well defined for memory, tools and steering.
 **Debounce per (thread, author).** Messages from the same person within the window merge into one turn; messages from different people never merge. The window scales: about 300 ms for messages that skip the relevance gate (DMs, mentions, two-party follow-ups, "stop"), about 1 second for gated messages, 3 seconds while the thread has running subagents. It is re-evaluated as each message arrives. A same-author message that misses the short window still reaches the running turn through its inbox (or starts the next turn once the reply is out).
 - 
-An edit during the window replaces the message in the batch.
+An edit during the window replaces the message in the batch. Only a real change counts as an edit: `message_changed` whose text and files equal the stored copy (Slack re-sends a thread root unchanged every time a reply is added) updates nothing and logs no `message_edited` event. Previous texts are not stored.
 - 
 A deletion during the window removes it; if that empties the batch, the turn is cancelled.
 **Sequential turns.** If two people message at once, their turns run one after the other. The second turn sees the first turn's messages and reply as ordinary thread context.

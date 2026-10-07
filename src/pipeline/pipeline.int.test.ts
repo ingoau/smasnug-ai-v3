@@ -618,6 +618,26 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(types).toEqual(['message', 'message_edited', 'message_deleted', 'root_deleted']);
     });
 
+    it('message_changed with the same text and files (a thread root re-sent as replies arrive) is not an edit', async () => {
+      const root = nextTs();
+      const tid = `${C}:${root}`;
+      const edited = { ts: '1700000001.000000' };
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> one', ts: root, files: [{ id: 'F1', name: 'a.png' }] }));
+      await processSlackEvent(messageEnvelope({ subtype: 'message_changed', message: { user: 'U1', text: '<@UBOT> one!', ts: root, edited, files: [{ id: 'F1', name: 'a.png' }] } }));
+      // Slack re-sends the (once edited) root every time a reply is added: same text, same files.
+      for (let i = 1; i <= 3; i++) {
+        await processSlackEvent(
+          messageEnvelope({ subtype: 'message_changed', message: { user: 'U1', text: '<@UBOT> one!', ts: root, edited, reply_count: i, files: [{ id: 'F1', name: 'a.png' }] } }),
+        );
+      }
+      const edits = async () => (await sql`select 1 from thread_events where thread_id = ${tid} and type = 'message_edited'`).length;
+      expect(await edits()).toBe(1);
+      // A change in the files is an edit.
+      await processSlackEvent(messageEnvelope({ subtype: 'message_changed', message: { user: 'U1', text: '<@UBOT> one!', ts: root, edited, files: [] } }));
+      expect(await edits()).toBe(2);
+      expect((await sql`select text, files from messages where ts = ${root}`)[0]).toEqual({ text: '<@UBOT> one!', files: [] });
+    });
+
     it('deleting the thread root blocks posting into it, cancels pending turns and stops the running turn', async () => {
       const { slackCall, ThreadGoneError } = await import('../core/slack.js');
       const { stopRequestedSince } = await import('./stop.js');
