@@ -23,6 +23,11 @@ import { previewsConfigured, SANDBOX_TOOL_NAMES, sandboxConfigured } from '../sa
 
 /** Step cap per run (the token cap applies too). */
 const MAX_STEPS = 50;
+/**
+ * This long before the run's time cap, the run is told to stop researching and report: a timed-out run fails with no
+ * result at all, so deep research that runs long still hands back what it found.
+ */
+export const WRAP_UP_BEFORE_TIMEOUT_MS = 90_000;
 
 /** Card text while the first step runs (until its first tool call). */
 export const FIRST_STEP_DETAILS = 'Researching…';
@@ -77,6 +82,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
   const sandbox = !!sa.sandbox && sandboxConfigured();
   const maxDurationMs = sandbox ? limits.sandboxRunMaxDurationMs : limits.runMaxDurationMs;
   const timeout = setTimeout(() => controller.abort(new RunAbort('timeout')), maxDurationMs);
+  const wrapUpAt = Date.now() + maxDurationMs - WRAP_UP_BEFORE_TIMEOUT_MS;
   let cancelRequested = false;
   const heartbeat = setInterval(() => {
     sql<{ cancelRequested: boolean }[]>`update runs set heartbeat_at = now() where id = ${run.id} and status = 'running' returning cancel_requested`
@@ -161,9 +167,9 @@ export async function processSubagentRun(runId: number): Promise<void> {
       const inbox = await drainSubagentInbox(sa.id);
       for (const text of inbox) messages.push({ role: 'user', content: `[Orchestrator update] ${text}` });
 
-      const overBudget = tokens >= limits.runMaxTokens || step >= MAX_STEPS;
+      const overBudget = tokens >= limits.runMaxTokens || step >= MAX_STEPS || Date.now() >= wrapUpAt;
       if (overBudget) {
-        messages.push({ role: 'user', content: '[Orchestrator update] You are out of budget for this task. Stop using tools and report what you have now, ending with the SUMMARY line.' });
+        messages.push({ role: 'user', content: '[Orchestrator update] You are out of time or budget for this task. Stop using tools and report what you have now (including the leads you didn\'t get to), ending with the SUMMARY line.' });
       }
       if (step === 0) await setDetails(FIRST_STEP_DETAILS);
       else if (!lastDetails || lastDetails === FIRST_STEP_DETAILS) await setDetails('Thinking');

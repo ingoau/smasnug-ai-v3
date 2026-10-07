@@ -1,7 +1,17 @@
 /** Pure parts of ask_thread: the answering model's prompts and the size cap on the thread transcript. */
 
-/** Hard cap per front turn / subagent run (the tool set is built once per turn/run). */
+/** Hard cap per front turn (the tool set is built once per turn/run). */
 export const ASK_THREAD_MAX_CALLS_PER_TURN = 3;
+/**
+ * Hard cap per subagent run: research follows leads into many threads, and ask_thread is the cheap way to open one
+ * (a short answer instead of pages of messages in the run's context).
+ */
+export const ASK_THREAD_MAX_CALLS_PER_RUN = 12;
+
+/** The cap for a role: subagent runs get more than front turns. */
+export function askThreadMaxCalls(role: string): number {
+  return role === 'child' ? ASK_THREAD_MAX_CALLS_PER_RUN : ASK_THREAD_MAX_CALLS_PER_TURN;
+}
 
 export function askThreadSystemPrompt(): string {
   return `You answer one question about a Slack thread for another assistant, using only the thread transcript you are given.

@@ -209,7 +209,12 @@ export const limits = {
   // per thread / run
   threadConcurrentSubagents: 10,
   runMaxDurationMs: 10 * 60 * 1000,
-  runMaxTokens: 400_000,
+  /**
+   * Cumulative tokens of a run's model steps (every step re-sends the whole history, mostly served from the prompt
+   * cache). 400k ended Slack-heavy research after ~10 steps (context grows ~5-10k per step of search results); deep
+   * research runs 15-25 steps. Then the run is told to report what it has.
+   */
+  runMaxTokens: 1_000_000,
   autoSuspendReporters: 3,
   fetchMaxBytes: 3 * 1024 * 1024,
   fetchTimeoutMs: 10_000,

@@ -34,7 +34,7 @@ const { threadIdOf } = await import('../core/events.js');
 const { toolsFor } = await import('../core/tools.js');
 const { HAVEN, havenFixtureHandler, havenSearchMatches } = await import('../context/fixtures.js');
 await import('./index.js');
-const { ASK_THREAD_MAX_CALLS_PER_TURN } = await import('./ask-thread-prompt.js');
+const { ASK_THREAD_MAX_CALLS_PER_TURN, ASK_THREAD_MAX_CALLS_PER_RUN } = await import('./ask-thread-prompt.js');
 const { MISSING_SCOPE_MESSAGE } = await import('./public-thread.js');
 
 const channel = `C${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
@@ -153,5 +153,13 @@ describe('ask_thread', () => {
     for (let i = 0; i < ASK_THREAD_MAX_CALLS_PER_TURN; i++) expect(await exec(t, { question: `q${i}?` })).toContain('Answer about');
     expect(await exec(t, { question: 'one more?' })).toMatch(/already used/);
     expect(h.prompts).toHaveLength(ASK_THREAD_MAX_CALLS_PER_TURN);
+  });
+
+  it(`subagent runs get ${ASK_THREAD_MAX_CALLS_PER_RUN} calls (research opens many threads)`, async () => {
+    const t = toolsFor('child', ctx()).ask_thread as any;
+    expect(t.description).toContain(`At most ${ASK_THREAD_MAX_CALLS_PER_RUN} calls per run`);
+    for (let i = 0; i < ASK_THREAD_MAX_CALLS_PER_RUN; i++) expect(await exec(t, { question: `q${i}?` })).toContain('Answer about');
+    expect(await exec(t, { question: 'one more?' })).toMatch(/already used \d+ times this run/);
+    expect(h.prompts).toHaveLength(ASK_THREAD_MAX_CALLS_PER_RUN);
   });
 });

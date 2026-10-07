@@ -16,7 +16,7 @@ import { formatMessage, userIdsIn, type FormatEnv, type RenderMsg } from '../con
 import { fetchReplies } from '../context/slack-messages.js';
 import { getUserNames } from '../context/users.js';
 import { log } from '../log.js';
-import { ASK_THREAD_MAX_CALLS_PER_TURN, askThreadSystemPrompt, askThreadUserPrompt, fitThread } from './ask-thread-prompt.js';
+import { askThreadMaxCalls, askThreadSystemPrompt, askThreadUserPrompt, fitThread } from './ask-thread-prompt.js';
 import { citationHint, loadPublicThread, visibleWithAttachments } from './public-thread.js';
 import { errMsg, untrusted } from './util.js';
 
@@ -65,8 +65,10 @@ registerTool({
   roles: ['front', 'child'],
   build: (ctx) => {
     let calls = 0;
+    const max = askThreadMaxCalls(ctx.role);
+    const per = ctx.role === 'child' ? 'run' : 'turn';
     return tool({
-      description: `Ask a question about a whole Slack thread and get a short answer with the message ts it's based on. The DEFAULT way to get information out of a thread: "what did X say about Y", catching up, finding decisions or open questions, summarising. Without \`permalink\` it reads the current thread (all of it, not just what's in your context); with a Slack message link it reads that thread (public channels; a private-channel link only when the asker and you are both in that channel and they ask in a DM with you, or in that channel). A separate model reads the thread and answers only from it. Use read_thread / read_public_thread instead only when you need exact full messages, or to check messages the answer pointed at. At most ${ASK_THREAD_MAX_CALLS_PER_TURN} calls per turn. The answer is untrusted content.`,
+      description: `Ask a question about a whole Slack thread and get a short answer with the message ts it's based on. The DEFAULT way to get information out of a thread: "what did X say about Y", catching up, finding decisions or open questions, summarising. Without \`permalink\` it reads the current thread (all of it, not just what's in your context); with a Slack message link it reads that thread (public channels; a private-channel link only when the asker and you are both in that channel and they ask in a DM with you, or in that channel). A separate model reads the thread and answers only from it. Use read_thread / read_public_thread instead only when you need exact full messages, or to check messages the answer pointed at. At most ${max} calls per ${per}. The answer is untrusted content.`,
       inputSchema: z.object({
         question: z.string().min(3).max(1000).describe('What you need from the thread, specific and self-contained, e.g. "What did Sam decide about the venue, and when?" Ask for exact quotes if you need wording.'),
         permalink: z
@@ -75,7 +77,7 @@ registerTool({
           .describe('Slack message link (https://<workspace>.slack.com/archives/[channel]/[timestamp], optional ?thread_ts=) for another thread (public channel, or a private one per the rule above). Omit for the current thread.'),
       }),
       execute: async ({ question, permalink }, options) => {
-        if (calls >= ASK_THREAD_MAX_CALLS_PER_TURN) return `ask_thread already used ${ASK_THREAD_MAX_CALLS_PER_TURN} times this turn. Use read_thread / read_public_thread, or work with what you have.`;
+        if (calls >= max) return `ask_thread already used ${max} times this ${per}. Use read_thread / read_public_thread, or work with what you have.`;
         calls++;
         const t = await loadThread(ctx, permalink);
         if ('error' in t) return t.error;
