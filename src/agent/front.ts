@@ -2,6 +2,8 @@
 import { hasToolCall, streamText, stepCountIs, type ModelMessage, type Tool } from 'ai';
 import { env, limits } from '../config.js';
 import { sql } from '../db/index.js';
+import { filesCreatedByRuns } from '../files/store.js';
+import { fileListingLine } from '../files/format.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { getBotIdentity, slackCall } from '../core/slack.js';
 import { getUserInfo, type UserInfo } from '../context/users.js';
@@ -205,6 +207,8 @@ export async function renderCardResults(cardId: number): Promise<{ text: string;
     select r.id, r.subagent_id, s.title, s.owner_id, r.status, r.instructions, r.result, r.error, r.is_resume
     from runs r join subagents s on s.id = r.subagent_id where r.card_id = ${cardId} order by r.id`;
   const per = Math.floor(BUDGET.synthesis / Math.max(1, runs.length));
+  // Files a run made: metadata only (the front agent posts them with reply(files) without reading them).
+  const made = await filesCreatedByRuns(runs.map((r) => Number(r.id)));
   const parts = runs.map((r) => {
     const head = `## ${r.subagentId} "${r.title}" (owner <@${r.ownerId}>)${r.isResume ? ' [follow-up run]' : ''} — ${r.status.toUpperCase()}`;
     const task = `Task: ${oneLine(r.instructions, 300)}`;
@@ -214,7 +218,9 @@ export async function renderCardResults(cardId: number): Promise<{ text: string;
         : r.status === 'cancelled'
           ? 'Cancelled before finishing.'
           : `Failed: ${r.error ?? 'unknown error'}`;
-    return `${head}\n${task}\n${body}`;
+    const files = made.get(Number(r.id)) ?? [];
+    const fileList = files.length ? `\nFiles it created (post with reply(files: [ids]); no need to read them):\n${files.map((f) => `- ${fileListingLine(f)}`).join('\n')}` : '';
+    return `${head}\n${task}\n${body}${fileList}`;
   });
   return { text: parts.join('\n\n'), runIds: runs.map((r) => Number(r.id)), allCancelled: runs.length > 0 && runs.every((r) => r.status === 'cancelled') };
 }
@@ -234,15 +240,20 @@ export async function renderEarlierRounds(cardId: number, maxRounds = 4): Promis
   if (!chain.length) return '';
   const parts: string[] = [];
   for (const { id, depth } of chain) {
-    const runs = await sql<{ subagentId: string; title: string; status: string; result: string | null; error: string | null }[]>`
-      select r.subagent_id, s.title, r.status, r.result, r.error
+    const runs = await sql<{ id: number; subagentId: string; title: string; status: string; result: string | null; error: string | null }[]>`
+      select r.id, r.subagent_id, s.title, r.status, r.result, r.error
       from runs r join subagents s on s.id = r.subagent_id where r.card_id = ${Number(id)} order by r.id`;
     if (!runs.length) continue;
     const per = Math.floor(BUDGET.synthesis / 2 / depth / Math.max(1, runs.length));
+    const made = await filesCreatedByRuns(runs.map((r) => Number(r.id)));
     parts.push(
       `### Round -${depth}\n` +
         runs
-          .map((r) => `- ${r.subagentId} "${r.title}" — ${r.status}: ${r.status === 'complete' ? clipTokens(r.result ?? '', per) : (r.error ?? 'cancelled')}`)
+          .map((r) => {
+            const files = made.get(Number(r.id)) ?? [];
+            const list = files.length ? ` [files: ${files.map((f) => fileListingLine(f)).join('; ')}]` : '';
+            return `- ${r.subagentId} "${r.title}" — ${r.status}: ${r.status === 'complete' ? clipTokens(r.result ?? '', per) : (r.error ?? 'cancelled')}${list}`;
+          })
           .join('\n'),
     );
   }

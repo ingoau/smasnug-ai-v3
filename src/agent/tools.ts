@@ -11,11 +11,27 @@ import { cancelSubagent, messageSubagent, spawnSubagent, ToolError } from './sub
 import { MAX_BUTTONS, MAX_LABEL_CHARS } from './reply-buttons.js';
 import { turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
+import { prepareOutgoingFiles } from './files.js';
 
-const fileSchema = z.object({
-  filename: z.string().describe('File name with extension, e.g. "report.md" or "data.csv"'),
-  content: z.string().describe('Full text content of the file'),
-});
+/**
+ * `reply(files)`: file ids (uploads, subagent results, create_file), or an inline text file that is stored first.
+ * Lenient like the rest of the reply schema: unknown ids are reported in the result, never a schema error.
+ */
+export const replyFilesSchema = z
+  .array(
+    z.union([
+      z.string().describe('A file id, e.g. "file_k3x9q2mf7a"'),
+      z.object({
+        filename: z.string().describe('File name with extension, e.g. "report.md" or "index.html"'),
+        content: z.string().describe('Full text content of the file'),
+        description: z.string().optional().describe('One line saying what the file is'),
+      }),
+    ]),
+  )
+  .optional()
+  .describe(
+    'Optional files to post below the message: file ids (file_…) from this conversation, from subagent results or from create_file (post subagent-made files by id without reading them), or an inline text file {filename, content}. HTML files are fine (Slack shows them).',
+  );
 
 /**
  * Deliberately lenient (no min/max): a schema violation would fail the call after its text already streamed, and a
@@ -50,7 +66,7 @@ registerTool({
         'Post a message in the current Slack thread (markdown). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction instead). A reply ends your turn unless continue_turn is true (calls in the same step that need their results, like searches, still run and come back to you). Usually one reply per turn; never send two replies that say the same thing.',
       inputSchema: z.object({
         text: z.string().describe('Message text in Slack-flavoured markdown. Keep it concise.'),
-        files: z.array(fileSchema).max(5).optional().describe('Optional text files to attach below the message'),
+        files: replyFilesSchema,
         buttons: buttonsSchema,
         continue_turn: continueTurnSchema,
       }),
@@ -62,12 +78,16 @@ registerTool({
       },
       execute: async ({ text, files, buttons }, { toolCallId }) => {
         const s = turnState(ctx);
-        const res = await s.replies.finish(toolCallId, text, files, buttons);
+        // At most 10 files per message (Slack); access is checked per id (this thread, or the speaker's own files).
+        const prepared = await prepareOutgoingFiles({ threadId: ctx.threadId, speakerId: ctx.speakerId, turnId: ctx.turnId }, files?.slice(0, 10));
+        const res = await s.replies.finish(toolCallId, text, prepared.files, buttons);
+        const notes = [...prepared.errors, ...((files?.length ?? 0) > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
+        const fileNote = notes.length ? ` File problems: ${notes.join(' ')}` : '';
         if (res.startsWith('Replied')) {
           s.visible.add('reply');
-          return `${res} Don't send another reply unless you have something new.`;
+          return `${res}${fileNote} Don't send another reply unless you have something new.`;
         } else if (s.replies.anyVisible) s.visible.add('reply'); // e.g. a stream the user stopped halfway
-        return res;
+        return `${res}${fileNote}`;
       },
     }),
 });
@@ -87,7 +107,7 @@ registerTool({
           .array(
             z.object({
               title: z.string().describe('Short task title for the plan card, e.g. "Research hosting options" (≤ 6 words)'),
-              instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, image ids img_N), and what a good result looks like'),
+              instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, file ids file_… of uploads it should use), and what a good result looks like'),
               seed_from: z.string().optional().describe('Id of an expired subagent whose summary should seed this one'),
             }),
           )

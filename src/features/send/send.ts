@@ -15,7 +15,7 @@ import { appendEvent } from '../../core/events.js';
 import { slackCall, slackErrorCode } from '../../core/slack.js';
 import { registerTool, type ToolContext } from '../../core/tools.js';
 import { redis } from '../../core/redis.js';
-import { uploadFiles } from '../../agent/files.js';
+import { prepareOutgoingFiles, uploadFiles, type OutgoingFile } from '../../agent/files.js';
 import { replyBlocks } from '../../agent/slack-markdown.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
@@ -41,7 +41,11 @@ export const SEND_TEXT_MAX = 6000;
 
 class UserFacingError extends Error {}
 
-const FileSchema = z.object({ filename: z.string().min(1).max(200), content: z.string().max(200_000) });
+/** File ids (this conversation's files, or the speaker's own), or an inline text file stored first. */
+const FileSchema = z.union([
+  z.string().describe('A file id, e.g. "file_k3x9q2mf7a"'),
+  z.object({ filename: z.string().min(1).max(200), content: z.string().max(200_000) }),
+]);
 
 export function sendMessageTool(ctx: ToolContext) {
   return tool({
@@ -55,11 +59,13 @@ export function sendMessageTool(ctx: ToolContext) {
     inputSchema: z.object({
       destination: z.string().describe('"thread", "#channel-name", "<#C…>", "<@U…>" or an id'),
       text: z.string().min(1).max(SEND_TEXT_MAX),
-      files: z.array(FileSchema).max(5).optional().describe('Text files to attach'),
+      files: z.array(FileSchema).max(5).optional().describe('Files to attach: file ids (file_…), or inline text files {filename, content}'),
     }),
     execute: async ({ destination, text, files }) => {
       try {
-        return await prepareSend(ctx, destination, text, files ?? []);
+        const prepared = await prepareOutgoingFiles({ threadId: ctx.threadId, speakerId: ctx.speakerId, turnId: ctx.turnId }, files);
+        if (prepared.errors.length) return `Not sent: ${prepared.errors.join(' ')}`;
+        return await prepareSend(ctx, destination, text, prepared.files);
       } catch (err) {
         if (err instanceof UserFacingError) return err.message;
         log.error({ err }, 'send_message failed');
@@ -71,7 +77,7 @@ export function sendMessageTool(ctx: ToolContext) {
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 
-async function prepareSend(ctx: ToolContext, destination: string, rawText: string, files: { filename: string; content: string }[]) {
+async function prepareSend(ctx: ToolContext, destination: string, rawText: string, files: OutgoingFile[]) {
   const dest = parseDestination(destination, ctx.channelId);
   if (dest.kind === 'invalid') return dest.error;
   const text = sanitizeOutgoing(rawText);

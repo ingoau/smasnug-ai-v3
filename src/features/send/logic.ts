@@ -45,7 +45,8 @@ export interface PendingSendRow {
   threadId: string | null;
   destination: string;
   text: string;
-  files: { filename: string; content: string }[];
+  /** Store files (`fileId`); pending sends from before the file store carry inline `content`. */
+  files: { filename: string; fileId?: string; content?: string }[];
   status: string;
   expiresAt: Date;
 }

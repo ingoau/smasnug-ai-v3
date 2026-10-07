@@ -515,7 +515,7 @@ export class ReplyManager {
       index: e.index,
       mode: delivered,
       text,
-      files: files?.map((f) => f.filename),
+      files: files?.map((f) => (f.fileId ? `${f.fileId} (${f.filename})` : f.filename)),
       ...(btnRow ? { buttons: btnRow.labels } : {}),
     });
     return `Replied (${delivered})${btnRow ? ` with buttons: ${btnRow.labels.join(' | ')}` : ''}.`;

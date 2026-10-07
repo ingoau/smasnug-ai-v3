@@ -15,7 +15,7 @@ vi.hoisted(() => {
   }
   process.env.OPENROUTER_KEY ||= 'test';
 });
-vi.mock('../agent/files.js', () => ({ uploadFiles: vi.fn(async () => {}) }));
+vi.mock('../agent/files.js', async (orig) => ({ ...(await orig<typeof import('../agent/files.js')>()), uploadFiles: vi.fn(async () => {}) }));
 
 const rand = () => Math.random().toString(36).slice(2, 8).toUpperCase();
 const uid = () => `UT${rand()}`;
@@ -75,6 +75,7 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
   afterAll(async () => {
     if (!sql) return;
     await sql`delete from threads where id = ${threadId}`;
+    await sql`delete from files where thread_id = ${threadId}`;
     await sql.end();
     redis.disconnect();
   });

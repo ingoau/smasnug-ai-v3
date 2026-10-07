@@ -507,4 +507,37 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(events.some((e) => e.payload.subagentId === saId)).toBe(true);
     expect(o.replies.length).toBeLessThanOrEqual(1);
   }, 120_000);
+  it('"build me a page" posts an HTML file through reply(files)', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn('PAGE', '', 'build me a tiny one-file HTML page for my robotics club "Gearheads" (a heading and one paragraph). Just the file please.');
+    await runFrontTurn(turn, io());
+    const channelId = tid.split(':')[0]!;
+    const calls = (await fakeCalls()).slice(before);
+    const complete = calls.filter((c) => c.method === 'files.completeUploadExternal' && c.args.channel_id === channelId);
+    const files = await sql<any[]>`select id, name, mime, description, owner_id from files where thread_id = ${tid}`;
+    console.log('page:', JSON.stringify(complete.map((c) => c.args.files)), JSON.stringify(files));
+    expect(complete).toHaveLength(1);
+    expect(complete[0]!.args.files[0].title).toMatch(/\.html?$/);
+    expect(files.some((f) => f.mime === 'text/html' && f.ownerId === turn.authorId)).toBe(true);
+    await sql`delete from files where thread_id = ${tid}`;
+  }, 120_000);
+
+  it('an uploaded image in context is looked at with read_file / ask_file', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const { createFile } = await import('../files/store.js');
+    const sharp = (await import('sharp')).default;
+    const { tid, turn } = await dmTurn('IMG', '', 'placeholder');
+    const png = await sharp({ create: { width: 400, height: 300, channels: 3, background: '#1f9d55' } }).png().toBuffer();
+    const f = await createFile({ threadId: tid, ownerId: turn.authorId, name: 'swatch.png', content: png, description: '' });
+    const msgTs = turn.messageTs[0];
+    threadText.set(tid, { history: '', newMessages: `[${msgTs}] <@${turn.authorId}> Tester: what colour is this? [file ${f.id}: swatch.png, image, from Tester]` });
+    await runFrontTurn(turn, io());
+    const tools = await sql<any[]>`select payload from thread_events where thread_id = ${tid} and type = 'turn_tools'`;
+    const o = await outcome(tid, 0);
+    console.log('image turn:', JSON.stringify(tools.map((t) => t.payload)), JSON.stringify(o.replies));
+    expect(JSON.stringify(tools.map((t) => t.payload))).toMatch(/read_file|ask_file/);
+    expect(o.replies.join(' ')).toMatch(/green/i);
+    await sql`delete from files where thread_id = ${tid}`;
+  }, 120_000);
 });

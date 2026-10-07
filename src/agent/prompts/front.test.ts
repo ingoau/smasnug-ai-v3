@@ -17,7 +17,7 @@ describe('frontSystemPrompt About you', () => {
     expect(p).toMatch(/semantic search/);
     expect(p).toMatch(/the web/);
     expect(p).toMatch(/fetch pages/);
-    expect(p).toMatch(/read threads, channels, images and canvases/);
+    expect(p).toMatch(/read threads, channels, images, uploaded files and canvases/);
     expect(p).toMatch(/create and edit canvases/);
     expect(p).toMatch(/reminders and change-watches/);
     expect(p).toMatch(/remember durable facts/);
