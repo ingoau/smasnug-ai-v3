@@ -107,14 +107,18 @@ thread's first text is within ~0.1s of the single-thread number; subagent runs s
 | First stream flush as soon as ~8 chars are there (80ms cap), then 250ms coalescing | first text −0.2–0.4s |
 | Redundant inbox-push transaction skipped in debounce fire | −~10ms |
 | Per-channel Slack limiter only counts message-creating calls; Postgres pool 10 → 20 | headroom for many threads in one DM channel |
-| Subagents: card shows "Researching…" and elapsed time for long steps; Luna subagents at reasoning effort low | lookup run 15s → 6s; broad research 84s → 36s (one run 186s with more fetch steps) |
+| Subagents: card shows "Researching…" and elapsed time for long steps; Luna subagents at reasoning effort low (since raised to medium for accuracy, see below) | lookup run 15s → 6s; broad research 84s → 36s (one run 186s with more fetch steps) |
 
 ### Evaluated, not changed
 
-- **Front reasoning effort** (`FRONT_REASONING_EFFORT`, default now `none`): the bench showed no difference because its prompts rarely triggered reasoning, but in real Slack turns with even 29–59 reasoning tokens took ~4.0–4.3s to the first token vs ~1.2–1.5s without. With `none`, the LIVE behaviour tests (delegation, silence, reports, e2e) passed 11/11 twice. Subagents keep `low`.
-  (~1.2s; reasoning tokens are already 0 at low). Probe with a tiny prompt and one tool: 0.8–1.1s, so the 8k-token
-  prompt (98% cached) costs ~0.2s at most; not worth trimming tool descriptions. Kept `low`; `none` delegated the
-  search scenario more often.
+- **Front reasoning effort** (`FRONT_REASONING_EFFORT`, default `none`): kept `none`. In real Slack turns even
+  29–59 reasoning tokens took ~4.0–4.3s to the first token vs ~1.2–1.5s without; `low` was slower and sometimes
+  ended the turn with plain text instead of calling `reply` (→ the "couldn't come up with a reply" fallback). Probe
+  with a tiny prompt and one tool: 0.8–1.1s, so the 8k-token prompt (98% cached) costs ~0.2s at most; not worth
+  trimming tool descriptions.
+- **Subagent reasoning effort** (`CHILD_REASONING_EFFORT`; the exception here: changed `low` → `medium`):
+  subagent-researched answers were ~86% correct at medium and high vs ~69% at low; high was slower and costlier
+  with no gain.
 - **Queue hops**: debounce → thread-run job pickup is ~1ms; not collapsed.
 - **Slack client overhead**: rate limiter (Redis Lua) + idempotency insert/update add ~15ms per keyed call
   (startStream measured 165ms at 150ms fake latency); left as is.

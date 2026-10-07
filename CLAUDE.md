@@ -8,7 +8,7 @@ TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK 
 `node_modules/ai/docs`), `@openrouter/ai-sdk-provider`, `@slack/web-api` + `@slack/socket-mode`, Postgres via
 `postgres` (camelCase transform on), Redis via `ioredis`, queues via BullMQ, zod, pino, vitest.
 
-Models: `openai/gpt-6-luna` (gate: reasoning off; front: none (`FRONT_REASONING_EFFORT`); children: low (`CHILD_REASONING_EFFORT`)). Provider: Hack Club AI
+Models: `openai/gpt-6-luna` (gate: reasoning off; front: none (`FRONT_REASONING_EFFORT`); children: medium (`CHILD_REASONING_EFFORT`)). Provider: Hack Club AI
 (`HACKCLUB_AI_KEY`, an OpenRouter proxy, free up to $3/day) first, OpenRouter as fallback, via `chatModel()` in
 `src/models.ts` (a spent daily budget: 402, or a 429 mentioning the spending limit/top-up → skip Hack Club until UTC midnight; same rules for the Hack Club Exa proxy). Web search: Exa via Hack Club's Exa proxy, then Exa direct
 (`EXA_API_KEY`, `src/tools/web-search.ts`). Live-test against Hack Club where possible; OpenRouter credit is limited.

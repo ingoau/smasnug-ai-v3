@@ -43,10 +43,10 @@ const Env = z.object({
   /** Front agent reasoning effort on OpenRouter (see docs/perf.md for the latency/quality comparison). */
   FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('none'),
   /**
-   * Reasoning effort for subagent runs; `default` = the model's own default. `low` roughly halves research runs
-   * (docs/perf.md).
+   * Reasoning effort for subagent runs; `default` = the model's own default. `medium`: researched answers are right
+   * more often than at `low` (which is faster); `high` gained nothing (docs/perf.md).
    */
-  CHILD_REASONING_EFFORT: z.enum(['default', 'none', 'minimal', 'low', 'medium', 'high']).default('low'),
+  CHILD_REASONING_EFFORT: z.enum(['default', 'none', 'minimal', 'low', 'medium', 'high']).default('medium'),
   /**
    * Coding agents (Cursor Cloud Agents, src/agent/cursor/): admin-only background agents that change the bot's own repo
    * and open a PR. Off unless both CURSOR_API_KEY and CURSOR_REPO are set. Never logged.
