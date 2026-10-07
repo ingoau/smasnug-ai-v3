@@ -21,8 +21,11 @@ const Env = z.object({
   GATE_MODEL: z.string().default('typesafe/jev-1.13'),
   /** Respond when the gate model's probability is at least this (contextual: see gateThreshold in pipeline/rules.ts). */
   GATE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
-  /** Threshold for the bot's own conversation partner: two-party threads, or the person it just replied to. */
-  GATE_PARTNER_THRESHOLD: z.coerce.number().min(0).max(1).default(0.6),
+  /**
+   * Threshold for the bot's own conversation partner: two-party threads, or the person it just replied to (0.6 let a
+   * partner thinking aloud through at p ≈ 0.62).
+   */
+  GATE_PARTNER_THRESHOLD: z.coerce.number().min(0).max(1).default(0.65),
   /** Threshold once the thread is cooling (idle longer than limits.gateCoolingAfterMs). */
   GATE_COOLING_THRESHOLD: z.coerce.number().min(0).max(1).default(0.9),
   BOT_DISPLAY_NAME: z.string().default('smasnug ai'),

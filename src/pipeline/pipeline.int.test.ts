@@ -517,10 +517,10 @@ describe.skipIf(!infra)('pipeline integration', () => {
     it('partner batches use the low threshold and become addressed turns; cooling threads the high one', async () => {
       await makeThread();
       await storeMsg('U2', '1.6', 'whats nd studio?');
-      const gate = vi.spyOn(gateImpl, 'run').mockResolvedValue({ respond: true, raw: '0.6', probability: 0.6, latencyMs: 5, model: 'test' });
+      const gate = vi.spyOn(gateImpl, 'run').mockResolvedValue({ respond: true, raw: '0.7', probability: 0.7, latencyMs: 5, model: 'test' });
       await debounce.addToBatch(THREAD, 'U2', '1.6', 'partner');
       await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 1 }));
-      expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.6 });
+      expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.65 });
       expect(gate.mock.calls[0]![0].note).toMatch(/just talking with/);
       const [t] = await sql`select addressed, gated, is_mention from turns where thread_id = ${THREAD}`;
       expect(t).toEqual({ addressed: true, gated: true, isMention: false });
@@ -533,7 +533,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(gate.mock.calls[1]![0].note).toBeUndefined();
       const decisions = await sql`select payload from thread_events where thread_id = ${THREAD} and type = 'gate_decision' order by id`;
       expect(decisions.map((d) => [d.payload.threshold, d.payload.partner ?? false, d.payload.cooling ?? false])).toEqual([
-        [0.6, true, false],
+        [0.65, true, false],
         [0.9, false, true],
       ]);
       const ts = await sql`select addressed from turns where thread_id = ${THREAD} and author_id = 'U3'`;
@@ -548,10 +548,10 @@ describe.skipIf(!infra)('pipeline integration', () => {
       await sql`update threads set last_addressed_at = now() - interval '8 hours', last_bot_reply_at = now() - interval '8 hours' where id = ${THREAD}`;
       await debounce.addToBatch(THREAD, 'U2', '1.65', 'answer_other');
       await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 1 }));
-      expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.6 });
+      expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.65 });
       expect(gate.mock.calls[0]![0].note).toMatch(/question or an offer for another person/);
       const [d] = await sql`select payload from thread_events where thread_id = ${THREAD} and type = 'gate_decision'`;
-      expect(d!.payload).toMatchObject({ partner: true, answersOther: true, cooling: true, threshold: 0.6 });
+      expect(d!.payload).toMatchObject({ partner: true, answersOther: true, cooling: true, threshold: 0.65 });
       expect((await sql`select addressed, gated from turns where thread_id = ${THREAD}`)[0]).toEqual({ addressed: true, gated: true });
       gate.mockRestore();
     });
