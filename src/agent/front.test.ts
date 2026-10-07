@@ -345,6 +345,28 @@ describe('runFrontTurn: turn context', () => {
   });
 });
 
+describe('runFrontTurn: pending actions', () => {
+  it("lists the speaker's pending confirmations and running reminders, only when there are any", async () => {
+    h.sqlHook = (q) => {
+      if (q.includes('from pending_sends')) return [{ destination: 'C9', expiresAt: new Date(Date.now() + 180_000) }];
+      if (q.includes('from reminders where owner_id')) return [{ reminders: 2, watches: 0, previewTerms: 0, previewClaims: 0 }];
+      return undefined;
+    };
+    h.model = mockModel([replyStep('ok'), textStep('')]);
+    await runFrontTurn(turn({ id: 45 }), io().io);
+    const msg = turnText();
+    expect(msg).toContain('<pending_actions');
+    expect(msg).toMatch(/send_message previews waiting for their Send click \(nothing sent yet\): to <#C9>, expires in 3 min/);
+    expect(msg).toContain('Active: 2 reminders');
+    expect(msg.indexOf('<pending_actions')).toBeLessThan(msg.indexOf('<current_time>'));
+
+    h.sqlHook = undefined;
+    h.model = mockModel([replyStep('ok'), textStep('')]);
+    await runFrontTurn(turn({ id: 46 }), io().io);
+    expect(turnText()).not.toContain('<pending_actions');
+  });
+});
+
 describe('runFrontTurn: thread summary', () => {
   it('puts the rolling summary in <thread_summary> right before <thread_history>, only when there is one', async () => {
     h.ctx = { summary: '- Sam asked where to hold the jam [1.000100]\n- decided: CSIT', history: '[1 earlier reply not shown; summarised in <thread_summary>]' };

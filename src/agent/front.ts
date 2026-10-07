@@ -16,6 +16,7 @@ import { renderMessages, renderThreadContext } from '../context/thread.js';
 import { recordModelUsage } from '../features/guard.js';
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
+import { loadPendingActions, renderPendingActions } from '../features/pending.js';
 import { HUDDLE_DJ_PROMPT, renderDjState } from '../features/huddlefm/render.js';
 import { huddleFmConfigured } from '../features/huddlefm/client.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
@@ -308,13 +309,14 @@ function section(tag: string, body: string, attrs = ''): string {
 
 async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; allCancelled: boolean; outcome?: { fallback: string | null } }> {
   const { channelId } = parseThreadId(turn.threadId);
-  const [memory, snapshot, ctx, dj, self, conversation] = await Promise.all([
+  const [memory, snapshot, ctx, dj, self, conversation, pending] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId)).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
     timing.span('ctx_thread', () => renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs, timing })),
     renderDjState({ channelId: parseThreadId(turn.threadId).channelId, threadId: turn.threadId, speakerId: turn.authorId }),
     getBotIdentity().catch(() => undefined),
     timing.span('ctx_conversation', () => getConversationInfo(channelId)).catch((err) => (log.warn({ err }, 'getConversationInfo failed'), null)),
+    timing.span('ctx_pending', () => loadPendingActions(turn.authorId)).catch((err) => (log.warn({ err }, 'loadPendingActions failed'), null)),
   ]);
   const participants = await timing
     .span('ctx_participants', () => renderParticipantsSection(ctx.participantIds, turn.authorId, self?.userId))
@@ -371,6 +373,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     );
   }
   parts.push(section('thread', ctx.threadFacts ?? ''));
+  parts.push(section('pending_actions', pending ? renderPendingActions(pending, now) : '', ' note="The speaker\'s own pending confirmations and running reminders / watches."'));
   parts.push(section('current_time', renderNow(now, speaker.tz)));
   let synthesisRunIds: number[] = [];
   let allCancelled = false;
