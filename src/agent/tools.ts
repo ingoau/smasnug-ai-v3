@@ -103,7 +103,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        `Start background subagents for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels). Each task in \`tasks\` becomes its own subagent and they all run in parallel: for a request with independent parts (several products, people, channels, questions), pass one task per part in this ONE call (up to ${MAX_SPAWN_TASKS}). Only split into parts that don't need each other's results: one question, or a comparison that needs one finding first, is one task (or a later round). A subagent cannot see this conversation: give each complete, self-contained instructions. Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer.`,
+        `Start background subagents for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels). Each task in \`tasks\` becomes its own subagent and they all run in parallel: when the request names several items that each need research (products, frameworks, people, channels, options, cities, questions), pass one task per item in this ONE call (up to ${MAX_SPAWN_TASKS}), also for "compare A, B and C" (you compare when the results are back). One task for a single question, trivially small items, or a step whose finding the rest needs ("find the top 3 X" first; one task per item in the next round). A subagent cannot see this conversation: give each complete, self-contained instructions. Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer.`,
       inputSchema: z.object({
         tasks: z
           .array(
@@ -118,7 +118,7 @@ registerTool({
           )
           .min(1)
           .max(MAX_SPAWN_TASKS)
-          .describe('One entry per subagent. Usually one; several only for independent parts (one per product, person, channel…), never for steps of one question'),
+          .describe('One entry per subagent: one per named item that needs its own research (each product, framework, person, channel…); a single entry for one question or a step that must come first'),
       }),
       execute: async ({ tasks }) => {
         const s = turnState(ctx);

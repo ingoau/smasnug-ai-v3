@@ -382,6 +382,26 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     expect(o.cardTitles.every((t) => t == null)).toBe(true); // set_card_title not offered / not used
   }, 120_000);
 
+  it('comparing three named, independent things fans out: one spawn_subagent call with a task per item', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn(
+      'FANOUT',
+      '',
+      'can you compare Astro, SvelteKit and Remix for me? current version, build speed, learning curve and hosting options. take your time',
+    );
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    const [tools] = await sql<{ payload: { calls: { tool: string }[] } }[]>`
+      select payload from thread_events where thread_id = ${tid} and type = 'turn_tools' order by id desc limit 1`;
+    const spawnCalls = (tools?.payload.calls ?? []).filter((c) => c.tool === 'spawn_subagent').length;
+    // eslint-disable-next-line no-console
+    console.log('fanout:', JSON.stringify({ ...o, spawnCalls }));
+    expect(spawnCalls).toBe(1);
+    expect(o.spawns).toBeGreaterThanOrEqual(3);
+    expect(o.cancels).toBe(0);
+  }, 120_000);
+
   it('"hi! what can you do?" gets one reply and no reaction', async () => {
     const { runFrontTurn } = await import('./front.js');
     const before = (await fakeCalls()).length;
