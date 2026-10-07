@@ -29,7 +29,10 @@ export interface RenderedThreadContext {
 
 const CHANNEL_BEFORE = Math.max(1, limits.contextChannelMessages - 2);
 const CHANNEL_AFTER = limits.contextChannelMessages - CHANNEL_BEFORE;
-const MAX_CHARS = limits.messageTruncateTokens * 4;
+const HISTORY_CHARS = limits.messageTruncateTokens * 4;
+const CHANNEL_CHARS = limits.channelMessageTruncateTokens * 4;
+const NEW_CHARS = limits.newMessageTruncateTokens * 4;
+const READ_CHARS = limits.readMessageTruncateTokens * 4;
 
 interface ThreadRow {
   id: string;
@@ -122,13 +125,13 @@ async function loadChannelContext(thread: ThreadRow): Promise<RenderMsg[]> {
 }
 
 /** Build the FormatEnv for a set of messages: user names, image ids (assigned now), bot identity. */
-export async function formatEnvFor(threadId: string, msgs: RenderMsg[]): Promise<FormatEnv> {
+export async function formatEnvFor(threadId: string, msgs: RenderMsg[], maxChars = HISTORY_CHARS): Promise<FormatEnv> {
   const [names, imageIds, self] = await Promise.all([
     getUserNames(userIdsIn(msgs)),
     assignImageIds(threadId, msgs),
     getBotIdentity().catch(() => undefined),
   ]);
-  return { names, imageIds, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: MAX_CHARS };
+  return { names, imageIds, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars };
 }
 
 /**
@@ -155,8 +158,8 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
   const fenv = await span('ctx_format_env', () => formatEnvFor(threadId, shown));
   return {
     history: formatThread(sel, fenv),
-    channelContext: formatMessages(channelMsgs, fenv),
-    newMessages: formatMessages(newMsgs, fenv),
+    channelContext: formatMessages(channelMsgs, { ...fenv, maxChars: CHANNEL_CHARS }),
+    newMessages: formatMessages(newMsgs, { ...fenv, maxChars: NEW_CHARS }),
   };
 }
 
@@ -171,13 +174,13 @@ export async function renderMessages(threadId: string, ts: string[]): Promise<st
   const { channelId } = parseThreadId(threadId);
   await ensureThread(threadId);
   const msgs = await withButtons(threadId, await loadByTs(channelId, ts));
-  const fenv = await formatEnvFor(threadId, msgs);
+  const fenv = await formatEnvFor(threadId, msgs, NEW_CHARS);
   return formatMessages(msgs, fenv);
 }
 
 /** Render raw Slack API messages (read_thread / read_channel) in the context format; registers their images. */
 export async function renderRawMessages(threadId: string, msgs: RenderMsg[]): Promise<string> {
   await ensureThread(threadId);
-  const fenv = await formatEnvFor(threadId, msgs);
+  const fenv = await formatEnvFor(threadId, msgs, READ_CHARS);
   return formatMessages(msgs, fenv);
 }

@@ -66,7 +66,15 @@ export const limits = {
   debounceBusyMs: 3000,
   contextReplies: 29,
   contextChannelMessages: 5,
-  messageTruncateTokens: 300,
+  /** Per-message cuts (≈tokens, ~4 chars each) when rendering Slack messages for a model, cut with " [truncated]". */
+  /** Thread history in the prompt (the history section's own budget still drops the oldest messages first). */
+  messageTruncateTokens: 1000,
+  /** Channel background around the thread parent (a small section, so a long message can't crowd out the rest). */
+  channelMessageTruncateTokens: 300,
+  /** The turn's own new messages (and ones that arrive mid-turn): the request itself, e.g. a pasted log. */
+  newMessageTruncateTokens: 4000,
+  /** Explicit reads: read_thread, read_channel, read_public_thread, read_public_channel. */
+  readMessageTruncateTokens: 2000,
   disengageAfterMessages: 25,
   disengageAfterMs: 3 * 60 * 60 * 1000,
   gateContextMessages: 6,

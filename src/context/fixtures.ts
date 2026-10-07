@@ -79,7 +79,9 @@ export function fixtureReplies(replyCount = 40, threadTs = FIX_THREAD_TS) {
       msg.files = [file('F0HEIC', 'IMG_0042.HEIC', 'image/heic')];
     }
     if (i === replyCount) {
-      msg.text = 'long message '.repeat(200);
+      // ~26k chars: longer than the biggest per-message cut (limits.newMessageTruncateTokens * 4 = 16k), so it's
+      // truncated wherever it renders. (No config import here: format.test.ts loads this without env.)
+      msg.text = 'long message '.repeat(2000);
       msg.edited = { user, ts: `${base + i + 5}.000000` };
     }
     replies.push(msg);

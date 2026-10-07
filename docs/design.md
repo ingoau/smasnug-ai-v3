@@ -267,7 +267,7 @@ If replies are omitted, a marker says so: `[42 earlier replies not shown]`.
 - 
 Every message is labelled with its author: `<@U123> Ingo: …`; bots as `[bot] Gorkie: …`.
 - 
-Messages over a few hundred tokens are truncated with `[truncated]`.
+Long messages are truncated with `[truncated]` (`limits` in `src/config.ts`): ~1000 tokens each in thread history, ~300 in channel background, ~4000 for the turn's own new messages, ~2000 in explicit reads (`read_thread`, `read_channel`, `read_public_thread`, `read_public_channel`).
 - 
 Attachments appear as placeholders, e.g. `[file: budget.csv]`.
 For more, the front agent can call `read_thread(before_ts, limit)` and `read_channel(before_ts, limit)` (current thread/channel only), or delegate a summary of a long thread to a subagent. The bot token only reads channels the bot is in. Other threads (e.g. a search hit that is a thread reply) are read with `read_public_thread(permalink | channel + thread_ts, limit?)`: user token (`channels:history` user scope), the channel must be verified public (cached `conversations.info`, fail closed), parent first then up to 50 replies, `##` messages dropped, forwarded content inlined, no image ids, counted as a Slack search. Other public channels' top-level history is read with `read_public_channel(permalink | channel + around_ts / before_ts / after_ts, limit?)`: same user token and public check, surrounding context around a message or paging older/newer through the channel, `##` dropped, counted as a Slack search.

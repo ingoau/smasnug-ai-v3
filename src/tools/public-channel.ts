@@ -240,7 +240,7 @@ registerTool({
             names,
             imageIds: new Map(),
             self: { ...self, name: env.BOT_DISPLAY_NAME },
-            maxChars: limits.messageTruncateTokens * 4,
+            maxChars: limits.readMessageTruncateTokens * 4,
           };
           const markLinked = target.mode === 'around' && !target.linkedIsReply;
           const aroundTs = markLinked ? target.ts : undefined;

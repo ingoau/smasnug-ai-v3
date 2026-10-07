@@ -68,8 +68,8 @@ export const BUDGET = {
   snapshot: 800,
   channelContext: 1000,
   history: 8000,
-  newMessages: 3000,
-  inbox: 1500,
+  newMessages: 8000,
+  inbox: 8000,
   synthesis: 12000,
 } as const;
 
