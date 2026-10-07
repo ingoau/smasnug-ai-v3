@@ -120,6 +120,7 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       await sql`delete from sandbox_allowlist where user_id = ${u}`;
       await sql`delete from hca_verifications where user_id = ${u}`;
       await sql`delete from preview_terms where user_id = ${u}`;
+      await sql`delete from sandbox_first_use where user_id = ${u}`;
     }
     const { closeQueues, queue, QUEUE } = await import('../core/queues.js');
     await queue(QUEUE.sandbox).obliterate({ force: true }).catch(() => {});
@@ -168,6 +169,11 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
     const outs = await Promise.all([1, 2, 3].map((i) => call(ctx, 'sandbox_exec', { command: `echo ${i}` })));
     fake.createDelayMs = 0;
     expect(fake.counts.create - before).toBe(1);
+    // The one-time first-use note went to the owner only, once.
+    await vi.waitFor(async () => {
+      const notes = (await fakeCalls()).filter((c) => c.method === 'chat.postEphemeral' && c.args.user === u && /Modal \(US\)/.test(c.args.text));
+      expect(notes).toHaveLength(1);
+    });
     for (const [i, o] of outs.entries()) expect(o).toContain(`ran: echo ${i + 1}`);
     expect(outs[0]).toMatch(/untrusted_content/);
     const [row] = await sql<any[]>`select * from sandboxes where subagent_id = ${sa.subagentId}`;

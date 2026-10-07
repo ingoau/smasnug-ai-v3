@@ -17,7 +17,7 @@ import { createFile, FileError, fileStore, loadFileBytes, resolveFile } from '..
 import { log } from '../log.js';
 import { processImage } from '../tools/image-process.js';
 import { errMsg, untrusted } from '../tools/util.js';
-import { accessModelText, canUseSandbox, notifyAccess } from './access.js';
+import { accessModelText, canUseSandbox, firstUseNotice, notifyAccess } from './access.js';
 import { EXEC_SCRIPT, formatExecResult, isImagePath, safeBaseName } from './format.js';
 import { SandboxRefused, withSandbox } from './lifecycle.js';
 import { shq, workPath, type Handle } from './provider.js';
@@ -37,6 +37,7 @@ async function gate(ctx: ToolContext): Promise<string | null> {
     void notifyAccess({ userId: ctx.speakerId, channelId: ctx.channelId, threadTs: ctx.threadTs, reason: access.reason });
     return accessModelText(access.reason);
   }
+  void firstUseNotice({ userId: ctx.speakerId, channelId: ctx.channelId, threadTs: ctx.threadTs }).catch(() => {});
   return null;
 }
 

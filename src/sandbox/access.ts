@@ -89,3 +89,15 @@ export async function notifyAccess(o: { userId: string; channelId: string; threa
     ...(o.threadTs ? { thread_ts: o.threadTs } : {}),
   }).catch((err) => log.warn({ err }, 'sandbox access ephemeral failed'));
 }
+
+export const FIRST_USE_NOTE =
+  'Heads-up: to run code for you, the code and any files it uses go to Modal (US), where it runs in an isolated sandbox; they are deleted when the task ends. Live previews go to Cloudflare, and you will be asked first.';
+
+/** The one-time first-use note (docs/sandbox.md §6), to the user only, on their first sandbox use. */
+export async function firstUseNotice(o: { userId: string; channelId: string; threadTs?: string }): Promise<void> {
+  const [fresh] = await sql`insert into sandbox_first_use (user_id) values (${o.userId}) on conflict do nothing returning user_id`;
+  if (!fresh) return;
+  await slackCall('chat.postEphemeral', { channel: o.channelId, user: o.userId, text: FIRST_USE_NOTE, ...(o.threadTs ? { thread_ts: o.threadTs } : {}) }).catch((err) =>
+    log.warn({ err }, 'sandbox first-use note failed'),
+  );
+}
