@@ -91,6 +91,56 @@ const SLACK_WAIT_PREFIX = "Waiting for Slack's";
 const SLACK_WAIT_LABEL_MIN_MS = 1000;
 export const slackWaitLabel = (ms: number, method = 'search.messages') =>
   `${method === 'search.messages' ? SLACK_WAIT_LABEL : "Waiting for Slack's rate limit"} (${Math.max(1, Math.ceil(ms / 1000))}s)`;
+/** While a wait lasts, its label counts down this often. */
+export const SLACK_WAIT_TICK_MS = 5000;
+
+/**
+ * The card label while a run's tool calls wait for Slack's rate limiter (pure logic). The wait label wins over tool
+ * labels until every wait is over (parallel tool calls in one step would otherwise overwrite it as their tool-call
+ * parts arrive); those labels are kept and the latest one comes back when the waits end. Counts down to the latest
+ * expected end; names the search limit while any search waits.
+ */
+export class SlackWaitTracker {
+  private waits = 0;
+  private until = 0;
+  private search = false;
+  private before = '';
+
+  get waiting(): boolean {
+    return this.waits > 0;
+  }
+
+  /** A wait started (`current` = the label shown now): the label to show. */
+  start(ev: Pick<SlackWaitEvent, 'method' | 'estimateMs'>, current: string, now = Date.now()): string {
+    if (this.waits++ === 0) {
+      this.before = current;
+      this.until = 0;
+      this.search = false;
+    }
+    this.until = Math.max(this.until, now + ev.estimateMs);
+    if (ev.method === 'search.messages') this.search = true;
+    return this.label(now)!;
+  }
+
+  /** A wait ended: the label to restore once none is left, else null. */
+  end(): string | null {
+    if (this.waits === 0) return null;
+    return --this.waits === 0 ? this.before : null;
+  }
+
+  /** Another label (a tool call) while waiting: kept for after the wait (true), or shown now (false). */
+  defer(details: string): boolean {
+    if (!this.waits) return false;
+    this.before = details;
+    return true;
+  }
+
+  /** The countdown label now (null when nothing waits). */
+  label(now = Date.now()): string | null {
+    if (!this.waits) return null;
+    return slackWaitLabel(this.until - now, this.search ? 'search.messages' : 'other');
+  }
+}
 
 /** Runs executing in this process, for shutdown. */
 const active = new Map<number, AbortController>();
@@ -192,8 +242,20 @@ export async function processSubagentRun(runId: number): Promise<void> {
   };
 
   const label = new RunLabel();
+  // A Slack call waiting for the shared rate limiter (subagent searches can wait about one 30-s search window) shows
+  // that on the card with a countdown, instead of a search that looks stuck; then the label goes back to what it
+  // was (or the latest tool label that arrived meanwhile). Waits are added up per step for run_step.
+  const waitLabel = new SlackWaitTracker();
+  let waitTicker: NodeJS.Timeout | undefined;
+  let stepSlackWaitMs = 0;
   let detailsSince = Date.now();
+  /** Just the card text (no run_progress event): wait countdowns, restores, elapsed time. */
+  const showDetails = (details: string, what: string) =>
+    sql`update runs set details = ${details} where id = ${run.id} and status = 'running'`
+      .then(() => scheduleCardRender(run.cardId))
+      .catch((err) => log.debug({ err, runId: run.id }, `${what} failed`));
   const setDetails = async (details: string) => {
+    if (!details.startsWith(SLACK_WAIT_PREFIX) && waitLabel.defer(details)) return;
     if (details === lastDetails) return;
     lastDetails = details;
     detailsSince = Date.now();
@@ -203,30 +265,37 @@ export async function processSubagentRun(runId: number): Promise<void> {
       await appendEvent(run.threadId, 'run_progress', `subagent:${run.subagentId}`, { runId: run.id, details });
     }
   };
-  // A slack_search waiting for the shared search rate limiter shows that on the card (instead of a search that looks
-  // slow), then the label goes back to what it was. Waits are added up per step for run_step.
-  let slackWaits = 0;
-  let labelBeforeWait = '';
-  let stepSlackWaitMs = 0;
+  const stopWaitTicker = () => {
+    if (waitTicker) clearInterval(waitTicker);
+    waitTicker = undefined;
+  };
   const onSlackWait = (ev: SlackWaitEvent) => {
     if (ev.done) stepSlackWaitMs += ev.waitedMs;
     if (ev.estimateMs < SLACK_WAIT_LABEL_MIN_MS) return;
     if (!ev.done) {
-      if (slackWaits++ === 0) labelBeforeWait = lastDetails;
-      void setDetails(slackWaitLabel(ev.estimateMs, ev.method)).catch((err) => log.debug({ err, runId: run.id }, 'wait label failed'));
+      void setDetails(waitLabel.start(ev, lastDetails)).catch((err) => log.debug({ err, runId: run.id }, 'wait label failed'));
+      waitTicker ??= setInterval(() => {
+        const next = waitLabel.label();
+        if (!next || next === lastDetails) return;
+        lastDetails = next;
+        void showDetails(next, 'wait countdown');
+      }, SLACK_WAIT_TICK_MS);
+      waitTicker.unref();
       return;
     }
-    if (--slackWaits > 0 || !lastDetails.startsWith(SLACK_WAIT_PREFIX)) return;
-    lastDetails = labelBeforeWait;
-    sql`update runs set details = ${labelBeforeWait} where id = ${run.id} and status = 'running'`
-      .then(() => scheduleCardRender(run.cardId))
-      .catch((err) => log.debug({ err, runId: run.id }, 'wait label restore failed'));
+    const restore = waitLabel.end();
+    if (restore === null) return;
+    stopWaitTicker();
+    if (restore === lastDetails) return;
+    lastDetails = restore;
+    detailsSince = Date.now();
+    void showDetails(restore, 'wait label restore');
   };
   // Long steps (deep web searches, long generations) produce no events: show the elapsed time instead of a
   // card that looks stuck. Goes through the coalesced card render, at most every ELAPSED_TICK_MS.
   const elapsedTicker = setInterval(() => {
     const ms = Date.now() - detailsSince;
-    if (!lastDetails || ms < ELAPSED_TICK_MS) return;
+    if (!lastDetails || ms < ELAPSED_TICK_MS || waitLabel.waiting) return;
     const shown = withElapsed(lastDetails, ms);
     sql`update runs set details = ${shown} where id = ${run.id} and status = 'running'`
       .then(() => scheduleCardRender(run.cardId))
@@ -348,6 +417,7 @@ export async function processSubagentRun(runId: number): Promise<void> {
     clearTimeout(timeout);
     clearInterval(heartbeat);
     clearInterval(elapsedTicker);
+    stopWaitTicker();
     active.delete(run.id);
     if (sandbox) void onSandboxRunFinished(run.id).catch((err) => log.warn({ err, runId: run.id }, 'sandbox run-finished hook failed'));
   }
