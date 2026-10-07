@@ -25,7 +25,7 @@ import { chatModel, MODELS } from '../../models.js';
 import { ensureThreadRun } from '../../pipeline/scheduler.js';
 import { fetchPage, type FetchedPage } from '../../tools/fetch-url.js';
 import { BlockedUrlError } from '../../tools/safe-fetch.js';
-import { filterPublicMatches, formatSearchMatches, searchUserIds } from '../../tools/slack-search.js';
+import { filterPublicMatches, formatSearchMatches, searchUserIds, slackMaxWaitMs } from '../../tools/slack-search.js';
 import { errMsg, untrusted } from '../../tools/util.js';
 import { runWebSearch, type WebSearchOutput } from '../../tools/web-search.js';
 import { recordModelUsage, takeLimit } from '../guard.js';
@@ -108,14 +108,14 @@ export const defaultDeps: WatchDeps = {
   webSearch: (ctx, query) => runWebSearch(ctx, { query, num_results: limits.webSearchMaxResults }),
   async slackSearch(query) {
     // Background work must not hold up interactive slack_search on the shared user-token limiter (20 per 30 s): queued
-    // as background (behind interactive calls, outside their reserve), failing fast (SlackBusyError) so the check
-    // is retried shortly (checkWatch) instead of blocking. Not cached: a watch wants fresh results.
+    // as background (behind interactive calls, outside their reserve), waiting up to about one window like subagent
+    // searches; a longer wait (SlackBusyError) is retried shortly (checkWatch). Not cached: a watch wants fresh results.
     const res = await slackCall<any>(
       'search.messages',
       { query, count: 30, highlight: false, sort: 'timestamp', sort_dir: 'desc' },
-      { token: 'user', maxWaitMs: limits.slackSearchMaxWaitMs, priority: 'background' },
+      { token: 'user', maxWaitMs: slackMaxWaitMs('background', 'search'), priority: 'background' },
     );
-    return filterPublicMatches(res.messages?.matches ?? []);
+    return filterPublicMatches(res.messages?.matches ?? [], { priority: 'background', maxWaitMs: slackMaxWaitMs('background', 'read') });
   },
   async judge(o) {
     const res = await generateText({
@@ -342,7 +342,7 @@ async function gather(w: WatchRow, deps: WatchDeps): Promise<Gathered> {
   try {
     matches = await deps.slackSearch(w.target);
   } catch (err) {
-    // Rate limited by interactive searches: not a failure, the baseline stays and the next interval checks again.
+    // Still rate limited after the background wait: not a failure, the baseline stays and it's retried shortly.
     if (err instanceof SlackBusyError) return { result: 'busy' };
     throw err;
   }
@@ -351,7 +351,7 @@ async function gather(w: WatchRow, deps: WatchDeps): Promise<Gathered> {
   const fresh = newSlackMatches(matches, { sinceTs, ownerId: w.ownerId, channelId, threadTs });
   const state = { ...w.state, sinceTs: maxTs(matches.map((m) => m?.ts), sinceTs) };
   if (!fresh.length) return { findings: '', state };
-  const names = await getUserNames(searchUserIds(fresh));
+  const names = await getUserNames(searchUserIds(fresh), { priority: 'background', maxWaitMs: slackMaxWaitMs('background', 'read') });
   const { text } = formatSearchMatches(fresh, names, FINDINGS_MAX_CHARS);
   return { findings: `New public Slack messages for "${w.target}":\n${text}`, state };
 }

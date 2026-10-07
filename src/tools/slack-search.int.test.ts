@@ -1,9 +1,10 @@
 /**
  * slack_search through the real shared limiter (SLACK_FAKE_LIMITER=1) against the fake Slack and the test Redis:
  *   INTEGRATION=1 pnpm vitest run src/tools/slack-search.int
- * A burst of subagent searches never waits longer than limits.slackSearchMaxWaitMs (the excess gets the busy result),
- * waiting searches are served in order, and a front-agent (interactive) search gets a slot while subagent
- * (background) searches are queued. Uses the production window (search.messages: 20 per 30 s, 4 reserved).
+ * A burst of subagent (background) searches larger than the background share waits for the window to refill and is
+ * served within about one window (none busy), waiting searches are served in order, and a front-agent (interactive)
+ * search gets a reserved slot while subagent searches are queued. Uses the production window (search.messages: 20 per
+ * 30 s, 4 reserved), so the burst test takes ~30 s.
  */
 import './test-env.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -17,6 +18,7 @@ describe.skipIf(!INTEGRATION)('slack_search under the shared rate limit', () => 
   let S: typeof import('./slack-search.js');
   let limits: typeof import('../config.js').limits;
   let rateLimitKey: typeof import('../core/slack.js').rateLimitKey;
+  let pauseKey: typeof import('../core/slack.js').pauseKey;
   const removers: (() => void)[] = [];
   const prevLimiter = process.env.SLACK_FAKE_LIMITER;
 
@@ -54,7 +56,7 @@ describe.skipIf(!INTEGRATION)('slack_search under the shared rate limit', () => 
     ({ redis } = await import('../core/redis.js'));
     ({ toolsFor } = await import('../core/tools.js'));
     ({ limits } = await import('../config.js'));
-    ({ rateLimitKey } = await import('../core/slack.js'));
+    ({ rateLimitKey, pauseKey } = await import('../core/slack.js'));
     await import('./index.js');
     S = await import('./slack-search.js');
     key = rateLimitKey('user', 'search.messages');
@@ -85,31 +87,59 @@ describe.skipIf(!INTEGRATION)('slack_search under the shared rate limit', () => 
     await sql?.end();
   });
 
-  it('30 concurrent subagent searches: the background share is served, the rest get the busy result fast', async () => {
-    const results = await Promise.all(
+  it('30 concurrent subagent searches all succeed within about one window; a front-agent search mid-burst gets a reserved slot fast', async () => {
+    const waits: any[] = [];
+    const t0 = Date.now();
+    const burst = Promise.all(
       Array.from({ length: 30 }, async (_, i) => {
-        const t0 = Date.now();
-        const out: string = await exec(toolsFor('child', ctx()).slack_search, { query: q(`burst${i}`) });
+        const out: string = await exec(toolsFor('child', ctx({ [S.SLACK_WAIT_EXTRA]: (ev: any) => waits.push(ev) })).slack_search, { query: q(`burst${i}`) });
         return { out, ms: Date.now() - t0 };
       }),
     );
-    const ok = results.filter((x) => x.out.includes('public channels only'));
-    const busy = results.filter((x) => x.out.startsWith('Slack search is rate limited right now'));
-    expect(ok).toHaveLength(PER_MIN - limits.slackSearchInteractiveReserve);
-    expect(busy).toHaveLength(30 - ok.length);
-    for (const x of results) expect(x.ms).toBeLessThan(limits.slackSearchMaxWaitMs);
-    // The busy ones knew up front: no slot frees within maxWaitMs, so they didn't sit it out.
-    for (const x of busy) expect(x.ms).toBeLessThan(1500);
-    expect(served).toHaveLength(ok.length);
 
-    // A user's question in a front-agent turn still gets one of the reserved slots right away.
-    const t0 = Date.now();
+    // Mid-burst: the background share (16) is used up and the rest are queued; a user's question still gets one of the
+    // 4 reserved slots right away.
+    await new Promise((res) => setTimeout(res, 2000));
+    expect(served).toHaveLength(PER_MIN - limits.slackSearchInteractiveReserve);
+    const t1 = Date.now();
     const front: string = await exec(toolsFor('front', ctx()).slack_search, { query: q('front') });
     expect(front).toContain('public channels only');
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t1).toBeLessThan(1000);
+
+    const results = await burst;
+    expect(results.filter((x) => !x.out.includes('public channels only'))).toEqual([]); // none busy
+    expect(served).toHaveLength(31);
+    const waited = results.filter((x) => x.ms > 5000);
+    // The 14 over the background share waited for the window to refill: about one window, within the background cap.
+    expect(waited).toHaveLength(30 - (PER_MIN - limits.slackSearchInteractiveReserve));
+    for (const x of waited) {
+      expect(x.ms).toBeGreaterThan(WINDOW_MS - 2000);
+      expect(x.ms).toBeLessThan(limits.slackSearchBackgroundMaxWaitMs);
+    }
+    // Each waiting search reported its wait (start + end) for the card label.
+    const searchWaits = waits.filter((e) => e.method === 'search.messages' && e.reason === 'rate_limit');
+    expect(searchWaits.filter((e) => !e.done)).toHaveLength(waited.length);
+    expect(searchWaits.filter((e) => e.done)).toHaveLength(waited.length);
+    for (const e of searchWaits.filter((x) => !x.done)) expect(e.estimateMs).toBeGreaterThan(WINDOW_MS - 3000);
+  }, 60_000);
+
+  it('a background search whose wait would exceed the background cap gets the busy result up front, with when to retry', async () => {
+    // A long 429 pause (Retry-After past the cap).
+    const pause = pauseKey('user', 'search.messages');
+    await redis.set(pause, String(Date.now() + 45_000), 'PX', 45_000);
+    try {
+      const t0 = Date.now();
+      const out: string = await exec(toolsFor('child', ctx()).slack_search, { query: q('paused') });
+      expect(Date.now() - t0).toBeLessThan(1000);
+      expect(out).toMatch(/^Slack search is rate limited right now \(~4[45]s until a slot frees/);
+      expect(out).toMatch(/search again in ~4[45]s/);
+      expect(served).toHaveLength(0);
+    } finally {
+      await redis.del(pause);
+    }
   });
 
-  it('waiting searches are served in arrival order, each within maxWaitMs, and report their wait', async () => {
+  it('waiting front-agent searches are served in arrival order, each within the interactive cap, and report their wait', async () => {
     // Full window; the oldest 5 entries leave it 400, 700, 1000, 1300, 1600 ms from now.
     await fill(PER_MIN - 5, [400, 700, 1000, 1300, 1600]);
     const waits: any[] = [];
@@ -176,6 +206,7 @@ describe.skipIf(!INTEGRATION)('slack_search under the shared rate limit', () => 
       const waits: any[] = [];
       const t0 = Date.now();
       const out: string = await exec(toolsFor('child', ctx({ [S.SLACK_WAIT_EXTRA]: (ev: any) => waits.push(ev) })).slack_search, { query: `ss3new${r} q` });
+      // The info window is full for ~60 s, past even the background cap: skipped up front, not waited out.
       expect(Date.now() - t0).toBeLessThan(limits.slackSearchMaxWaitMs);
       expect(out).toContain('in the known public channel');
       expect(out).not.toContain('in an unverified channel');

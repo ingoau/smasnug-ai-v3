@@ -51,15 +51,33 @@ export interface SlackWaitOpts {
   onWait?: SlackWaitCallback;
 }
 
-/** SlackWaitOpts for a tool call in `ctx`: priority by role, the subagent runner's wait callback, a wait cap. */
-export function slackWaitOpts(ctx: Pick<ToolContext, 'role' | 'extras'>, maxWaitMs = limits.slackToolMaxWaitMs): SlackWaitOpts {
-  const onWait = typeof ctx.extras[SLACK_WAIT_EXTRA] === 'function' ? (ctx.extras[SLACK_WAIT_EXTRA] as SlackWaitCallback) : undefined;
-  return { priority: ctx.role === 'child' ? 'background' : 'interactive', maxWaitMs, ...(onWait ? { onWait } : {}) };
+/**
+ * How long a tool's Slack call may wait for the shared rate limiter. Interactive (a front turn someone is waiting on)
+ * fails fast; background (subagents, watches) sits out about one search.messages window, so a burst that used up the
+ * background share is served as the window refills instead of getting "rate limited".
+ */
+export function slackMaxWaitMs(priority: SlackPriority, kind: 'search' | 'read' = 'read'): number {
+  if (kind === 'search') return priority === 'background' ? limits.slackSearchBackgroundMaxWaitMs : limits.slackSearchMaxWaitMs;
+  return priority === 'background' ? limits.slackToolBackgroundMaxWaitMs : limits.slackToolMaxWaitMs;
 }
+
+/**
+ * SlackWaitOpts for a tool call in `ctx`: priority by role, the subagent runner's wait callback, and the wait cap for
+ * that priority (`slackMaxWaitMs`; `cap` picks search vs read caps, or gives one in ms).
+ */
+export function slackWaitOpts(ctx: Pick<ToolContext, 'role' | 'extras'>, cap: 'search' | 'read' | number = 'read'): SlackWaitOpts {
+  const onWait = typeof ctx.extras[SLACK_WAIT_EXTRA] === 'function' ? (ctx.extras[SLACK_WAIT_EXTRA] as SlackWaitCallback) : undefined;
+  const priority: SlackPriority = ctx.role === 'child' ? 'background' : 'interactive';
+  const maxWaitMs = typeof cap === 'number' ? cap : slackMaxWaitMs(priority, cap);
+  return { priority, maxWaitMs, ...(onWait ? { onWait } : {}) };
+}
+
+const retrySeconds = (waitMs: number) => Math.max(1, Math.ceil(waitMs / 1000));
 
 /** Model-facing result when a read gave up on the shared rate limiter. */
 export function slackBusyText(what: string, waitMs: number): string {
-  return `Slack is rate limited right now (~${Math.max(1, Math.ceil(waitMs / 1000))}s until a slot frees; the limit is shared by everyone using the bot), so ${what} couldn't be read. Work with what you have, or try again in a minute.`;
+  const s = retrySeconds(waitMs);
+  return `Slack is rate limited right now (~${s}s until a slot frees; the limit is shared by everyone using the bot), so ${what} couldn't be read. Work with what you have, or try again in ~${s}s.`;
 }
 
 /** The visibility check's verdicts: verified public (with names), and the ids skipped because Slack was busy. */
@@ -264,7 +282,7 @@ export function searchCacheKey(query: string, sort: SearchSort | undefined, page
   return `slack:search:cache:${createHash('sha256').update(JSON.stringify([query.trim(), sort ?? 'relevance', page])).digest('hex').slice(0, 32)}`;
 }
 
-/** Identical searches in flight in this process share one Slack call. */
+/** Identical searches in flight in this process share one Slack call (per priority: a front turn never sits out a subagent's wait). */
 const inflight = new Map<string, Promise<{ matches: any[]; skipped: number }>>();
 
 /**
@@ -288,7 +306,8 @@ export async function searchPublicMatches(
       if (Array.isArray(parsed)) return { ...(await filterPublicMatchesDetailed(parsed, opts)), cached: true };
     } catch {}
   }
-  let p = inflight.get(key);
+  const flightKey = `${key}:${opts.priority}`;
+  let p = inflight.get(flightKey);
   if (!p) {
     p = (async () => {
       const res = await slackCall<any>(
@@ -308,8 +327,8 @@ export async function searchPublicMatches(
       // Incomplete (some channels unverified): not cached, so the next identical search can find them.
       if (!filtered.skipped) await redis.set(key, JSON.stringify(pub), 'EX', limits.slackSearchCacheTtlS).catch((err) => log.debug({ err }, 'search cache write failed'));
       return { matches: pub, skipped: filtered.skipped };
-    })().finally(() => inflight.delete(key));
-    inflight.set(key, p);
+    })().finally(() => inflight.delete(flightKey));
+    inflight.set(flightKey, p);
   }
   return { ...(await p), cached: false };
 }
@@ -320,10 +339,10 @@ export function skippedNote(skipped: number): string | null {
   return `[Note: ${skipped} more ${skipped === 1 ? 'result was' : 'results were'} skipped because Slack's rate limit kept me from checking that ${skipped === 1 ? 'its channel is' : 'their channels are'} public. Searching again in a minute may show ${skipped === 1 ? 'it' : 'them'}.]`;
 }
 
-/** Model-facing result when the shared limiter is full. */
+/** Model-facing result when the shared limiter is full (longer than the caller may wait): says when to retry. */
 export function searchBusyText(waitMs: number): string {
-  const s = Math.max(1, Math.ceil(waitMs / 1000));
-  return `Slack search is rate limited right now (~${s}s until a slot frees; about 20 searches per 30 s, shared by everyone using the bot). Work with the hits you have; open them with ask_thread / read_public_thread / read_public_channel (separate limits), or search again later.`;
+  const s = retrySeconds(waitMs);
+  return `Slack search is rate limited right now (~${s}s until a slot frees; about 20 searches per 30 s, shared by everyone using the bot). Work with the hits you have; open them with ask_thread / read_public_thread / read_public_channel (separate limits), and search again in ~${s}s.`;
 }
 
 /**
@@ -340,8 +359,9 @@ registerTool({
   roles: ['front', 'child'],
   build: (ctx) => {
     let calls = 0;
-    // Front-agent turns are a user waiting on an answer; subagent research is background work (see SlackPriority).
-    const { priority = 'interactive', onWait } = slackWaitOpts(ctx);
+    // Front-agent turns are a user waiting on an answer (fail fast); subagent research is background work that waits
+    // up to about one search window for a slot (see SlackPriority, slackMaxWaitMs).
+    const { priority = 'interactive', onWait, maxWaitMs = limits.slackSearchMaxWaitMs } = slackWaitOpts(ctx, 'search');
     const withBudget = (text: string, skipped = 0) => {
       const notes = [skippedNote(skipped), ctx.role === 'child' ? searchBudgetNote(calls) : null].filter(Boolean);
       return [text, ...notes].join('\n');
@@ -361,9 +381,9 @@ registerTool({
         const over = await takeLimit('search', ctx.speakerId, ctx.threadId);
         if (over) return over;
         try {
-          const { matches: pub, skipped } = await searchPublicMatches(query, sort, { priority, maxWaitMs: limits.slackSearchMaxWaitMs, onWait });
+          const { matches: pub, skipped } = await searchPublicMatches(query, sort, { priority, maxWaitMs, onWait });
           if (!pub.length) return withBudget(`No public-channel results for "${query}".`, skipped);
-          const names = await getUserNames(searchUserIds(pub), { priority, maxWaitMs: limits.slackSearchMaxWaitMs, onWait });
+          const names = await getUserNames(searchUserIds(pub), { priority, maxWaitMs, onWait });
           const { text, shown } = formatSearchMatches(pub, names);
           return withBudget(untrusted('slack search', `Results for "${query}" (${shown} shown, public channels only):\n${text}`), skipped);
         } catch (err) {

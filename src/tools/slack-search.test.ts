@@ -1,6 +1,6 @@
 /**
  * slack_search: the short-lived result cache (public matches only, re-checked on a hit),
- * in-flight sharing, the fail-fast busy result and the soft per-run budget note. The limiter itself is covered in
+ * in-flight sharing, the busy result, the per-priority wait caps and the soft per-run budget note. The limiter itself is covered in
  * src/core/slack-limiter.test.ts and, end to end with the fake Slack, in slack-search.int.test.ts.
  */
 import './test-env.js';
@@ -14,7 +14,7 @@ import { threadIdOf } from '../core/events.js';
 import { toolsFor, type ToolContext } from '../core/tools.js';
 import { getUserNames } from '../context/users.js';
 import './index.js';
-import { formatSearchMatches, searchBudgetNote, searchBusyText, searchCacheKey, searchUserIds, slimMatch } from './slack-search.js';
+import { formatSearchMatches, searchBudgetNote, searchBusyText, searchCacheKey, searchUserIds, slackBusyText, slackMaxWaitMs, slackWaitOpts, SLACK_WAIT_EXTRA, slimMatch } from './slack-search.js';
 
 const r = Math.random().toString(36).slice(2, 8).toUpperCase();
 const channel = `C2SS${r}`;
@@ -169,5 +169,37 @@ describe('slack_search busy + budget', () => {
     expect(searchBudgetNote(12, 12)).toBeNull();
     expect(searchBudgetNote(13, 12)).toMatch(/13 searches in this run/);
     expect(searchBusyText(200)).toContain('~1s');
+    // Says when to retry (e.g. after a long 429 pause that outlasts even the background wait).
+    expect(searchBusyText(45_000)).toMatch(/search again in ~45s/);
+    expect(slackBusyText('that thread', 40_200)).toMatch(/try again in ~41s/);
+  });
+});
+
+describe('per-priority wait caps', () => {
+  it('interactive fails fast; background waits about one search window (30 s) plus a margin', () => {
+    expect(slackMaxWaitMs('interactive', 'search')).toBe(limits.slackSearchMaxWaitMs);
+    expect(slackMaxWaitMs('interactive', 'read')).toBe(limits.slackToolMaxWaitMs);
+    expect(slackMaxWaitMs('background', 'search')).toBe(limits.slackSearchBackgroundMaxWaitMs);
+    expect(slackMaxWaitMs('background', 'read')).toBe(limits.slackToolBackgroundMaxWaitMs);
+    expect(slackMaxWaitMs('background')).toBe(limits.slackToolBackgroundMaxWaitMs);
+    for (const ms of [limits.slackSearchBackgroundMaxWaitMs, limits.slackToolBackgroundMaxWaitMs]) {
+      expect(ms).toBeGreaterThan(30_000);
+      expect(ms).toBeLessThanOrEqual(35_000);
+    }
+    expect(limits.slackSearchMaxWaitMs).toBeLessThan(limits.slackSearchBackgroundMaxWaitMs);
+    expect(limits.slackToolMaxWaitMs).toBeLessThan(limits.slackToolBackgroundMaxWaitMs);
+  });
+
+  it('slackWaitOpts: priority and cap by role, the run\'s wait callback, an explicit cap wins', () => {
+    const onWait = () => {};
+    expect(slackWaitOpts({ role: 'front', extras: {} }, 'search')).toEqual({ priority: 'interactive', maxWaitMs: limits.slackSearchMaxWaitMs });
+    expect(slackWaitOpts({ role: 'front', extras: {} })).toEqual({ priority: 'interactive', maxWaitMs: limits.slackToolMaxWaitMs });
+    expect(slackWaitOpts({ role: 'child', extras: { [SLACK_WAIT_EXTRA]: onWait } }, 'search')).toEqual({
+      priority: 'background',
+      maxWaitMs: limits.slackSearchBackgroundMaxWaitMs,
+      onWait,
+    });
+    expect(slackWaitOpts({ role: 'child', extras: {} })).toEqual({ priority: 'background', maxWaitMs: limits.slackToolBackgroundMaxWaitMs });
+    expect(slackWaitOpts({ role: 'child', extras: {} }, 1234).maxWaitMs).toBe(1234);
   });
 });
