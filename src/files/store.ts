@@ -202,7 +202,9 @@ export async function registerSlackFiles(threadId: string, msgs: RenderMsg[]): P
 
   const { channelId } = parseThreadId(threadId);
   for (let attempt = 0; attempt < 4; attempt++) {
-    const missing = candidates.filter((c) => !out.has(c.file.id));
+    // A fixed order (by Slack file id): concurrent registrations of the same files then take their unique-index
+    // locks in the same order and can't deadlock each other.
+    const missing = candidates.filter((c) => !out.has(c.file.id)).sort((a, b) => (a.file.id < b.file.id ? -1 : a.file.id > b.file.id ? 1 : 0));
     if (!missing.length) break;
     const rows = missing.map((c) => ({
       id: newFileId(),
