@@ -64,23 +64,42 @@ describe('renderCard', () => {
     expect(text.length).toBeGreaterThan(0);
   });
 
-  it('collapses to one titled line once nothing is active: the summary, or the background title once frozen', () => {
-    const runs = [run(1, { status: 'complete', output: 'ok' }), run(2, { status: 'cancelled' })];
+  it('a finished card stays a plan block: every task final, titled by its summary, then its background title', () => {
+    const runs = [
+      run(1, { status: 'complete', output: 'ok', sources: [{ url: 'https://example.com/a', title: 'Doc A' }] }),
+      run(2, { status: 'cancelled' }),
+    ];
     const done = renderCard({ id: 1, title: null, frozen: false }, runs);
-    expect(done.blocks).toEqual([{ type: 'context', block_id: 'card_1_plan', elements: [{ type: 'mrkdwn', text: '✓ *Ran 2 subagents*' }] }]);
-    expect(done.text).toBe('Ran 2 subagents');
+    expect(done.blocks).toHaveLength(1);
+    const plan = done.blocks[0] as any;
+    expect(plan).toMatchObject({ type: 'plan', block_id: 'card_1_plan', title: 'Ran 2 subagents' });
+    // The subagent runs are still listed (Slack shows the plan collapsed to its title, expandable on click).
+    expect(plan.tasks.map((t: any) => [t.task_id, t.title, t.status])).toEqual([
+      ['run_1', 'Task 1', 'complete'],
+      ['run_2', 'Task 2', 'error'],
+    ]);
+    expect(textOf(plan.tasks[0].output)).toBe('ok');
+    expect(plan.tasks[0].sources).toEqual([{ type: 'url', url: 'https://example.com/a', text: 'Doc A' }]);
+    expect(textOf(plan.tasks[1].output)).toBe('Cancelled');
+    expect(done.text.split('\n')[0]).toBe('Ran 2 subagents');
     const frozen = renderCard({ id: 1, title: 'Checked the docs', frozen: true }, runs);
-    expect(frozen.blocks).toEqual([{ type: 'context', block_id: 'card_1_plan', elements: [{ type: 'mrkdwn', text: '✓ *Checked the docs* · ran 2 subagents' }] }]);
+    expect((frozen.blocks[0] as any).title).toBe('Checked the docs');
+    expect((frozen.blocks[0] as any).tasks).toEqual(plan.tasks);
     expect(frozen.text.startsWith('Checked the docs')).toBe(true);
   });
 
-  it('a frozen card is collapsed even with a run still marked active; the title is escaped and never pings', () => {
-    const r = renderCard({ id: 1, title: '<!channel> & co', frozen: true }, [run(3, { status: 'running' }), run(2)]);
+  it('a frozen card finishes its steps; a run still marked active keeps its real status; the title never pings', () => {
+    const r = renderCard({ id: 1, title: '<!channel> & co', frozen: true, steps: [{ tool: 'web_search', status: 'in_progress' }] }, [run(3, { status: 'running' }), run(2)]);
     expect(r.blocks).toHaveLength(1);
-    expect(r.blocks[0]!.type).toBe('context');
-    const text = (r.blocks[0] as any).elements[0].text as string;
-    expect(text).toContain('&amp; co');
-    expect(text).not.toContain('<!channel>');
+    const plan = r.blocks[0] as any;
+    expect(plan.type).toBe('plan');
+    expect(plan.title).not.toContain('<!channel>');
+    expect(plan.title).toContain('& co');
+    expect(plan.tasks.map((t: any) => [t.task_id, t.title, t.status])).toEqual([
+      ['step_1', 'Searched the web', 'complete'],
+      ['run_2', 'Task 2', 'pending'],
+      ['run_3', 'Task 3', 'in_progress'],
+    ]);
   });
 
   it('orders runs by id while live', () => {
@@ -88,15 +107,15 @@ describe('renderCard', () => {
     expect((r.blocks[0] as any).tasks.map((t: any) => t.task_id)).toEqual(['run_2', 'run_3']);
   });
 
-  it('lives in the reply message: [card, reply markdown], text = reply text; collapsed keeps the text', () => {
+  it('lives in the reply message: [card, reply markdown], text = reply text; finished keeps the text', () => {
     const runs = [run(1, { status: 'running', details: 'Reading docs' })];
     const live = renderCard({ id: 4, title: null, frozen: false, replyText: 'On it — checking the docs.' }, runs);
     expect(live.blocks.map((b) => b.type)).toEqual(['plan', 'markdown']);
     expect((live.blocks[1] as any).text).toBe('On it — checking the docs.');
     expect(live.text).toBe('On it — checking the docs.');
     const frozen = renderCard({ id: 4, title: 'Checked the docs', frozen: true, replyText: 'On it — checking the docs.' }, [run(1, { status: 'complete', output: 'ok' })]);
-    expect(frozen.blocks.map((b) => b.type)).toEqual(['context', 'markdown']);
-    expect(JSON.stringify(frozen.blocks[0])).toContain('Checked the docs');
+    expect(frozen.blocks.map((b) => b.type)).toEqual(['plan', 'markdown']);
+    expect((frozen.blocks[0] as any).title).toBe('Checked the docs');
     expect(frozen.text).toBe('On it — checking the docs.');
     // Over Slack's 12k markdown budget: rendered as rich_text (nothing cut), fallback text 3k.
     const long = renderCard({ id: 4, title: null, frozen: false, replyText: 'x'.repeat(20_000) }, runs);
@@ -129,7 +148,7 @@ describe('turn steps on the card', () => {
     ]);
   });
 
-  it('a step still running keeps the card open ("Working…"), with its live label', () => {
+  it('a step still running: the plan is live ("Working…"), with its live label', () => {
     const r = renderCard({ id: 6, title: null, frozen: false, steps: steps(['web_search', 'complete'], ['fetch_url', 'in_progress']) }, []);
     const plan = r.blocks[0] as any;
     expect(plan.type).toBe('plan');
@@ -137,20 +156,39 @@ describe('turn steps on the card', () => {
     expect(plan.tasks.map((t: any) => t.title)).toEqual(['Searched the web', 'Reading the page…']);
   });
 
-  it('once done, a steps-only card is one line summing up the steps', () => {
+  it('once done, a steps-only card is a plan titled with the summary of its steps', () => {
     const r = renderCard(
       { id: 7, title: null, frozen: false, replyText: 'Here you go.', steps: steps(['slack_search', 'complete'], ['fetch_url', 'complete'], ['fetch_url', 'complete'], ['slack_search', 'complete']) },
       [],
     );
-    expect(r.blocks[0]).toEqual({ type: 'context', block_id: 'card_7_plan', elements: [{ type: 'mrkdwn', text: '✓ *Searched Slack twice, read 2 pages*' }] });
-    expect(r.blocks.map((b) => b.type)).toEqual(['context', 'markdown']);
+    expect(r.blocks.map((b) => b.type)).toEqual(['plan', 'markdown']);
+    const plan = r.blocks[0] as any;
+    expect(plan.title).toBe('Searched Slack twice, read 2 pages');
+    expect(plan.tasks.map((t: any) => [t.title, t.status])).toEqual([
+      ['Searched Slack', 'complete'],
+      ['Read a page', 'complete'],
+      ['Read a page', 'complete'],
+      ['Searched Slack', 'complete'],
+    ]);
   });
 
-  it('the collapsed line of a written-up card: its title · the steps and runs', () => {
+  it('a written-up card: its background title, else the summary of steps and runs; every step and run a task', () => {
     const runs = [run(1, { status: 'complete', output: 'ok' }), run(2, { status: 'error', error: 'x' }), run(3, { status: 'complete', output: 'ok' })];
-    const r = renderCard({ id: 8, title: 'Compared frontend libraries', frozen: true, steps: steps(['slack_search', 'complete'], ['fetch_url', 'complete'], ['fetch_url', 'complete']) }, runs);
-    expect((r.blocks[0] as any).elements[0].text).toBe('✓ *Compared frontend libraries* · searched Slack, read 2 pages, ran 3 subagents (1 failed)');
-    expect(r.text).toBe('Compared frontend libraries · searched Slack, read 2 pages, ran 3 subagents (1 failed)');
+    const card = { id: 8, frozen: true, steps: steps(['slack_search', 'complete'], ['fetch_url', 'complete'], ['fetch_url', 'complete']) };
+    const untitled = renderCard({ ...card, title: null }, runs);
+    expect((untitled.blocks[0] as any).title).toBe('Searched Slack, read 2 pages, ran 3 subagents (1 failed)');
+    const r = renderCard({ ...card, title: 'Compared frontend libraries' }, runs);
+    const plan = r.blocks[0] as any;
+    expect(plan.title).toBe('Compared frontend libraries');
+    expect(plan.tasks.map((t: any) => [t.task_id, t.status])).toEqual([
+      ['step_1', 'complete'],
+      ['step_2', 'complete'],
+      ['step_3', 'complete'],
+      ['run_1', 'complete'],
+      ['run_2', 'error'],
+      ['run_3', 'complete'],
+    ]);
+    expect(r.text.split('\n')[0]).toBe('Compared frontend libraries');
   });
 });
 

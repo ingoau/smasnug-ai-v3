@@ -1150,12 +1150,12 @@ describe('runFrontTurn: status activity', () => {
     it('a lookup is a step on the turn card: saved, rendered above the streamed reply, attached', async () => {
       vi.stubGlobal('fetch', exaOk);
       try {
-        h.cardBlock = () => (h.cardSteps.length ? { type: 'context', block_id: 'card_5_plan', elements: [{ type: 'mrkdwn', text: '✓ *Searched the web*' }] } : null);
+        h.cardBlock = () => (h.cardSteps.length ? { type: 'plan', block_id: 'card_5_plan', title: 'Searched the web', tasks: [{ type: 'task_card', task_id: 'step_1', title: 'Searched the web', status: 'complete' }] } : null);
         h.model = mockModel([toolStep(['web_search', { query: 'pico price' }]), replyStep('About $7 at most shops.'), textStep('')]);
         await runFrontTurn(turn({ id: 74 }), ioWithActivity(true).io);
         expect(h.cardSteps).toEqual([{ tool: 'web_search', status: 'complete' }]);
         const update = h.slack.filter((c) => c.method === 'chat.update').at(-1)!;
-        expect(update.args.blocks.map((b: any) => b.type)).toEqual(['context', 'markdown']);
+        expect(update.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown']);
         expect(h.cardAttached).toEqual([update.args.ts]);
         expect(h.postedCards).toEqual([5]);
       } finally {

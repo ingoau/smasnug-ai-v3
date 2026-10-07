@@ -14,7 +14,6 @@ import { redis } from '../core/redis.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import { renderCard, renderCardBlock, type CardRun, type CardState, type PlanBlock, type RunStatus } from './card-render.js';
-import type { ContextBlock } from './reply-buttons.js';
 import type { CardStep } from './card-steps.js';
 import { buttonsBlock, buttonsFallbackText } from './reply-buttons.js';
 import { buttonsForMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
@@ -111,7 +110,7 @@ export async function saveCardSteps(cardId: number, steps: CardStep[]): Promise<
  * The card block for a reply message that is about to carry it (the reply's final layout or its post): null when
  * the card has nothing to show yet or already lives in another message.
  */
-export async function cardBlockFor(cardId: number): Promise<PlanBlock | ContextBlock | null> {
+export async function cardBlockFor(cardId: number): Promise<PlanBlock | null> {
   const loaded = await loadCard(cardId);
   if (!loaded || loaded.card.messageTs || (!loaded.runs.length && !loaded.card.steps.length)) return null;
   return renderCardBlock(toState(loaded.card), loaded.runs);
@@ -233,7 +232,7 @@ export async function renderCardNow(cardId: number): Promise<void> {
   }
 }
 
-/** Freeze a card after its synthesis: final title, collapsed to its line. */
+/** Freeze a card after its synthesis: finished for good (its background title follows, src/agent/titles.ts). */
 export async function freezeCard(cardId: number): Promise<void> {
   await sql`update cards set frozen = true where id = ${cardId}`;
   await renderCardNow(cardId);

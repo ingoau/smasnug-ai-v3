@@ -12,8 +12,8 @@
  * a last resort they are posted as a small follow-up message.
  * Tool activity ("Searching Slack…") shows live as the tasks of a plan in an activity message (activity-trail.ts). A
  * reply adopts that message: a streamed reply streams into it, a posted one is written into it (chat.update). The
- * final layout is [plan card, reply, buttons]: the turn's card (turn-card.ts; its steps and runs, collapsed once
- * done) or none for a turn without lookups or subagents. One card per message. No task is ever left in progress
+ * final layout is [plan card, reply, buttons]: the turn's card (turn-card.ts; a plan block of its steps and runs,
+ * which Slack shows collapsed to its title once the stream is over) or none for a turn without lookups or subagents. One card per message. No task is ever left in progress
  * when a stream stops (Slack would show it as failed).
  */
 import { appendEvent } from '../core/events.js';
@@ -71,8 +71,8 @@ export interface ReplyTarget {
   card?: { block(): Promise<CardBlock | null>; attached(ts: string, text: string): Promise<void> };
 }
 
-/** The plan card as one block (a plan, or its collapsed line). */
-export type CardBlock = { type: 'plan' | 'context'; block_id?: string };
+/** The plan card as one block (a Slack plan block, live or finished). */
+export type CardBlock = { type: 'plan'; block_id?: string };
 
 /**
  * Stream errors meaning Slack is no longer streaming this message (e.g. stopped by the user). `stopped_by_user` too:

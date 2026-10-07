@@ -4,7 +4,8 @@
  *   conversation once it has a substantive request, and every SESSION_RETITLE_EVERY user turns checks whether the
  *   topic clearly changed (the model may answer KEEP). A user-chosen title is never touched (agent-session.ts).
  * - Plan-card titles: after a synthesis turn wrote up a card whose runs have all finished, a job gives the card its
- *   short past-tense title ("Compared 3 hosting options"), shown on the collapsed card line.
+ *   short past-tense title ("Compared 3 hosting options"), the finished plan's title (what Slack shows of it
+ *   collapsed).
  * One cheap text call each (Luna, reasoning off), usage recorded. Jobs are idempotent per thread + turn / card + turn.
  */
 import { generateText } from 'ai';

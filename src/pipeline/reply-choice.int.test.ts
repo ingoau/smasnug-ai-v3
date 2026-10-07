@@ -143,9 +143,9 @@ describe.skipIf(!INTEGRATION)('reply buttons: press flow', () => {
     const k = (await fakeCalls()).length;
     await press({ user: 'UBTNC', id, index: 0, ts, actionTs: '1700000400.000001' });
     const upd = (await callsSince(k)).find((c) => c.method === 'chat.update' && c.args.ts === ts)!;
-    // [the card (collapsed: its one step is done), the reply, the pressed note]
-    expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['context', 'markdown', 'context']);
-    expect(upd.args.blocks[0].elements[0].text).toBe('✓ *Searched the web*');
+    // [the card (a finished plan: its one step is done), the reply, the pressed note]
+    expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown', 'context']);
+    expect(upd.args.blocks[0]).toMatchObject({ title: 'Searched the web', tasks: [{ task_id: 'step_1', title: 'Searched the web', status: 'complete' }] });
     expect(upd.args.blocks[2].elements[0].text).toBe('<@UBTNC> pressed *Go deeper*');
     expect(upd.args.text).toBe('here is the gist. want more?');
   });

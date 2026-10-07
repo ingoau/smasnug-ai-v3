@@ -1,7 +1,7 @@
 /**
  * Turn steps on the plan card: the lookups and other work a turn did itself ("Searched Slack", "Read a page"), shown
- * as tasks next to the subagent runs it started, and summed up in the collapsed card ("searched Slack, read 2
- * pages"). Pure, unit-tested (card-render.test.ts).
+ * as tasks next to the subagent runs it started, and summed up in the finished card's title until its background
+ * title arrives ("Searched Slack, read 2 pages"). Pure, unit-tested (card-render.test.ts).
  *
  * Only real work is a step. Bookkeeping (notes, reminders, watches, titles), responses (reply / react) and the
  * subagent tools are not: runs are tasks of their own, and a steer shows on the run's row. A turn with no step and no

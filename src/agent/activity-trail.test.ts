@@ -339,7 +339,7 @@ describe('ReplyManager with activity cards', () => {
 
   it('the final layout of a streamed reply keeps the turn card above it', async () => {
     const attached: string[] = [];
-    const card = { type: 'context', block_id: 'card_5_plan', elements: [{ type: 'mrkdwn', text: '✓ *Searched the web*' }] };
+    const card = { type: 'plan', block_id: 'card_5_plan', title: 'Searched the web', tasks: [{ type: 'task_card', task_id: 'step_1', title: 'Searched the web', status: 'complete' }] } as const;
     const rm = new ReplyManager(target(0, { card: { block: async () => card, attached: async (ts: string) => void attached.push(ts) } }));
     rm.activity('Searching the web…', 'w1');
     await sleep(10);

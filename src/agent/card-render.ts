@@ -2,9 +2,12 @@
  * Plan card rendering: a pure function of DB state → Slack message (blocks + text). No I/O here.
  *
  * One card per bot message (Slack shows one plan per message): the turn's own steps (card-steps.ts) and the runs it
- * started are the tasks of one plan block, above the reply text. Once nothing in it is in progress (or it was frozen
- * after its synthesis), the card collapses to one titled line: a `context` block "✓ *Title* · searched Slack, read 2
- * pages". Slack documents no collapsed state for plan blocks, so the collapsed card is a plain context line.
+ * started are the tasks of one plan block, above the reply text. The card is always a plan block, live or finished.
+ * Once nothing in it is in progress (or it was frozen after its synthesis) it is finished: every task in its final
+ * status (complete / error), titled with its background title (src/agent/titles.ts) or, until that arrives, the
+ * summary of what it did ("Searched Slack, read 2 pages, ran 3 subagents"). Slack itself shows a plan block collapsed
+ * to its title and expands it on click (verified in the Slack client; the plan block docs don't mention it), so there
+ * is no collapsing logic here: the finished plan still lists every step and run when opened.
  */
 import { capitalize, stepTitle, summarizeSteps, type CardStep } from './card-steps.js';
 import { markdownToRich, type RichTextElement, type RichTextInline } from './rich-text.js';
@@ -212,57 +215,50 @@ export interface RenderedCard {
   blocks: (MarkdownBlock | ReplyBlock | PlanBlock | ActionsBlock | ButtonsActionsBlock | ContextBlock)[];
 }
 
-/** True when nothing on the card is still going (no step in progress, no run queued / running) or it was frozen. */
-export function isCollapsed(card: Pick<CardState, 'frozen' | 'steps'>, runs: Pick<CardRun, 'status'>[]): boolean {
+/** True when the card is finished: frozen (after its synthesis), or no step in progress and no run queued / running. */
+export function isFinished(card: Pick<CardState, 'frozen' | 'steps'>, runs: Pick<CardRun, 'status'>[]): boolean {
   return card.frozen || (!runs.some((r) => isActive(r.status)) && !(card.steps ?? []).some((s) => s.status === 'in_progress'));
 }
 
-const escapeMrkdwn = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+/** Longest plan title we send (Slack documents none for the block; plan_update chunks allow 256). */
+const MAX_PLAN_TITLE = 150;
 
 /**
- * The collapsed card's line: the card's title (frozen cards, src/agent/titles.ts) with the summary of what it did, or the
- * summary alone ("Searched Slack, read 2 pages"), or "Ran N subagents".
+ * The plan's title. Live: "Running N subagents" while runs are active, else "Working…" (a step is running).
+ * Finished: the card's background title (src/agent/titles.ts), else the summary of what it did ("Searched Slack,
+ * read 2 pages, ran 3 subagents"), else "Ran N subagents". It is what a viewer sees of the finished card until they
+ * expand it.
  */
-export function collapsedLine(card: Pick<CardState, 'frozen' | 'title' | 'steps'>, runs: Pick<CardRun, 'status'>[]): { title: string; summary: string } {
-  const summary = summarizeSteps(card.steps ?? [], runs);
-  const title = card.frozen ? card.title?.trim() : '';
-  if (title) return { title, summary };
-  if (summary) return { title: capitalize(summary), summary: '' };
-  return { title: frozenTitle(null, runs.length), summary: '' };
+export function planTitle(card: Pick<CardState, 'frozen' | 'title' | 'steps'>, runs: Pick<CardRun, 'status'>[]): string {
+  let title: string;
+  if (!isFinished(card, runs)) title = runs.some((r) => isActive(r.status)) ? liveTitle(runs) : 'Working…';
+  else title = card.title?.trim() || capitalize(summarizeSteps(card.steps ?? [], runs)) || frozenTitle(null, runs.length);
+  return neutralizeBroadcasts(clip(title, MAX_PLAN_TITLE));
 }
 
-/** Title of the expanded plan: the runs' title, else "Working…" while a step runs, else the summary. */
-function expandedTitle(card: CardState, runs: CardRun[]): string {
-  if (runs.length) return card.frozen ? frozenTitle(card.title, runs.length) : liveTitle(runs);
-  if ((card.steps ?? []).some((s) => s.status === 'in_progress')) return 'Working…';
-  return capitalize(summarizeSteps(card.steps ?? [])) || 'Done';
-}
-
-/** The card itself (one block): a plan with the steps and runs as tasks, or its collapsed line. */
-export function renderCardBlock(card: CardState, runs: CardRun[]): PlanBlock | ContextBlock {
+/**
+ * The card itself (one block): a plan with the steps, then the runs, as tasks. Finished, no step is left in
+ * progress (a step still running when its turn ended never failed: complete).
+ */
+export function renderCardBlock(card: CardState, runs: CardRun[]): PlanBlock {
   const sorted = [...runs].sort((a, b) => a.id - b.id);
-  const blockId = `card_${card.id}_plan`;
-  if (isCollapsed(card, sorted)) {
-    const { title, summary } = collapsedLine(card, sorted);
-    const text = neutralizeBroadcasts(`✓ *${escapeMrkdwn(clip(title, 150))}*${summary ? ` · ${escapeMrkdwn(summary)}` : ''}`);
-    return { type: 'context', block_id: blockId, elements: [{ type: 'mrkdwn', text }] };
-  }
+  const finished = isFinished(card, sorted);
   const budget = outputBudget(sorted.length);
-  const steps: TaskCardBlock[] = (card.steps ?? []).map((s, i) => ({ type: 'task_card', task_id: `step_${i + 1}`, title: stepTitle(s), status: s.status }));
+  const steps: TaskCardBlock[] = (card.steps ?? []).map((s, i) => {
+    const status = finished && s.status === 'in_progress' ? 'complete' : s.status;
+    return { type: 'task_card', task_id: `step_${i + 1}`, title: stepTitle({ ...s, status }), status };
+  });
   const tasks = [...steps, ...sorted.map((r) => taskFor(r, budget))].slice(-MAX_PLAN_TASKS);
   // Stable block ids so Slack treats each chat.update as the same blocks (keeps the plan expanded if the viewer opened it).
-  return { type: 'plan', block_id: blockId, title: expandedTitle(card, sorted), tasks };
+  return { type: 'plan', block_id: `card_${card.id}_plan`, title: planTitle(card, sorted), tasks };
 }
 
 /** Plain-text summary of the card (the fallback text of a card without a reply). */
 function cardText(card: CardState, runs: CardRun[]): string {
   const sorted = [...runs].sort((a, b) => a.id - b.id);
-  if (isCollapsed(card, sorted)) {
-    const { title, summary } = collapsedLine(card, sorted);
-    return summary ? `${title} · ${summary}` : title;
-  }
-  const title = expandedTitle(card, sorted);
-  return [title, ...(card.steps ?? []).map((s) => `• ${stepTitle(s)}`), ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n');
+  const block = renderCardBlock(card, sorted);
+  const steps = block.tasks.filter((t) => t.task_id.startsWith('step_')).map((t) => `• ${t.title}`);
+  return [block.title, ...steps, ...sorted.map((r) => `• ${r.isResume ? '↻ ' : ''}${r.subagentTitle} (${statusWord(r)})`)].join('\n');
 }
 
 /**

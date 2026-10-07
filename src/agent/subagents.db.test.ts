@@ -158,14 +158,14 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     expect(calls.some((c) => c.method === 'chat.postMessage')).toBe(false);
     const [cardA] = await sql<any[]>`select message_ts, reply_text from cards where id = ${a.cardId}`;
     expect(cardA).toEqual({ messageTs: '1790001000.000100', replyText: 'On it — checking.' });
-    // Later renders keep the reply text below the card; with nothing left running it collapses to its line.
+    // Later renders keep the reply text below the card; with nothing left running it is a finished plan (the run listed).
     await sub.cancelSubagent({ threadId, subagentId: a.subagentId, actor: 'U_G' });
     const b4 = (await fakeCalls()).length;
     await cards.renderCardNow(a.cardId);
     calls = (await fakeCalls()).slice(b4);
     const re = calls.filter((c) => c.method === 'chat.update' && c.args.ts === '1790001000.000100').at(-1)!;
-    expect(re.args.blocks.map((b: any) => b.type)).toEqual(['context', 'markdown']);
-    expect(re.args.blocks[0].elements[0].text).toBe('✓ *Ran 1 subagent*');
+    expect(re.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown']);
+    expect(re.args.blocks[0]).toMatchObject({ title: 'Ran 1 subagent', tasks: [{ task_id: expect.stringMatching(/^run_/), title: 'Card test', status: 'error' }] });
     expect(re.args.blocks[1].text).toBe('On it — checking.');
 
     // Attaching fails (e.g. Slack refuses to update a streamed message) → standalone card.

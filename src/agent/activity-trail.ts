@@ -24,7 +24,7 @@
  *   chat.stopStream (which accepts `chunks`, https://docs.slack.dev/reference/methods/chat.stopStream).
  * - The turn's next reply adopts this message (ReplyManager): a streamed reply's text streams in below the plan, a
  *   reply posted whole is written into it (chat.update). The final layout renders the turn's plan card from the DB
- *   (turn-card.ts, card-render.ts: the steps and runs, collapsed once done) above the reply, or no card at all for a
+ *   (turn-card.ts, card-render.ts: a plan of the steps and runs, every task final once done) above the reply, or no card at all for a
  *   turn without lookups or subagents. When anything was posted in the thread after the activity message (a user
  *   message, send_message, …), adopting it would put the reply above that post: it is deleted and the reply opens a
  *   message of its own.

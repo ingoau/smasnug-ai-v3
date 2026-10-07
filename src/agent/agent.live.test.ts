@@ -156,9 +156,12 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     await processCardRender(cardId);
     calls = await fakeCalls();
     const update = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
-    // Everything done: the card collapses to its line.
-    expect(update?.args.blocks[0]).toMatchObject({ type: 'context', block_id: `card_${cardId}_plan` });
-    expect(update?.args.blocks[0].elements[0].text).toMatch(/^✓ \*Ran \d subagents?\*/);
+    // Everything done: a finished plan (Slack shows it collapsed to its title), every run listed and final.
+    expect(update?.args.blocks[0]).toMatchObject({ type: 'plan', block_id: `card_${cardId}_plan` });
+    expect(update?.args.blocks[0].title).toMatch(/ran \d subagents?/i);
+    const runTasks = update?.args.blocks[0].tasks.filter((t: any) => t.task_id.startsWith('run_'));
+    expect(runTasks).toHaveLength(done.length);
+    expect(runTasks.every((t: any) => t.status === "complete")).toBe(true);
 
     // Synthesis turn.
     const before = calls.length;
@@ -178,7 +181,10 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const frozen = calls.filter((c) => c.method === 'chat.update' && c.args.ts === card.messageTs).at(-1);
     expect(frozen).toBeTruthy();
     expect(frozen!.args.blocks.some((b: any) => b.type === 'actions')).toBe(false); // no Stop all button
-    expect(frozen!.args.blocks[0].type).toBe('context'); // collapsed: "✓ *Title* · ran N subagents"
+    // A finished plan (collapsed by Slack to its title), every run still listed.
+    expect(frozen!.args.blocks[0]).toMatchObject({ type: 'plan', block_id: `card_${cardId}_plan` });
+    expect(frozen!.args.blocks[0].tasks.filter((t: any) => t.task_id.startsWith('run_'))).toHaveLength(done.length);
+    expect(frozen!.args.blocks[0].tasks.every((t: any) => t.status === 'complete' || t.status === 'error')).toBe(true);
     expect(frozen!.args.blocks.filter((b: any) => b.type === 'plan' || b.block_id === `card_${cardId}_plan`)).toHaveLength(1);
     const [card2] = await sql<any[]>`select * from cards where id = ${cardId}`;
     expect(card2.frozen).toBe(true);
@@ -188,7 +194,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     const events = await sql<any[]>`select type, payload from thread_events where thread_id = ${threadId} order by id`;
     expect(events.filter((e) => e.type === 'reply').length).toBeGreaterThanOrEqual(1);
     // eslint-disable-next-line no-console
-    console.log('card line:', frozen!.args.blocks[0].elements[0].text, '| in reply:', replied, '| synthesis:', streamed.slice(0, 200));
+    console.log('card title:', frozen!.args.blocks[0].title, '| in reply:', replied, '| synthesis:', streamed.slice(0, 200));
   }, 180_000);
 
   async function freshThread(tag: string) {
