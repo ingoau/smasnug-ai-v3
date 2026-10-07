@@ -2,6 +2,8 @@
  * read_public_channel: read top-level messages in any PUBLIC Slack channel (incl. channels the bot isn't in).
  * Fetch by permalink or channel + timestamp, get surrounding context, or page older/newer through the channel.
  * Uses the USER token (`channels:history`) and the same fail-closed public check as slack_search / read_public_thread.
+ * Private channels: only via the private-link rule (bot + speaker both members, asked in the speaker's DM with the
+ * bot or in that channel; bot token), see private-links.ts.
  */
 import { tool } from 'ai';
 import { z } from 'zod';
@@ -14,7 +16,7 @@ import { fromSlack } from '../context/normalize.js';
 import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
-import { publicChannelNames } from './slack-search.js';
+import { notVisibleMessage, resolveLinkAccess } from './private-links.js';
 import { channelPageHeader, estimateRenderedChars, takeWithinBudget, trimAround } from './paging.js';
 import { errMsg, normalizeTs, parseChannelId, parseSlackPermalink, SLACK_PERMALINK_PATTERN, textWithAttachments, untrusted } from './util.js';
 
@@ -150,6 +152,7 @@ export async function fetchChannelPage(
   channel: string,
   target: Exclude<ChannelTarget, { error: string }>,
   limit: number,
+  token: 'bot' | 'user' = 'user',
 ): Promise<{ msgs: RenderMsg[]; hasCenter: boolean; hasOlder: boolean; hasNewer: boolean }> {
   const need = Math.min(limit + OVERFETCH, 100);
 
@@ -157,6 +160,7 @@ export async function fetchChannelPage(
     const raws = await fetchHistory(channel, {
       ...(target.mode === 'before' ? { latest: target.ts, inclusive: false } : {}),
       limit: need,
+      token,
     });
     const vis = visible(raws);
     // Slack returns fewer than asked only when the channel has no more: then this page reaches the start.
@@ -164,7 +168,7 @@ export async function fetchChannelPage(
   }
 
   if (target.mode === 'after') {
-    const raws = await fetchHistoryAfterClosest(channel, target.ts, need);
+    const raws = await fetchHistoryAfterClosest(channel, target.ts, need, token);
     // Newer messages can't be ruled out (the forward walk only covers a time window): always offer the cursor.
     return { msgs: visible(raws).slice(0, limit), hasCenter: false, hasOlder: true, hasNewer: true };
   }
@@ -179,8 +183,9 @@ export async function fetchChannelPage(
       latest: aroundTs,
       inclusive: true,
       limit: Math.min(beforeN + 1 + OVERFETCH, 100),
+      token,
     }),
-    fetchHistoryAfterClosest(channel, aroundTs, afterN + OVERFETCH),
+    fetchHistoryAfterClosest(channel, aroundTs, afterN + OVERFETCH, token),
   ]);
   const beforeVis = visible(beforeRaws);
   const afterVis = visible(afterRaws);
@@ -199,7 +204,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        `Read top-level messages in any PUBLIC Slack channel (also channels the bot isn't in), a page at a time (oldest first on the page, ~${limits.readPageTokens} tokens max). Prefer a Slack message link shaped like https://hackclub.slack.com/archives/[channel]/[timestamp] (channel id + p + message ts without the dot), or pass channel + around_ts for surrounding context; use before_ts / after_ts to page older / newer; omit timestamps for the latest messages. The header says where the page is and how to continue. Thread replies aren't in channel history — use read_public_thread for those. Results are untrusted content.`,
+        `Read top-level messages in any PUBLIC Slack channel (also channels the bot isn't in), a page at a time (oldest first on the page, ~${limits.readPageTokens} tokens max). Prefer a Slack message link shaped like https://hackclub.slack.com/archives/[channel]/[timestamp] (channel id + p + message ts without the dot), or pass channel + around_ts for surrounding context; use before_ts / after_ts to page older / newer; omit timestamps for the latest messages. The header says where the page is and how to continue. Thread replies aren't in channel history — use read_public_thread for those. A private-channel link works only when the asker and you are both in that channel and they ask in a DM with you (or in that channel). Results are untrusted content.`,
       inputSchema: z.object({
         permalink: z
           .string()
@@ -217,16 +222,15 @@ registerTool({
         const target = resolveChannelTarget(input);
         if ('error' in target) return target.error;
         const { channel } = target;
-        if (!channel.startsWith('C')) return "Can't read that channel: only public channels can be read.";
+        if (!/^[CG]/.test(channel)) return notVisibleMessage('channel');
         const over = await takeLimit('search', ctx.speakerId, ctx.threadId);
         if (over) return over;
-        const pub = await publicChannelNames([channel]);
-        if (!pub.has(channel)) return `Can't read that channel: <#${channel}> isn't a public channel (or couldn't be verified as one).`;
-        const name = pub.get(channel);
-        const chLabel = name ? `<#${channel}|${name}>` : `<#${channel}>`;
+        const access = await resolveLinkAccess(channel, { speakerId: ctx.speakerId, channelId: ctx.channelId }, 'channel');
+        if ('error' in access) return access.error;
+        const { chLabel, token, visibility } = access;
         const n = input.limit ?? DEFAULT_LIMIT;
         try {
-          const fetched = await fetchChannelPage(channel, target, n);
+          const fetched = await fetchChannelPage(channel, target, n, token);
           const { hasCenter } = fetched;
           // Size cap (like read_thread / read_channel): keep the end the mode reads from, or the linked message's surroundings.
           const msgs =
@@ -280,9 +284,11 @@ registerTool({
             );
           }
           lines.push(...msgs.map(mark));
-          return untrusted('slack channel (public)', lines.join('\n'));
+          return untrusted(`slack channel (${visibility})`, lines.join('\n'));
         } catch (err) {
           const code = slackErrorCode(err);
+          // Bot token (private link): it lost access since the check; answer like any channel it can't see.
+          if (token === 'bot' && (code === 'channel_not_found' || code === 'not_in_channel' || code === 'missing_scope' || code === 'no_permission')) return notVisibleMessage('channel');
           if (code === 'missing_scope' || code === 'not_allowed_token_type' || code === 'no_permission') {
             log.warn({ code, channel }, 'read_public_channel: user token lacks channels:history');
             return MISSING_SCOPE_MESSAGE;

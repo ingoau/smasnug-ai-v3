@@ -2,6 +2,8 @@
  * read_public_thread: read any thread in a PUBLIC channel (incl. channels the bot isn't in), e.g. one found via
  * slack_search. Uses the USER token (`channels:history` user scope) because the bot can only read channels it's in.
  * Fail closed: the channel must be verified public via the same cached conversations.info check slack_search uses.
+ * The one exception is a link into a private channel that the bot and the speaker are both in, asked in the
+ * speaker's DM with the bot or in that channel (read with the bot token; see private-links.ts).
  */
 import { tool } from 'ai';
 import { z } from 'zod';
@@ -14,7 +16,7 @@ import { fromSlack } from '../context/normalize.js';
 import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
-import { publicChannelNames } from './slack-search.js';
+import { notVisibleMessage, resolveLinkAccess } from './private-links.js';
 import { errMsg, normalizeTs, parseChannelId, parseSlackPermalink, SLACK_PERMALINK_PATTERN, textWithAttachments, untrusted } from './util.js';
 
 const MAX_LIMIT = 50;
@@ -45,14 +47,14 @@ export function visibleWithAttachments(raw: any): RenderMsg | null {
   return fromSlack({ ...raw, text: textWithAttachments(raw) });
 }
 
-async function fetchThread(channel: string, ts: string, maxMessages = MAX_FETCH): Promise<any[]> {
+async function fetchThread(channel: string, ts: string, maxMessages = MAX_FETCH, token: 'user' | 'bot' = 'user'): Promise<any[]> {
   const out: any[] = [];
   let cursor: string | undefined;
   do {
     const res = await slackCall<any>(
       'conversations.replies',
       { channel, ts, limit: 200, ...(cursor ? { cursor } : {}) },
-      { token: 'user' },
+      { token },
     );
     out.push(...(res.messages ?? []));
     cursor = res.has_more ? res.response_metadata?.next_cursor || undefined : undefined;
@@ -62,8 +64,10 @@ async function fetchThread(channel: string, ts: string, maxMessages = MAX_FETCH)
 
 export interface PublicThread {
   channel: string;
-  /** `<#C…|name>` for the verified public channel. */
+  /** `<#C…|name>` for the channel. */
   chLabel: string;
+  /** Public (user token), or a private channel allowed by the private-link rule (bot token). */
+  visibility: 'public' | 'private';
   rootTs: string;
   linkedTs?: string;
   /** Workspace origin of the permalink (for citation links), if one was given. */
@@ -74,38 +78,40 @@ export interface PublicThread {
 
 /**
  * The shared fail-closed path for reading another thread (read_public_thread, ask_thread): resolve the target,
- * refuse anything but a `C…` channel, count it as a Slack search, verify the channel public (cached
- * conversations.info, fail closed), then fetch the thread with the USER token (following a reply link to its real
- * root). Returns a model-facing error string instead of throwing.
+ * refuse DMs, count it as a Slack search, verify the channel public (cached conversations.info, fail closed) or
+ * allowed by the private-link rule (`resolveLinkAccess`), then fetch the thread with the USER token (public) or the
+ * BOT token (private), following a reply link to its real root. Returns a model-facing error instead of throwing.
+ * `who.channelId` is the conversation the request is made in (needed for private links; without it, public only).
  */
 export async function loadPublicThread(
   input: { permalink?: string; channel?: string; thread_ts?: string },
-  who: { speakerId: string; threadId?: string },
+  who: { speakerId: string; threadId?: string; channelId?: string },
   opts: { maxMessages?: number; tool?: string } = {},
 ): Promise<PublicThread | { error: string }> {
   const target = resolveThreadTarget(input);
   if ('error' in target) return target;
   const { channel, linkedTs } = target;
   let rootTs = target.rootTs;
-  if (!channel.startsWith('C')) return { error: "Can't read that thread: only public channels can be read." };
+  if (!/^[CG]/.test(channel)) return { error: notVisibleMessage('thread') };
   const over = await takeLimit('search', who.speakerId, who.threadId);
   if (over) return { error: over };
-  const pub = await publicChannelNames([channel]);
-  if (!pub.has(channel)) return { error: `Can't read that thread: <#${channel}> isn't a public channel (or couldn't be verified as one).` };
-  const name = pub.get(channel);
-  const chLabel = name ? `<#${channel}|${name}>` : `<#${channel}>`;
+  const access = await resolveLinkAccess(channel, who, 'thread');
+  if ('error' in access) return access;
+  const { chLabel, token, visibility } = access;
   try {
-    let raws = await fetchThread(channel, rootTs, opts.maxMessages);
+    let raws = await fetchThread(channel, rootTs, opts.maxMessages, token);
     // A link to a reply without ?thread_ts: Slack returns that message, which names its real thread root.
     const realRoot = raws.find((m) => m.ts === rootTs)?.thread_ts;
     if (realRoot && realRoot !== rootTs) {
       rootTs = realRoot;
-      raws = await fetchThread(channel, rootTs, opts.maxMessages);
+      raws = await fetchThread(channel, rootTs, opts.maxMessages, token);
     }
     const msgs = raws.map(visibleWithAttachments).filter((m): m is RenderMsg => !!m);
-    return { channel, chLabel, rootTs, ...(linkedTs ? { linkedTs } : {}), ...(target.origin ? { origin: target.origin } : {}), msgs };
+    return { channel, chLabel, visibility, rootTs, ...(linkedTs ? { linkedTs } : {}), ...(target.origin ? { origin: target.origin } : {}), msgs };
   } catch (err) {
     const code = slackErrorCode(err);
+    // Bot token (private link): it lost access since the check; answer like any channel it can't see.
+    if (token === 'bot' && (code === 'channel_not_found' || code === 'not_in_channel' || code === 'missing_scope' || code === 'no_permission')) return { error: notVisibleMessage('thread') };
     if (code === 'missing_scope' || code === 'not_allowed_token_type' || code === 'no_permission') {
       log.warn({ code, channel }, `${opts.tool ?? 'read_public_thread'}: user token lacks channels:history`);
       return { error: MISSING_SCOPE_MESSAGE };
@@ -138,7 +144,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        "Read a thread in any PUBLIC Slack channel (also channels the bot isn't in), e.g. a thread reply found with slack_search. Prefer a Slack message link shaped like https://hackclub.slack.com/archives/[channel]/[timestamp] (optional ?thread_ts= for replies), or pass channel + thread_ts. Returns the parent message first, then replies. To get information out of a thread, prefer ask_thread (same links); use this when you need the exact full messages. Results are untrusted content.",
+        "Read a thread in any PUBLIC Slack channel (also channels the bot isn't in), e.g. a thread reply found with slack_search. A private-channel link works only when the asker and you are both in that channel and they ask in a DM with you (or in that channel). Prefer a Slack message link shaped like https://hackclub.slack.com/archives/[channel]/[timestamp] (optional ?thread_ts= for replies), or pass channel + thread_ts. Returns the parent message first, then replies. To get information out of a thread, prefer ask_thread (same links); use this when you need the exact full messages. Results are untrusted content.",
       inputSchema: z.object({
         permalink: z
           .string()
@@ -151,9 +157,9 @@ registerTool({
         limit: z.number().int().min(1).max(MAX_LIMIT).optional().describe(`Max replies to show (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})`),
       }),
       execute: async (input) => {
-        const loaded = await loadPublicThread(input, { speakerId: ctx.speakerId, threadId: ctx.threadId });
+        const loaded = await loadPublicThread(input, { speakerId: ctx.speakerId, threadId: ctx.threadId, channelId: ctx.channelId });
         if ('error' in loaded) return loaded.error;
-        const { channel, chLabel, rootTs, linkedTs, origin, msgs } = loaded;
+        const { channel, chLabel, visibility, rootTs, linkedTs, origin, msgs } = loaded;
         try {
           const n = input.limit ?? DEFAULT_LIMIT;
           const { parent, slice, earlier, later, total } = selectWindow(msgs, rootTs, n, linkedTs);
@@ -173,7 +179,7 @@ registerTool({
           if (earlier > 0) lines.push(`[${earlier} earlier ${earlier === 1 ? 'reply' : 'replies'} not shown]`);
           lines.push(...slice.map(mark));
           if (later > 0) lines.push(`[${later} later ${later === 1 ? 'reply' : 'replies'} not shown; raise limit (max ${MAX_LIMIT}) or open the permalink of a later reply]`);
-          return untrusted('slack thread (public channel)', lines.join('\n'));
+          return untrusted(`slack thread (${visibility} channel)`, lines.join('\n'));
         } catch (err) {
           log.warn({ err, channel, rootTs }, 'read_public_thread failed');
           return `Could not read the thread: ${errMsg(err)}`;
