@@ -415,9 +415,22 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
             : turn.gated
               ? `No @mention, but a relevance check judged that <new_messages> from <@${turn.authorId}> is meant for you (or that you clearly have something to add): respond using your tools, unless it is clearly not for you.`
               : "This is an unmentioned follow-up in a thread you're following along: respond only if it is addressed to you or you clearly add something; otherwise do nothing.",
-    );
+    );    const ahead = await resultsAheadNote(turn).catch((err) => (log.warn({ err }, 'resultsAheadNote failed'), ''));
+    if (ahead) parts.push(ahead);
   }
   return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, allCancelled, ...(outcome ? { outcome } : {}) };
+}
+
+/**
+ * A user turn that runs ahead of a waiting results (synthesis) turn (src/pipeline/turn-hold.ts: user turns queued when
+ * a results turn comes up go first): the results get written up right after this turn, so it must not pre-empt them.
+ */
+export async function resultsAheadNote(turn: TurnRow): Promise<string> {
+  const [row] = await sql`
+    select 1 from turns where thread_id = ${turn.threadId} and kind = 'synthesis' and status = 'pending' and id < ${turn.id} limit 1`;
+  return row
+    ? "Your subagents' results came in just before these messages; they get written up in a turn right after this one. Don't report, guess at or redo them here (if asked about them, just say they're coming)."
+    : '';
 }
 
 /** How far back a results / scheduled turn looks for human messages still on their way to a turn of their own. */

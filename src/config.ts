@@ -112,6 +112,15 @@ export const limits = {
   /** DMs / mentions / two-party follow-ups (no gate): short window, see debounceWindowMs. */
   debounceDirectMs: 300,
   debounceBusyMs: 3000,
+  /**
+   * Turn hold (src/pipeline/turn-hold.ts): a results (synthesis) or scheduled turn waits up to turnHoldMaxMs while a
+   * human message in the thread is still in its debounce window or at the relevance gate, re-checking every
+   * turnHoldPollMs (delayed thread-run job; the debounce fire also wakes it). The gate's in-flight marker expires
+   * after gateInflightTtlMs if a worker dies mid-gate.
+   */
+  turnHoldMaxMs: 8000,
+  turnHoldPollMs: 1000,
+  gateInflightTtlMs: 30_000,
   /** Thread history in the prompt: at most this many replies (plus the parent), within historyTokens (src/context/window.ts). */
   contextReplies: 40,
   historyTokens: 8000,

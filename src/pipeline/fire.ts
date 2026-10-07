@@ -10,11 +10,11 @@ import { sql } from '../db/index.js';
 import { recordModelUsage } from '../features/guard.js';
 import { log } from '../log.js';
 import { markMessage } from '../core/timing.js';
-import { isLatestSeq, takeBatch, type DebounceJob } from './debounce.js';
+import { isLatestSeq, releaseInflight, takeBatch, type DebounceJob } from './debounce.js';
 import { clearIntakeStatus } from './session-status.js';
 import { runGate, type GateResult } from './gate.js';
-import { batchIsAddressed, batchIsMention, batchIsPartnerLike, batchIsRecentPartner, batchNeedsGate, gateThreshold, isCooling } from './rules.js';
-import { pushToRunningTurn, scheduleMessages } from './scheduler.js';
+import { type BatchReason, batchIsAddressed, batchIsMention, batchIsPartnerLike, batchIsRecentPartner, batchNeedsGate, gateThreshold, isCooling } from './rules.js';
+import { pushToRunningTurn, scheduleMessages, wakeHeldTurn } from './scheduler.js';
 import { getThread, loadMessages, recentMessages } from './store.js';
 import { djGateNote } from '../features/huddlefm/render.js';
 
@@ -47,8 +47,21 @@ export async function processDebounce(job: Job<DebounceJob>) {
     // Superseded by a newer message's job (nothing to do), or emptied by deletions / native stop: then no turn
     // follows, so take back the status shown at intake.
     if (await isLatestSeq(job.data)) await clearIntakeStatus(threadId, authorId);
+    await wakeHeldTurn(threadId).catch((err) => log.warn({ err, threadId }, 'waking a held turn failed'));
     return;
   }
+  // The batch is marked in flight (takeBatch) until it is scheduled or dropped: a results / scheduled turn waits for
+  // it meanwhile (turn-hold.ts). Release, then wake that turn, in this order (see thread-run's post-release check).
+  try {
+    await fireBatch(job, batch, firedAt);
+  } finally {
+    await releaseInflight(job.data).catch((err) => log.warn({ err, threadId }, 'releasing the in-flight batch failed'));
+    await wakeHeldTurn(threadId).catch((err) => log.warn({ err, threadId }, 'waking a held turn failed'));
+  }
+}
+
+async function fireBatch(job: Job<DebounceJob>, batch: { ts: string; reason: BatchReason }[], firedAt: number) {
+  const { threadId, authorId } = job.data;
 
   const { channelId } = parseThreadId(threadId);
   const msgs = await loadMessages(channelId, batch.map((b) => b.ts));

@@ -2,7 +2,7 @@
  * Integration tests against local Postgres/Redis (dedicated test db + redis db, see test-infra.ts). runFrontTurn is
  * stubbed; Slack runs in SLACK_FAKE mode. Skipped automatically when the infra isn't reachable.
  */
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Job } from 'bullmq';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import type { TurnIO } from '../agent/front.js';
@@ -620,6 +620,110 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const follow = await scheduler.finishTurn(turn2.id, 'done');
       expect(follow).not.toBeNull();
       expect((await turns()).find((t) => t.id === follow)).toMatchObject({ status: 'pending', messageTs: ['1.2', '1.3'], isMention: true });
+    });
+  });
+
+  describe('turn hold: results / scheduled turns wait for pending human messages', () => {
+    const order = () => run.mock.calls.map(([t]) => `${t.kind}:${t.authorId}`);
+    const events = async (type: string) => (await sql`select payload from thread_events where thread_id = ${THREAD} and type = ${type} order by id`).map((e) => e.payload);
+    const saved = { max: 0, poll: 0 };
+    beforeEach(async () => {
+      const { limits } = await import('../config.js');
+      saved.max = limits.turnHoldMaxMs;
+      saved.poll = limits.turnHoldPollMs;
+    });
+    afterEach(async () => {
+      const { limits } = await import('../config.js');
+      (limits as any).turnHoldMaxMs = saved.max;
+      (limits as any).turnHoldPollMs = saved.poll;
+    });
+
+    it('a results turn waits while a newer message is in debounce and at the gate; the user turn then runs first', async () => {
+      await makeThread();
+      await storeMsg('U2', '1.5', 'can you also open a PR for the parser fix?');
+      const synth = await scheduler.requestTurn({ threadId: THREAD, authorId: 'U1', kind: 'synthesis', cardId: 7 });
+      await debounce.addToBatch(THREAD, 'U2', '1.5', 'gate');
+
+      // In debounce: held, with a delayed re-check.
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(run).not.toHaveBeenCalled();
+      expect((await turns()).map((t) => [t.kind, t.status])).toEqual([['synthesis', 'pending']]);
+      const delayed = await queue(QUEUE.threadRun).getJobs(['delayed']);
+      expect(delayed.map((j) => j.data)).toContainEqual({ threadId: THREAD });
+      expect(await events('turn_held')).toEqual([{ turnId: synth, maxMs: saved.max }]);
+
+      // At the gate (batch taken, decision in flight): still held.
+      const gate = vi.spyOn(gateImpl, 'run').mockImplementation(async () => {
+        expect(await debounce.hasPendingHumanInput(THREAD)).toBe(true);
+        await processThreadRun(job({ threadId: THREAD }));
+        expect(run).not.toHaveBeenCalled();
+        return { respond: true, raw: 'yes', latencyMs: 5, model: 'test' };
+      });
+      await queue(QUEUE.threadRun).drain(true);
+      await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 1 }));
+      expect(gate).toHaveBeenCalledTimes(1);
+      expect(await debounce.hasPendingHumanInput(THREAD)).toBe(false);
+      expect(await threadRunJobs()).toContainEqual({ threadId: THREAD }); // woken by the user turn + the fire
+
+      // The message became its own user turn: it runs before the results turn that waited for it.
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(order()).toEqual(['user:U2', 'synthesis:U1']);
+      expect((await turns()).map((t) => t.status)).toEqual(['done', 'done']);
+      expect(await events('turn_hold_ended')).toEqual([expect.objectContaining({ turnId: synth, kind: 'synthesis', timedOut: false })]);
+      expect(await events('turn_yielded')).toEqual([{ turnId: synth, to: synth + 1 }]);
+      gate.mockRestore();
+    });
+
+    it('the gate says no: the held turn runs once the decision is in, with no user turn', async () => {
+      await makeThread();
+      await storeMsg('U2', '1.5', 'lol same');
+      await scheduler.requestTurn({ threadId: THREAD, authorId: 'U1', kind: 'scheduled' });
+      await debounce.addToBatch(THREAD, 'U2', '1.5', 'gate');
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(run).not.toHaveBeenCalled();
+      const gate = vi.spyOn(gateImpl, 'run').mockResolvedValueOnce({ respond: false, raw: 'no', latencyMs: 5, model: 'test' });
+      await queue(QUEUE.threadRun).drain(true);
+      await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 1 }));
+      expect(await threadRunJobs()).toContainEqual({ threadId: THREAD }); // the fire woke the held thread
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(order()).toEqual(['scheduled:U1']);
+      gate.mockRestore();
+    });
+
+    it('the wait is bounded: after turnHoldMaxMs the turn runs anyway (the "Still being handled" note covers it)', async () => {
+      const { limits } = await import('../config.js');
+      (limits as any).turnHoldMaxMs = 150;
+      (limits as any).turnHoldPollMs = 50;
+      await makeThread();
+      await storeMsg('U2', '1.5', 'one more thing');
+      const synth = await scheduler.requestTurn({ threadId: THREAD, authorId: 'U1', kind: 'synthesis', cardId: 7 });
+      await debounce.addToBatch(THREAD, 'U2', '1.5', 'gate'); // never fired in this test
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(run).not.toHaveBeenCalled();
+      await new Promise((r) => setTimeout(r, 200));
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(order()).toEqual(['synthesis:U1']);
+      expect(await events('turn_hold_ended')).toEqual([expect.objectContaining({ turnId: synth, timedOut: true })]);
+    });
+
+    it('user turns already queued go first; ones queued later wait behind the results turn', async () => {
+      await makeThread();
+      await scheduler.requestTurn({ threadId: THREAD, authorId: 'U1', kind: 'synthesis', cardId: 7 });
+      await scheduler.scheduleMessages(THREAD, 'U2', ['1.5'], true);
+      run.mockImplementation(async (turn: TurnRow) => {
+        if (turn.authorId === 'U2') await scheduler.scheduleMessages(THREAD, 'U3', ['1.6'], true); // arrives mid-turn
+      });
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(order()).toEqual(['user:U2', 'synthesis:U1', 'user:U3']);
+    });
+
+    it('nothing pending: a results turn runs at once, no hold events', async () => {
+      await makeThread();
+      await scheduler.requestTurn({ threadId: THREAD, authorId: 'U1', kind: 'synthesis', cardId: 7 });
+      await processThreadRun(job({ threadId: THREAD }));
+      expect(order()).toEqual(['synthesis:U1']);
+      expect(await events('turn_held')).toEqual([]);
+      expect(await events('turn_hold_ended')).toEqual([]);
     });
   });
 

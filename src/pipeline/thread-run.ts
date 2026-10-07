@@ -2,6 +2,10 @@
  * thread-run processor: one front agent per thread at a time. The holder of the Redis thread lock drains pending
  * turns in id order; anyone else returns immediately (the holder picks their turn up). After releasing, the holder
  * re-checks for pending turns and re-enqueues, so no wakeup is lost.
+ *
+ * Exception (src/pipeline/turn-hold.ts): a results / scheduled turn next in line waits (bounded) while a person's
+ * newer message is still in debounce / at the gate, and then lets the user turns queued behind it run first. While
+ * it waits the holder releases the lock and re-checks via a delayed thread-run job (the debounce fire also wakes it).
  */
 import type { Job } from 'bullmq';
 import { runFrontTurn, type TurnIO } from '../agent/front.js';
@@ -11,11 +15,13 @@ import type { TurnRow } from '../core/types.js';
 import { log } from '../log.js';
 import { loadMessageMarks, timingReport, TurnTiming } from '../core/timing.js';
 import { acquireLock, threadLockKey, THREAD_LOCK_TTL_MS, type HeldLock } from './lock.js';
-import { claimNextPending, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
+import { claimNextTurn, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns, runningTurnIds, setPhase } from './scheduler.js';
 import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, setSessionStatus, trackTurnStatus, TurnStatus, type FinalSessionStatus } from './session-status.js';
 import { removeOpenActivity } from '../agent/activity-registry.js';
 import { finalSessionStatus, isNotedSuspended, noteSessionSettled, noteSessionSuspended, resumeSuspendedSession } from './agent-session.js';
 import { stopRequestedSince } from './stop.js';
+import { hasPendingHumanInput } from './debounce.js';
+import { enqueue, QUEUE } from '../core/queues.js';
 import { currentlyViewing } from './view-context.js';
 
 export const ERROR_TEXT = 'Something broke, try again.';
@@ -36,6 +42,7 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
   const lockedAt = Date.now();
   let first = true;
   let lastFinal: FinalSessionStatus | null = null;
+  let heldRetryMs: number | null = null;
   try {
     // We hold the lock, so nothing else is running here: any 'running' turn is left over from a crash.
     for (const id of await runningTurnIds(threadId)) {
@@ -45,8 +52,13 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
       await appendEvent(threadId, 'turn_finished', 'system', { turnId: id, status: 'error', reason: 'stale' });
     }
     while (!shuttingDown && lock.held) {
-      const turn = await claimNextPending(threadId);
-      if (!turn) break;
+      const next = await claimNextTurn(threadId);
+      if (!next) break;
+      if (next.kind === 'held') {
+        heldRetryMs = next.retryInMs;
+        break;
+      }
+      const turn = next.turn;
       const timing = new TurnTiming();
       if (first) {
         timing.mark('run_picked', pickedAt);
@@ -69,6 +81,13 @@ export async function processThreadRun(job: Job<{ threadId: string }>) {
   // session may still say `suspended` with nothing pending. Re-check now. Same when a confirmation was resolved while
   // turns ran here (e.g. an expiry whose silent outcome turn never touched the status): its note is still there.
   if (lastFinal === 'suspended' || (lastFinal && (await isNotedSuspended(threadId)))) await resumeSuspendedSession(threadId);
+  if (heldRetryMs != null) {
+    // Held for pending human input. If it went away while we held the lock (its wake-up found the lock taken),
+    // re-check now; otherwise poll later (the debounce fire wakes the thread sooner when it is done).
+    if (await hasPendingHumanInput(threadId)) await enqueue(QUEUE.threadRun, { threadId }, { delay: heldRetryMs });
+    else await ensureThreadRun(threadId);
+    return;
+  }
   if (await hasPendingTurns(threadId)) await ensureThreadRun(threadId);
 }
 

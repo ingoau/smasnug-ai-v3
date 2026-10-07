@@ -13,6 +13,10 @@ import { compareTs, debounceWindowMs, type BatchReason } from './rules.js';
 
 const batchKey = (threadId: string, authorId: string) => `debounce:batch:${threadId}:${authorId}`;
 const seqKey = (threadId: string, authorId: string) => `debounce:seq:${threadId}:${authorId}`;
+/** Authors with a batch opened in this thread (recently): where hasPendingHumanInput looks. */
+const authorsKey = (threadId: string) => `debounce:authors:${threadId}`;
+/** Set while a taken batch is being gated / scheduled (value: the batch's seq). */
+const inflightKey = (threadId: string, authorId: string) => `debounce:inflight:${threadId}:${authorId}`;
 const KEY_TTL_MS = 60 * 60 * 1000;
 
 /** BullMQ custom job ids must not contain ':'. */
@@ -23,13 +27,21 @@ redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
 redis.call('PEXPIRE', KEYS[1], ARGV[3])
 local s = redis.call('INCR', KEYS[2])
 redis.call('PEXPIRE', KEYS[2], ARGV[3])
+redis.call('SADD', KEYS[3], ARGV[4])
+redis.call('PEXPIRE', KEYS[3], ARGV[3])
 return s`;
 
+/** Takes the batch and, atomically with it, marks it in flight (gate / scheduling), so it is never invisible. */
 const TAKE = `
 if redis.call('GET', KEYS[2]) ~= ARGV[1] then return false end
 local h = redis.call('HGETALL', KEYS[1])
 redis.call('DEL', KEYS[1])
+if #h > 0 then redis.call('SET', KEYS[3], ARGV[1], 'PX', ARGV[2]) end
 return h`;
+
+const RELEASE = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end
+return 0`;
 
 export interface DebounceJob {
   threadId: string;
@@ -58,7 +70,7 @@ export async function hasActiveRuns(threadId: string): Promise<boolean> {
 
 /** Add a message to the author's batch and (re)start the window. Returns the window used. */
 export async function addToBatch(threadId: string, authorId: string, ts: string, reason: BatchReason): Promise<number> {
-  const seq = Number(await redis.eval(ADD, 2, batchKey(threadId, authorId), seqKey(threadId, authorId), ts, reason, KEY_TTL_MS));
+  const seq = Number(await redis.eval(ADD, 3, batchKey(threadId, authorId), seqKey(threadId, authorId), authorsKey(threadId), ts, reason, KEY_TTL_MS, authorId));
   const delay = debounceWindowMs(await hasActiveRuns(threadId), { idleMs: limits.debounceIdleMs, busyMs: limits.debounceBusyMs, directMs: limits.debounceDirectMs }, reason);
   const data: DebounceJob = { threadId, authorId, seq };
   const jobId = jobIdFor(threadId, authorId, seq);
@@ -86,13 +98,40 @@ export async function removeFromBatch(threadId: string, authorId: string, ts: st
   return (await redis.hdel(batchKey(threadId, authorId), ts)) === 1;
 }
 
-/** Atomically take the batch if `seq` is still the latest. Returns null for superseded jobs or empty batches. */
+/**
+ * Atomically take the batch if `seq` is still the latest. Returns null for superseded jobs or empty batches. A taken
+ * batch stays marked in flight until releaseInflight (or limits.gateInflightTtlMs).
+ */
 export async function takeBatch(job: DebounceJob): Promise<{ ts: string; reason: BatchReason }[] | null> {
-  const res = (await redis.eval(TAKE, 2, batchKey(job.threadId, job.authorId), seqKey(job.threadId, job.authorId), String(job.seq))) as string[] | null;
+  const res = (await redis.eval(
+    TAKE,
+    3,
+    batchKey(job.threadId, job.authorId),
+    seqKey(job.threadId, job.authorId),
+    inflightKey(job.threadId, job.authorId),
+    String(job.seq),
+    limits.gateInflightTtlMs,
+  )) as string[] | null;
   if (!res || res.length === 0) return null;
   const out: { ts: string; reason: BatchReason }[] = [];
   for (let i = 0; i < res.length; i += 2) out.push({ ts: res[i]!, reason: res[i + 1] as BatchReason });
   return out.sort((a, b) => compareTs(a.ts, b.ts));
+}
+
+/** The batch taken by `job` is no longer in flight (gated and scheduled, or dropped). A newer batch's mark stays. */
+export async function releaseInflight(job: DebounceJob): Promise<void> {
+  await redis.eval(RELEASE, 1, inflightKey(job.threadId, job.authorId), String(job.seq));
+}
+
+/**
+ * Whether a person's message in this thread is still on its way to a turn: in an open debounce batch, or taken and
+ * at the relevance gate / being scheduled. Used to hold results / scheduled turns (src/pipeline/turn-hold.ts).
+ */
+export async function hasPendingHumanInput(threadId: string): Promise<boolean> {
+  const authors = await redis.smembers(authorsKey(threadId));
+  if (authors.length === 0) return false;
+  const keys = authors.flatMap((a) => [batchKey(threadId, a), inflightKey(threadId, a)]);
+  return (await redis.exists(...keys)) > 0;
 }
 
 /** Drop the author's open batch (native stop): the pending debounce job then finds nothing to take. */

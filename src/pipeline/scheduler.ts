@@ -12,8 +12,11 @@ import type { StoredMessage, TurnRow } from '../core/types.js';
 import { parseThreadId } from '../core/events.js';
 import { batchIsAddressed, batchNeedsGate, compareTs, type BatchReason } from './rules.js';
 import { loadMessages } from './store.js';
-import { addToBatch } from './debounce.js';
+import { addToBatch, hasPendingHumanInput } from './debounce.js';
 import { appendEvent } from '../core/events.js';
+import { redis } from '../core/redis.js';
+import { limits } from '../config.js';
+import { decideHold, pickNextTurn, yieldCutoff, type PendingTurn } from './turn-hold.js';
 
 const TURN_COLS = sql`id::int as id, thread_id, author_id, kind, is_mention, addressed, gated, message_ts, card_id::int as card_id, status, phase`;
 
@@ -165,6 +168,75 @@ export async function claimNextPending(threadId: string): Promise<TurnRow | null
       update turns set status = 'running', phase = 'tools', started_at = now() where id = ${next.id} returning ${TURN_COLS}`;
     return turn!;
   });
+}
+
+// ---- turn hold / order for non-user turns (src/pipeline/turn-hold.ts) ----
+
+/** Per non-user turn: `since` (first held, ms) and `cutoff` (its yield cutoff, once fixed). */
+const holdKey = (turnId: number) => `turnhold:${turnId}`;
+/** Set while a turn of this thread is held: the debounce fire then wakes the thread (wakeHeldTurn). */
+const holdWakeKey = (threadId: string) => `turnhold:thread:${threadId}`;
+const HOLD_STATE_TTL_MS = 60 * 60 * 1000;
+
+async function getHoldState(turnId: number): Promise<{ since: number | null; cutoff: number | null }> {
+  const h = await redis.hgetall(holdKey(turnId));
+  return { since: h.since ? Number(h.since) : null, cutoff: h.cutoff ? Number(h.cutoff) : null };
+}
+
+/** Wake a thread whose turn is held for pending human input (called once a debounce fire is done with a batch). */
+export async function wakeHeldTurn(threadId: string): Promise<void> {
+  if (await redis.exists(holdWakeKey(threadId))) await ensureThreadRun(threadId);
+}
+
+export type ClaimResult = { kind: 'turn'; turn: TurnRow } | { kind: 'held'; turnId: number; retryInMs: number };
+
+/**
+ * The thread-run holder's claim: the next pending turn, or `held` when a non-user turn is next in line and a
+ * person's newer message is still in debounce / at the gate (bounded by limits.turnHoldMaxMs; the caller retries
+ * after `retryInMs`). Once a non-user turn stops waiting it fixes its yield cutoff: user turns queued behind it at
+ * that moment run first (see turn-hold.ts). claimNextPending stays plain id order.
+ */
+export async function claimNextTurn(threadId: string, nowMs = Date.now()): Promise<ClaimResult | null> {
+  const out = await sql.begin(async (tx) => {
+    await lockThread(tx, threadId);
+    const pending = await tx<PendingTurn[]>`
+      select id::int as id, kind from turns where thread_id = ${threadId} and status = 'pending' order by id for update`;
+    const head = pending[0];
+    if (!head) return null;
+    let cutoff: number | null = null;
+    let held: { turnId: number; kind: string; waitedMs: number; timedOut: boolean } | null = null;
+    if (head.kind !== 'user') {
+      const state = await getHoldState(head.id);
+      cutoff = state.cutoff;
+      if (cutoff == null) {
+        const d = decideHold({ pendingHuman: await hasPendingHumanInput(threadId), heldSinceMs: state.since, nowMs, turnHoldMaxMs: limits.turnHoldMaxMs, turnHoldPollMs: limits.turnHoldPollMs });
+        if (d.hold) {
+          await redis
+            .multi()
+            .hsetnx(holdKey(head.id), 'since', String(nowMs))
+            .pexpire(holdKey(head.id), HOLD_STATE_TTL_MS)
+            .set(holdWakeKey(threadId), String(head.id), 'PX', limits.turnHoldMaxMs + 10_000)
+            .exec();
+          return { kind: 'held' as const, turnId: head.id, retryInMs: d.retryInMs, first: state.since == null };
+        }
+        cutoff = yieldCutoff(pending);
+        await redis.multi().hset(holdKey(head.id), 'cutoff', String(cutoff)).pexpire(holdKey(head.id), HOLD_STATE_TTL_MS).del(holdWakeKey(threadId)).exec();
+        if (state.since != null) held = { turnId: head.id, kind: head.kind, waitedMs: d.waitedMs, timedOut: d.timedOut };
+      }
+    }
+    const id = pickNextTurn(pending, cutoff)!;
+    const [turn] = await tx<TurnRow[]>`
+      update turns set status = 'running', phase = 'tools', started_at = now() where id = ${id} returning ${TURN_COLS}`;
+    return { kind: 'turn' as const, turn: turn!, held, aheadOf: id !== head.id ? head.id : null };
+  });
+  if (!out) return null;
+  if (out.kind === 'held') {
+    if (out.first) await appendEvent(threadId, 'turn_held', 'system', { turnId: out.turnId, maxMs: limits.turnHoldMaxMs }).catch(() => {});
+    return { kind: 'held', turnId: out.turnId, retryInMs: out.retryInMs };
+  }
+  if (out.held) await appendEvent(threadId, 'turn_hold_ended', 'system', out.held).catch(() => {});
+  if (out.aheadOf != null) await appendEvent(threadId, 'turn_yielded', 'system', { turnId: out.aheadOf, to: out.turn.id }).catch(() => {});
+  return { kind: 'turn', turn: out.turn };
 }
 
 export async function hasPendingTurns(threadId: string): Promise<boolean> {

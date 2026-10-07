@@ -4,7 +4,8 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { sql } from '../db/index.js';
 import { redis } from '../core/redis.js';
 import { threadIdOf } from '../core/events.js';
-import { renderQueuedTurns } from './front.js';
+import { renderQueuedTurns, resultsAheadNote } from './front.js';
+import type { TurnRow } from '../core/types.js';
 
 const channel = `CQT${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 const now = new Date();
@@ -48,5 +49,19 @@ describe('renderQueuedTurns', () => {
     await sql`update threads set last_bot_reply_ts = ${ts(0)} where id = ${threadId}`;
     await sql`update turns set status = 'done' where thread_id = ${threadId}`;
     expect(await renderQueuedTurns(threadId, now)).toBe('');
+  });
+
+  it('resultsAheadNote: only for a user turn that runs ahead of a waiting results turn', async () => {
+    await sql`delete from turns where thread_id = ${threadId}`;
+    const ins = async (kind: string, status = 'pending') =>
+      (await sql<{ id: number }[]>`insert into turns (thread_id, author_id, kind, message_ts, status) values (${threadId}, 'U1', ${kind}, '{}', ${status}) returning id::int as id`)[0]!.id;
+    const asTurn = (id: number) => ({ id, threadId, kind: 'user' }) as TurnRow;
+    const before = await ins('user');
+    const synth = await ins('synthesis');
+    const user = await ins('user', 'running');
+    expect(await resultsAheadNote(asTurn(user))).toContain("subagents' results came in");
+    expect(await resultsAheadNote(asTurn(before))).toBe('');
+    await sql`update turns set status = 'done' where id = ${synth}`;
+    expect(await resultsAheadNote(asTurn(user))).toBe('');
   });
 });
