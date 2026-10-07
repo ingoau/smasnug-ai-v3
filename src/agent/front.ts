@@ -25,6 +25,7 @@ import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
 import { cursorInstructRefusal, cursorRefusal } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
+import { endsTurnAfterStep, type StepCall, type StepResultPart } from './turn-end.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
@@ -472,9 +473,18 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       instructions: system,
       messages,
       tools,
-      // The model decides when it's done (a step without tool calls ends the loop). Native stop ends it at the next
-      // step boundary.
-      stopWhen: [stepCountIs(MAX_STEPS), hasToolCall('end_turn'), () => checkStop()],
+      // A step without tool calls ends the loop, and so does a step whose reply / reaction went out with nothing
+      // else in it still needing a look (turn-end.ts; `continue_turn: true` keeps going); end_turn ends a silent turn.
+      // A stop request (`!stop`) ends it at the next step boundary.
+      stopWhen: [
+        stepCountIs(MAX_STEPS),
+        hasToolCall('end_turn'),
+        ({ steps }) => {
+          const last = steps.at(-1);
+          return Boolean(last && endsTurnAfterStep(last.toolCalls as StepCall[], last.toolResults as StepResultPart[]));
+        },
+        () => checkStop(),
+      ],
       prepareStep: async ({ messages: current }) => {
         const extra: ModelMessage[] = [];
         const inbox = await takeInbox();
@@ -492,6 +502,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 
     let stepText = '';
     let stepTools: string[] = [];
+    let stepCalls: StepCall[] = [];
+    let stepResults: StepResultPart[] = [];
     for await (const part of result.fullStream) {
       if (part.type !== 'start' && part.type !== 'start-step') timing.mark('first_chunk');
       switch (part.type) {
@@ -507,8 +519,10 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
         case 'tool-call':
           announce(part.toolCallId, part.toolName);
           stepTools.push(part.toolName);
+          stepCalls.push({ toolCallId: part.toolCallId, toolName: part.toolName, input: part.input });
           break;
         case 'tool-result': {
+          stepResults.push({ toolCallId: part.toolCallId, toolName: part.toolName, output: part.output });
           const v = VISIBLE_TOOLS[part.toolName];
           if (v) state.visible.add(v);
           if (v === 'send') replies.notePostedInThread(); // posted below any open activity message
@@ -534,12 +548,13 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             cachedInputTokens: part.usage.inputTokenDetails?.cacheReadTokens,
           }).catch((err) => log.warn({ err }, 'recordModelUsage failed'));
           if (stepText.trim()) await appendEvent(turn.threadId, 'discarded_text', 'bot', { turnId, text: stepText });
-          // Final step detection: a step without tool calls ends the loop; after a step that only replied/reacted,
-          // the next model call is the wrap-up, so new messages should start a fresh turn instead.
-          const onlyFinalish = stepTools.length > 0 && stepTools.every((t) => t === 'reply' || t === 'react') && stepTools.includes('reply');
-          if (part.finishReason !== 'tool-calls' || onlyFinalish) await setPhase('final');
+          // Final step detection: a step without tool calls ends the loop, and so does a step whose reply/reaction
+          // went out (endsTurnAfterStep, same rule as stopWhen): new messages then start a fresh turn instead.
+          if (part.finishReason !== 'tool-calls' || endsTurnAfterStep(stepCalls, stepResults)) await setPhase('final');
           stepText = '';
           stepTools = [];
+          stepCalls = [];
+          stepResults = [];
           break;
         }
         case 'error':

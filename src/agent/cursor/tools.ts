@@ -37,7 +37,7 @@ registerTool({
         return {
           pending_id: r.pendingId,
           status: 'awaiting_admin_confirmation',
-          note: `${r.reused ? 'The admin already has this preview. ' : ''}Nothing has started: the admin sees a private preview with Launch / Cancel (expires in ${Math.round(limits.cursorConfirmTtlMs / 60_000)} min). Reply once, very short (e.g. "check the preview and hit Launch"), then call end_turn. Once launched it shows on a plan card and you get the PR link and summary in a later turn; if they cancel, the launch fails or the preview expires, you get a turn saying so. Never say it started, is running or is merged.`,
+          note: `${r.reused ? 'The admin already has this preview. ' : ''}Nothing has started: the admin sees a private preview with Launch / Cancel (expires in ${Math.round(limits.cursorConfirmTtlMs / 60_000)} min). Reply once, very short (e.g. "check the preview and hit Launch"); that ends your turn. Once launched it shows on a plan card and you get the PR link and summary in a later turn; if they cancel, the launch fails or the preview expires, you get a turn saying so. Never say it started, is running or is merged.`,
         };
       },
     }),

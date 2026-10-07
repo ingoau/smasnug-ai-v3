@@ -91,8 +91,8 @@ const { streamArgsText } = await import('./slack-markdown.js');
 
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
 
-function replyStep(text: string, chunkSize = 7) {
-  const json = JSON.stringify({ text });
+function replyStep(text: string, chunkSize = 7, extra: Record<string, unknown> = {}) {
+  const json = JSON.stringify({ text, ...extra });
   const deltas: any[] = [];
   for (let i = 0; i < json.length; i += chunkSize) deltas.push({ type: 'tool-input-delta', id: 'c1', delta: json.slice(i, i + chunkSize) });
   return [
@@ -183,8 +183,8 @@ describe('runFrontTurn (mock model)', () => {
     expect(start.args).toMatchObject({ channel: 'C1', thread_ts: '100.000001', recipient_user_id: 'U1' });
     expect(phases).toEqual(['final']);
     expect(h.events.find((e) => e.type === 'reply')?.payload).toMatchObject({ mode: 'streamed', text, index: 0 });
-    // The model decides when it's done: it gets one more step after replying and ends by not calling tools.
-    expect(((h.model as any).doStreamCalls as any[]).length).toBe(2);
+    // A delivered reply ends the turn in its own step: no extra model call just to end it.
+    expect(((h.model as any).doStreamCalls as any[]).length).toBe(1);
   });
 
   it('posts the reply whole with a markdown block while runs are active', async () => {
@@ -238,7 +238,7 @@ describe('runFrontTurn (mock model)', () => {
 
   it('after a successful reaction, a later model failure does not throw or post an error reply', async () => {
     h.model = mockModel([
-      toolStep(['react', { emoji: 'thumbsup' }]),
+      toolStep(['react', { emoji: 'thumbsup', continue_turn: true }]),
       [{ type: 'stream-start', warnings: [] }, { type: 'error', error: new Error('down') }],
     ]);
     await expect(runFrontTurn(turn({ id: 83 }), io(true).io)).resolves.toBeUndefined();
@@ -264,7 +264,7 @@ describe('runFrontTurn (mock model)', () => {
   });
 
   it('injects inbox messages before the next model call and updates defaultReactTs', async () => {
-    h.model = mockModel([replyStep('first'), textStep('')]);
+    h.model = mockModel([replyStep('first', 7, { continue_turn: true }), textStep('')]);
     const msg = { ts: '100.000009', text: 'one more thing', channelId: 'C1' } as any;
     await runFrontTurn(turn(), io(true, [[], [msg]]).io);
     const calls = (h.model as any).doStreamCalls as any[];
@@ -402,6 +402,58 @@ describe('runFrontTurn: parallel tool calls', () => {
   });
 });
 
+describe('runFrontTurn: a reply or reaction ends the turn', () => {
+  const calls = () => ((h.model as any).doStreamCalls as any[]).length;
+
+  it('ends after the reply step, or the reaction step, with no end_turn step', async () => {
+    h.model = mockModel([toolStep(['reply', { text: 'yo' }]), textStep('never reached')]);
+    const a = io();
+    await runFrontTurn(turn({ id: 90 }), a.io);
+    expect(calls()).toBe(1);
+    expect(a.phases).toEqual(['final']);
+
+    h.model = mockModel([toolStep(['react', { emoji: 'eyes' }]), textStep('never reached')]);
+    await runFrontTurn(turn({ id: 91 }), io().io);
+    expect(calls()).toBe(1);
+  });
+
+  it('ack + spawn in one step ends the turn; the card still goes out', async () => {
+    h.model = mockModel([toolStep(['reply', { text: 'on it' }], ['spawn_subagent', { tasks: [{ title: 'Look', instructions: 'look it up' }] }]), textStep('never reached')]);
+    await runFrontTurn(turn({ id: 92 }), io().io);
+    expect(calls()).toBe(1);
+    expect(h.spawns).toHaveLength(1);
+    expect(h.postedCards).toEqual([5]);
+  });
+
+  it('continues when the step also searched, when continue_turn is set, or when the reply was empty', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    try {
+      h.model = mockModel([toolStep(['reply', { text: 'checking' }], ['web_search', { query: 'pico' }]), textStep('')]);
+      await runFrontTurn(turn({ id: 93 }), io().io);
+      expect(calls()).toBe(2);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+
+    h.model = mockModel([toolStep(['reply', { text: 'one sec', continue_turn: true }]), textStep('')]);
+    const a = io();
+    await runFrontTurn(turn({ id: 94 }), a.io);
+    expect(calls()).toBe(2);
+
+    h.model = mockModel([toolStep(['reply', { text: '  ' }]), textStep('')]);
+    await runFrontTurn(turn({ id: 95, isMention: false }), io(false).io);
+    expect(calls()).toBe(2);
+  });
+
+  it("the reply result no longer asks for end_turn", async () => {
+    h.model = mockModel([toolStep(['reply', { text: 'one sec', continue_turn: true }]), textStep('')]);
+    await runFrontTurn(turn({ id: 96 }), io().io);
+    const second = JSON.stringify(((h.model as any).doStreamCalls as any[])[1].prompt);
+    expect(second).toContain('Replied (');
+    expect(second).not.toContain('call end_turn when');
+  });
+});
+
 describe('runFrontTurn: spawn_subagent fan-out', () => {
   it('one call with several tasks starts one subagent per task on the same card; a failed one is reported, not fatal', async () => {
     const tasks = [
@@ -409,7 +461,7 @@ describe('runFrontTurn: spawn_subagent fan-out', () => {
       { title: 'FAIL', instructions: 'x' },
       { title: 'ESP32-C6', instructions: 'Research the ESP32-C6' },
     ];
-    h.model = mockModel([toolStep(['reply', { text: 'on it' }]), toolStep(['spawn_subagent', { tasks }]), toolStep(['end_turn', {}])]);
+    h.model = mockModel([toolStep(['reply', { text: 'on it', continue_turn: true }]), toolStep(['spawn_subagent', { tasks }]), toolStep(['end_turn', {}])]);
     await runFrontTurn(turn({ id: 80 }), io().io);
     expect(h.spawns.map((o) => o.title)).toEqual(['Pico 2 W', 'FAIL', 'ESP32-C6']);
     expect(h.spawns.every((o) => o.turnId === 80 && o.ownerId === 'U1')).toBe(true);
@@ -505,7 +557,7 @@ describe('runFrontTurn: model freedom', () => {
 
   it('lets the model both react and reply, and ends when it stops calling tools', async () => {
     h.activeRuns = 1;
-    h.model = mockModel([toolStep(['react', { emoji: 'tada' }]), toolStep(['reply', { text: 'congrats on shipping it!' }]), textStep('')]);
+    h.model = mockModel([toolStep(['react', { emoji: 'tada', continue_turn: true }]), toolStep(['reply', { text: 'congrats on shipping it!', continue_turn: true }]), textStep('')]);
     await runFrontTurn(turn({ id: 70 }), io().io);
     expect(methods()).toContain('reactions.add');
     expect(methods()).toContain('chat.postMessage');
@@ -522,7 +574,7 @@ describe('runFrontTurn: model freedom', () => {
 
   it('posts a second reply if the model sends one', async () => {
     h.activeRuns = 1;
-    h.model = mockModel([toolStep(['reply', { text: 'one sec' }]), toolStep(['reply', { text: 'one sec' }]), textStep('')]);
+    h.model = mockModel([toolStep(['reply', { text: 'one sec', continue_turn: true }]), toolStep(['reply', { text: 'one sec' }]), textStep('')]);
     await runFrontTurn(turn({ id: 71 }), io().io);
     expect(h.slack.filter((c) => c.method === 'chat.postMessage').length).toBe(2);
   });
@@ -663,7 +715,7 @@ describe('runFrontTurn: status activity', () => {
     it('no new activity message once the turn has replied (the status still shows the work)', async () => {
       vi.stubGlobal('fetch', exaOk);
       try {
-        h.model = mockModel([replyStep('Let me check.'), toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
+        h.model = mockModel([replyStep('Let me check.', 7, { continue_turn: true }), toolStep(['web_search', { query: 'pico price' }]), textStep('')]);
         const a = ioWithActivity(true);
         await runFrontTurn(turn({ id: 69 }), a.io);
         expect(a.activity).toEqual(['Searching the web…']);

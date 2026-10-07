@@ -11,6 +11,7 @@ import { log } from '../log.js';
 import { updateStoredReaction } from '../context/reactions-store.js';
 import { EXTRAS, getExtra } from './extras.js';
 import { normalizeTs } from './util.js';
+import { continueTurnSchema } from '../agent/turn-end.js';
 
 const SEMOJI_TIMEOUT_MS = 1000;
 const SEMOJI_RESULTS = 8;
@@ -155,6 +156,7 @@ registerTool({
       inputSchema: z.object({
         emoji: z.string().describe('Emoji name of your reaction, e.g. "hourglass"'),
         message_ts: z.string().optional().describe('ts of the message; default: the triggering message'),
+        continue_turn: continueTurnSchema,
       }),
       execute: async ({ emoji, message_ts }) => unreact(ctx, emoji, message_ts),
     }),
@@ -166,10 +168,11 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        'Add an emoji reaction INSTEAD of a reply, when a reaction is the whole response (e.g. to a "thanks"). Never together with a reply; at most one per turn. Defaults to the message you are responding to; pass message_ts (the bracketed ts from context) to react to another message. Any standard or custom emoji name, without colons.',
+        'Add an emoji reaction INSTEAD of a reply, when a reaction is the whole response (e.g. to a "thanks"). Never together with a reply; at most one per turn. Ends your turn unless continue_turn is true. Defaults to the message you are responding to; pass message_ts (the bracketed ts from context) to react to another message. Any standard or custom emoji name, without colons.',
       inputSchema: z.object({
         emoji: z.string().describe('Emoji name, e.g. "eyes" or "white_check_mark"'),
         message_ts: z.string().optional().describe('ts of the message to react to; default: the triggering message'),
+        continue_turn: continueTurnSchema,
       }),
       execute: async ({ emoji, message_ts }) => react(ctx, emoji, message_ts),
     }),
