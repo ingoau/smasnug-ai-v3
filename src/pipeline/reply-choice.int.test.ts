@@ -121,7 +121,7 @@ describe.skipIf(!INTEGRATION)('reply buttons: press flow', () => {
     const { renderThreadContext } = await import('../context/thread.js');
     const ctx = await renderThreadContext(threadId, { newMessageTs: ['1700000200.123456'] });
     expect(ctx.history).toMatch(/which board\? \[buttons: ESP32 \| Pico; .+ pressed "Pico"\]/);
-    expect(ctx.newMessages).toMatch(/^\[1700000200\.123456\] <@UBTNA> .*: Pico \(button\)$/);
+    expect(ctx.newMessages).toMatch(/^\[1700000200\.123456 · 2023-11-14 22:16 UTC\] <@UBTNA> .*: Pico \(button\)$/);
   });
 
   it('a suspended user gets nothing and the buttons stay pressable', async () => {
