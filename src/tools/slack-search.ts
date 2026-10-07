@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { limits } from '../config.js';
-import { registerTool } from '../core/tools.js';
+import { registerTool, type ToolContext } from '../core/tools.js';
 import { SlackBusyError, slackCall, slackErrorCode, type SlackPriority, type SlackWaitEvent } from '../core/slack.js';
 import { redis } from '../core/redis.js';
 import { takeLimit } from '../features/guard.js';
@@ -42,11 +42,45 @@ export function isPublicChannelInfo(ch: any): boolean {
 const visibilityKey = (id: string) => `slack:chanvis:${id}`;
 
 /**
+ * Rate-limit options for a tool's Slack calls: the limiter queue (subagents are `background`), how long to wait at most
+ * (then SlackBusyError), and who to tell about a wait (the subagent's card label, SLACK_WAIT_EXTRA).
+ */
+export interface SlackWaitOpts {
+  priority?: SlackPriority;
+  maxWaitMs?: number;
+  onWait?: SlackWaitCallback;
+}
+
+/** SlackWaitOpts for a tool call in `ctx`: priority by role, the subagent runner's wait callback, a wait cap. */
+export function slackWaitOpts(ctx: Pick<ToolContext, 'role' | 'extras'>, maxWaitMs = limits.slackToolMaxWaitMs): SlackWaitOpts {
+  const onWait = typeof ctx.extras[SLACK_WAIT_EXTRA] === 'function' ? (ctx.extras[SLACK_WAIT_EXTRA] as SlackWaitCallback) : undefined;
+  return { priority: ctx.role === 'child' ? 'background' : 'interactive', maxWaitMs, ...(onWait ? { onWait } : {}) };
+}
+
+/** Model-facing result when a read gave up on the shared rate limiter. */
+export function slackBusyText(what: string, waitMs: number): string {
+  return `Slack is rate limited right now (~${Math.max(1, Math.ceil(waitMs / 1000))}s until a slot frees; the limit is shared by everyone using the bot), so ${what} couldn't be read. Work with what you have, or try again in a minute.`;
+}
+
+/** The visibility check's verdicts: verified public (with names), and the ids skipped because Slack was busy. */
+export interface ChannelVisibility {
+  names: Map<string, string>;
+  /** Not verified because the shared rate limiter was too busy (treated as not public; not cached). */
+  busy: Set<string>;
+  /** Longest wait the busy lookups would have needed (ms). */
+  busyWaitMs: number;
+}
+
+/**
  * Verified public channels among `ids` → their names ('' when unknown): conversations.info (bot token), cached in
  * Redis for an hour. Any error or ambiguity means "not public"; failed lookups aren't cached, so they are retried.
+ * With `opts.maxWaitMs`, a lookup that would wait longer for the rate limiter is skipped (fail closed) and listed in
+ * `busy`, so the caller can say some results were left out.
  */
-export async function publicChannelNames(ids: string[]): Promise<Map<string, string>> {
+export async function channelVisibility(ids: string[], opts: SlackWaitOpts = {}): Promise<ChannelVisibility> {
   const out = new Map<string, string>();
+  const busy = new Set<string>();
+  let busyWaitMs = 0;
   await Promise.all(
     [...new Set(ids)].map(async (id) => {
       try {
@@ -58,7 +92,7 @@ export async function publicChannelNames(ids: string[]): Promise<Map<string, str
         }
         let verdict: string;
         try {
-          const res = await slackCall<any>('conversations.info', { channel: id });
+          const res = await slackCall<any>('conversations.info', { channel: id }, { maxWaitMs: opts.maxWaitMs, priority: opts.priority, onWait: opts.onWait });
           const ok = res?.ok !== false && res?.channel?.id === id && isPublicChannelInfo(res.channel);
           verdict = ok ? `public:${typeof res.channel.name === 'string' ? res.channel.name : ''}` : 'private';
         } catch (err) {
@@ -70,24 +104,49 @@ export async function publicChannelNames(ids: string[]): Promise<Map<string, str
         await redis.set(visibilityKey(id), verdict, 'EX', VISIBILITY_TTL_S);
         if (verdict.startsWith('public:')) out.set(id, verdict.slice('public:'.length));
       } catch (err) {
+        if (err instanceof SlackBusyError) {
+          busy.add(id);
+          busyWaitMs = Math.max(busyWaitMs, err.waitMs);
+          log.info({ channel: id, waitMs: err.waitMs }, 'channel visibility lookup skipped: rate limited; treating it as private');
+          return;
+        }
         log.warn({ err, channel: id }, 'channel visibility lookup failed; treating it as private');
       }
     }),
   );
-  return out;
+  return { names: out, busy, busyWaitMs };
+}
+
+/** Verified public channels among `ids` → their names (see channelVisibility). */
+export async function publicChannelNames(ids: string[], opts: SlackWaitOpts = {}): Promise<Map<string, string>> {
+  return (await channelVisibility(ids, opts)).names;
 }
 
 /** The subset of `ids` that are verified public channels (see publicChannelNames). */
-export async function publicChannelIds(ids: string[]): Promise<Set<string>> {
-  return new Set((await publicChannelNames(ids)).keys());
+export async function publicChannelIds(ids: string[], opts: SlackWaitOpts = {}): Promise<Set<string>> {
+  return new Set((await publicChannelNames(ids, opts)).keys());
 }
 
-/** Matches safe to show: verified public channels only, `##` messages dropped (guidelines). Order kept. */
-export async function filterPublicMatches(matches: any[]): Promise<any[]> {
+/**
+ * Matches safe to show: verified public channels only, `##` messages dropped (guidelines). Order kept. `skipped`:
+ * matches dropped only because their channel couldn't be verified in time (rate limited).
+ */
+export async function filterPublicMatchesDetailed(matches: any[], opts: SlackWaitOpts = {}): Promise<{ matches: any[]; skipped: number }> {
   const candidates = matches.filter((m) => isPublicChannelMatch(m) && !isHiddenMessage(m.text));
-  if (!candidates.length) return [];
-  const pub = await publicChannelIds(candidates.map((m) => m.channel.id));
-  return candidates.filter((m) => pub.has(m.channel.id));
+  if (!candidates.length) return { matches: [], skipped: 0 };
+  const vis = await channelVisibility(
+    candidates.map((m) => m.channel.id),
+    opts,
+  );
+  return {
+    matches: candidates.filter((m) => vis.names.has(m.channel.id)),
+    skipped: candidates.filter((m) => vis.busy.has(m.channel.id)).length,
+  };
+}
+
+/** Matches safe to show (see filterPublicMatchesDetailed). */
+export async function filterPublicMatches(matches: any[], opts: SlackWaitOpts = {}): Promise<any[]> {
+  return (await filterPublicMatchesDetailed(matches, opts)).matches;
 }
 
 const CONTEXT_BEFORE = ['previous_2', 'previous'] as const;
@@ -206,25 +265,27 @@ export function searchCacheKey(query: string, sort: SearchSort | undefined, page
 }
 
 /** Identical searches in flight in this process share one Slack call. */
-const inflight = new Map<string, Promise<any[]>>();
+const inflight = new Map<string, Promise<{ matches: any[]; skipped: number }>>();
 
 /**
  * Public matches (verified, `##` dropped, slimmed, at most MAX_RESULTS) for a search: from the short-lived Redis cache
  * when an identical search ran in the last `limits.slackSearchCacheTtlS`, else from search.messages (throws
  * SlackBusyError when the shared limiter would make it wait longer than `maxWaitMs`). Cached results are re-checked
- * against the channel-visibility cache before they're returned (fail closed).
+ * against the channel-visibility cache before they're returned (fail closed). The conversations.info checks wait at
+ * most `maxWaitMs` too: matches in channels that couldn't be verified in time are dropped and counted in `skipped`
+ * (such a result isn't cached).
  */
 export async function searchPublicMatches(
   query: string,
   sort: SearchSort | undefined,
   opts: { priority: SlackPriority; maxWaitMs: number; onWait?: SlackWaitCallback },
-): Promise<{ matches: any[]; cached: boolean }> {
+): Promise<{ matches: any[]; cached: boolean; skipped: number }> {
   const key = searchCacheKey(query, sort);
   const hit = await redis.get(key).catch(() => null);
   if (hit) {
     try {
       const parsed = JSON.parse(hit);
-      if (Array.isArray(parsed)) return { matches: await filterPublicMatches(parsed), cached: true };
+      if (Array.isArray(parsed)) return { ...(await filterPublicMatchesDetailed(parsed, opts)), cached: true };
     } catch {}
   }
   let p = inflight.get(key);
@@ -242,13 +303,21 @@ export async function searchPublicMatches(
         { token: 'user', maxWaitMs: opts.maxWaitMs, priority: opts.priority, onWait: opts.onWait },
       );
       // Only the filtered list is ever kept or described: never `messages.total`/pagination (they count private hits).
-      const pub = (await filterPublicMatches(res.messages?.matches ?? [])).slice(0, MAX_RESULTS).map(slimMatch);
-      await redis.set(key, JSON.stringify(pub), 'EX', limits.slackSearchCacheTtlS).catch((err) => log.debug({ err }, 'search cache write failed'));
-      return pub;
+      const filtered = await filterPublicMatchesDetailed(res.messages?.matches ?? [], opts);
+      const pub = filtered.matches.slice(0, MAX_RESULTS).map(slimMatch);
+      // Incomplete (some channels unverified): not cached, so the next identical search can find them.
+      if (!filtered.skipped) await redis.set(key, JSON.stringify(pub), 'EX', limits.slackSearchCacheTtlS).catch((err) => log.debug({ err }, 'search cache write failed'));
+      return { matches: pub, skipped: filtered.skipped };
     })().finally(() => inflight.delete(key));
     inflight.set(key, p);
   }
-  return { matches: await p, cached: false };
+  return { ...(await p), cached: false };
+}
+
+/** Appended to search results when some matches were left out because their channel couldn't be verified in time. */
+export function skippedNote(skipped: number): string | null {
+  if (!skipped) return null;
+  return `[Note: ${skipped} more ${skipped === 1 ? 'result was' : 'results were'} skipped because Slack's rate limit kept me from checking that ${skipped === 1 ? 'its channel is' : 'their channels are'} public. Searching again in a minute may show ${skipped === 1 ? 'it' : 'them'}.]`;
 }
 
 /** Model-facing result when the shared limiter is full. */
@@ -272,11 +341,10 @@ registerTool({
   build: (ctx) => {
     let calls = 0;
     // Front-agent turns are a user waiting on an answer; subagent research is background work (see SlackPriority).
-    const priority: SlackPriority = ctx.role === 'child' ? 'background' : 'interactive';
-    const onWait = typeof ctx.extras[SLACK_WAIT_EXTRA] === 'function' ? (ctx.extras[SLACK_WAIT_EXTRA] as SlackWaitCallback) : undefined;
-    const withBudget = (text: string) => {
-      const note = ctx.role === 'child' ? searchBudgetNote(calls) : null;
-      return note ? `${text}\n${note}` : text;
+    const { priority = 'interactive', onWait } = slackWaitOpts(ctx);
+    const withBudget = (text: string, skipped = 0) => {
+      const notes = [skippedNote(skipped), ctx.role === 'child' ? searchBudgetNote(calls) : null].filter(Boolean);
+      return [text, ...notes].join('\n');
     };
     return tool({
       description:
@@ -293,11 +361,11 @@ registerTool({
         const over = await takeLimit('search', ctx.speakerId, ctx.threadId);
         if (over) return over;
         try {
-          const { matches: pub } = await searchPublicMatches(query, sort, { priority, maxWaitMs: limits.slackSearchMaxWaitMs, onWait });
-          if (!pub.length) return withBudget(`No public-channel results for "${query}".`);
-          const names = await getUserNames(searchUserIds(pub));
+          const { matches: pub, skipped } = await searchPublicMatches(query, sort, { priority, maxWaitMs: limits.slackSearchMaxWaitMs, onWait });
+          if (!pub.length) return withBudget(`No public-channel results for "${query}".`, skipped);
+          const names = await getUserNames(searchUserIds(pub), { priority, maxWaitMs: limits.slackSearchMaxWaitMs, onWait });
           const { text, shown } = formatSearchMatches(pub, names);
-          return withBudget(untrusted('slack search', `Results for "${query}" (${shown} shown, public channels only):\n${text}`));
+          return withBudget(untrusted('slack search', `Results for "${query}" (${shown} shown, public channels only):\n${text}`), skipped);
         } catch (err) {
           if (err instanceof SlackBusyError) return withBudget(searchBusyText(err.waitMs));
           log.warn({ err, query }, 'slack_search failed');

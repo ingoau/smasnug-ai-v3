@@ -41,11 +41,13 @@ export function withElapsed(details: string, ms: number): string {
   return `${details} (${Math.round(ms / 1000)}s)`;
 }
 
-/** Card label while a slack_search waits for the shared search rate limiter. */
+/** Card label while a tool's Slack call waits for the shared rate limiter (search: its own, tighter limit). */
 export const SLACK_WAIT_LABEL = "Waiting for Slack's search rate limit";
+const SLACK_WAIT_PREFIX = "Waiting for Slack's";
 /** Shorter waits don't change the label (no flicker). */
 const SLACK_WAIT_LABEL_MIN_MS = 1000;
-export const slackWaitLabel = (ms: number) => `${SLACK_WAIT_LABEL} (${Math.max(1, Math.ceil(ms / 1000))}s)`;
+export const slackWaitLabel = (ms: number, method = 'search.messages') =>
+  `${method === 'search.messages' ? SLACK_WAIT_LABEL : "Waiting for Slack's rate limit"} (${Math.max(1, Math.ceil(ms / 1000))}s)`;
 
 /** Runs executing in this process, for shutdown. */
 const active = new Map<number, AbortController>();
@@ -167,10 +169,10 @@ export async function processSubagentRun(runId: number): Promise<void> {
     if (ev.estimateMs < SLACK_WAIT_LABEL_MIN_MS) return;
     if (!ev.done) {
       if (slackWaits++ === 0) labelBeforeWait = lastDetails;
-      void setDetails(slackWaitLabel(ev.estimateMs)).catch((err) => log.debug({ err, runId: run.id }, 'wait label failed'));
+      void setDetails(slackWaitLabel(ev.estimateMs, ev.method)).catch((err) => log.debug({ err, runId: run.id }, 'wait label failed'));
       return;
     }
-    if (--slackWaits > 0 || !lastDetails.startsWith(SLACK_WAIT_LABEL)) return;
+    if (--slackWaits > 0 || !lastDetails.startsWith(SLACK_WAIT_PREFIX)) return;
     lastDetails = labelBeforeWait;
     sql`update runs set details = ${labelBeforeWait} where id = ${run.id} and status = 'running'`
       .then(() => scheduleCardRender(run.cardId))

@@ -11,7 +11,7 @@
  * or unknown channel gets, so nothing reveals that a private channel exists, what it's called, or what's in it.
  */
 import { getConversationInfo, isChannelMember, type ConversationInfo } from '../context/conversation.js';
-import { publicChannelNames } from './slack-search.js';
+import { channelVisibility, slackBusyText, type SlackWaitOpts } from './slack-search.js';
 
 export type LinkTarget = 'thread' | 'channel';
 
@@ -67,13 +67,20 @@ const label = (id: string, name?: string) => (name ? `<#${id}|${name}>` : `<#${i
  * Public first (same cached check as slack_search); otherwise the private-link rule. Returns the token to read with,
  * or a model-facing refusal. Never throws (lookups fail closed).
  */
-export async function resolveLinkAccess(channel: string, who: { speakerId: string; channelId?: string }, what: LinkTarget): Promise<LinkAccess | { error: string }> {
+export async function resolveLinkAccess(
+  channel: string,
+  who: { speakerId: string; channelId?: string },
+  what: LinkTarget,
+  slack: SlackWaitOpts = {},
+): Promise<LinkAccess | { error: string }> {
   // DMs (D…) are never read through a link; only C… / G… ids can be channels. G… (legacy private channels and
   // group DMs) never counts as public, as before: it can only pass the private-link rule.
   if (!/^[CG]/.test(channel)) return { error: notVisibleMessage(what) };
   if (channel.startsWith('C')) {
-    const pub = await publicChannelNames([channel]);
-    if (pub.has(channel)) return { visibility: 'public', token: 'user', chLabel: label(channel, pub.get(channel) || undefined) };
+    const vis = await channelVisibility([channel], slack);
+    if (vis.names.has(channel)) return { visibility: 'public', token: 'user', chLabel: label(channel, vis.names.get(channel) || undefined) };
+    // Not verified in time (rate limited): fail closed, and say why instead of "not visible".
+    if (vis.busy.has(channel)) return { error: slackBusyText(`that ${what}`, vis.busyWaitMs) };
   }
   if (!who.channelId) return { error: notVisibleMessage(what) };
 

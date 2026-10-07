@@ -1,6 +1,6 @@
 /** Reading messages from Slack (bot token) and from the `messages` table, normalised to RenderMsg. */
 import { sql } from '../db/index.js';
-import { slackCall } from '../core/slack.js';
+import { slackCall, type SlackCallOpts } from '../core/slack.js';
 import { compareTs } from './format.js';
 import { fromSlack } from './normalize.js';
 
@@ -35,18 +35,26 @@ export async function storeMessages(channelId: string, threadId: string | null, 
 }
 
 /** conversations.replies for a whole thread (oldest first), paginated up to `maxMessages`. */
-export async function fetchReplies(channelId: string, threadTs: string, opts: { latest?: string; maxMessages?: number } = {}): Promise<any[]> {
+export async function fetchReplies(
+  channelId: string,
+  threadTs: string,
+  opts: { latest?: string; maxMessages?: number; slack?: Pick<SlackCallOpts, 'maxWaitMs' | 'priority' | 'onWait'> } = {},
+): Promise<any[]> {
   const max = opts.maxMessages ?? 1000;
   const out: any[] = [];
   let cursor: string | undefined;
   do {
-    const res = await slackCall<any>('conversations.replies', {
-      channel: channelId,
-      ts: threadTs,
-      limit: 200,
-      ...(opts.latest ? { latest: opts.latest, inclusive: false } : {}),
-      ...(cursor ? { cursor } : {}),
-    });
+    const res = await slackCall<any>(
+      'conversations.replies',
+      {
+        channel: channelId,
+        ts: threadTs,
+        limit: 200,
+        ...(opts.latest ? { latest: opts.latest, inclusive: false } : {}),
+        ...(cursor ? { cursor } : {}),
+      },
+      opts.slack ?? {},
+    );
     out.push(...(res.messages ?? []));
     cursor = res.has_more ? res.response_metadata?.next_cursor || undefined : undefined;
   } while (cursor && out.length < max);

@@ -3,7 +3,7 @@
  * need tz and avatar; the front agent's turn message shows profile details (pronouns, title, status, admin/owner).
  */
 import { redis } from '../core/redis.js';
-import { slackCall } from '../core/slack.js';
+import { SlackBusyError, slackCall, type SlackCallOpts } from '../core/slack.js';
 import { log } from '../log.js';
 
 export interface UserInfo {
@@ -67,16 +67,26 @@ export function userInfoFromSlack(u: any): UserInfo {
   };
 }
 
-/** users.info with a Redis cache. Returns null if the user can't be looked up (cached briefly). */
-export async function getUserInfo(userId: string): Promise<UserInfo | null> {
+/** Rate-limit options for the lookup (SlackCallOpts subset): a tool inside a subagent step passes a wait cap. */
+export type UserLookupOpts = Pick<SlackCallOpts, 'maxWaitMs' | 'priority' | 'onWait'>;
+
+/**
+ * users.info with a Redis cache. Returns null if the user can't be looked up (cached briefly). With `maxWaitMs`, a
+ * lookup the shared rate limiter would hold longer returns null without caching (names are a nicety).
+ */
+export async function getUserInfo(userId: string, opts: UserLookupOpts = {}): Promise<UserInfo | null> {
   const cached = await redis.get(key(userId));
   if (cached) return cached === 'null' ? null : (JSON.parse(cached) as UserInfo);
   try {
-    const res = await slackCall<any>('users.info', { user: userId, include_locale: true });
+    const res = await slackCall<any>('users.info', { user: userId, include_locale: true }, opts);
     const info = userInfoFromSlack(res.user);
     await redis.set(key(userId), JSON.stringify(info), 'EX', TTL_S);
     return info;
   } catch (err) {
+    if (err instanceof SlackBusyError) {
+      log.info({ userId, waitMs: err.waitMs }, 'users.info skipped: rate limited');
+      return null;
+    }
     log.warn({ err, userId }, 'users.info failed');
     await redis.set(key(userId), 'null', 'EX', NEG_TTL_S);
     return null;
@@ -84,9 +94,9 @@ export async function getUserInfo(userId: string): Promise<UserInfo | null> {
 }
 
 /** Names for many users at once (parallel, cached). */
-export async function getUserNames(ids: string[]): Promise<Map<string, string>> {
+export async function getUserNames(ids: string[], opts: UserLookupOpts = {}): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  const infos = await Promise.all(ids.map((id) => getUserInfo(id)));
+  const infos = await Promise.all(ids.map((id) => getUserInfo(id, opts)));
   infos.forEach((info, i) => {
     if (info) out.set(ids[i]!, info.name);
   });

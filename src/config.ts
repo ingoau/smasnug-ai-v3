@@ -207,6 +207,12 @@ export const limits = {
   // slack_search on the shared user token (search.messages, ~20/min for the whole app; src/tools/slack-search.ts)
   /** A search that would wait longer than this for the shared rate limiter returns a "rate limited" result instead. */
   slackSearchMaxWaitMs: 6_000,
+  /**
+   * Slack reads inside tools (conversations.info visibility checks, read_public_thread / ask_thread /
+   * read_public_channel history, users.info for names) give up after waiting this long for the shared rate limiter:
+   * fail closed / skip with a "rate limited" note instead of a long silent stall.
+   */
+  slackToolMaxWaitMs: 15_000,
   /** search.messages slots per minute only interactive calls (front-agent turns) may use; background (subagents, watches) get the rest. */
   slackSearchInteractiveReservePerMin: 4,
   /** Identical searches (query, sort, page) share their public results for this long (Redis; public matches only). */

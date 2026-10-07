@@ -8,7 +8,7 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { registerTool } from '../core/tools.js';
-import { getBotIdentity, slackCall, slackErrorCode } from '../core/slack.js';
+import { getBotIdentity, SlackBusyError, slackCall, slackErrorCode } from '../core/slack.js';
 import { env, limits } from '../config.js';
 import { takeLimit } from '../features/guard.js';
 import { compareTs, formatMessage, userIdsIn, type FormatEnv, type RenderMsg } from '../context/format.js';
@@ -17,6 +17,7 @@ import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
 import { notVisibleMessage, resolveLinkAccess } from './private-links.js';
+import { slackBusyText, slackWaitOpts, type SlackWaitOpts } from './slack-search.js';
 import { channelPageHeader, estimateRenderedChars, takeWithinBudget, trimAround } from './paging.js';
 import { errMsg, normalizeTs, parseChannelId, parseSlackPermalink, SLACK_PERMALINK_PATTERN, textWithAttachments, untrusted } from './util.js';
 
@@ -99,7 +100,7 @@ const visible = (raws: any[]) => raws.map(visibleMsg).filter((m): m is RenderMsg
 
 async function fetchHistory(
   channel: string,
-  opts: { latest?: string; oldest?: string; inclusive?: boolean; limit: number; token?: 'bot' | 'user' },
+  opts: { latest?: string; oldest?: string; inclusive?: boolean; limit: number; token?: 'bot' | 'user'; slack?: SlackWaitOpts },
 ): Promise<any[]> {
   const res = await slackCall<any>(
     'conversations.history',
@@ -110,7 +111,7 @@ async function fetchHistory(
       ...(opts.oldest ? { oldest: opts.oldest } : {}),
       ...(opts.inclusive !== undefined ? { inclusive: opts.inclusive } : {}),
     },
-    { token: opts.token ?? 'user' },
+    { token: opts.token ?? 'user', maxWaitMs: opts.slack?.maxWaitMs, priority: opts.slack?.priority, onWait: opts.slack?.onWait },
   );
   return [...(res.messages ?? [])].sort((a, b) => compareTs(a.ts, b.ts));
 }
@@ -120,13 +121,13 @@ async function fetchHistory(
  * naive fetch skips ahead in busy channels; walk `latest` backward (and widen empty gaps) until the page starts
  * right after `oldestTs`.
  */
-export async function fetchHistoryAfterClosest(channel: string, oldestTs: string, limit: number, token: 'bot' | 'user' = 'user'): Promise<any[]> {
+export async function fetchHistoryAfterClosest(channel: string, oldestTs: string, limit: number, token: 'bot' | 'user' = 'user', slack?: SlackWaitOpts): Promise<any[]> {
   let windowS = TIME_WINDOW_S;
   let hi = addSeconds(oldestTs, windowS);
   let bestFull: any[] | null = null;
 
   for (let walk = 0; walk < MAX_AFTER_WALKS; walk++) {
-    const raws = await fetchHistory(channel, { oldest: oldestTs, latest: hi, inclusive: false, limit: 100, token });
+    const raws = await fetchHistory(channel, { oldest: oldestTs, latest: hi, inclusive: false, limit: 100, token, slack });
     if (!raws.length) {
       if (bestFull) return bestFull; // previous full page started at the first message after oldestTs
       if (windowS >= MAX_WINDOW_S) return [];
@@ -153,6 +154,7 @@ export async function fetchChannelPage(
   target: Exclude<ChannelTarget, { error: string }>,
   limit: number,
   token: 'bot' | 'user' = 'user',
+  slack?: SlackWaitOpts,
 ): Promise<{ msgs: RenderMsg[]; hasCenter: boolean; hasOlder: boolean; hasNewer: boolean }> {
   const need = Math.min(limit + OVERFETCH, 100);
 
@@ -161,6 +163,7 @@ export async function fetchChannelPage(
       ...(target.mode === 'before' ? { latest: target.ts, inclusive: false } : {}),
       limit: need,
       token,
+      slack,
     });
     const vis = visible(raws);
     // Slack returns fewer than asked only when the channel has no more: then this page reaches the start.
@@ -168,7 +171,7 @@ export async function fetchChannelPage(
   }
 
   if (target.mode === 'after') {
-    const raws = await fetchHistoryAfterClosest(channel, target.ts, need, token);
+    const raws = await fetchHistoryAfterClosest(channel, target.ts, need, token, slack);
     // Newer messages can't be ruled out (the forward walk only covers a time window): always offer the cursor.
     return { msgs: visible(raws).slice(0, limit), hasCenter: false, hasOlder: true, hasNewer: true };
   }
@@ -184,8 +187,9 @@ export async function fetchChannelPage(
       inclusive: true,
       limit: Math.min(beforeN + 1 + OVERFETCH, 100),
       token,
+      slack,
     }),
-    fetchHistoryAfterClosest(channel, aroundTs, afterN + OVERFETCH, token),
+    fetchHistoryAfterClosest(channel, aroundTs, afterN + OVERFETCH, token, slack),
   ]);
   const beforeVis = visible(beforeRaws);
   const afterVis = visible(afterRaws);
@@ -225,12 +229,13 @@ registerTool({
         if (!/^[CG]/.test(channel)) return notVisibleMessage('channel');
         const over = await takeLimit('search', ctx.speakerId, ctx.threadId);
         if (over) return over;
-        const access = await resolveLinkAccess(channel, { speakerId: ctx.speakerId, channelId: ctx.channelId }, 'channel');
+        const slack = slackWaitOpts(ctx);
+        const access = await resolveLinkAccess(channel, { speakerId: ctx.speakerId, channelId: ctx.channelId }, 'channel', slack);
         if ('error' in access) return access.error;
         const { chLabel, token, visibility } = access;
         const n = input.limit ?? DEFAULT_LIMIT;
         try {
-          const fetched = await fetchChannelPage(channel, target, n, token);
+          const fetched = await fetchChannelPage(channel, target, n, token, slack);
           const { hasCenter } = fetched;
           // Size cap (like read_thread / read_channel): keep the end the mode reads from, or the linked message's surroundings.
           const msgs =
@@ -253,7 +258,7 @@ registerTool({
           }
 
           const [names, self] = await Promise.all([
-            getUserNames(userIdsIn(msgs)),
+            getUserNames(userIdsIn(msgs), slack),
             getBotIdentity().catch(() => undefined),
           ]);
           // No file ids: files from other channels stay plain `[file: …]` placeholders.
@@ -286,6 +291,7 @@ registerTool({
           lines.push(...msgs.map(mark));
           return untrusted(`slack channel (${visibility})`, lines.join('\n'));
         } catch (err) {
+          if (err instanceof SlackBusyError) return slackBusyText(`that channel (${chLabel})`, err.waitMs);
           const code = slackErrorCode(err);
           // Bot token (private link): it lost access since the check; answer like any channel it can't see.
           if (token === 'bot' && (code === 'channel_not_found' || code === 'not_in_channel' || code === 'missing_scope' || code === 'no_permission')) return notVisibleMessage('channel');

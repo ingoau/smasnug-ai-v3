@@ -9,7 +9,7 @@ import { generateText, tool } from 'ai';
 import { z } from 'zod';
 import { env, limits } from '../config.js';
 import { registerTool, type ToolContext } from '../core/tools.js';
-import { getBotIdentity } from '../core/slack.js';
+import { getBotIdentity, SlackBusyError } from '../core/slack.js';
 import { recordModelUsage } from '../features/guard.js';
 import { chatModel, MODELS } from '../models.js';
 import { formatMessage, userIdsIn, type FormatEnv, type RenderMsg } from '../context/format.js';
@@ -18,6 +18,7 @@ import { getUserNames } from '../context/users.js';
 import { log } from '../log.js';
 import { askThreadMaxCalls, askThreadSystemPrompt, askThreadUserPrompt, fitThread } from './ask-thread-prompt.js';
 import { citationHint, loadPublicThread, visibleWithAttachments } from './public-thread.js';
+import { slackBusyText, slackWaitOpts, type SlackWaitOpts } from './slack-search.js';
 import { errMsg, untrusted } from './util.js';
 
 export const ASK_THREAD_TOOL = 'ask_thread';
@@ -35,25 +36,27 @@ interface LoadedThread {
 }
 
 async function loadThread(ctx: ToolContext, permalink: string | undefined): Promise<LoadedThread | { error: string }> {
+  const slack = slackWaitOpts(ctx);
   if (permalink?.trim()) {
-    const t = await loadPublicThread({ permalink }, { speakerId: ctx.speakerId, threadId: ctx.threadId, channelId: ctx.channelId }, { maxMessages: MAX_FETCH, tool: ASK_THREAD_TOOL });
+    const t = await loadPublicThread({ permalink }, { speakerId: ctx.speakerId, threadId: ctx.threadId, channelId: ctx.channelId }, { maxMessages: MAX_FETCH, tool: ASK_THREAD_TOOL, slack });
     if ('error' in t) return t;
     return { where: `${t.chLabel}, thread ${t.rootTs}`, rootTs: t.rootTs, msgs: t.msgs, ...(t.origin ? { hint: citationHint(t.origin, t.channel, t.rootTs) } : {}) };
   }
   try {
-    const raws = await fetchReplies(ctx.channelId, ctx.threadTs, { maxMessages: MAX_FETCH });
+    const raws = await fetchReplies(ctx.channelId, ctx.threadTs, { maxMessages: MAX_FETCH, slack });
     // `##` and hidden messages dropped (fromSlack via visibleWithAttachments); forwarded content inlined.
     const msgs = raws.map(visibleWithAttachments).filter((m): m is RenderMsg => !!m);
     return { where: 'this thread (the current conversation)', rootTs: ctx.threadTs, msgs };
   } catch (err) {
+    if (err instanceof SlackBusyError) return { error: slackBusyText('this thread', err.waitMs) };
     log.warn({ err, threadId: ctx.threadId }, 'ask_thread: reading the current thread failed');
     return { error: `Could not read the thread: ${errMsg(err)}` };
   }
 }
 
 /** Render the thread for the answering model: context format, large per-message cut, overall cap. */
-async function renderTranscript(t: LoadedThread): Promise<{ text: string; shown: number; omitted: number }> {
-  const [names, self] = await Promise.all([getUserNames(userIdsIn(t.msgs)), getBotIdentity().catch(() => undefined)]);
+async function renderTranscript(t: LoadedThread, slack: SlackWaitOpts): Promise<{ text: string; shown: number; omitted: number }> {
+  const [names, self] = await Promise.all([getUserNames(userIdsIn(t.msgs), slack), getBotIdentity().catch(() => undefined)]);
   // No file ids: the answering model can't open files; they stay `[file: …]` placeholders.
   const fenv: FormatEnv = { names, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.askThreadMessageTokens * 4 };
   const lines = t.msgs.filter((m) => !m.deleted).map((m) => ({ ts: m.ts, line: formatMessage({ ...m, replyCount: undefined }, fenv) }));
@@ -83,7 +86,7 @@ registerTool({
         if ('error' in t) return t.error;
         if (!t.msgs.length) return `No visible messages in ${t.where}.`;
         try {
-          const transcript = await renderTranscript(t);
+          const transcript = await renderTranscript(t, slackWaitOpts(ctx));
           const signals = [ctx.abortSignal, options?.abortSignal, AbortSignal.timeout(limits.askThreadTimeoutMs)].filter((s): s is AbortSignal => !!s);
           const reasoningEffort = env.CHILD_REASONING_EFFORT !== 'default' ? env.CHILD_REASONING_EFFORT : null;
           const res = await generateText({

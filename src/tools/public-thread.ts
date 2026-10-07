@@ -8,7 +8,7 @@
 import { tool } from 'ai';
 import { z } from 'zod';
 import { registerTool } from '../core/tools.js';
-import { getBotIdentity, slackCall, slackErrorCode } from '../core/slack.js';
+import { getBotIdentity, SlackBusyError, slackCall, slackErrorCode } from '../core/slack.js';
 import { env, limits } from '../config.js';
 import { takeLimit } from '../features/guard.js';
 import { compareTs, formatMessage, userIdsIn, type FormatEnv, type RenderMsg } from '../context/format.js';
@@ -17,6 +17,7 @@ import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
 import { notVisibleMessage, resolveLinkAccess } from './private-links.js';
+import { slackBusyText, slackWaitOpts, type SlackWaitOpts } from './slack-search.js';
 import { errMsg, normalizeTs, parseChannelId, parseSlackPermalink, SLACK_PERMALINK_PATTERN, textWithAttachments, untrusted } from './util.js';
 
 const MAX_LIMIT = 50;
@@ -47,14 +48,14 @@ export function visibleWithAttachments(raw: any): RenderMsg | null {
   return fromSlack({ ...raw, text: textWithAttachments(raw) });
 }
 
-async function fetchThread(channel: string, ts: string, maxMessages = MAX_FETCH, token: 'user' | 'bot' = 'user'): Promise<any[]> {
+async function fetchThread(channel: string, ts: string, maxMessages = MAX_FETCH, token: 'user' | 'bot' = 'user', slack: SlackWaitOpts = {}): Promise<any[]> {
   const out: any[] = [];
   let cursor: string | undefined;
   do {
     const res = await slackCall<any>(
       'conversations.replies',
       { channel, ts, limit: 200, ...(cursor ? { cursor } : {}) },
-      { token },
+      { token, maxWaitMs: slack.maxWaitMs, priority: slack.priority, onWait: slack.onWait },
     );
     out.push(...(res.messages ?? []));
     cursor = res.has_more ? res.response_metadata?.next_cursor || undefined : undefined;
@@ -86,7 +87,7 @@ export interface PublicThread {
 export async function loadPublicThread(
   input: { permalink?: string; channel?: string; thread_ts?: string },
   who: { speakerId: string; threadId?: string; channelId?: string },
-  opts: { maxMessages?: number; tool?: string } = {},
+  opts: { maxMessages?: number; tool?: string; slack?: SlackWaitOpts } = {},
 ): Promise<PublicThread | { error: string }> {
   const target = resolveThreadTarget(input);
   if ('error' in target) return target;
@@ -95,20 +96,21 @@ export async function loadPublicThread(
   if (!/^[CG]/.test(channel)) return { error: notVisibleMessage('thread') };
   const over = await takeLimit('search', who.speakerId, who.threadId);
   if (over) return { error: over };
-  const access = await resolveLinkAccess(channel, who, 'thread');
+  const access = await resolveLinkAccess(channel, who, 'thread', opts.slack);
   if ('error' in access) return access;
   const { chLabel, token, visibility } = access;
   try {
-    let raws = await fetchThread(channel, rootTs, opts.maxMessages, token);
+    let raws = await fetchThread(channel, rootTs, opts.maxMessages, token, opts.slack);
     // A link to a reply without ?thread_ts: Slack returns that message, which names its real thread root.
     const realRoot = raws.find((m) => m.ts === rootTs)?.thread_ts;
     if (realRoot && realRoot !== rootTs) {
       rootTs = realRoot;
-      raws = await fetchThread(channel, rootTs, opts.maxMessages, token);
+      raws = await fetchThread(channel, rootTs, opts.maxMessages, token, opts.slack);
     }
     const msgs = raws.map(visibleWithAttachments).filter((m): m is RenderMsg => !!m);
     return { channel, chLabel, visibility, rootTs, ...(linkedTs ? { linkedTs } : {}), ...(target.origin ? { origin: target.origin } : {}), msgs };
   } catch (err) {
+    if (err instanceof SlackBusyError) return { error: slackBusyText('that thread', err.waitMs) };
     const code = slackErrorCode(err);
     // Bot token (private link): it lost access since the check; answer like any channel it can't see.
     if (token === 'bot' && (code === 'channel_not_found' || code === 'not_in_channel' || code === 'missing_scope' || code === 'no_permission')) return { error: notVisibleMessage('thread') };
@@ -157,7 +159,8 @@ registerTool({
         limit: z.number().int().min(1).max(MAX_LIMIT).optional().describe(`Max replies to show (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT})`),
       }),
       execute: async (input) => {
-        const loaded = await loadPublicThread(input, { speakerId: ctx.speakerId, threadId: ctx.threadId, channelId: ctx.channelId });
+        const slack = slackWaitOpts(ctx);
+        const loaded = await loadPublicThread(input, { speakerId: ctx.speakerId, threadId: ctx.threadId, channelId: ctx.channelId }, { slack });
         if ('error' in loaded) return loaded.error;
         const { channel, chLabel, visibility, rootTs, linkedTs, origin, msgs } = loaded;
         try {
@@ -165,7 +168,7 @@ registerTool({
           const { parent, slice, earlier, later, total } = selectWindow(msgs, rootTs, n, linkedTs);
           if (!parent && !slice.length) return `No visible messages in that thread (${chLabel}, thread ${rootTs}).`;
           const [names, self] = await Promise.all([
-            getUserNames(userIdsIn([...(parent ? [parent] : []), ...slice])),
+            getUserNames(userIdsIn([...(parent ? [parent] : []), ...slice]), slack),
             getBotIdentity().catch(() => undefined),
           ]);
           // No file ids: files from other threads stay plain `[file: …]` placeholders (the file store is thread-scoped).

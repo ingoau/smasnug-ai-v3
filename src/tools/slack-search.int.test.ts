@@ -151,4 +151,45 @@ describe.skipIf(!INTEGRATION)('slack_search under the shared rate limit', () => 
     expect(b1).toContain('public channels only');
     expect(order.slice(1)).toEqual(['bg0', 'bg1']);
   });
+
+  it("conversations.info busy: unverified channels' matches are dropped (fail closed) with a note, fast, and not cached", async () => {
+    const NEW = `C3SSNEW${r}`;
+    const infoKey = rateLimitKey('bot', 'conversations.info');
+    const { addFakeHandler } = await import('../core/slack-fake.js');
+    const remove = addFakeHandler((method, args) => {
+      if (method !== 'search.messages' || !String(args.query).startsWith(`ss3new${r}`)) return undefined;
+      return {
+        ok: true,
+        messages: {
+          matches: [
+            { channel: { id: NEW, name: 'unverified' }, user: 'U3SSBOB', ts: '1790000002.000100', text: 'in an unverified channel', permalink: `https://x.slack.com/archives/${NEW}/p1790000002000100` },
+            { channel: { id: PUB, name: 'ship' }, user: 'U3SSBOB', ts: '1790000003.000100', text: 'in the known public channel', permalink: `https://x.slack.com/archives/${PUB}/p1790000003000100` },
+          ],
+        },
+      };
+    });
+    try {
+      await S.publicChannelNames([PUB]); // PUB verified (cached) before the limiter fills up
+      const now = Date.now();
+      for (let i = 0; i < 50; i++) await redis.zadd(infoKey, now, `${now}:info${i}`);
+      const waits: any[] = [];
+      const t0 = Date.now();
+      const out: string = await exec(toolsFor('child', ctx({ [S.SLACK_WAIT_EXTRA]: (ev: any) => waits.push(ev) })).slack_search, { query: `ss3new${r} q` });
+      expect(Date.now() - t0).toBeLessThan(limits.slackSearchMaxWaitMs);
+      expect(out).toContain('in the known public channel');
+      expect(out).not.toContain('in an unverified channel');
+      expect(out).toMatch(/1 more result was skipped because Slack's rate limit kept me from checking that its channel is public/);
+      expect(await redis.get(S.searchCacheKey(`ss3new${r} q`, undefined))).toBeNull(); // incomplete: not cached
+      expect(await redis.get(`slack:chanvis:${NEW}`)).toBeNull(); // unverified: not cached as private either
+
+      // A link into that channel fails closed with a rate-limit message, not a silent stall or "not visible".
+      const t1 = Date.now();
+      const read: string = await exec(toolsFor('child', ctx()).read_public_thread, { permalink: `https://x.slack.com/archives/${NEW}/p1790000002000100` });
+      expect(Date.now() - t1).toBeLessThan(limits.slackToolMaxWaitMs);
+      expect(read).toMatch(/^Slack is rate limited right now .* so that thread couldn't be read/);
+    } finally {
+      remove();
+      await redis.del(infoKey, `${infoKey}:qi`, `${infoKey}:qb`, `${infoKey}:seen`);
+    }
+  });
 });
