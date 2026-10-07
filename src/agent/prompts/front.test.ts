@@ -53,8 +53,9 @@ describe('frontSystemPrompt delegation and scope rules', () => {
   const p = frontSystemPrompt('smasnug ai');
 
   it('fans named independent items out, also for comparisons; dependent steps stay one task / a later round', () => {
-    expect(p).toMatch(/Independent parts \([^)]*frameworks[^)]*also when the ask is to compare them\) get one task each in ONE spawn_subagent call/);
-    expect(p).toMatch(/need each other's results are one task or a later round/);
+    expect(p).toMatch(/Several named items that each need their own research \([^)]*frameworks[^)]*\) get one task per item in ONE spawn_subagent call, also when the ask is to compare them/);
+    expect(p).toMatch(/Bundle only trivially small items or steps that need each other's results/);
+    expect(p).toMatch(/the first round only finds the list \("the top 3 X"\), then one subagent per item/);
   });
 
   it('"one speaker" is about identity and permissions, not about whose request the work serves', () => {

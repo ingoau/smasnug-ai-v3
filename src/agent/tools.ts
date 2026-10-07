@@ -118,7 +118,7 @@ registerTool({
           )
           .min(1)
           .max(MAX_SPAWN_TASKS)
-          .describe('One entry per subagent: one per named item that needs its own research (each product, framework, person, channel…); a single entry for one question or a step that must come first'),
+          .describe('One entry per subagent: one per named item that needs its own research (each product, framework, person, channel…); a single entry for one question, including its steps (find X, then compare it)'),
       }),
       execute: async ({ tasks }) => {
         const s = turnState(ctx);
