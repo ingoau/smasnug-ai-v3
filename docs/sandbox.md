@@ -169,16 +169,18 @@ Every tool:
 | `sandbox_exec` | `command`, `timeout_s?` (default 60, max `limits.sandboxExecMaxMs` = 300 s), `cwd?` | Runs the command. Returns the exit code, duration and stdout/stderr. Each stream is capped at 64 KB from the provider, then shown as head 2k + tail 10k chars with a `[… N bytes cut; full output in /work/.last/stdout]` note. Counts against `takeLimit('sandbox_exec')`. Aborts with `ctx.abortSignal` (cancel/timeout) by killing the process; the provider timeout is the backstop. |
 | `sandbox_read_file` | `path`, `offset?` | Text: 24k chars per call with paging. Images (png/jpg/gif/webp): resized like `read_image` and returned as an image, so the child can look at its own chart or Playwright screenshot. Other binaries: size + type only, plus "export it instead". |
 | `sandbox_write_file` | `path`, `content` | Text only, ≤ 200 KB per call; anything larger is made with `sandbox_exec`. Paths must stay under `/work`, normalized, no `..`. |
-| `sandbox_import` | `file_id`, `path?` | Copies a thread file from the file store to `/work/in/<safe name>`. Uses the file store's thread-scoped access check: only files of `ctx.threadId`. ≤ `limits.sandboxImportMaxBytes` (50 MB). |
-| `sandbox_export` | `path`, `name?`, `description` | Reads the file (≤ `limits.sandboxExportMaxBytes`, 25 MB). It is stored as `createFile({ threadId, ownerId, name, bytes, description, origin: { kind: 'sandbox', subagentId, runId } })`, which returns `file_…`. The name is sanitized; the MIME type comes from content sniffing, not the extension. Idempotent per (run, path, content hash). |
+| `sandbox_import` | `file_id`, `path?` | Copies a thread file from the file store to `/work/in/<safe name>`. Uses the file store's access rule (`resolveFile`: this thread's files, or the owner's own). ≤ `limits.sandboxImportMaxBytes` (50 MB). |
+| `sandbox_export` | `path`, `name?`, `description` | Reads the file (≤ `limits.sandboxExportMaxBytes`, 25 MB). It is stored as `createFile({ threadId, ownerId, name, content, description, createdRunId, createdSubagentId, idempotencyKey })`, which returns `file_…`. The name is sanitized; the MIME type comes from content sniffing, not the extension. Idempotent per (run, path, content hash). |
 | `request_preview` | `dir`, `title` | **Does not deploy.** Checks that `index.html` exists, ≤ 1,000 files, each ≤ 5 MiB and ≤ 25 MiB total, via one `find`/`stat` exec. Tars the dir, stores the tarball as an internal file-store file, and inserts a `previews` row (`requested`, one per run). Counts `takeLimit('preview')`. Returns: "Preview queued. After you finish, the system deploys it and posts the link in the thread. Mention in your result that a preview was requested." |
 
-**File store contract the sandbox needs** (round 3 owns the names):
-- `createFile(...) → { id }`;
-- `getFileForThread(id, threadId) → { name, bytes, mime } | null`;
-- an `internal` flag (or origin kind) for preview bundles, so they don't show up as thread files.
+**File store contract** (built in round 3, `src/files/store.ts`; design doc, "Files"):
+- export: `createFile({ threadId, ownerId, name, content, description, createdRunId, createdSubagentId, idempotencyKey })`
+  → `FileMeta` (`id` = `file_…`; name sanitised, MIME type sniffed, ≤ `limits.fileMaxBytes`, 5 MB for now: raise it
+  or add a sandbox-specific cap when exports need more). Files a run created are listed with its result automatically.
+- import: `resolveFile(id, { threadId, speakerId })` (the shared access rule: this thread's files, files posted here,
+  or the owner's own) → `loadFileBytes(meta)` (lazy Slack download for uploads).
+- preview bundles: `createFile({ …, internal: true })`; internal files never resolve through tools or show in listings.
 
-Until the file store exists, Phase 2 ships without `sandbox_import`/`sandbox_export`, and results are text only.
 
 ### 3.5 Lifecycle hooks
 
@@ -460,7 +462,7 @@ App Home admin additions:
   `fetch_url` already allows GET exfiltration, so the sandbox adds bandwidth, not a new class of risk. Residual
   risk, documented. DM threads are the sensitive case.
 - Exported files are user deliverables. The name is sanitized and the MIME type comes from sniffing. HTML is
-  uploaded to Slack as a file, which Slack doesn't render.
+  uploaded to Slack as a file (Slack now renders HTML files).
 - Only the subagent's owner can be the preview requester. A steer from someone else in the thread can't redirect
   the claim. `request_preview` records `subagents.owner_id`, not the steerer.
 - Synthesis and scheduled turns can spawn sandbox subagents (unlike coding agents). They are bounded by the owner's
