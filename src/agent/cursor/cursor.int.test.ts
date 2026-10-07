@@ -193,13 +193,17 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     expect(await agents.pollCursorRuns({ runId: s.runId })).toBe(0);
 
     fake.set(agentId, { status: 'RUNNING' });
+    const { limits } = await import('../../config.js');
+    const polledAt = Date.now();
     expect(await poll(s.runId)).toBe(1);
     run = await runRow(s.runId);
     expect(run.status).toBe('running');
     expect(run.details).toBe('Coding in Cursor…');
     const cr = (await sql<any[]>`select * from cursor_runs where run_id = ${s.runId}`)[0];
     expect(cr).toMatchObject({ cursorStatus: 'RUNNING', claimId: null, pollErrors: 0 });
-    expect(cr.nextPollAt.getTime()).toBeGreaterThan(Date.now() + 20_000);
+    // Next poll one poll interval out (limits.cursorPollMs; a little slack for the DB / test clocks).
+    expect(cr.nextPollAt.getTime()).toBeGreaterThan(polledAt + limits.cursorPollMs - 2_000);
+    expect(cr.nextPollAt.getTime()).toBeLessThan(Date.now() + limits.cursorPollMs + 2_000);
 
     fake.set(agentId, {
       status: 'FINISHED',
