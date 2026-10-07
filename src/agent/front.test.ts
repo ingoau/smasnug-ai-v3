@@ -668,6 +668,26 @@ describe('runFrontTurn: queued user turns in non-user turns', () => {
     await runFrontTurn(turn({ id: 121 }), io().io);
     expect(turnText()).not.toContain('Queued after this turn');
   });
+
+  it('a results turn is told to leave newer messages still in debounce or at the gate to their own turn', async () => {
+    h.sqlHook = (q) => {
+      if (q.includes('from runs r join subagents')) return [{ id: 1, subagentId: 'sa_1', title: 'T', ownerId: 'U1', status: 'complete', instructions: 'x', result: 'r', error: null, isResume: false }];
+      if (q.includes('not exists (select 1 from turns u')) return [{ userId: 'U1', ts: '100.000012' }, { userId: 'U1', ts: '100.000011' }, { userId: 'U2', ts: '100.000010' }];
+      return undefined;
+    };
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 122, kind: 'synthesis', cardId: 5, messageTs: [], isMention: false }), io(false).io);
+    const t = turnText();
+    expect(t).toContain('Still being handled: these newer messages');
+    expect(t).toContain('<@U1>: [100.000011] [100.000012]\n<@U2>: [100.000010]');
+    expect(t).not.toContain('Queued after this turn');
+
+    // A scheduled turn (reminder) too.
+    h.sqlHook = (q) => (q.includes('not exists (select 1 from turns u') ? [{ userId: 'U2', ts: '100.000010' }] : undefined);
+    h.model = mockModel([textStep('')]);
+    await runFrontTurn(turn({ id: 123, kind: 'scheduled', messageTs: [], isMention: false }), io(false).io);
+    expect(turnText()).toContain('Still being handled');
+  });
 });
 
 describe('runFrontTurn: spawn_subagent fan-out', () => {

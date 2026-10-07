@@ -421,17 +421,45 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
   return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, allCancelled, ...(outcome ? { outcome } : {}) };
 }
 
+/** How far back a results / scheduled turn looks for human messages still on their way to a turn of their own. */
+const UNHANDLED_LOOKBACK_S = 15 * 60;
+const MAX_UNHANDLED = 10;
+
 /**
- * For a non-user turn: the user turns already queued in this thread (messages that arrived meanwhile). They run right
- * after this one with their speaker's own tools (e.g. the admin's spawn_coding_agent, never offered in a results turn),
- * so this turn must leave them alone instead of answering them (or refusing) from here.
+ * For a non-user turn: people's messages it must leave alone. (1) User turns already queued in this thread (messages
+ * that arrived meanwhile): they run right after this one with their speaker's own tools (e.g. the admin's
+ * spawn_coding_agent, never offered in a results turn). (2) Human messages stored after the bot's last reply (within
+ * the last 15 minutes) that are in no turn yet: still in their debounce window or at the relevance gate. They get a
+ * turn of their own if they're meant for the bot, so a results / reminder turn that starts meanwhile must not answer
+ * them too (prod: a results turn answered a question that its own turn then answered again).
  */
-export async function renderQueuedTurns(threadId: string): Promise<string> {
-  const rows = await sql<{ authorId: string; messageTs: string[] }[]>`
-    select author_id, message_ts from turns where thread_id = ${threadId} and kind = 'user' and status = 'pending' order by id`;
-  const lines = rows.filter((r) => r.messageTs?.length).map((r) => `<@${r.authorId}>: ${[...r.messageTs].sort((a, b) => Number(a) - Number(b)).map((t) => `[${t}]`).join(' ')}`);
-  if (!lines.length) return '';
-  return `Queued after this turn: these messages (in <thread_history>) get their own turn right after this one, with that person as the speaker. Don't answer, refuse or act on them here; leave them to that turn.\n${lines.join('\n')}`;
+export async function renderQueuedTurns(threadId: string, now = new Date()): Promise<string> {
+  const [rows, unhandled] = await Promise.all([
+    sql<{ authorId: string; messageTs: string[] }[]>`
+      select author_id, message_ts from turns where thread_id = ${threadId} and kind = 'user' and status = 'pending' order by id`,
+    sql<{ userId: string; ts: string }[]>`
+      select m.user_id, m.ts from messages m join threads t on t.id = m.thread_id
+      where m.thread_id = ${threadId} and not m.deleted and m.bot_id is null and m.user_id is not null
+        and m.ts::numeric > coalesce(t.last_bot_reply_ts, '0')::numeric
+        and m.ts::numeric > ${now.getTime() / 1000 - UNHANDLED_LOOKBACK_S}
+        and not exists (select 1 from turns u where u.thread_id = m.thread_id and m.ts = any(u.message_ts))
+        and not exists (select 1 from thread_inbox i join turns u on u.id = i.turn_id where u.thread_id = m.thread_id and i.message_ts = m.ts)
+      order by m.ts::numeric desc limit ${MAX_UNHANDLED}`,
+  ]);
+  const byAuthor = (list: { author: string; ts: string[] }[]) =>
+    list.filter((r) => r.ts.length).map((r) => `<@${r.author}>: ${[...r.ts].sort((a, b) => Number(a) - Number(b)).map((t) => `[${t}]`).join(' ')}`);
+  const queued = byAuthor(rows.map((r) => ({ author: r.authorId, ts: r.messageTs ?? [] })));
+  const grouped = new Map<string, string[]>();
+  for (const m of unhandled) grouped.set(m.userId, [...(grouped.get(m.userId) ?? []), m.ts]);
+  const pending = byAuthor([...grouped].map(([author, ts]) => ({ author, ts })));
+  const parts: string[] = [];
+  if (queued.length)
+    parts.push(`Queued after this turn: these messages (in <thread_history>) get their own turn right after this one, with that person as the speaker. Don't answer, refuse or act on them here; leave them to that turn.\n${queued.join('\n')}`);
+  if (pending.length)
+    parts.push(
+      `Still being handled: these newer messages (in <thread_history>) arrived after your last reply and are not part of this turn. They get a turn of their own if they're meant for you, so don't answer, refuse or act on them here.\n${pending.join('\n')}`,
+    );
+  return parts.join('\n\n');
 }
 
 /** DM threads: the conversation's sidebar title, so the model knows whether to (re)title it. */
