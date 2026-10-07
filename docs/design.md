@@ -40,9 +40,9 @@ Three roles, each granted tools from one shared registry. Safety rules come from
 - 
 **Gate:** a cheap relevance check that decides whether the bot should respond to an unmentioned follow-up. No tools; outputs yes or no.
 - 
-**Front agent:** the only agent that talks to users. Handles one speaker per turn, replies, reacts, spawns and steers subagents, and manages memory. Answers directly only for trivial or quick things (from knowledge, or one or two light lookups; a subagent adds latency and a plan card) and delegates everything else, fanning independent parts out to several subagents spawned in the same step.
+**Front agent:** the only agent that talks to users. Handles one speaker per turn, replies, reacts, spawns and steers subagents, and manages memory. Answers directly only for trivial or quick things (from knowledge, or one or two light lookups; a subagent adds latency and a plan card) and delegates everything else, fanning independent parts out to several subagents started by one `spawn_subagent` call (one task each).
 
-**Parallel tool calls.** Both agents ask the provider for parallel tool calls (`parallel_tool_calls: true` in `providerOptions.openrouter`; the OpenRouter default, set explicitly, and left out for a subagent step whose tools are switched off by its token cap). The AI SDK executes all tool calls of a step concurrently once the step's model call ends. GPT-6 Luna does emit several calls per step (checked live: four independent lookups in one step, with and without the flag). Both prompts tell the agents to put independent calls in one step: the front agent its ack `reply` + `spawn_subagent`, several spawns for independent parts, or a Slack and a web search at once; subagents several searches / fetches / `ask_thread` calls at once.
+**Parallel tool calls.** Both agents ask the provider for parallel tool calls (`parallel_tool_calls: true` in `providerOptions.openrouter`; the OpenRouter default, set explicitly, and left out for a subagent step whose tools are switched off by its token cap). The AI SDK executes all tool calls of a step concurrently once the step's model call ends. GPT-6 Luna does emit several short calls per step (checked live: four independent lookups in one step with and without the flag; with the full front prompt, a `web_search` and a `slack_search` together), but calls with long arguments (spawns, the ack reply) come one per step, hence the batched `spawn_subagent`. Both prompts tell the agents to put independent calls in one step: the front agent its ack `reply` + `spawn_subagent`, or a Slack and a web search at once; subagents several searches / fetches / `ask_thread` calls at once.
 - 
 **Subagents (children):** one general type, no specialised agents. Do longer work in the background and return results to the front agent. Never post to Slack, never touch memory.
 Tool
@@ -154,7 +154,7 @@ Subagents are persistent sessions within a thread; each piece of work on one is 
 
 **Front agent tools:**
 - 
-`spawn_subagent(title, instructions)` creates a subagent and starts its first run.
+`spawn_subagent(tasks: [{ title, instructions, seed_from? }])` creates one subagent per task (up to 6, each checked against the limits; a task that can't start is reported back without failing the others) and starts their first runs, all on the turn's plan card. Batching is in the schema because GPT-6 Luna, given the full front prompt, emits long-argument calls like spawns one per step even with parallel tool calls on (checked live: three spawns took three model steps; with the `tasks` array it is one call).
 - 
 `message_subagent(id, text)`: if running, pushes to its inbox; if idle, starts a new run on the same session with full prior history; if cancelled, errors so the agent spawns a new one.
 - 

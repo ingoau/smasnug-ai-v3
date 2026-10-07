@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   postedCards: [] as number[],
   /** Overrides for the mocked renderThreadContext result. */
   ctx: {} as Record<string, unknown>,
+  spawns: [] as any[],
 }));
 
 vi.mock('../db/index.js', () => {
@@ -50,7 +51,11 @@ vi.mock('../core/events.js', async (orig) => ({
 }));
 vi.mock('./subagents.js', () => ({
   activeRunsInThread: async () => h.activeRuns,
-  spawnSubagent: async () => ({ subagentId: 'sa_1', runId: 1, cardId: 5 }),
+  spawnSubagent: async (o: any) => {
+    h.spawns.push(o);
+    if (o.title === 'FAIL') throw new Error('Too many subagents running');
+    return { subagentId: `sa_${h.spawns.length}`, runId: h.spawns.length, cardId: 5 };
+  },
   cancelSubagent: async (o: any) => `Subagent ${o.subagentId} cancelled.`,
   messageSubagent: async () => ({ mode: 'steered', runId: 1, cardId: 5, note: 'n' }),
 }));
@@ -159,6 +164,7 @@ beforeEach(() => {
   h.sqlHook = undefined;
   h.postedCards = [];
   h.ctx = {};
+  h.spawns = [];
 });
 
 describe('runFrontTurn (mock model)', () => {
@@ -365,6 +371,25 @@ describe('runFrontTurn: parallel tool calls', () => {
   });
 });
 
+describe('runFrontTurn: spawn_subagent fan-out', () => {
+  it('one call with several tasks starts one subagent per task on the same card; a failed one is reported, not fatal', async () => {
+    const tasks = [
+      { title: 'Pico 2 W', instructions: 'Research the Pico 2 W' },
+      { title: 'FAIL', instructions: 'x' },
+      { title: 'ESP32-C6', instructions: 'Research the ESP32-C6' },
+    ];
+    h.model = mockModel([toolStep(['reply', { text: 'on it' }]), toolStep(['spawn_subagent', { tasks }]), toolStep(['end_turn', {}])]);
+    await runFrontTurn(turn({ id: 80 }), io().io);
+    expect(h.spawns.map((o) => o.title)).toEqual(['Pico 2 W', 'FAIL', 'ESP32-C6']);
+    expect(h.spawns.every((o) => o.turnId === 80 && o.ownerId === 'U1')).toBe(true);
+    expect(h.postedCards).toEqual([5]);
+    const toolResult = JSON.stringify(((h.model as any).doStreamCalls as any[])[2].prompt);
+    expect(toolResult).toContain('sa_1');
+    expect(toolResult).toContain('sa_3');
+    expect(toolResult).toContain('not_started');
+  });
+});
+
 describe('runFrontTurn: native stop', () => {
   const slackError = (code: string) => Object.assign(new Error(code), { data: { ok: false, error: code } });
 
@@ -507,7 +532,7 @@ describe('runFrontTurn: status activity', () => {
   }
 
   it('reports work tools once each (from input start), never reply/react/search_emojis', async () => {
-    const input = JSON.stringify({ title: 'Research', instructions: 'Research it' });
+    const input = JSON.stringify({ tasks: [{ title: 'Research', instructions: 'Research it' }] });
     const spawnStreamed = [
       { type: 'stream-start', warnings: [] },
       { type: 'tool-input-start', id: 's1', toolName: 'spawn_subagent' },

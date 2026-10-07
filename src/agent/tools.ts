@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { registerTool } from '../core/tools.js';
-import { cancelSubagent, messageSubagent, spawnSubagent } from './subagents.js';
+import { cancelSubagent, messageSubagent, spawnSubagent, ToolError } from './subagents.js';
 import { MAX_BUTTONS, MAX_LABEL_CHARS } from './reply-buttons.js';
 import { turnState } from './turn-state.js';
 
@@ -70,35 +70,60 @@ registerTool({
     }),
 });
 
+/** Subagents one spawn_subagent call may start (each is its own subagent; per-user / per-thread limits still apply). */
+export const MAX_SPAWN_TASKS = 6;
+
 registerTool({
   name: 'spawn_subagent',
   roles: ['front'],
   build: (ctx) =>
     tool({
       description:
-        'Start a background subagent for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels, summarising long threads). It cannot see this conversation: give complete, self-contained instructions. Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer. For independent parts, spawn one per part in the same step (they run in parallel).',
+        `Start background subagents for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels). Each task in \`tasks\` becomes its own subagent and they all run in parallel: for a request with independent parts (several products, people, channels, questions), pass one task per part in this ONE call (up to ${MAX_SPAWN_TASKS}). Only split into parts that don't need each other's results: one question, or a comparison that needs one finding first, is one task (or a later round). A subagent cannot see this conversation: give each complete, self-contained instructions. Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer.`,
       inputSchema: z.object({
-        title: z.string().describe('Short task title for the plan card, e.g. "Research hosting options" (≤ 6 words)'),
-        instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, image ids img_N), and what a good result looks like'),
-        seed_from: z.string().optional().describe('Id of an expired subagent whose summary should seed this one'),
+        tasks: z
+          .array(
+            z.object({
+              title: z.string().describe('Short task title for the plan card, e.g. "Research hosting options" (≤ 6 words)'),
+              instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, image ids img_N), and what a good result looks like'),
+              seed_from: z.string().optional().describe('Id of an expired subagent whose summary should seed this one'),
+            }),
+          )
+          .min(1)
+          .max(MAX_SPAWN_TASKS)
+          .describe('One entry per subagent. Usually one; several only for independent parts (one per product, person, channel…), never for steps of one question'),
       }),
-      execute: async ({ title, instructions, seed_from }) => {
+      execute: async ({ tasks }) => {
         const s = turnState(ctx);
-        const r = await spawnSubagent({
-          threadId: s.threadId,
-          turnId: s.turn.id,
-          ownerId: s.turn.authorId,
-          title,
-          instructions,
-          seedFrom: seed_from,
-        });
-        s.cardId = r.cardId;
-        s.spawned.add(r.subagentId);
-        s.delegated = true;
-        s.visible.add('spawn');
+        const started: { subagent_id: string; title: string }[] = [];
+        const failed: { title: string; error: string }[] = [];
+        let firstError: unknown;
+        // One after another: the limits are checked per spawn, and every run is queued (and starts) right away.
+        for (const t of tasks) {
+          try {
+            const r = await spawnSubagent({
+              threadId: s.threadId,
+              turnId: s.turn.id,
+              ownerId: s.turn.authorId,
+              title: t.title,
+              instructions: t.instructions,
+              seedFrom: t.seed_from,
+            });
+            s.cardId = r.cardId;
+            s.spawned.add(r.subagentId);
+            s.delegated = true;
+            s.visible.add('spawn');
+            started.push({ subagent_id: r.subagentId, title: t.title });
+          } catch (err) {
+            firstError ??= err;
+            failed.push({ title: t.title, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        if (!started.length) throw tasks.length === 1 ? firstError : new ToolError(failed.map((f) => `"${f.title}": ${f.error}`).join('; '));
         return {
-          subagent_id: r.subagentId,
+          started,
           status: 'queued',
+          ...(failed.length ? { not_started: failed } : {}),
           note: 'Plan card will be posted below your reply. Do not research this yourself or answer it now; at most one short acknowledgement (if you have not replied yet), then call end_turn. You get the results in a later turn.',
         };
       },
