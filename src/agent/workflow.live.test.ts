@@ -77,6 +77,10 @@ describe.skipIf(!LIVE)('multi-round subagent workflow (LIVE)', () => {
   }, 600_000);
 
   it('an explicitly staged request runs a second round from the summary turn', async () => {
+    // Registrations as in the first case, so this one also runs on its own (-t).
+    await import('../tools/index.js');
+    await import('./register.js');
+    await import('../features/register.js');
     const { sql } = await import('../db/index.js');
     const scheduler = await import('../pipeline/scheduler.js');
     const { processThreadRun } = await import('../pipeline/thread-run.js');
@@ -104,6 +108,10 @@ describe.skipIf(!LIVE)('multi-round subagent workflow (LIVE)', () => {
       from cards c where c.thread_id = ${threadId} order by c.id`;
     // eslint-disable-next-line no-console
     console.log('staged cards:', JSON.stringify(cards));
+    const tools = await sql<{ type: string; payload: any }[]>`
+      select type, payload from thread_events where thread_id = ${threadId} and type in ('turn_tools', 'lookup_guard') order by id`;
+    // eslint-disable-next-line no-console
+    console.log('staged turns:', tools.map((e) => (e.type === 'lookup_guard' ? `[guard ${e.payload.guard}]` : e.payload.calls.map((c: any) => c.tool).join(','))).join(' | '));
     const second = cards.find((c) => c.parentCardId != null && c.runs > 0);
     expect(second).toBeTruthy();
     expect(second!.runs).toBeGreaterThanOrEqual(2);

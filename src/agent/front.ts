@@ -31,6 +31,7 @@ import { activeRunsInThread } from './subagents.js';
 import { cursorInstructRefusal, cursorRefusal, isCursorAdmin } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
 import { endsTurnAfterStep, type StepCall, type StepResultPart } from './turn-end.js';
+import { countLookupSteps, LOOKUP_RESTRICT_NOTE, lookupGuard, lookupNudgeNote, nonLookupTools, type LookupGuard } from './lookup-guard.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
 import { noteBotReply } from '../pipeline/store.js';
 import { awaitsReply } from '../pipeline/rules.js';
@@ -707,6 +708,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   };
 
   let failed: unknown;
+  /** How far the lookup guard has gone in this turn (lookup-guard.ts). */
+  let guardStage: LookupGuard = 'none';
   /** Every tool call of this turn, for the next turn's <previous_turn_tools>. */
   const turnCalls: { tool: string; args: unknown }[] = [];
   try {
@@ -732,8 +735,20 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
         },
         () => checkStop(),
       ],
-      prepareStep: async ({ messages: current }) => {
+      prepareStep: async ({ messages: current, steps }) => {
         const extra: ModelMessage[] = [];
+        // Lookup guard (lookup-guard.ts): nudge towards delegating after several lookup-only steps, then turn the
+        // research tools off. The notes go in once; the restriction holds for every later step.
+        const lookupSteps = countLookupSteps(steps.map((s) => s.toolCalls.map((c) => c.toolName)));
+        const guard = lookupGuard(lookupSteps, { nudgeAfter: limits.frontLookupNudgeSteps, restrictAfter: limits.frontLookupRestrictSteps });
+        if (guard !== 'none' && guardStage === 'none') extra.push({ role: 'user', content: lookupNudgeNote(lookupSteps) });
+        if (guard === 'restrict' && guardStage !== 'restrict') extra.push({ role: 'user', content: LOOKUP_RESTRICT_NOTE });
+        if (guard !== guardStage && guard !== 'none') {
+          log.info({ turnId, lookupSteps, guard }, 'front lookup guard');
+          await appendEvent(turn.threadId, 'lookup_guard', 'system', { turnId, lookupSteps, guard }).catch(() => {});
+          guardStage = guard;
+        }
+        const activeTools = guardStage === 'restrict' ? nonLookupTools(Object.keys(tools)) : undefined;
         const inbox = await takeInbox();
         if (inbox.length) {
           inbox.forEach((m) => seenTs.add(m.ts));
@@ -743,7 +758,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
           await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
         }
-        return extra.length ? { messages: [...current, ...extra] } : {};
+        return { ...(extra.length ? { messages: [...current, ...extra] } : {}), ...(activeTools ? { activeTools } : {}) };
       },
     });
 

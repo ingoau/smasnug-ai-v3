@@ -499,6 +499,60 @@ describe('runFrontTurn: a reply or reaction ends the turn', () => {
   });
 });
 
+describe('runFrontTurn: lookup guard', () => {
+  const calls = () => (h.model as any).doStreamCalls as any[];
+  const toolNames = (i: number) => (calls()[i].tools ?? []).map((t: any) => t.name);
+  const promptText = (i: number) => JSON.stringify(calls()[i].prompt);
+  const search = (q: string) => toolStep(['web_search', { query: q }]);
+
+  it('a quick answer with one or two lookups is untouched', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    try {
+      h.model = mockModel([search('a'), search('b'), toolStep(['reply', { text: 'here you go' }])]);
+      await runFrontTurn(turn({ id: 130 }), io().io);
+      expect(calls()).toHaveLength(3);
+      for (let i = 0; i < 3; i++) {
+        expect(toolNames(i)).toContain('web_search');
+        expect(promptText(i)).not.toContain('system_note');
+      }
+      expect(h.events.some((e) => e.type === 'lookup_guard')).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('nudges towards spawn_subagent after 3 lookup steps, then switches research tools off after 2 more', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    try {
+      h.model = mockModel([
+        search('1'),
+        toolStep(['reply', { text: 'looking', continue_turn: true }], ['web_search', { query: '2' }]),
+        search('3'),
+        search('4'),
+        search('5'),
+        toolStep(['reply', { text: 'handing this to subagents' }], ['spawn_subagent', { tasks: [{ title: 'Dig', instructions: 'dig in' }] }]),
+      ]);
+      await runFrontTurn(turn({ id: 131 }), io().io);
+      expect(calls()).toHaveLength(6);
+      // Steps 0-2: no note, research available.
+      for (let i = 0; i < 3; i++) expect(promptText(i)).not.toContain('system_note');
+      // Step 3 (after 3 lookup steps): the nudge, tools unchanged.
+      expect(promptText(3)).toContain("You've done 3 rounds of lookups");
+      expect(promptText(3)).toContain('spawn_subagent');
+      expect(toolNames(3)).toContain('web_search');
+      // Step 5 (after 5): research off, reply and spawn_subagent still there; the nudge is not repeated.
+      expect(promptText(5)).toContain('Research tools are now off');
+      expect(promptText(5).split("You've done").length - 1).toBe(1);
+      expect(toolNames(5)).not.toContain('web_search');
+      expect(toolNames(5)).toEqual(expect.arrayContaining(['reply', 'spawn_subagent', 'end_turn']));
+      expect(h.spawns).toHaveLength(1);
+      expect(h.events.filter((e) => e.type === 'lookup_guard').map((e) => e.payload.guard)).toEqual(['nudge', 'restrict']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('runFrontTurn: conversation state', () => {
   it('frames an addressed (non-mention) turn as talking with the bot', async () => {
     h.model = mockModel([textStep('')]);
