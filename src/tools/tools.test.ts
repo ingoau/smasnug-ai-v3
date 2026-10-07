@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import sharp from 'sharp';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { sql } from '../db/index.js';
+import { limits } from '../config.js';
 import { redis } from '../core/redis.js';
 import { addFakeHandler, fakeSlackError } from '../core/slack-fake.js';
 import { threadIdOf } from '../core/events.js';
@@ -118,10 +119,20 @@ describe('read_thread / read_channel', () => {
     expect(out).toContain('[1790000011.000100] <@U0BOB> Bob Builder: reply number 11');
     expect(out).toContain('reply number 7');
     expect(out).not.toContain('reply number 12');
-    expect(out).toMatch(/\[4 earlier replies — call read_thread with before_ts=1790000007\.000100\]/); // 1-4 (5,6 hidden)
+    // Replies 1-4 visible before it (5, 6 hidden); position, older and newer cursors in the header.
+    expect(out).toMatch(/\[replies 5–9 of \d+ replies; older: read_thread before_ts=1790000007\.000100; newer: read_thread after_ts=1790000011\.000100\]/);
     const all: string = await exec(toolsFor('front', baseCtx()).read_thread, { before_ts: '1790000004.000100', limit: 10 });
     expect(all).toContain('Anyone know how to fix'); // parent included when the window reaches it
     expect(all).toContain('[image img_1: screenshot.png, from Ingo]');
+    expect(all).toContain('start of thread');
+    // Forwards from the start: the parent first, then the oldest replies.
+    const fwd: string = await exec(toolsFor('front', baseCtx()).read_thread, { after_ts: FIX_THREAD_TS, limit: 3 });
+    expect(fwd).toMatch(/\[parent \+ replies 1–3 of \d+ replies; start of thread; newer: read_thread after_ts=1790000003\.000100\]/);
+    expect(fwd).toContain('Anyone know how to fix');
+    // Pages are capped by size: the newest page stops long before 100 messages of up to ~2000 tokens each.
+    const newest: string = await exec(toolsFor('front', baseCtx()).read_thread, { limit: 100 });
+    expect(newest.length).toBeLessThan(limits.readPageTokens * 4 + 3000);
+    expect(newest).toContain('newest reply');
   });
 
   it('reads channel history', async () => {

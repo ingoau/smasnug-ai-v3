@@ -75,6 +75,8 @@ export const limits = {
   newMessageTruncateTokens: 4000,
   /** Explicit reads: read_thread, read_channel, read_public_thread, read_public_channel. */
   readMessageTruncateTokens: 2000,
+  /** Page size cap (≈tokens) for read_thread / read_channel: a page stops before it would exceed this (≥ 1 message). */
+  readPageTokens: 6000,
   disengageAfterMessages: 25,
   disengageAfterMs: 3 * 60 * 60 * 1000,
   gateContextMessages: 6,
