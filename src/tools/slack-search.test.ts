@@ -1,5 +1,5 @@
 /**
- * slack_search: the short-lived result cache (public matches only, re-checked on a hit, never for semantic search),
+ * slack_search: the short-lived result cache (public matches only, re-checked on a hit),
  * in-flight sharing, the fail-fast busy result and the soft per-run budget note. The limiter itself is covered in
  * src/core/slack-limiter.test.ts and, end to end with the fake Slack, in slack-search.int.test.ts.
  */
@@ -139,13 +139,6 @@ describe('slack_search cache', () => {
     const outs: string[] = await Promise.all(tools.map((t) => exec(t, { query: q('concurrent') })));
     expect(searchCalls).toHaveLength(1);
     expect(new Set(outs).size).toBe(1);
-  });
-
-  it('slack_semantic_search results are never cached', async () => {
-    const query = q('semantic?');
-    await exec(toolsFor('child', ctx()).slack_semantic_search, { query });
-    expect(await redis.exists(searchCacheKey(query, undefined))).toBe(0);
-    expect(await redis.exists(searchCacheKey(query.trim(), 'relevance'))).toBe(0);
   });
 });
 

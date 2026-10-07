@@ -7,7 +7,6 @@ import { processThreadSummary, type ThreadSummaryJob } from '../context/summary.
 import './fetch-url.js';
 import './web-search.js';
 import './slack-search.js';
-import './slack-semantic-search.js';
 import './read-history.js';
 import './public-thread.js';
 import './ask-thread.js';

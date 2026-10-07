@@ -18,13 +18,13 @@ afterAll(async () => {
 describe('userQuotaStates', () => {
   it('reads the sliding windows without counting, and warns once a limit is close', async () => {
     const fresh = await userQuotaStates(user);
-    expect(fresh.find((q) => q.kind === 'semantic_search')).toMatchObject({ max: limits.userSemanticSearchesPerHour, remaining: limits.userSemanticSearchesPerHour });
+    expect(fresh.find((q) => q.kind === 'canvas_write')).toMatchObject({ max: limits.userCanvasWritesPerHour, remaining: limits.userCanvasWritesPerHour });
     expect(lowQuotaLines(fresh)).toBe('');
-    for (let i = 0; i < limits.userSemanticSearchesPerHour - 1; i++) expect(await takeLimit('semantic_search', user)).toBeNull();
+    for (let i = 0; i < limits.userCanvasWritesPerHour - 1; i++) expect(await takeLimit('canvas_write', user)).toBeNull();
     const states = await userQuotaStates(user);
-    expect(states.find((q) => q.kind === 'semantic_search')!.remaining).toBe(1);
+    expect(states.find((q) => q.kind === 'canvas_write')!.remaining).toBe(1);
     // Reading didn't count: one is still left.
-    expect((await userQuotaStates(user)).find((q) => q.kind === 'semantic_search')!.remaining).toBe(1);
-    expect(lowQuotaLines(states)).toBe(`Semantic Slack searches: only 1 left this hour (max ${limits.userSemanticSearchesPerHour}/hour).`);
+    expect((await userQuotaStates(user)).find((q) => q.kind === 'canvas_write')!.remaining).toBe(1);
+    expect(lowQuotaLines(states)).toBe(`Canvas writes: only 1 left this hour (max ${limits.userCanvasWritesPerHour}/hour).`);
   });
 });

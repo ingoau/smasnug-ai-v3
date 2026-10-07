@@ -80,13 +80,13 @@ describe('low-quota warnings', () => {
     expect(quotaIsLow({ max: 500, remaining: 26 })).toBe(false);
     expect(
       lowQuotaLines([
-        { kind: 'semantic_search', noun: 'Semantic Slack searches', max: 20, remaining: 1 },
+        { kind: 'canvas_write', noun: 'Canvas writes', max: 30, remaining: 1 },
         { kind: 'websearch', noun: 'Web searches', max: 100, remaining: 0 },
         { kind: 'search', noun: 'Slack searches', max: 500, remaining: 400 },
         { kind: 'subagent', noun: 'Subagents', max: 10, remaining: 0 },
       ]).split('\n'),
     ).toEqual([
-      'Semantic Slack searches: only 1 left this hour (max 20/hour).',
+      'Canvas writes: only 1 left this hour (max 30/hour).',
       'Web searches: none left this hour (max 100/hour); calls will be refused.',
       'Subagents: they already have 10 running (the max); a new spawn will be refused until one finishes.',
     ]);

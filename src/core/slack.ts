@@ -94,10 +94,6 @@ const METHOD_RPM: Record<string, number> = {
   'conversations.history': 50,
   'users.info': 100,
   'views.publish': 100,
-  // Real-time Search: "an additional user-level limit of 10 requests per minute with burst"; every call uses the one
-  // user token, so this is also the per-user limit (docs.slack.dev/reference/methods/assistant.search.context).
-  'assistant.search.context': 10,
-  'assistant.search.info': 20, // Tier 2
   // Canvases (tiers from docs.slack.dev/reference/methods/canvases.*): create is tier 2, the rest tier 3.
   'canvases.create': 20,
   'canvases.edit': 50,

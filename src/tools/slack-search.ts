@@ -200,7 +200,7 @@ export function slimMatch(m: any): any {
   return out;
 }
 
-/** Redis key of a cached search: (query, sort, page). Never used for slack_semantic_search (Real-time Search). */
+/** Redis key of a cached search: (query, sort, page). */
 export function searchCacheKey(query: string, sort: SearchSort | undefined, page = 1): string {
   return `slack:search:cache:${createHash('sha256').update(JSON.stringify([query.trim(), sort ?? 'relevance', page])).digest('hex').slice(0, 32)}`;
 }

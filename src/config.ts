@@ -204,8 +204,6 @@ export const limits = {
   userWebSearchesPerHour: 100,
   userFetchesPerHour: 100,
   userSendsPerHour: 100,
-  /** slack_semantic_search (Slack Real-time Search): secondary search, kept rare. */
-  userSemanticSearchesPerHour: 20,
   // slack_search on the shared user token (search.messages, ~20/min for the whole app; src/tools/slack-search.ts)
   /** A search that would wait longer than this for the shared rate limiter returns a "rate limited" result instead. */
   slackSearchMaxWaitMs: 6_000,
