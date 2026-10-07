@@ -20,7 +20,7 @@ vi.hoisted(() => {
 });
 
 const h = vi.hoisted(() => ({ model: undefined as any }));
-vi.mock('../models.js', () => ({ MODELS: { gate: 'mock', front: 'mock', child: 'mock-child' }, chatModel: () => h.model }));
+vi.mock('../models.js', async (orig) => ({ ...(await orig<typeof import('../models.js')>()), MODELS: { gate: 'mock', front: 'mock', child: 'mock-child' }, chatModel: () => h.model }));
 vi.mock('../pipeline/scheduler.js', () => ({ requestTurn: async () => 1 }));
 vi.mock('./cards.js', async (orig) => ({ ...(await orig<typeof import('./cards.js')>()), scheduleCardRender: async () => {} }));
 
