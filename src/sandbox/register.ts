@@ -30,7 +30,7 @@ if (enabled) {
 }
 
 type SandboxJob =
-  | { type: 'pause'; sandboxId: string; generation?: number; force?: boolean }
+  | { type: 'pause'; sandboxId: string; generation?: number; force?: boolean; minIdleMs?: number }
   | { type: 'destroy'; sandboxId: string }
   | { type: 'preview-prepare' | 'preview-deploy'; previewId: string };
 
@@ -41,7 +41,7 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
     const d = job.data as SandboxJob;
     switch (d.type) {
       case 'pause':
-        await pauseSandbox(d.sandboxId, { generation: d.generation, force: d.force });
+        await pauseSandbox(d.sandboxId, { generation: d.generation, force: d.force, minIdleMs: d.minIdleMs });
         return;
       case 'destroy':
         await destroySandbox(d.sandboxId);

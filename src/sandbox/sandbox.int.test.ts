@@ -234,6 +234,51 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
     expect(out).toContain('ran: ls');
   });
 
+  it('a finished run pauses its sandbox after a short grace (delayed job), so idle time is not charged', async () => {
+    const { queue, QUEUE } = await import('../core/queues.js');
+    const { limits } = await import('../config.js');
+    const delayedPause = async (sandboxId: string) =>
+      (await queue(QUEUE.sandbox).getJobs(['delayed', 'waiting'])).filter((j) => j.data.type === 'pause' && j.data.sandboxId === sandboxId);
+    const t = await newThread();
+    const u = await newUser();
+    const sa = await newSubagent({ threadId: t, owner: u });
+    const ctx = ctxOf(t, u, sa);
+    await call(ctx, 'sandbox_exec', { command: 'echo hi' });
+    const [row] = await sql<any[]>`select * from sandboxes where subagent_id = ${sa.subagentId}`;
+
+    // Another run of the same subagent is queued: no early pause.
+    const [queued] = await sql<{ id: number }[]>`insert into runs (subagent_id, thread_id, instructions, status, is_resume) values (${sa.subagentId}, ${t}, 'next', 'queued', true) returning id`;
+    await finishRun(sa.runId);
+    await hooks.onSandboxRunFinished(sa.runId);
+    expect(await delayedPause(row.id)).toHaveLength(0);
+    await sql`update runs set status = 'cancelled', finished_at = now() where id = ${queued!.id}`;
+
+    // The last run ended: one delayed pause job.
+    await hooks.onSandboxRunFinished(Number(queued!.id));
+    const jobs = await delayedPause(row.id);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.opts.delay).toBe(limits.sandboxRunEndPauseMs);
+    expect(jobs[0]!.data).toMatchObject({ generation: row.generation, minIdleMs: limits.sandboxRunEndPauseMs });
+    await jobs[0]!.remove();
+
+    // Used again within the grace (idle_since cleared): the job is a no-op.
+    await call({ ...ctx, runId: Number(queued!.id) }, 'sandbox_exec', { command: 'echo again' });
+    expect(await L.pauseSandbox(row.id, jobs[0]!.data)).toBe('skipped');
+    // Idle for the whole grace: paused, and its usage segment closed (charged up to now, not the 5-min idle pause).
+    await sql`update sandboxes set idle_since = now() - ${limits.sandboxRunEndPauseMs} * interval '1 millisecond' where id = ${row.id}`;
+    expect(await L.pauseSandbox(row.id, jobs[0]!.data)).toBe('paused');
+    const open = await sql`select 1 from sandbox_usage where sandbox_id = ${row.id} and ended_at is null`;
+    expect(open).toHaveLength(0);
+    expect(await B.userMinutesToday(u)).toBeLessThan(1);
+  });
+
+  it('isIdleFor: idle for the grace (with a little clock skew), never when in use', () => {
+    const now = Date.parse('2026-10-07T12:00:00Z');
+    expect(L.isIdleFor(null, 45_000, now)).toBe(false);
+    expect(L.isIdleFor(new Date(now - 44_000), 45_000, now)).toBe(true); // within the 2 s skew
+    expect(L.isIdleFor(new Date(now - 30_000), 45_000, now)).toBe(false);
+  });
+
   it('destroys sandboxes of ended subagents and reconciles orphans', async () => {
     const t = await newThread();
     const u = await newUser();

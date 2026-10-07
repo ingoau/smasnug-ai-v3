@@ -332,6 +332,12 @@ export const limits = {
   sandboxLifetimeMs: 45 * 60_000,
   /** A live sandbox whose subagent has no active run is paused (filesystem snapshot + terminate) after this. */
   sandboxIdlePauseMs: 5 * 60_000,
+  /**
+   * When a sandbox subagent's run ends (complete / failed / cancelled) and no other run of it is queued, its sandbox
+   * is paused this long after (a delayed pause job) instead of after sandboxIdlePauseMs: idle live time counts
+   * against the user's daily sandbox minutes and the budget. A follow-up within the grace reuses the live sandbox.
+   */
+  sandboxRunEndPauseMs: 45_000,
   /** Run duration cap for subagents with a sandbox (other runs keep runMaxDurationMs). */
   sandboxRunMaxDurationMs: 30 * 60_000,
   sandboxExecDefaultMs: 60_000,

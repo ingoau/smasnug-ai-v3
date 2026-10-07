@@ -239,13 +239,16 @@ export async function withSandbox<T>(o: { subagentId: string; threadId: string; 
 }
 
 /** Pause job: snapshot + terminate, unless the sandbox was used again meanwhile (generation) or a run is active. */
-export async function pauseSandbox(sandboxId: string, o: { generation?: number; force?: boolean } = {}): Promise<'paused' | 'skipped' | 'lost'> {
+export async function pauseSandbox(sandboxId: string, o: { generation?: number; force?: boolean; minIdleMs?: number } = {}): Promise<'paused' | 'skipped' | 'lost'> {
   const [pre] = await sql<SandboxRow[]>`select * from sandboxes where id = ${sandboxId}`;
   if (!pre) return 'skipped';
   return withLock(lockKey(pre), async () => {
     const [row] = await sql<SandboxRow[]>`select * from sandboxes where id = ${sandboxId}`;
     if (!row || row.state !== 'running' || !row.providerId) return 'skipped';
     if (o.generation != null && row.generation !== o.generation) return 'skipped';
+    // A run-end pause: only if the sandbox stayed idle since (a tool call clears idle_since; a later run end
+    // schedules its own pause).
+    if (o.minIdleMs != null && !o.force && !isIdleFor(row.idleSince, o.minIdleMs)) return 'skipped';
     if (!o.force && row.subagentId) {
       const [active] = await sql`select 1 from runs where subagent_id = ${row.subagentId} and status in ('queued', 'running') limit 1`;
       if (active) return 'skipped';
@@ -291,6 +294,25 @@ export async function destroySandbox(sandboxId: string): Promise<void> {
     await closeSegments({ sandboxId: row.id });
   });
 }
+
+/** Clock skew between workers and Postgres (idle_since is the DB's now()). */
+const IDLE_SKEW_MS = 2000;
+
+/** Pure: idle (idle_since set) for at least `ms`, allowing a little clock skew. */
+export function isIdleFor(idleSince: Date | null, ms: number, now = Date.now()): boolean {
+  return idleSince != null && now - new Date(idleSince).getTime() >= ms - IDLE_SKEW_MS;
+}
+
+/**
+ * The pause after a run ended (src/sandbox/hooks.ts): delayed by limits.sandboxRunEndPauseMs, and skipped then if the
+ * sandbox was used again, another run is active, or it was recreated (generation). One job per run end.
+ */
+export const enqueueRunEndPause = (row: Pick<SandboxRow, 'id' | 'generation'>, runId: number) =>
+  enqueue(
+    QUEUE.sandbox,
+    { type: 'pause', sandboxId: row.id, generation: row.generation, minIdleMs: limits.sandboxRunEndPauseMs },
+    { jobId: `pause-${row.id}-${row.generation}-run${runId}`, delay: limits.sandboxRunEndPauseMs, attempts: 2, backoff: { type: 'fixed', delay: 10_000 }, removeOnComplete: true, removeOnFail: true },
+  );
 
 // The job ids dedupe while a job is pending only (removed when done): a pause that was skipped (a run was active) or a
 // destroy that failed must be enqueueable again by the next sweep.
