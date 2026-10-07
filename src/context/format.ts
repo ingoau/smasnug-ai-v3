@@ -9,7 +9,7 @@
  *   [1727950004.000500] <@U123> Ingo: Pico (button)
  * The bracketed number is the message ts (used by react / read_thread before_ts / read_channel before_ts).
  */
-import type { MessageReaction, SlackFileRef } from '../core/types.js';
+import type { MessageAttachment, MessageReaction, SlackFileRef } from '../core/types.js';
 import { contextFileLabel, type ContextFile } from '../files/format.js';
 
 export interface RenderMsg {
@@ -28,6 +28,8 @@ export interface RenderMsg {
   buttons?: { labels: string[]; pressedBy?: string | null; pressedLabel?: string | null };
   /** This "message" is a quick-reply button press (its text is the label). */
   viaButton?: boolean;
+  /** Forwarded messages and link unfurls shown with it (normalize.ts attachmentsFromSlack). */
+  attachments?: MessageAttachment[];
 }
 
 export interface FormatEnv {
@@ -136,11 +138,40 @@ export function buttonsLabel(b: RenderMsg['buttons'], env: FormatEnv): string {
   return `[buttons: ${b.labels.join(' | ')}${b.pressedBy && b.pressedLabel != null ? `; ${who} pressed "${b.pressedLabel}"` : ''}]`;
 }
 
+/** Per-attachment cuts: a forwarded message is content, a link preview just context. */
+const FORWARD_MAX_CHARS = 1500;
+const LINK_MAX_CHARS = 400;
+
+/**
+ * `[forwarded from Sam in #ship: …]`, `[link preview: Title — description (url)]`, `[attached: …]`. Attachments whose
+ * text the message already contains (an app message whose text is its attachment's fallback, or a public read that
+ * inlined it) are skipped.
+ */
+export function attachmentLabels(atts: MessageAttachment[] | undefined, rawText: string, env: FormatEnv): string[] {
+  const out: string[] = [];
+  for (const a of atts ?? []) {
+    const body = a.text ? renderSlackText(a.text, env.names).replace(/\s+/g, ' ').trim() : '';
+    if (body && rawText.includes(a.text!.trim())) continue;
+    if (a.kind === 'link') {
+      const desc = [a.title, body].filter(Boolean).join(' — ');
+      if (!desc) continue;
+      out.push(`[link preview: ${truncateText(desc, Math.min(LINK_MAX_CHARS, env.maxChars))}${a.url ? ` (${a.url})` : ''}]`);
+      continue;
+    }
+    const content = body || a.title || '';
+    if (!content) continue;
+    const who = a.author ? ` from ${a.author}` : '';
+    const where = a.channel ? ` in #${a.channel}` : '';
+    out.push(`[${a.kind === 'forwarded' ? 'forwarded' : 'attached'}${who}${where}: ${truncateText(content, Math.min(FORWARD_MAX_CHARS, env.maxChars))}]`);
+  }
+  return out;
+}
+
 export function formatMessage(m: RenderMsg, env: FormatEnv): string {
   const text = truncateText(renderSlackText(m.text ?? '', env.names).trim(), env.maxChars);
   const from = authorName(m, env);
   const files = (m.files ?? []).map((f) => fileLabel(f, from, env));
-  const parts = [text, ...files].filter(Boolean);
+  const parts = [text, ...attachmentLabels(m.attachments, m.text ?? '', env), ...files].filter(Boolean);
   if (m.viaButton) parts.push('(button)');
   const buttons = buttonsLabel(m.buttons, env);
   if (buttons) parts.push(buttons);

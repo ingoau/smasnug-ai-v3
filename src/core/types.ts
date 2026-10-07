@@ -38,6 +38,21 @@ export interface StoredMessage {
   deleted: boolean;
   /** Reactions on the message (kept current from reaction events). */
   reactions?: MessageReaction[];
+  /** Forwarded messages and link unfurls Slack shows with the message (migration 252). */
+  attachments?: MessageAttachment[];
+}
+
+/**
+ * A forwarded message / message unfurl ('forwarded'), a link preview ('link') or another app attachment
+ * ('attached'), normalised from Slack's `attachments` (src/context/normalize.ts). Untrusted content.
+ */
+export interface MessageAttachment {
+  kind: 'forwarded' | 'link' | 'attached';
+  author?: string;
+  channel?: string;
+  title?: string;
+  text?: string;
+  url?: string;
 }
 
 /** One emoji's reactions on a message. `count` can exceed users.length (Slack truncates the user list). */

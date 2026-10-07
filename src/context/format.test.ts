@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { compareTs, formatMessage, formatMessages, formatThread, isImageFile, reactionsLabel, renderSlackText, selectThread, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
 import { applyReaction, reactionsFromSlack } from './reactions.js';
 import { fixtureReplies, FIX_THREAD_TS } from './fixtures.js';
-import { fromSlack } from './normalize.js';
+import { attachmentsFromSlack, fromSlack } from './normalize.js';
 
 const env = (over: Partial<FormatEnv> = {}): FormatEnv => ({
   names: new Map([
@@ -159,5 +159,32 @@ describe('reactions', () => {
     expect(r).toEqual([{ name: 'eyes', users: ['U2'], count: 1 }]);
     // Backfilled counts beyond the listed users are kept.
     expect(applyReaction([{ name: 'x', users: ['U1'], count: 5 }], 'added', 'x', 'U2')).toEqual([{ name: 'x', users: ['U1', 'U2'], count: 6 }]);
+  });
+});
+
+describe('forwards and link unfurls (attachments)', () => {
+  const forward = { is_share: true, author_name: 'Sam', channel_name: 'ship', text: 'Demo night moved to Friday 6pm', fallback: 'Demo night moved', from_url: 'https://x.slack.com/archives/C1/p1790000000000100' };
+  const unfurl = { service_name: 'Example', title: 'Pico 2 W datasheet', text: 'RP2350, 520 KB SRAM, Wi-Fi', from_url: 'https://example.com/pico', original_url: 'https://example.com/pico' };
+
+  it('normalises forwards, link previews and app attachments; drops ## content and empty ones', () => {
+    expect(attachmentsFromSlack([forward, unfurl, { text: '## secret forward', is_share: true }, { color: 'good' }, { fallback: 'Build #7 passed' }])).toEqual([
+      { kind: 'forwarded', author: 'Sam', channel: 'ship', text: 'Demo night moved to Friday 6pm', url: 'https://x.slack.com/archives/C1/p1790000000000100' },
+      { kind: 'link', title: 'Pico 2 W datasheet', text: 'RP2350, 520 KB SRAM, Wi-Fi', url: 'https://example.com/pico' },
+      { kind: 'attached', text: 'Build #7 passed' },
+    ]);
+    expect(attachmentsFromSlack(undefined)).toEqual([]);
+    expect(attachmentsFromSlack([{ is_share: true, text: 'x'.repeat(9000) }])[0]!.text).toHaveLength(4000);
+  });
+
+  it('renders them after the message text, cut to size, without repeating text the message already has', () => {
+    const m = fromSlack({ ts: '1790000000.000100', user: 'U0INGO', text: 'look at this', attachments: [forward, unfurl] })!;
+    expect(formatMessage(m, env())).toBe(
+      '[1790000000.000100] <@U0INGO> Ingo: look at this [forwarded from Sam in #ship: Demo night moved to Friday 6pm] [link preview: Pico 2 W datasheet — RP2350, 520 KB SRAM, Wi-Fi (https://example.com/pico)]',
+    );
+    // An app message whose text is its attachment's fallback: shown once.
+    const bot = fromSlack({ ts: '1790000000.000200', bot_id: 'BCI', username: 'CI Bot', text: '', attachments: [{ fallback: 'Build #42 failed', text: 'Build #42 failed' }] })!;
+    expect(formatMessage(bot, env())).toBe('[1790000000.000200] [bot] CI Bot: Build #42 failed');
+    const long = fromSlack({ ts: '1790000000.000300', user: 'U0INGO', text: 'fwd', attachments: [{ is_share: true, text: 'word '.repeat(1000) }] })!;
+    expect(formatMessage(long, env()).length).toBeLessThan(1300);
   });
 });

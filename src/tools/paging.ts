@@ -9,7 +9,8 @@ export function estimateRenderedChars(m: RenderMsg, maxChars: number): number {
   const text = Math.min((m.text ?? '').length, maxChars + 12);
   const files = (m.files ?? []).reduce((n, f) => n + 30 + (f.name?.length ?? 4), 0);
   const reactions = (m.reactions?.length ?? 0) * 25;
-  return 60 + text + files + reactions;
+  const attachments = (m.attachments ?? []).reduce((n, a) => n + 40 + Math.min((a.text?.length ?? 0) + (a.title?.length ?? 0), a.kind === 'link' ? 400 : 1500) + (a.url?.length ?? 0), 0);
+  return 60 + text + files + reactions + attachments;
 }
 
 /** Take messages from the start (`'forward'`) or the end (`'backward'`) of `msgs` until the budget or count runs out; at least one. */

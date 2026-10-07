@@ -1,10 +1,51 @@
 /** Pure normalisation of Slack API messages and stored rows into RenderMsg. */
-import type { SlackFileRef, StoredMessage } from '../core/types.js';
+import type { MessageAttachment, SlackFileRef, StoredMessage } from '../core/types.js';
 import type { RenderMsg } from './format.js';
 import { reactionsFromSlack } from './reactions.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 
 export const HIDDEN_SUBTYPES = new Set(['tombstone', 'message_deleted', 'channel_join', 'channel_leave', 'group_join', 'group_leave']);
+
+/** Stored per attachment at most (the renderer cuts further). */
+const ATTACHMENT_TEXT_MAX = 4000;
+const ATTACHMENT_FIELD_MAX = 200;
+const MAX_ATTACHMENTS = 5;
+
+const field = (v: unknown, max = ATTACHMENT_FIELD_MAX) => {
+  const t = typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '';
+  return t ? t.slice(0, max) : undefined;
+};
+
+/**
+ * Slack `attachments` → MessageAttachment[] (pure): forwarded messages and Slack message unfurls ('forwarded'),
+ * link unfurls ('link', with the page's title and description), other app attachments ('attached'). Ones without
+ * any text are dropped, and so is forwarded / unfurled content that starts with `##` (workspace guidelines).
+ */
+export function attachmentsFromSlack(raw: unknown): MessageAttachment[] {
+  if (!Array.isArray(raw)) return [];
+  const out: MessageAttachment[] = [];
+  for (const a of raw) {
+    if (!a || typeof a !== 'object') continue;
+    const body = String(a.text || a.fallback || '').trim();
+    if (isHiddenMessage(body) || isHiddenMessage(a.pretext)) continue;
+    const message = Boolean(a.is_share || a.is_msg_unfurl);
+    const link = !message && Boolean(a.from_url || a.original_url || a.title_link || a.service_name);
+    const title = field(a.title);
+    const text = body ? body.slice(0, ATTACHMENT_TEXT_MAX) : undefined;
+    if (!text && !title) continue;
+    const url = field(a.from_url || a.original_url || a.title_link, 500);
+    out.push({
+      kind: message ? 'forwarded' : link ? 'link' : 'attached',
+      ...(field(a.author_name || a.author_subname) ? { author: field(a.author_name || a.author_subname) } : {}),
+      ...(field(a.channel_name) ? { channel: field(a.channel_name) } : {}),
+      ...(title ? { title } : {}),
+      ...(text ? { text } : {}),
+      ...(url && /^https?:\/\//.test(url) ? { url } : {}),
+    });
+    if (out.length >= MAX_ATTACHMENTS) break;
+  }
+  return out;
+}
 
 /**
  * Slack API message → RenderMsg. Returns null for messages that should never be shown (joins, tombstones, and `##`
@@ -41,6 +82,7 @@ export function fromSlack(raw: any): RenderMsg | null {
     deleted: false,
     replyCount: raw.reply_count || undefined,
     reactions: reactionsFromSlack(raw.reactions),
+    attachments: attachmentsFromSlack(raw.attachments),
   };
 }
 
@@ -62,6 +104,7 @@ export function fromStored(m: StoredMessage | (StoredMessage & Record<string, an
     edited: !!m.editedAt,
     deleted: !!m.deleted,
     reactions: Array.isArray(m.reactions) ? m.reactions : [],
+    attachments: Array.isArray(m.attachments) ? m.attachments : [],
   };
 }
 

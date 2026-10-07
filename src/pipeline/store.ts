@@ -1,6 +1,7 @@
 /** Stored copies of Slack messages and thread rows. */
 import { sql, type Sql } from '../db/index.js';
-import type { SlackFileRef, StoredMessage } from '../core/types.js';
+import type { MessageAttachment, SlackFileRef, StoredMessage } from '../core/types.js';
+import { attachmentsFromSlack } from '../context/normalize.js';
 import { removeMessageFiles } from '../files/store.js';
 import { log } from '../log.js';
 
@@ -32,6 +33,8 @@ export interface SlackMessage {
   text?: string;
   files?: { id: string; name?: string; mimetype?: string; url_private?: string; size?: number; mode?: string }[];
   edited?: { ts: string; user?: string };
+  /** Forwarded messages and link unfurls (normalised and stored, attachmentsFromSlack). */
+  attachments?: unknown[];
 }
 
 export function isBotMessage(m: SlackMessage): boolean {
@@ -67,11 +70,12 @@ export async function upsertThread(t: { id: string; channelId: string; threadTs:
  */
 export async function storeMessage(channelId: string, threadId: string | null, m: SlackMessage): Promise<{ deleted: boolean }> {
   const files = fileRefs(m);
+  const attachments: MessageAttachment[] = attachmentsFromSlack(m.attachments);
   const [row] = await sql<{ deleted: boolean }[]>`
-    insert into messages (channel_id, ts, thread_id, user_id, bot_id, username, text, files, edited_at)
+    insert into messages (channel_id, ts, thread_id, user_id, bot_id, username, text, files, edited_at, attachments)
     values (${channelId}, ${m.ts}, ${threadId}, ${m.user ?? null}, ${m.bot_id ?? null},
             ${m.username ?? m.bot_profile?.name ?? null}, ${m.text ?? ''}, ${sql.json(files as any)},
-            ${m.edited ? slackTsDate(m.edited.ts) : null})
+            ${m.edited ? slackTsDate(m.edited.ts) : null}, ${sql.json(attachments as any)})
     on conflict (channel_id, ts) do update set
       thread_id = coalesce(messages.thread_id, excluded.thread_id),
       user_id = coalesce(messages.user_id, excluded.user_id),
@@ -83,7 +87,10 @@ export async function storeMessage(channelId: string, threadId: string | null, m
       files = case when messages.deleted then '[]'::jsonb
                    when messages.edited_at is not null and (excluded.edited_at is null or excluded.edited_at < messages.edited_at) then messages.files
                    else excluded.files end,
-      edited_at = greatest(messages.edited_at, excluded.edited_at)
+      edited_at = greatest(messages.edited_at, excluded.edited_at),
+      attachments = case when messages.deleted then '[]'::jsonb
+                         when excluded.attachments = '[]'::jsonb then messages.attachments
+                         else excluded.attachments end
     returning deleted`;
   return { deleted: Boolean(row?.deleted) };
 }
@@ -92,7 +99,7 @@ export async function storeMessage(channelId: string, threadId: string | null, m
 export async function insertTombstone(channelId: string, ts: string, threadId: string, userId: string | null) {
   await sql`
     insert into messages (channel_id, ts, thread_id, user_id, deleted) values (${channelId}, ${ts}, ${threadId}, ${userId}, true)
-    on conflict (channel_id, ts) do update set text = '', files = '[]'::jsonb, deleted = true`;
+    on conflict (channel_id, ts) do update set text = '', files = '[]'::jsonb, attachments = '[]'::jsonb, deleted = true`;
 }
 
 /**
@@ -105,6 +112,11 @@ export async function applyEdit(channelId: string, m: SlackMessage): Promise<{ t
   const text = m.text ?? '';
   // The files it had: uploads removed from the message leave the file store too.
   const [before] = await sql<{ files: SlackFileRef[] }[]>`select files from messages where channel_id = ${channelId} and ts = ${m.ts} and not deleted`;
+  // Link unfurls arrive (and removed previews leave) as a message_changed with the same text: the full message's
+  // attachments are stored, but that alone is not an edit.
+  const attachments = attachmentsFromSlack(m.attachments);
+  await sql`update messages set attachments = ${sql.json(attachments as any)}
+    where channel_id = ${channelId} and ts = ${m.ts} and not deleted and attachments is distinct from ${sql.json(attachments as any)}::jsonb`;
   const [row] = await sql<{ threadId: string | null; userId: string | null }[]>`
     update messages set text = ${text}, files = ${sql.json(files as any)},
       edited_at = ${m.edited ? slackTsDate(m.edited.ts) : sql`edited_at`}
@@ -126,7 +138,7 @@ export async function applyEdit(channelId: string, m: SlackMessage): Promise<{ t
 export async function applyDelete(channelId: string, ts: string): Promise<{ threadId: string | null; userId: string | null } | undefined> {
   const [before] = await sql<{ files: SlackFileRef[] }[]>`select files from messages where channel_id = ${channelId} and ts = ${ts}`;
   const [row] = await sql<{ threadId: string | null; userId: string | null }[]>`
-    update messages set text = '', files = '[]'::jsonb, deleted = true
+    update messages set text = '', files = '[]'::jsonb, attachments = '[]'::jsonb, deleted = true
     where channel_id = ${channelId} and ts = ${ts}
     returning thread_id, user_id`;
   const slackIds = (Array.isArray(before?.files) ? before.files : []).map((f) => f?.id).filter((id): id is string => !!id);
@@ -153,7 +165,7 @@ export async function isTwoPartyThread(thread: ThreadRow, authorId: string): Pro
 export async function loadMessages(channelId: string, ts: string[], tx: Sql = sql): Promise<StoredMessage[]> {
   if (ts.length === 0) return [];
   return tx<StoredMessage[]>`
-    select channel_id, ts, thread_id, user_id, bot_id, username, text, files, edited_at, deleted
+    select channel_id, ts, thread_id, user_id, bot_id, username, text, files, edited_at, deleted, attachments
     from messages where channel_id = ${channelId} and ts = any(${ts}::text[]) and not deleted
     order by ts::numeric`;
 }
@@ -161,7 +173,7 @@ export async function loadMessages(channelId: string, ts: string[], tx: Sql = sq
 /** The last `n` stored messages of a thread strictly before `beforeTs`. */
 export async function recentMessages(threadId: string, beforeTs: string, n: number): Promise<StoredMessage[]> {
   const rows = await sql<StoredMessage[]>`
-    select channel_id, ts, thread_id, user_id, bot_id, username, text, files, edited_at, deleted
+    select channel_id, ts, thread_id, user_id, bot_id, username, text, files, edited_at, deleted, attachments
     from messages where thread_id = ${threadId} and not deleted and ts::numeric < ${beforeTs}::numeric
     order by ts::numeric desc limit ${n}`;
   return rows.reverse();

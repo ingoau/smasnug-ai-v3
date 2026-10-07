@@ -62,7 +62,7 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
         returning s.thread_id`,
   );
   // Copies of messages deleted in Slack: drop the content right away.
-  await run('messages_deleted_content', sql`update messages set text = '', files = '[]' where deleted and (text <> '' or files <> '[]') returning ts`);
+  await run('messages_deleted_content', sql`update messages set text = '', files = '[]', attachments = '[]' where deleted and (text <> '' or files <> '[]' or attachments <> '[]') returning ts`);
   // File store (src/files/): files the bot made go 30 days after creation; uploads go with message retention, and
   // right away when their Slack message was deleted (normally done at deletion time; this catches stragglers).
   await run('files_created', sql`delete from files where origin = 'created' and created_at < ${older(secs(limits.createdFileRetentionMs))} returning id`);

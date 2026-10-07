@@ -83,7 +83,11 @@ export function renderForGate(msgs: StoredMessage[], botUserId: string, botName 
       let text = m.text.replaceAll(`<@${botUserId}>`, `@${botName}`);
       if (text.length > 1200) text = `${text.slice(0, 1200)}…`;
       const files = m.files.length ? ` [${m.files.length} file(s)]` : '';
-      return `${who}: ${text}${files}`;
+      const shared = (m.attachments ?? [])
+        .filter((a) => a.text && !m.text.includes(a.text))
+        .map((a) => ` [${a.kind === 'link' ? 'link preview' : a.kind}: ${a.text!.length > 300 ? `${a.text!.slice(0, 300)}…` : a.text}]`)
+        .join('');
+      return `${who}: ${text}${shared}${files}`;
     })
     .join('\n');
 }

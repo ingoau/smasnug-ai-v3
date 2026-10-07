@@ -23,12 +23,13 @@ export async function storeMessages(channelId: string, threadId: string | null, 
         files: sql.json(m.files as any),
         edited_at: r.edited?.ts ? new Date(Number(r.edited.ts) * 1000) : null,
         reactions: sql.json((m.reactions ?? []) as any),
+        attachments: sql.json((m.attachments ?? []) as any),
       };
     });
   if (!rows.length) return;
   for (let i = 0; i < rows.length; i += 200) {
     const chunk = rows.slice(i, i + 200);
-    await sql`insert into messages ${sql(chunk, 'channel_id', 'ts', 'thread_id', 'user_id', 'bot_id', 'username', 'text', 'files', 'edited_at', 'reactions')}
+    await sql`insert into messages ${sql(chunk, 'channel_id', 'ts', 'thread_id', 'user_id', 'bot_id', 'username', 'text', 'files', 'edited_at', 'reactions', 'attachments')}
       on conflict (channel_id, ts) do nothing`;
   }
 }
