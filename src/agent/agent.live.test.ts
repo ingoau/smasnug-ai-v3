@@ -680,6 +680,54 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     await sql`delete from files where thread_id = ${th.id}`;
   }, 120_000);
 
+  it('an explicit length ("a 300-word explainer") beats the brevity default: ≥ ~270 words in the reply, a canvas or a file', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn(
+      'LENGTH',
+      '',
+      'write me a 300-word explainer on glimmerball, a sport i invented for my novel: teams of four on floating platforms try to catch a glowing ball that changes weight. make up the details',
+    );
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    const channelId = tid.split(':')[0]!;
+    const canvases = (await fakeCalls())
+      .slice(before)
+      .filter((c) => c.method === 'canvases.create' || c.method === 'canvases.edit')
+      .map((c) => JSON.stringify(c.args));
+    const files = await sql<{ content: Buffer | null }[]>`select content from files where thread_id = ${tid} and channel_id = ${channelId}`;
+    const words = (s: string) => s.split(/\s+/).filter((w) => /[a-z]/i.test(w)).length;
+    const counts = [...o.replies, ...canvases, ...files.map((f) => f.content?.toString('utf8') ?? '')].map(words);
+    // eslint-disable-next-line no-console
+    console.log('length:', JSON.stringify({ replies: o.replies.map(words), canvases: canvases.length, files: files.length, spawns: o.spawns, counts }));
+    expect(Math.max(0, ...counts)).toBeGreaterThanOrEqual(270);
+    await sql`delete from files where thread_id = ${tid}`;
+  }, 120_000);
+
+  it('per-section minimums ("each part at least 200 words") are met, not squeezed into a few lines per part', async () => {
+    const { runFrontTurn } = await import('./front.js');
+    const before = (await fakeCalls()).length;
+    const { tid, turn } = await dmTurn(
+      'SECTIONS',
+      '',
+      'for my novel, write a 3-part guide to glimmerball (a sport i invented: teams of four on floating platforms catch a glowing ball that changes weight): rules, positions, strategy. each part at least 200 words. make up the details',
+    );
+    await runFrontTurn(turn, io());
+    const o = await outcome(tid, before);
+    const channelId = tid.split(':')[0]!;
+    const canvases = (await fakeCalls())
+      .slice(before)
+      .filter((c) => c.method === 'canvases.create' || c.method === 'canvases.edit')
+      .map((c) => JSON.stringify(c.args));
+    const files = await sql<{ content: Buffer | null }[]>`select content from files where thread_id = ${tid} and channel_id = ${channelId}`;
+    const words = (s: string) => s.split(/\s+/).filter((w) => /[a-z]/i.test(w)).length;
+    const total = [...o.replies, ...canvases, ...files.map((f) => f.content?.toString('utf8') ?? '')].map(words).reduce((a, b) => a + b, 0);
+    // eslint-disable-next-line no-console
+    console.log('sections:', JSON.stringify({ replies: o.replies.map(words), canvases: canvases.length, files: files.length, spawns: o.spawns, total }));
+    expect(total).toBeGreaterThanOrEqual(560);
+    await sql`delete from files where thread_id = ${tid}`;
+  }, 180_000);
+
   it('an admin musing about the bot gets a brief acknowledgement, not a coding agent proposal', async () => {
     const { runFrontTurn } = await import('./front.js');
     const th = await freshThread('MUSE');

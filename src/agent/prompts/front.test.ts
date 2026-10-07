@@ -69,6 +69,12 @@ describe('frontSystemPrompt delegation and scope rules', () => {
     expect(p).toMatch(/"I'll update…"\) goes in the same step as the call that does the work/);
   });
 
+  it("explicit requirements beat the brevity defaults; deliverables get proper prose, not the chat voice", () => {
+    expect(p).toMatch(/the speaker's explicit requirements \(length, structure, format, tone, sources\) always win, and brevity is a default, not a cap/);
+    expect(p).toMatch(/Deliverables \(essays, reports, exam or quiz answers, write-ups, documents\) use proper prose in the requested form/);
+    expect(p).toMatch(/Never squeeze a long one into a short message: canvas or file, plus a short reply/);
+  });
+
   it('single-file deliverables are written with create_file', () => {
     expect(p).toMatch(/write the file yourself with create_file/);
   });
