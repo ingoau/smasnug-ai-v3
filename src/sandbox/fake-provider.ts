@@ -20,6 +20,8 @@ export class FakeProvider implements SandboxProvider {
   snapshots = new Map<string, Map<string, Buffer>>();
   counts = { create: 0, resume: 0, pause: 0, destroy: 0, deletePaused: 0, exec: 0 };
   createDelayMs = 0;
+  /** A slow snapshot (the box stays listed meanwhile, as on Modal). */
+  pauseDelayMs = 0;
   /** Commands of sandbox_exec (SBX_CMD) → result. Default: echo the command. */
   onExec: (cmd: string, box: FakeBox) => { exitCode?: number; stdout?: string; stderr?: string } = (cmd) => ({ stdout: `ran: ${cmd}\n` });
   private n = 0;
@@ -49,6 +51,7 @@ export class FakeProvider implements SandboxProvider {
   }
 
   async pause(h: Handle): Promise<Paused> {
+    if (this.pauseDelayMs) await new Promise((r) => setTimeout(r, this.pauseDelayMs));
     const b = this.box(h);
     this.counts.pause++;
     const ref = `snap-${b.id}`;

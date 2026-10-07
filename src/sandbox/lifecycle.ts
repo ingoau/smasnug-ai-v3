@@ -39,6 +39,8 @@ export interface SandboxRow {
   idleSince: Date | null;
   liveSince: Date | null;
   lastUsedAt: Date;
+  /** Set by a trigger on every update (migration 253). */
+  updatedAt: Date;
 }
 
 /** A refusal the model may see (quotas, budget): plain, non-personal text. */
@@ -55,6 +57,11 @@ async function lockFor(key: string): Promise<HeldLock> {
     if (Date.now() > deadline) throw new Error('sandbox is busy (lock wait timed out)');
     await new Promise((r) => setTimeout(r, 200));
   }
+}
+
+/** The lock if it is free right now, else null (never waits: the holder is mid-transition). */
+async function tryLock(key: string): Promise<HeldLock | null> {
+  return acquireLock(`lock:sandbox:${key}`, LOCK_TTL_MS);
 }
 
 async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
@@ -208,18 +215,26 @@ export async function pauseSandbox(sandboxId: string, o: { generation?: number; 
       const [active] = await sql`select 1 from runs where subagent_id = ${row.subagentId} and status in ('queued', 'running') limit 1`;
       if (active) return 'skipped';
     }
-    await sql`update sandboxes set state = 'pausing', last_used_at = now() where id = ${row.id}`;
+    // Conditional transitions: the row may move meanwhile (the stuck sweep, a destroy whose lock expired).
+    const [claimed] = await sql`update sandboxes set state = 'pausing', last_used_at = now()
+                                where id = ${row.id} and state = 'running' and generation = ${row.generation} returning id`;
+    if (!claimed) return 'skipped';
     const provider = sandboxProvider();
     try {
       const paused = await provider.pause({ providerId: row.providerId });
-      await sql`update sandboxes set state = 'paused', provider_id = null, paused_ref = ${paused.ref}, paused_expires_at = ${paused.expiresAt}, idle_since = null
-                where id = ${row.id}`;
+      const [done] = await sql`update sandboxes set state = 'paused', provider_id = null, paused_ref = ${paused.ref}, paused_expires_at = ${paused.expiresAt}, idle_since = null
+                               where id = ${row.id} and state = 'pausing' returning id`;
       await closeSegments({ sandboxId: row.id });
+      if (!done) {
+        // The row was ended while we snapshotted: nothing references the snapshot.
+        if (provider.deletePaused) await provider.deletePaused(paused).catch(() => {});
+        return 'lost';
+      }
       return 'paused';
     } catch (err) {
       if (!(err instanceof SandboxGoneError)) log.warn({ err, sandboxId: row.id }, 'sandbox pause failed; terminating it');
       await provider.destroy({ providerId: row.providerId }).catch(() => {});
-      await sql`update sandboxes set state = 'lost', provider_id = null where id = ${row.id}`;
+      await sql`update sandboxes set state = 'lost', provider_id = null where id = ${row.id} and state = 'pausing'`;
       await closeSegments({ sandboxId: row.id });
       return 'lost';
     }
@@ -273,31 +288,79 @@ export async function sweepSandboxes(): Promise<{ paused: number; destroyed: num
   return { paused: toPause.length, destroyed: dead.length };
 }
 
+/** Rows in these states own a provider sandbox (or are about to): their sandbox is never an orphan. */
+const NON_TERMINAL: SandboxState[] = ['creating', 'running', 'pausing', 'resuming', 'destroying'];
+const TRANSITIONAL: SandboxState[] = ['creating', 'resuming', 'pausing', 'destroying'];
+/**
+ * A provider sandbox whose row changed this recently is left alone: a transition just finished (pausing → paused
+ * while the provider still lists the box it is terminating; a create that just stored its provider id).
+ */
+export const RECONCILE_GRACE_MS = 2 * 60_000;
+/** A transition (creating, resuming, pausing, destroying) unchanged for this long is stuck → lost. */
+export const STUCK_TRANSITION_MS = 15 * 60_000;
+
+/**
+ * Pure: is a live provider work sandbox an orphan? `row` is its row (by provider id, else by its `sbx` tag), if any.
+ * A non-terminal row keeps its own sandbox (a pause snapshots for a while with the box still listed), a creating or
+ * resuming row also keeps a tagged box whose id it hasn't stored yet, and any row that changed within the grace period
+ * keeps it. Anything else (no row, an ended row, an old box of a row that moved on) is an orphan.
+ */
+export function isOrphan(sb: { providerId: string }, row: Pick<SandboxRow, 'state' | 'providerId' | 'updatedAt'> | null, now = Date.now()): boolean {
+  if (!row) return true;
+  if (now - new Date(row.updatedAt).getTime() < RECONCILE_GRACE_MS) return false;
+  if (!NON_TERMINAL.includes(row.state)) return true;
+  if (row.providerId === sb.providerId) return false;
+  return !(row.state === 'creating' || row.state === 'resuming');
+}
+
+/** The row a provider work sandbox belongs to: by provider id, else by its `sbx` tag. */
+async function rowOfBox(sb: { providerId: string; tags: Record<string, string> }): Promise<SandboxRow | null> {
+  const [byId] = await sql<SandboxRow[]>`select * from sandboxes where provider_id = ${sb.providerId} limit 1`;
+  if (byId) return byId;
+  if (!sb.tags.sbx) return null;
+  const [byTag] = await sql<SandboxRow[]>`select * from sandboxes where id = ${sb.tags.sbx}`;
+  return byTag ?? null;
+}
+
 /**
  * `sandbox:reconcile` (every 10 min): provider sandboxes without a live row are orphans (worker crash mid-create,
  * a failed destroy) → terminated; live rows the provider no longer has → lost; transitions stuck for long → lost.
+ * Race-safe against pause / resume / destroy, which hold the row's lock for their whole transition: an orphan that has
+ * a row, and a stuck row, are only touched under that lock (taken without waiting: a held lock means a transition is
+ * in progress, so it's skipped until the next run) after re-reading the row.
  */
 export async function reconcileSandboxes(): Promise<{ orphans: number; lost: number }> {
   const provider = sandboxProvider();
   const live = await provider.list(baseTags());
-  const rows = await sql<SandboxRow[]>`select * from sandboxes where state in ('creating', 'running', 'resuming', 'pausing', 'destroying')`;
-  const byProvider = new Map(rows.filter((r) => r.providerId).map((r) => [r.providerId!, r]));
+  const rows = await sql<SandboxRow[]>`select * from sandboxes where state in ${sql(NON_TERMINAL)}`;
   const previewsDeploying = new Set(
     (await sql<{ id: string }[]>`select id from previews where status = 'deploying'`).map((r) => r.id),
   );
+  const destroyBox = (providerId: string) => provider.destroy({ providerId }).catch((err) => log.warn({ err }, 'orphan destroy failed'));
   let orphans = 0;
   for (const sb of live) {
     if (sb.tags.kind === 'deploy') {
       if (sb.tags.preview && previewsDeploying.has(sb.tags.preview)) continue;
-    } else {
-      const row = byProvider.get(sb.providerId);
-      if (row && row.state === 'running') continue;
-      // A create in progress hasn't stored its provider id yet.
-      const pending = rows.find((r) => r.id === sb.tags.sbx && (r.state === 'creating' || r.state === 'resuming'));
-      if (pending) continue;
+      await destroyBox(sb.providerId);
+      orphans++;
+      continue;
     }
-    await provider.destroy({ providerId: sb.providerId }).catch((err) => log.warn({ err }, 'orphan destroy failed'));
-    orphans++;
+    const row = await rowOfBox(sb);
+    if (!isOrphan(sb, row)) continue;
+    if (!row) {
+      await destroyBox(sb.providerId);
+      orphans++;
+      continue;
+    }
+    const lock = await tryLock(lockKey(row));
+    if (!lock) continue;
+    try {
+      if (!isOrphan(sb, await rowOfBox(sb))) continue;
+      await destroyBox(sb.providerId);
+      orphans++;
+    } finally {
+      await lock.release();
+    }
   }
   const liveIds = new Set(live.map((l) => l.providerId));
   const minute = Date.now() - 60_000;
@@ -311,12 +374,23 @@ export async function reconcileSandboxes(): Promise<{ orphans: number; lost: num
       lost++;
     }
   }
-  const stuck = await sql`
-    update sandboxes set state = 'lost', provider_id = null
-    where state in ('creating', 'resuming', 'pausing', 'destroying') and last_used_at < now() - interval '15 minutes'
-    returning id`;
-  for (const s of stuck) await closeSegments({ sandboxId: s.id });
-  return { orphans, lost: lost + stuck.length };
+  const stuckBefore = new Date(Date.now() - STUCK_TRANSITION_MS);
+  const stuck = await sql<SandboxRow[]>`select * from sandboxes where state in ${sql(TRANSITIONAL)} and updated_at < ${stuckBefore}`;
+  for (const s of stuck) {
+    const lock = await tryLock(lockKey(s));
+    if (!lock) continue;
+    try {
+      const [moved] = await sql`
+        update sandboxes set state = 'lost', provider_id = null
+        where id = ${s.id} and state in ${sql(TRANSITIONAL)} and updated_at < ${stuckBefore} returning id`;
+      if (!moved) continue;
+      await closeSegments({ sandboxId: s.id });
+      lost++;
+    } finally {
+      await lock.release();
+    }
+  }
+  return { orphans, lost };
 }
 
 /** Retention: ended rows after 30 days, usage segments after 62, stale HCA rows after 30. */

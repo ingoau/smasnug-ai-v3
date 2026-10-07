@@ -256,6 +256,47 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
     expect(fake.boxes.get(orphan.providerId)!.alive).toBe(false);
   });
 
+  it('reconcile leaves a sandbox mid-pause alone; the pause completes', async () => {
+    const t = await newThread();
+    const u = await newUser();
+    const sa = await newSubagent({ threadId: t, owner: u });
+    await call(ctxOf(t, u, sa), 'sandbox_write_file', { path: 'keep.txt', content: 'x' });
+    await finishRun(sa.runId);
+    const [row] = await sql<any[]>`select * from sandboxes where subagent_id = ${sa.subagentId}`;
+    fake.pauseDelayMs = 400;
+    try {
+      const pausing = L.pauseSandbox(row.id, { generation: row.generation });
+      await vi.waitFor(async () => expect((await sql<any[]>`select state from sandboxes where id = ${row.id}`)[0].state).toBe('pausing'));
+      // The pause holds the lock: skipped. And with an old updated_at, the state alone protects it.
+      await sql`update sandboxes set updated_at = now() - interval '1 hour' where id = ${row.id}`;
+      await L.reconcileSandboxes();
+      expect(fake.boxes.get(row.providerId)!.alive).toBe(true);
+      expect(await pausing).toBe('paused');
+    } finally {
+      fake.pauseDelayMs = 0;
+    }
+    const [after] = await sql<any[]>`select * from sandboxes where id = ${row.id}`;
+    expect(after.state).toBe('paused');
+    expect(fake.snapshots.has(after.pausedRef)).toBe(true);
+    // State-based protection without the lock: a 'pausing' row whose box is still listed is not an orphan.
+    const sa2 = await newSubagent({ threadId: t, owner: u });
+    await call(ctxOf(t, u, sa2), 'sandbox_exec', { command: 'true' });
+    const [r2] = await sql<any[]>`select * from sandboxes where subagent_id = ${sa2.subagentId}`;
+    await sql`update sandboxes set state = 'pausing', updated_at = now() - interval '5 minutes' where id = ${r2.id}`;
+    await L.reconcileSandboxes();
+    expect(fake.boxes.get(r2.providerId)!.alive).toBe(true);
+    // Stuck for long → lost (and then its box is an orphan once the grace period has passed).
+    await sql`update sandboxes set updated_at = now() - interval '1 hour' where id = ${r2.id}`;
+    const r = await L.reconcileSandboxes();
+    expect(r.lost).toBeGreaterThanOrEqual(1);
+    expect((await sql<any[]>`select state from sandboxes where id = ${r2.id}`)[0].state).toBe('lost');
+    // Still listed but the row just changed (grace): kept; after the grace period: destroyed.
+    expect(fake.boxes.get(r2.providerId)!.alive).toBe(true);
+    await sql`update sandboxes set updated_at = now() - interval '1 hour' where id = ${r2.id}`;
+    await L.reconcileSandboxes();
+    expect(fake.boxes.get(r2.providerId)!.alive).toBe(false);
+  });
+
   it('imports thread files (access rule applies) and exports deliverables into the file store', async () => {
     const tA = await newThread();
     const tB = await newThread();
