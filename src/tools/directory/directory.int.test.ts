@@ -336,7 +336,7 @@ describe.skipIf(!infra)('workspace directory', () => {
 
     it('says the directory is still building (with progress) before the first complete crawl', async () => {
       await handleDirectoryEvent({ type: 'user_change', user: user('U0AAA', 'alice') });
-      await sql`insert into directory_crawls (kind, running, started_at, rows_seen) values ('people', true, now(), 75000)`;
+      await sql`insert into directory_crawls (kind, running, started_at, rows_seen) values ('people', true, now(), 120000)`;
       const out = await exec('find_people', { query: 'alice' });
       expect(out).toMatch(/still building \(50% done\).*slack_search/);
       expect(out).toContain('<@U0AAA>');

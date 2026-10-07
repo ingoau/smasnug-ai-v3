@@ -409,8 +409,11 @@ export const limits = {
   directoryUsersPageSize: 500,
   /** conversations.list page size (max 1000; Slack may return fewer after filtering). */
   directoryChannelsPageSize: 1000,
-  /** Progress estimate before the first complete crawl (Hack Club: ~150k users, 20k+ public channels). */
-  directoryPeopleEstimate: 150_000,
+  /**
+   * Progress estimates for the "directory still building (N%)" note, only until a kind's first complete crawl (then
+   * its last row count is used). Hack Club: ~240k people rows (users + bots).
+   */
+  directoryPeopleEstimate: 240_000,
   directoryChannelsEstimate: 25_000,
 } as const;
 
