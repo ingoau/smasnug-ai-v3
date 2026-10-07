@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  answersOtherOffer,
   awaitsReply,
   batchIsAddressed,
+  batchIsPartnerLike,
   batchIsMention,
   batchNeedsGate,
   debounceWindowMs,
@@ -53,6 +55,28 @@ describe('decide', () => {
     expect(decide({ ...base, awaitedReply: true, disengageDue: true })).toEqual({ action: 'batch', reason: 'direct' });
     expect(decide({ ...base, awaitedReply: true, mentionsOthers: true })).toEqual({ action: 'ignore', reason: 'mentions_other' });
     expect(decide({ ...base, awaitedReply: true, quietPrefix: true })).toEqual({ action: 'ignore', reason: 'quiet' });
+  });
+});
+
+describe("someone else answering the bot's question / offer", () => {
+  it('is the first human message after a reply that awaited someone else', () => {
+    expect(answersOtherOffer({ awaitsReplyFrom: 'U1', authorId: 'U2', humansSinceReply: false })).toBe(true);
+    expect(answersOtherOffer({ awaitsReplyFrom: 'U1', authorId: 'U2', humansSinceReply: true })).toBe(false);
+    expect(answersOtherOffer({ awaitsReplyFrom: 'U1', authorId: 'U1', humansSinceReply: false })).toBe(false); // that's 'direct'
+    expect(answersOtherOffer({ awaitsReplyFrom: null, authorId: 'U2', humansSinceReply: false })).toBe(false);
+  });
+  it('goes through the gate (partner threshold) in an engaged thread, never skipping it', () => {
+    expect(decide({ ...base, answersOther: true })).toEqual({ action: 'batch', reason: 'answer_other' });
+    expect(decide({ ...base, answersOther: true, engaged: false })).toEqual({ action: 'ignore', reason: 'not_engaged' });
+    expect(decide({ ...base, answersOther: true, disengageDue: true })).toEqual({ action: 'ignore', reason: 'disengaged' });
+    expect(decide({ ...base, answersOther: true, mentionsOthers: true })).toEqual({ action: 'ignore', reason: 'mentions_other' });
+    expect(decide({ ...base, answersOther: true, awaitedReply: true })).toEqual({ action: 'batch', reason: 'direct' });
+    expect(batchNeedsGate(['answer_other'])).toBe(true);
+    expect(batchIsAddressed(['answer_other'])).toBe(true);
+    expect(batchIsPartnerLike(['answer_other', 'gate'])).toBe(true);
+    expect(batchIsPartnerLike(['partner'])).toBe(true);
+    expect(batchIsPartnerLike(['gate'])).toBe(false);
+    expect(debounceWindowMs(false, { idleMs: 1000, busyMs: 3000, directMs: 300 }, 'answer_other')).toBe(300);
   });
 });
 

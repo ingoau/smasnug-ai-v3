@@ -15,7 +15,7 @@ import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
-import { decide, isSlackbotUser, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
+import { answersOtherOffer, decide, isSlackbotUser, mentionFacts, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
 import { isBotPeerDm } from './dm-peer.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { handleHuddleFmMessage, isFromHuddleFm } from '../features/huddlefm/inbound.js';
@@ -125,8 +125,18 @@ async function handleNewMessage(ev: MessageEvent) {
     followUp && thread.engaged && !awaitedReply && !twoParty && thread.lastBotPartner === authorId && thread.lastBotReplyTs
       ? !(await othersSpokeBetween(threadId, authorId, thread.lastBotReplyTs, ev.ts))
       : false;
+  // The bot's latest reply asked someone else (or offered) and this is the first human message since: probably
+  // answering the bot too, but less certain, so it goes through the gate at the partner threshold.
+  const answersOther =
+    followUp && thread.engaged && !awaitedReply && !twoParty && !partner && thread.lastBotReplyTs
+      ? answersOtherOffer({
+          awaitsReplyFrom: thread.awaitsReplyFrom,
+          authorId,
+          humansSinceReply: thread.awaitsReplyFrom && thread.awaitsReplyFrom !== authorId ? await othersSpokeBetween(threadId, null, thread.lastBotReplyTs, ev.ts) : true,
+        })
+      : false;
 
-  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, partner, awaitedReply, quietPrefix });
+  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, partner, awaitedReply, answersOther, quietPrefix });
   log.debug({ threadId, ts: ev.ts, decision }, 'message decision');
   if (decision.action === 'ignore') {
     if (decision.reason === 'disengaged') await disengage(threadId, 'idle', null);

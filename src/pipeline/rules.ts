@@ -9,9 +9,11 @@
  * - 'direct': the author answers the bot's own question / offer (awaitedReply): runs without the gate.
  * - 'partner': a two-party thread, or the bot's latest conversation partner continuing with nobody else in between:
  *   through the gate at the lower partner threshold (gateThreshold).
+ * - 'answer_other': the first human message after the bot's question / offer to someone else (answersOtherOffer):
+ *   probably taking it up, but less certain than 'direct', so through the gate at the partner threshold.
  * - 'gate': through the gate at the normal (or cooling) threshold.
  */
-export type BatchReason = 'dm' | 'mention' | 'direct' | 'partner' | 'gate';
+export type BatchReason = 'dm' | 'mention' | 'direct' | 'partner' | 'answer_other' | 'gate';
 
 export type Decision =
   | { action: 'ignore'; reason: 'bot' | 'not_engaged' | 'mentions_other' | 'disengaged' | 'unsupported' | 'quiet' }
@@ -38,6 +40,11 @@ export interface MessageFacts {
    * their first message since: runs without the gate, regardless of idle time or disengagement.
    */
   awaitedReply?: boolean;
+  /**
+   * The bot's latest message ended with a question, an offer or buttons for someone else, and this is the first human
+   * message since (answersOtherOffer): gated at the partner threshold.
+   */
+  answersOther?: boolean;
   /** Text starts with `<>` (guidelines rule 4): never answered unless the bot is @mentioned. */
   quietPrefix?: boolean;
 }
@@ -52,10 +59,19 @@ export function decide(f: MessageFacts): Decision {
   if (f.disengageDue) return { action: 'ignore', reason: 'disengaged' };
   if (f.mentionsOthers) return { action: 'ignore', reason: 'mentions_other' };
   if (f.twoParty || f.partner) return { action: 'batch', reason: 'partner' };
+  if (f.answersOther) return { action: 'batch', reason: 'answer_other' };
   return { action: 'batch', reason: 'gate' };
 }
 
-const GATED = new Set<BatchReason>(['gate', 'partner']);
+/**
+ * Could this be someone else answering the bot? The bot's latest reply awaits an answer (awaitsReply) from a person
+ * other than this author, and no human has written since that reply (`humansSinceReply`, checked by the caller).
+ */
+export function answersOtherOffer(f: { awaitsReplyFrom: string | null | undefined; authorId: string; humansSinceReply: boolean }): boolean {
+  return Boolean(f.awaitsReplyFrom) && f.awaitsReplyFrom !== f.authorId && !f.humansSinceReply;
+}
+
+const GATED = new Set<BatchReason>(['gate', 'partner', 'answer_other']);
 
 /** A batch runs the front agent without the gate if any of its messages had a deterministic reason. */
 export function batchNeedsGate(reasons: BatchReason[]): boolean {
@@ -64,10 +80,15 @@ export function batchNeedsGate(reasons: BatchReason[]): boolean {
 
 /**
  * Not a mention, but framed as addressed to the bot ("talking with you"): an answer to its question / offer, or a
- * partner follow-up (only reaches a turn after passing the gate).
+ * partner follow-up or someone else's answer to it (those two only reach a turn after passing the gate).
  */
 export function batchIsAddressed(reasons: BatchReason[]): boolean {
-  return reasons.some((r) => r === 'direct' || r === 'partner');
+  return reasons.some((r) => r === 'direct' || r === 'partner' || r === 'answer_other');
+}
+
+/** A gated batch that gets the partner threshold: the bot's conversation partner, or someone answering the bot. */
+export function batchIsPartnerLike(reasons: BatchReason[]): boolean {
+  return reasons.some((r) => r === 'partner' || r === 'answer_other');
 }
 
 /** Mention/DM turns get the status indicator. */
@@ -109,8 +130,8 @@ export function isCooling(s: Pick<EngagementState, 'lastAddressedAt' | 'lastBotR
 }
 
 /**
- * The gate's respond threshold for a batch. A partner batch (two-party thread, or the bot's latest conversation
- * partner continuing) gets the low threshold, even in a cooling thread (nobody else spoke since the bot did); a
+ * The gate's respond threshold for a batch. A partner batch (two-party thread, the bot's latest conversation partner
+ * continuing, or someone else answering the bot's question / offer: batchIsPartnerLike) gets the low threshold, even in a cooling thread (nobody else spoke since the bot did); a
  * cooling thread gets the high one; everything else the base GATE_THRESHOLD.
  */
 export function gateThreshold(f: { partner: boolean; cooling: boolean }, t: { base: number; partner: number; cooling: number }): number {

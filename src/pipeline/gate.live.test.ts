@@ -58,3 +58,22 @@ describe.skipIf(!LIVE)('gate (live): the bot\'s conversation partner', () => {
     expect(r.respond).toBe(expected);
   }, 30_000);
 });
+
+describe.skipIf(!LIVE)("gate (live): someone else answering the bot's offer", () => {
+  const convo = [
+    msg('UALICE', '<@UBOT> our club needs a signup sheet for the robotics workshop'),
+    msg('UBOB', 'yeah we keep losing track of who is coming'),
+    msg('UBOT', 'i can make a simple signup page with name, email and a t-shirt size field. want me to make it?', true),
+  ];
+  it.each([
+    { name: 'a go-ahead from the other person', next: 'yes go for it', expected: true },
+    { name: 'an aside to the other person', next: 'alice did you book the room yet', expected: false },
+  ])('$name', async ({ next, expected }) => {
+    const { runGate } = await import('./gate.js');
+    const { answerGateNote } = await import('./fire.js');
+    const r = await runGate({ context: convo, newMessages: [msg('UBOB', next)], botUserId: 'UBOT', threshold: 0.6, note: answerGateNote('smasnug ai') });
+    console.log(JSON.stringify({ next, raw: r.raw, probability: r.probability, fallback: r.fallback, error: r.error }));
+    expect(r.error).toBeUndefined();
+    expect(r.respond).toBe(expected);
+  }, 30_000);
+});

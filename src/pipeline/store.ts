@@ -185,12 +185,15 @@ export async function consumeAwaitedReply(threadId: string, authorId: string): P
   return rows.length > 0;
 }
 
-/** True if a human other than `authorId` wrote in the thread after `afterTs` and before `beforeTs` (stored copies). */
-export async function othersSpokeBetween(threadId: string, authorId: string, afterTs: string, beforeTs: string): Promise<boolean> {
+/**
+ * True if a human other than `authorId` (any human when null) wrote in the thread after `afterTs` and before
+ * `beforeTs` (stored copies).
+ */
+export async function othersSpokeBetween(threadId: string, authorId: string | null, afterTs: string, beforeTs: string): Promise<boolean> {
   const [row] = await sql<{ spoke: boolean }[]>`
     select exists (
       select 1 from messages where thread_id = ${threadId} and not deleted and bot_id is null and user_id is not null
-        and user_id <> ${authorId} and ts::numeric > ${afterTs}::numeric and ts::numeric < ${beforeTs}::numeric
+        and (${authorId}::text is null or user_id <> ${authorId}) and ts::numeric > ${afterTs}::numeric and ts::numeric < ${beforeTs}::numeric
     ) as spoke`;
   return Boolean(row?.spoke);
 }

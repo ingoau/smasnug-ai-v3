@@ -13,7 +13,7 @@ import { markMessage } from '../core/timing.js';
 import { isLatestSeq, takeBatch, type DebounceJob } from './debounce.js';
 import { clearIntakeStatus } from './session-status.js';
 import { runGate, type GateResult } from './gate.js';
-import { batchIsAddressed, batchIsMention, batchNeedsGate, gateThreshold, isCooling } from './rules.js';
+import { batchIsAddressed, batchIsMention, batchIsPartnerLike, batchNeedsGate, gateThreshold, isCooling } from './rules.js';
 import { pushToRunningTurn, scheduleMessages } from './scheduler.js';
 import { getThread, loadMessages, recentMessages } from './store.js';
 import { djGateNote } from '../features/huddlefm/render.js';
@@ -21,6 +21,11 @@ import { djGateNote } from '../features/huddlefm/render.js';
 /** The gate's note for a partner batch: who the author is to the bot (code-written, from thread state). */
 export function partnerGateNote(botName: string): string {
   return `The newest message comes from the person ${botName} was just talking with in this thread (no one else has written since ${botName}'s last reply, or only the two of them are in the thread): a question, request or follow-up from them is most likely meant for ${botName}.`;
+}
+
+/** The gate's note for someone else's first message after the bot's question / offer (rules.ts 'answer_other'). */
+export function answerGateNote(botName: string): string {
+  return `${botName}'s latest message in this thread ended with a question or an offer for another person, and the newest message is the first anyone has written since: it may well be answering ${botName}'s question or taking up its offer.`;
 }
 
 /** Swappable for tests. */
@@ -58,7 +63,9 @@ export async function processDebounce(job: Job<DebounceJob>) {
   }
 
   const needsGate = batchNeedsGate(reasons);
-  const partner = reasons.includes('partner');
+  // Partner threshold: the bot's conversation partner ('partner'), or someone else answering it ('answer_other').
+  const partner = batchIsPartnerLike(reasons);
+  const answersOther = partner && !reasons.includes('partner');
   if (needsGate) {
     const thread = await getThread(threadId);
     if (!thread?.engaged) return; // disengaged while the window was open
@@ -67,7 +74,7 @@ export async function processDebounce(job: Job<DebounceJob>) {
     const threshold = gateThreshold({ partner, cooling }, { base: env.GATE_THRESHOLD, partner: env.GATE_PARTNER_THRESHOLD, cooling: env.GATE_COOLING_THRESHOLD });
     const [context, djNote] = await Promise.all([recentMessages(threadId, ts[0]!, limits.gateContextMessages), djGateNote({ channelId, threadId })]);
     // Code-written situation for the gate (never thread content).
-    const note = [partner ? partnerGateNote(env.BOT_DISPLAY_NAME) : '', djNote ?? ''].filter(Boolean).join(' ');
+    const note = [answersOther ? answerGateNote(env.BOT_DISPLAY_NAME) : partner ? partnerGateNote(env.BOT_DISPLAY_NAME) : '', djNote ?? ''].filter(Boolean).join(' ');
     const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId, threshold, ...(note ? { note } : {}) });
     await appendEvent(threadId, 'gate_decision', 'system', {
       messageTs: ts,
@@ -78,6 +85,7 @@ export async function processDebounce(job: Job<DebounceJob>) {
       model: result.model,
       threshold,
       ...(partner ? { partner: true } : {}),
+      ...(answersOther ? { answersOther: true } : {}),
       ...(cooling ? { cooling: true } : {}),
       ...(result.probability !== undefined ? { probability: result.probability } : {}),
       ...(result.fallback ? { fallback: result.fallback } : {}),
