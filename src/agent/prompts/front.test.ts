@@ -83,7 +83,8 @@ describe('frontSystemPrompt delegation and scope rules', () => {
   it("explicit requirements beat the brevity defaults; deliverables get proper prose, not the chat voice", () => {
     expect(p).toMatch(/the speaker's explicit requirements \(length, structure, format, tone, sources\) always win, and brevity is a default, not a cap/);
     expect(p).toMatch(/Deliverables \(essays, reports, exam or quiz answers, write-ups, documents\) use proper prose in the requested form/);
-    expect(p).toMatch(/Never squeeze a long one into a short message: canvas or file, plus a short reply/);
+    expect(p).toMatch(/go in a markdown file \(create_file, \.md\) posted with reply\(files\); a canvas only when the speaker asks for one/);
+    expect(p).toMatch(/Never squeeze a long one into a short message: a file \(or the canvas they asked for\), plus a short reply/);
   });
 
   it('says plainly when a capability is not available here instead of asking setup questions', () => {

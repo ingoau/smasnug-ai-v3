@@ -261,7 +261,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        `Create a Slack canvas (a document people can keep, share and edit) for a long-form deliverable: research write-ups, guides, plans, comparison tables, notes. The current conversation can read it and the speaker can edit it. Returns the link: then reply with a short summary plus the link (don't paste the content into the reply). ${canvasMarkdownHint}`,
+        `Create a Slack canvas (a document people can keep, share and edit). Only when the speaker asks for a canvas; other long-form deliverables go in a markdown file (create_file). The current conversation can read it and the speaker can edit it. Returns the link: then reply with a short summary plus the link (don't paste the content into the reply). ${canvasMarkdownHint}`,
       inputSchema: z.object({
         title: z.string().describe('Canvas title, short (e.g. "Hosting options compared")'),
         content: z
