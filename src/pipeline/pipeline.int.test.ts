@@ -282,7 +282,7 @@ describe.skipIf(!infra)('pipeline integration', () => {
           io.setActivity!('Reading the page…');
           await new Promise((r) => setTimeout(r, 50));
           io.sessionReleased!(); // a reply's chat.stopStream set the session active
-          io.setActivity!('Starting a subagent…');
+          io.setActivity!('Digging in…');
           io.setActivity!('Searching Slack…');
           await new Promise((r) => setTimeout(r, 50));
         });

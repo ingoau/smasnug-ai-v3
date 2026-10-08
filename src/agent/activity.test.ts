@@ -12,7 +12,7 @@ describe('activityForTool', () => {
     expect(activityForTool('read_public_channel')).toBe('Reading a Slack channel…');
     expect(activityForTool('read_channel')).toBe('Reading the channel…');
     expect(activityForTool('read_file')).toBe('Opening the file…');
-    expect(activityForTool('spawn_subagent')).toBe('Starting a subagent…');
+    expect(activityForTool('spawn_subagent')).toBe('Digging in…');
     expect(activityForTool('remember')).toBe('Saving a note…');
   });
 

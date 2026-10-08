@@ -5,7 +5,7 @@
  * started are the tasks of one plan block, above the reply text. The card is always a plan block, live or finished.
  * Once nothing in it is in progress (or it was frozen after its synthesis) it is finished: every task in its final
  * status (complete / error), titled with its background title (src/agent/titles.ts) or, until that arrives, the
- * summary of what it did ("Searched Slack, read 2 pages, ran 3 subagents"). Slack itself shows a plan block collapsed
+ * summary of what it did ("Searched Slack, read 2 pages, worked on 3 tasks"). Slack itself shows a plan block collapsed
  * to its title and expands it on click (verified in the Slack client; the plan block docs don't mention it), so there
  * is no collapsing logic here: the finished plan still lists every step and run when opened.
  */
@@ -127,17 +127,35 @@ export const STOP_ALL_ACTION = 'card:stop_all';
 
 export const isActive = (s: RunStatus) => s === 'queued' || s === 'running';
 
-const plural = (n: number) => `${n} subagent${n === 1 ? '' : 's'}`;
+/** Run details while it works (src/agent/child.ts): generic, so the plan title shows the task's own title instead. */
+export const FIRST_STEP_DETAILS = 'Researching…';
+export const THINKING_DETAILS = 'Thinking…';
+export const WRITING_DETAILS = 'Writing up…';
+const GENERIC_DETAILS = new Set([FIRST_STEP_DETAILS, THINKING_DETAILS, WRITING_DETAILS]);
 
-export function liveTitle(runs: Pick<CardRun, 'status'>[]): string {
-  const active = runs.filter((r) => isActive(r.status)).length;
-  return active > 0 ? `Running ${plural(active)}` : `Ran ${plural(runs.length)}`;
+const runTitle = (r: Pick<CardRun, 'subagentTitle'>) => r.subagentTitle?.trim() || 'Task';
+const tasks = (n: number) => (n === 1 ? 'a task' : `${n} tasks`);
+
+/**
+ * Live title while runs are active, in terms of the work (users never see the word "subagent"): one active run →
+ * what it is doing right now ("Searching Slack for “hackathon dates”"), or its title while it only thinks; several →
+ * "Working on 3 tasks". None active: frozenTitle.
+ */
+export function liveTitle(runs: Pick<CardRun, 'status' | 'subagentTitle' | 'details'>[]): string {
+  const active = runs.filter((r) => isActive(r.status));
+  if (active.length > 1) return `Working on ${tasks(active.length)}`;
+  const [only] = active;
+  if (!only) return frozenTitle(null, runs);
+  const details = only.status === 'running' ? only.details?.trim() : '';
+  // A long step's elapsed time (child.ts withElapsed) doesn't make a generic label specific.
+  return details && !GENERIC_DETAILS.has(details.replace(/ \(\d+s\)$/, '')) ? details : runTitle(only);
 }
 
-/** Title for a frozen card: its background title (src/agent/titles.ts) as written, else "Ran N subagents". */
-export function frozenTitle(title: string | null | undefined, runCount: number): string {
+/** Title for a finished card: its background title (src/agent/titles.ts) as written, else the one run's title, else "Worked on N tasks". */
+export function frozenTitle(title: string | null | undefined, runs: Pick<CardRun, 'subagentTitle'>[]): string {
   const t = title?.trim();
-  return t ? t : `Ran ${plural(runCount)}`;
+  if (t) return t;
+  return runs.length === 1 ? runTitle(runs[0]!) : `Worked on ${tasks(runs.length)}`;
 }
 
 function clip(s: string, max: number) {
@@ -184,7 +202,7 @@ function resultOutput(run: CardRun, budget: ReturnType<typeof outputBudget>): Ri
 
 export function taskFor(run: CardRun, budget = outputBudget(1)): TaskCardBlock {
   const duration = runDuration(run);
-  const title = `${clip(`${run.isResume ? '↻ ' : ''}${run.subagentTitle?.trim() || 'Subagent'}`, 110)}${duration ? ` · ${duration}` : ''}`;
+  const title = `${clip(`${run.isResume ? '↻ ' : ''}${runTitle(run)}`, 110)}${duration ? ` · ${duration}` : ''}`;
   const base = { type: 'task_card' as const, task_id: `run_${run.id}`, title };
   const steer = run.steerNotes.filter((n) => n?.trim()).map((n) => `↪ ${clip(n, 80)}`);
   const sources = (run.sources ?? [])
@@ -249,15 +267,15 @@ export function isFinished(card: Pick<CardState, 'frozen' | 'steps'>, runs: Pick
 const MAX_PLAN_TITLE = 150;
 
 /**
- * The plan's title. Live: "Running N subagents" while runs are active, else "Working…" (a step is running).
- * Finished: the card's background title (src/agent/titles.ts), else the summary of what it did ("Searched Slack,
- * read 2 pages, ran 3 subagents"), else "Ran N subagents". It is what a viewer sees of the finished card until they
- * expand it.
+ * The plan's title. Live: what the active run is doing ("Searching Slack for …"), or "Working on N tasks", while
+ * runs are active (liveTitle), else "Working…" (a step is running). Finished: the card's background title
+ * (src/agent/titles.ts), else the summary of what it did ("Searched Slack, read 2 pages, worked on 3 tasks"), else
+ * frozenTitle. It is what a viewer sees of the finished card until they expand it.
  */
-export function planTitle(card: Pick<CardState, 'frozen' | 'title' | 'steps'>, runs: Pick<CardRun, 'status'>[]): string {
+export function planTitle(card: Pick<CardState, 'frozen' | 'title' | 'steps'>, runs: Pick<CardRun, 'status' | 'subagentTitle' | 'details'>[]): string {
   let title: string;
   if (!isFinished(card, runs)) title = runs.some((r) => isActive(r.status)) ? liveTitle(runs) : 'Working…';
-  else title = card.title?.trim() || capitalize(summarizeSteps(card.steps ?? [], runs)) || frozenTitle(null, runs.length);
+  else title = card.title?.trim() || capitalize(summarizeSteps(card.steps ?? [], runs)) || frozenTitle(null, runs);
   return neutralizeBroadcasts(clip(title, MAX_PLAN_TITLE));
 }
 
