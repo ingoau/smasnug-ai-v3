@@ -26,9 +26,9 @@ describe('RunLabel (the subagent card label as a step streams)', () => {
     expect(l.text('Some text the model wrote next to its tool call, long enough.')).toBeNull();
   });
 
-  it('wait labels name the search limit only for search.messages', () => {
-    expect(slackWaitLabel(4200)).toBe("Waiting for Slack's search rate limit (5s)");
-    expect(slackWaitLabel(1000, 'conversations.info')).toBe("Waiting for Slack's rate limit (1s)");
+  it('wait labels say plainly that Slack is the hold-up', () => {
+    expect(slackWaitLabel(4200)).toBe('Waiting on Slack (5s)');
+    expect(slackWaitLabel(0)).toBe('Waiting on Slack (1s)');
   });
 });
 
@@ -36,10 +36,10 @@ describe('SlackWaitTracker (the card label while Slack calls wait)', () => {
   it('counts down to the expected end, then restores the label from before', () => {
     const w = new SlackWaitTracker();
     expect(w.label(0)).toBeNull();
-    expect(w.start({ method: 'search.messages', estimateMs: 29_500 }, 'Searching Slack for “x”', 0)).toBe("Waiting for Slack's search rate limit (30s)");
+    expect(w.start({ method: 'search.messages', estimateMs: 29_500 }, 'Searching Slack for “x”', 0)).toBe("Waiting on Slack (30s)");
     expect(w.waiting).toBe(true);
-    expect(w.label(10_000)).toBe("Waiting for Slack's search rate limit (20s)");
-    expect(w.label(29_800)).toBe("Waiting for Slack's search rate limit (1s)"); // overdue: never 0 or negative
+    expect(w.label(10_000)).toBe("Waiting on Slack (20s)");
+    expect(w.label(29_800)).toBe("Waiting on Slack (1s)"); // overdue: never 0 or negative
     expect(w.end()).toBe('Searching Slack for “x”');
     expect(w.waiting).toBe(false);
     expect(w.end()).toBeNull(); // unmatched end
@@ -48,12 +48,12 @@ describe('SlackWaitTracker (the card label while Slack calls wait)', () => {
   it('parallel waits: one label until the last ends; tool labels arriving meanwhile are kept, not shown', () => {
     const w = new SlackWaitTracker();
     w.start({ method: 'conversations.info', estimateMs: 5000 }, 'Thinking…', 0);
-    expect(w.label(0)).toBe("Waiting for Slack's rate limit (5s)");
-    // A search waits longer: the label counts down to the later end and names the search limit.
-    expect(w.start({ method: 'search.messages', estimateMs: 30_000 }, 'ignored', 1000)).toBe("Waiting for Slack's search rate limit (30s)");
+    expect(w.label(0)).toBe("Waiting on Slack (5s)");
+    // A search waits longer: the label counts down to the later end.
+    expect(w.start({ method: 'search.messages', estimateMs: 30_000 }, 'ignored', 1000)).toBe("Waiting on Slack (30s)");
     expect(w.defer('Searching Slack for “y”')).toBe(true);
     expect(w.end()).toBeNull();
-    expect(w.label(16_000)).toBe("Waiting for Slack's search rate limit (15s)");
+    expect(w.label(16_000)).toBe("Waiting on Slack (15s)");
     expect(w.end()).toBe('Searching Slack for “y”');
     expect(w.defer('Thinking…')).toBe(false); // nothing waits: shown right away
   });

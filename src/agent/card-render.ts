@@ -10,6 +10,7 @@
  * is no collapsing logic here: the finished plan still lists every step and run when opened.
  */
 import { capitalize, stepTitle, summarizeSteps, type CardStep } from './card-steps.js';
+import { DEFAULT_ACTIVITY } from './activity.js';
 import { cleanRichElements, markdownToRich, type RichTextElement, type RichTextInline } from './rich-text.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { sliceUnits } from '../tools/util.js';
@@ -131,21 +132,26 @@ export const isActive = (s: RunStatus) => s === 'queued' || s === 'running';
 export const FIRST_STEP_DETAILS = 'Researching…';
 export const THINKING_DETAILS = 'Thinking…';
 export const WRITING_DETAILS = 'Writing up…';
-const GENERIC_DETAILS = new Set([FIRST_STEP_DETAILS, THINKING_DETAILS, WRITING_DETAILS]);
+/** DEFAULT_ACTIVITY ("Working…") is also the label of a step with nothing more specific to say (util.ts describeToolStep). */
+const GENERIC_DETAILS = new Set([FIRST_STEP_DETAILS, THINKING_DETAILS, WRITING_DETAILS, DEFAULT_ACTIVITY]);
 
 const runTitle = (r: Pick<CardRun, 'subagentTitle'>) => r.subagentTitle?.trim() || 'Task';
 const tasks = (n: number) => (n === 1 ? 'a task' : `${n} tasks`);
 
 /**
- * Live title while runs are active, in terms of the work (users never see the word "subagent"): one active run →
- * what it is doing right now ("Searching Slack for “hackathon dates”"), or its title while it only thinks; several →
- * "Working on 3 tasks". None active: frozenTitle.
+ * Live title while runs are active, in terms of the work (users never see the word "subagent"). A card with one run:
+ * what it is doing right now ("Searching Slack for “hackathon dates”"), or its title while it only thinks. Several:
+ * "Working on 3 tasks", with how many are done once any are ("Working on 3 tasks · 1 done"), so a long round
+ * visibly moves. None active: frozenTitle.
  */
 export function liveTitle(runs: Pick<CardRun, 'status' | 'subagentTitle' | 'details'>[]): string {
   const active = runs.filter((r) => isActive(r.status));
-  if (active.length > 1) return `Working on ${tasks(active.length)}`;
-  const [only] = active;
-  if (!only) return frozenTitle(null, runs);
+  if (!active.length) return frozenTitle(null, runs);
+  if (runs.length > 1) {
+    const done = runs.length - active.length;
+    return `Working on ${tasks(runs.length)}${done ? ` · ${done} done` : ''}`;
+  }
+  const only = active[0]!;
   const details = only.status === 'running' ? only.details?.trim() : '';
   // A long step's elapsed time (child.ts withElapsed) doesn't make a generic label specific.
   return details && !GENERIC_DETAILS.has(details.replace(/ \(\d+s\)$/, '')) ? details : runTitle(only);

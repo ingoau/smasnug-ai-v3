@@ -21,6 +21,8 @@ import { SLACK_WAIT_EXTRA } from '../tools/slack-search.js';
 import type { SlackWaitEvent } from '../core/slack.js';
 import { addSource, compactHistory, describeToolStep, oneLine, splitResult, urlsInText, type RunSource } from './util.js';
 import { onSandboxRunFinished } from '../sandbox/hooks.js';
+import { resolveFile } from '../files/store.js';
+import type { FileAccessContext } from '../files/access.js';
 import { sandboxChildPrompt } from '../sandbox/prompts.js';
 import { previewsConfigured, SANDBOX_TOOL_NAMES, sandboxConfigured } from '../sandbox/settings.js';
 
@@ -85,13 +87,26 @@ export function withElapsed(details: string, ms: number): string {
   return `${details} (${Math.round(ms / 1000)}s)`;
 }
 
-/** Card label while a tool's Slack call waits for the shared rate limiter (search: its own, tighter limit). */
-export const SLACK_WAIT_LABEL = "Waiting for Slack's search rate limit";
-const SLACK_WAIT_PREFIX = "Waiting for Slack's";
+/** Tools whose card label names the file they open (by its name, never its id). */
+const FILE_STEP_TOOLS = new Set(['read_file', 'ask_file']);
+
+/**
+ * The name of the file a read_file / ask_file call opens, for its card label: only a file the run may use (the same
+ * access rule as the tools, so a probed id never shows a name); undefined otherwise or on any error.
+ */
+async function stepFileName(toolName: string, input: unknown, ctx: FileAccessContext): Promise<string | undefined> {
+  const id = (input as { file_id?: unknown } | null)?.file_id;
+  if (!FILE_STEP_TOOLS.has(toolName) || typeof id !== 'string' || !id.trim()) return undefined;
+  const f = await resolveFile(id.trim(), ctx).catch(() => null);
+  return f && !('error' in f) ? f.name : undefined;
+}
+
+/** Card label while a tool's Slack call waits for the shared rate limiter (search or any other method). */
+export const SLACK_WAIT_LABEL = 'Waiting on Slack';
+const SLACK_WAIT_PREFIX = SLACK_WAIT_LABEL;
 /** Shorter waits don't change the label (no flicker). */
 const SLACK_WAIT_LABEL_MIN_MS = 1000;
-export const slackWaitLabel = (ms: number, method = 'search.messages') =>
-  `${method === 'search.messages' ? SLACK_WAIT_LABEL : "Waiting for Slack's rate limit"} (${Math.max(1, Math.ceil(ms / 1000))}s)`;
+export const slackWaitLabel = (ms: number) => `${SLACK_WAIT_LABEL} (${Math.max(1, Math.ceil(ms / 1000))}s)`;
 /** While a wait lasts, its label counts down this often. */
 export const SLACK_WAIT_TICK_MS = 5000;
 
@@ -99,12 +114,11 @@ export const SLACK_WAIT_TICK_MS = 5000;
  * The card label while a run's tool calls wait for Slack's rate limiter (pure logic). The wait label wins over tool
  * labels until every wait is over (parallel tool calls in one step would otherwise overwrite it as their tool-call
  * parts arrive); those labels are kept and the latest one comes back when the waits end. Counts down to the latest
- * expected end; names the search limit while any search waits.
+ * expected end.
  */
 export class SlackWaitTracker {
   private waits = 0;
   private until = 0;
-  private search = false;
   private before = '';
 
   get waiting(): boolean {
@@ -116,10 +130,8 @@ export class SlackWaitTracker {
     if (this.waits++ === 0) {
       this.before = current;
       this.until = 0;
-      this.search = false;
     }
     this.until = Math.max(this.until, now + ev.estimateMs);
-    if (ev.method === 'search.messages') this.search = true;
     return this.label(now)!;
   }
 
@@ -139,7 +151,7 @@ export class SlackWaitTracker {
   /** The countdown label now (null when nothing waits). */
   label(now = Date.now()): string | null {
     if (!this.waits) return null;
-    return slackWaitLabel(this.until - now, this.search ? 'search.messages' : 'other');
+    return slackWaitLabel(this.until - now);
   }
 }
 
@@ -377,7 +389,8 @@ async function runClaimed(run: RunRow): Promise<void> {
         } else if (part.type === 'tool-call') {
           stepTools.push(part.toolName);
           if (part.toolName === 'fetch_url' && addSource(sources, (part.input as any)?.url)) sourcesDirty = true;
-          await setDetails(label.toolCall(part.toolCallId, describeToolStep(part.toolName, part.input)));
+          const fileName = await stepFileName(part.toolName, part.input, { threadId: run.threadId, speakerId: sa.ownerId });
+          await setDetails(label.toolCall(part.toolCallId, describeToolStep(part.toolName, part.input, { fileName })));
         } else if (part.type === 'tool-result') {
           if (part.toolName === WEB_SEARCH_TOOL) for (const src of webSearchSources(part.output)) if (addSource(sources, src.url, src.title)) sourcesDirty = true;
           await relabel(label.toolDone(part.toolCallId));
