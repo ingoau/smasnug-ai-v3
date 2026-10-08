@@ -386,7 +386,12 @@ describe.skipIf(!INTEGRATION)('coding agents (Cursor)', () => {
     expect(fake.latest(agentId).status).toBe('CANCELLED');
     expect((await runRow(s.runId)).status).toBe('cancelled');
     expect((await subRow(s.subagentId)).status).toBe('cancelled');
-    expect(await synthTurns(s.cardId)).toHaveLength(1);
+    // Its only run was cancelled: no results turn; the card is finished once its turn is over.
+    expect(await synthTurns(s.cardId)).toHaveLength(0);
+    await sub.maybeSynthesize(s.cardId, { turnOver: true });
+    expect(await synthTurns(s.cardId)).toHaveLength(0);
+    const [card] = await sql<{ synthesized: boolean; frozen: boolean }[]>`select synthesized, frozen from cards where id = ${s.cardId}`;
+    expect(card).toEqual({ synthesized: true, frozen: true });
   });
 
   it('ERROR / EXPIRED / cancelled elsewhere → error runs, reported honestly', async () => {

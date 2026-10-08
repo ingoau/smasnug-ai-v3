@@ -118,7 +118,8 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     await sub.cancelCardRuns(Number(resumed.cardId), 'U_B');
     const [stopped] = await sql<any[]>`select status from runs where id = ${res.runId}`;
     expect(stopped.status).toBe('cancelled');
-    expect(requested.filter((r) => r.cardId === Number(resumed.cardId))).toHaveLength(1);
+    // Every run on the card was cancelled: no results turn (subagents.ts maybeSynthesize).
+    expect(requested.filter((r) => r.cardId === Number(resumed.cardId))).toHaveLength(0);
   });
 
   it('a run that completes after cancellation was requested still reports its result (the agent decides)', async () => {

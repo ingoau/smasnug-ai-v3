@@ -13,7 +13,8 @@ import { takeLimit } from '../features/guard.js';
 import { requestTurn } from '../pipeline/scheduler.js';
 import { MODELS } from '../models.js';
 import { log } from '../log.js';
-import { ensureTurnCard, scheduleCardRender } from './cards.js';
+import { ensureTurnCard, renderCardNow, scheduleCardRender } from './cards.js';
+import { enqueueCardTitle } from './titles.js';
 import { deriveSteerNote, oneLine } from './util.js';
 import { cancelCodingAgentNow, cursorRefusal, isCursorAdmin, messageCodingAgent } from './cursor/agents.js';
 
@@ -111,7 +112,7 @@ export async function spawnSubagent(opts: {
     return Number(run!.id);
   });
   await enqueueRun(runId);
-  await appendEvent(opts.threadId, 'spawn', opts.ownerId, { subagentId, runId, cardId, title, model, instructions: opts.instructions, ...(opts.sandbox ? { sandbox: true } : {}) });
+  await appendEvent(opts.threadId, 'spawn', opts.ownerId, { subagentId, runId, cardId, turnId: opts.turnId, title, model, instructions: opts.instructions, ...(opts.sandbox ? { sandbox: true } : {}) });
   await scheduleCardRender(cardId);
   return { subagentId, runId, cardId };
 }
@@ -170,16 +171,16 @@ export async function messageSubagent(opts: {
   if ('error' in res) throw new ToolError(res.error);
   if (res.mode === 'resumed') {
     await enqueueRun(res.runId);
-    await appendEvent(opts.threadId, 'resume', opts.speakerId, { subagentId: opts.subagentId, runId: res.runId, cardId: res.cardId, text: opts.text });
+    await appendEvent(opts.threadId, 'resume', opts.speakerId, { subagentId: opts.subagentId, runId: res.runId, cardId: res.cardId, turnId: opts.turnId, text: opts.text });
   } else {
-    await appendEvent(opts.threadId, 'steer', opts.speakerId, { subagentId: opts.subagentId, runId: res.runId, note: res.note, text: opts.text });
+    await appendEvent(opts.threadId, 'steer', opts.speakerId, { subagentId: opts.subagentId, runId: res.runId, turnId: opts.turnId, note: res.note, text: opts.text });
   }
   await scheduleCardRender(res.cardId);
   return res;
 }
 
 /** Request cancellation: queued runs are cancelled immediately; running ones stop at their next step boundary. */
-export async function cancelSubagent(opts: { threadId: string; subagentId: string; actor: string }): Promise<string> {
+export async function cancelSubagent(opts: { threadId: string; subagentId: string; actor: string; /** the front turn that cancelled it (events) */ turnId?: number }): Promise<string> {
   const [kind] = await sql<{ kind: string }[]>`select kind from subagents where id = ${opts.subagentId} and thread_id = ${opts.threadId}`;
   const coding = kind?.kind === 'cursor';
   if (coding) {
@@ -209,7 +210,7 @@ export async function cancelSubagent(opts: { threadId: string; subagentId: strin
     };
   });
   if ('error' in out) throw new ToolError(out.error);
-  await appendEvent(opts.threadId, 'cancel', opts.actor, { subagentId: opts.subagentId });
+  await appendEvent(opts.threadId, 'cancel', opts.actor, { subagentId: opts.subagentId, ...(opts.turnId ? { turnId: opts.turnId } : {}) });
   // Coding agents have no loop that checks the flag: stop the Cursor run now (the poller retries if this fails).
   if (coding) await cancelCodingAgentNow(opts.subagentId);
   for (const c of new Set(out.cards)) await scheduleCardRender(c);
@@ -362,23 +363,46 @@ export async function failRuns(where: { runIds: number[] }, reason: string): Pro
 /**
  * When the last active run on a card reaches a terminal state, request exactly one synthesis turn
  * (guarded by `cards.synthesized` under a row lock).
+ *
+ * A card whose runs were ALL cancelled gets no synthesis turn: a run only ends `cancelled` when someone deliberately
+ * ended it (cancel_subagent, "Stop all", a deleted thread root), so there is nothing to write up, and a results turn
+ * would only re-read the original request and start the withdrawn work again (prod: "stop" → a new round →
+ * "resuming"). The card is finished instead (synthesized + frozen in the same locked transaction, so exactly-once
+ * still holds), re-rendered, and gets its background title (titles.ts). While the turn that started the card is
+ * still running it may spawn on the card again ("cancelled it, spawn again"): the card is left alone until that
+ * turn ends (`turnOver`, from the front turn's end; the sweeper's safety net retries too).
  */
-export async function maybeSynthesize(cardId: number | null | undefined): Promise<boolean> {
+export async function maybeSynthesize(cardId: number | null | undefined, opts: { turnOver?: boolean } = {}): Promise<boolean> {
   if (!cardId) return false;
   const req = await sql.begin(async (tx) => {
-    const [card] = await tx<{ id: number; threadId: string; synthesized: boolean; turnId: number | null }[]>`
-      select id, thread_id, synthesized, turn_id from cards where id = ${cardId} for update`;
+    const [card] = await tx<{ id: number; threadId: string; synthesized: boolean; turnId: number | null; messageTs: string | null }[]>`
+      select id, thread_id, synthesized, turn_id, message_ts from cards where id = ${cardId} for update`;
     if (!card || card.synthesized) return null;
-    const [c] = await tx<{ active: number; total: number }[]>`
-      select count(*) filter (where status in ('queued', 'running'))::int as active, count(*)::int as total from runs where card_id = ${cardId}`;
+    const [c] = await tx<{ active: number; total: number; cancelled: number; turnRunning: boolean }[]>`
+      select count(*) filter (where status in ('queued', 'running'))::int as active, count(*)::int as total,
+        count(*) filter (where status = 'cancelled')::int as cancelled,
+        exists (select 1 from turns where id = ${card.turnId} and status = 'running') as turn_running
+      from runs where card_id = ${cardId}`;
     if (!c || c.total === 0 || c.active > 0) return null;
+    if (c.cancelled === c.total) {
+      if (c.turnRunning && !opts.turnOver) return null;
+      await tx`update cards set synthesized = true, frozen = true where id = ${cardId}`;
+      return { skip: true as const, threadId: card.threadId, turnId: card.turnId == null ? null : Number(card.turnId), runs: c.total, posted: card.messageTs != null };
+    }
     const [author] = await tx<{ authorId: string }[]>`
       select coalesce((select author_id from turns where id = ${card.turnId}),
                       (select s.owner_id from runs r join subagents s on s.id = r.subagent_id where r.card_id = ${cardId} order by r.id limit 1)) as author_id`;
     await tx`update cards set synthesized = true where id = ${cardId}`;
-    return { threadId: card.threadId, authorId: author!.authorId };
+    return { skip: false as const, threadId: card.threadId, authorId: author!.authorId };
   });
   if (!req) return false;
+  if (req.skip) {
+    await appendEvent(req.threadId, 'synthesis_skipped', 'system', { cardId, reason: 'all_cancelled', runs: req.runs });
+    await renderCardNow(cardId);
+    // A card that never went out (its turn cancelled what it started) needs no title.
+    if (req.posted) await enqueueCardTitle(cardId, req.turnId ?? 0).catch((err) => log.warn({ err, cardId }, 'card title enqueue failed'));
+    return false;
+  }
   try {
     await requestTurn({ threadId: req.threadId, authorId: req.authorId, kind: 'synthesis', cardId });
     await appendEvent(req.threadId, 'synthesis_requested', 'system', { cardId });

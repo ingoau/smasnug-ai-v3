@@ -29,6 +29,8 @@ const h = vi.hoisted(() => ({
   cardAttached: [] as string[],
   /** Background title jobs enqueued (src/agent/titles.ts): ['card', cardId, turnId] | ['session', threadId, turnId]. */
   titleJobs: [] as unknown[][],
+  /** maybeSynthesize calls (subagents.ts): [cardId, opts]. */
+  synth: [] as unknown[][],
 }));
 
 vi.mock('../db/index.js', () => {
@@ -67,6 +69,7 @@ vi.mock('./subagents.js', () => ({
   },
   cancelSubagent: async (o: any) => `Subagent ${o.subagentId} cancelled.`,
   messageSubagent: async () => ({ mode: 'steered', runId: 1, cardId: 5, note: 'n' }),
+  maybeSynthesize: async (cardId: number, opts: unknown) => void h.synth.push([cardId, opts]),
 }));
 vi.mock('./cards.js', () => ({
   postCard: async (id: number) => void h.postedCards.push(id),
@@ -109,7 +112,7 @@ const { simulateReadableStream } = await import('ai');
 await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
-const { runFrontTurn, barePingKind, barePingInstruction } = await import('./front.js');
+const { runFrontTurn, barePingKind, barePingInstruction, needsFallback } = await import('./front.js');
 const { streamArgsText } = await import('./slack-markdown.js');
 
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
@@ -192,6 +195,7 @@ beforeEach(() => {
   h.cardBlock = undefined;
   h.cardAttached = [];
   h.titleJobs = [];
+  h.synth = [];
 });
 
 describe('runFrontTurn (mock model)', () => {
@@ -1325,5 +1329,60 @@ describe('confirmation outcome turns (send_message / coding-agent launch)', () =
     h.model = mockModel([replyStep('sent, here it is: https://x.slack.com/archives/C9/p1'), textStep('')]);
     await runFrontTurn(turn({ id: 85, kind: 'scheduled', messageTs: [] }), io(true).io);
     expect(h.slack.filter((c) => c.method === 'chat.postMessage' && c.args.text?.startsWith('sent ✓'))).toHaveLength(0);
+  });
+});
+
+// Prod: the user said stop, the bot cancelled the round, and the results turn started it again from the original
+// request. Results turns see what changed since the round started and may end silently when a task was cancelled.
+describe('synthesis turns after a cancellation', () => {
+  const fallbacks = () => h.slack.filter((c) => c.method === 'chat.postMessage' && /couldn't come up with a reply/.test(String(c.args.text)));
+  const runRow = (id: number, status: string) => ({ id, subagentId: `sa_${id}`, title: `Task ${id}`, ownerId: 'U1', status, instructions: 'x', result: status === 'complete' ? 'r' : null, error: null, isResume: false });
+  const rows = (runs: any[], since = true) => (q: string) => {
+    if (q.includes('from runs r join subagents')) return runs;
+    if (!since) return undefined;
+    if (q.includes('from cards c join turns t')) return [{ id: 40, threadId: 'C1:100.000001', messageTs: ['100.000002'], startedAt: new Date(100_002_000), createdAt: new Date(100_002_000), finishedAt: new Date(100_003_000) }];
+    if (q.includes('thread_inbox i where i.turn_id')) return [{ ts: '100.000005', userId: 'U1', botId: null }];
+    if (q.includes('from thread_events e left join subagents')) return [{ type: 'cancel', actor: 'U1', payload: { subagentId: 'sa_2', turnId: 41 }, createdAt: new Date(100_006_000), title: 'Task 2', turnTs: ['100.000005'] }];
+    return undefined;
+  };
+
+  it('the context lists what happened since the round started; the instruction says to go by the latest', async () => {
+    h.sqlHook = rows([runRow(1, 'complete'), runRow(2, 'cancelled')]);
+    h.model = mockModel([toolStep(['end_turn', {}])]);
+    await runFrontTurn(turn({ id: 150, kind: 'synthesis', cardId: 5, messageTs: [], isMention: false }), io(false).io);
+    const t = turnText();
+    expect(t).toContain('<since_round_start note');
+    expect(t).toContain('Since this round started');
+    expect(t).toContain('- <@U1> wrote [100.000005]\n- you cancelled sa_2 "Task 2" (in your turn for [100.000005])');
+    expect(t).toContain("go by the latest: don't start new rounds for anything withdrawn");
+    // Mixed card (one task cancelled): ending silently is allowed.
+    expect(fallbacks()).toHaveLength(0);
+  });
+
+  it('nothing since the round started: no block', async () => {
+    h.sqlHook = rows([runRow(1, 'complete')], false);
+    h.model = mockModel([replyStep('Here is what they found.'), textStep('')]);
+    await runFrontTurn(turn({ id: 151, kind: 'synthesis', cardId: 5, messageTs: [], isMention: false }), io(false).io);
+    expect(turnText()).not.toContain('<since_round_start note');
+  });
+
+  it('a silent synthesis with nothing cancelled still gets the fallback', async () => {
+    h.sqlHook = rows([runRow(1, 'complete'), runRow(2, 'error')]);
+    h.model = mockModel([toolStep(['end_turn', {}])]);
+    await runFrontTurn(turn({ id: 152, kind: 'synthesis', cardId: 5, messageTs: [], isMention: false }), io(false).io);
+    expect(fallbacks()).toHaveLength(1);
+  });
+
+  it('needsFallback: synthesis unless a task was cancelled; other turns when mentioned', () => {
+    expect(needsFallback({ kind: 'synthesis' }, { isMention: false }, false)).toBe(true);
+    expect(needsFallback({ kind: 'synthesis' }, { isMention: true }, true)).toBe(false);
+    expect(needsFallback({ kind: 'user' }, { isMention: true }, false)).toBe(true);
+    expect(needsFallback({ kind: 'user' }, { isMention: false }, false)).toBe(false);
+  });
+
+  it("a turn that started runs re-checks its card at the end (a card it cancelled entirely is finished then)", async () => {
+    h.model = mockModel([toolStep(['spawn_subagent', { tasks: [{ title: 'Pico 2 W', instructions: 'Research the Pico 2 W' }] }]), toolStep(['reply', { text: 'On it.' }])]);
+    await runFrontTurn(turn({ id: 153 }), io().io);
+    expect(h.synth).toEqual([[5, { turnOver: true }]]);
   });
 });

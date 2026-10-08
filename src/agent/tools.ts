@@ -208,11 +208,11 @@ registerTool({
       inputSchema: z.object({ id: z.string().describe('Subagent id, e.g. "sa_ab12cd"') }),
       execute: async ({ id }) => {
         const s = turnState(ctx);
-        const msg = await cancelSubagent({ threadId: s.threadId, subagentId: id, actor: s.turn.authorId });
+        const msg = await cancelSubagent({ threadId: s.threadId, subagentId: id, actor: s.turn.authorId, turnId: s.turn.id });
         s.visible.add('cancel');
         if (s.spawned.delete(id)) {
-          // Cancelling a subagent this very turn started: its card stays unposted and its synthesis stays silent
-          // (a run that still finishes is recorded as cancelled), so nobody would get an answer from it.
+          // Cancelling a subagent this very turn started: its card stays unposted and a card whose runs were all
+          // cancelled gets no results turn (subagents.ts maybeSynthesize), so nobody would get an answer from it.
           s.delegated = s.spawned.size > 0 || s.visible.has('resume');
           return `${msg} You started it in this turn, so no results will come from it: answer the speaker yourself now, or spawn again.`;
         }
