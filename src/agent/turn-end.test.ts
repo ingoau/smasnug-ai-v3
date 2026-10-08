@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { endsTurnAfterStep, responseSucceeded, RESPONSE_TOOLS, TERMINAL_SAFE_TOOLS } from './turn-end.js';
+import { endsTurnAfterStep, responseSucceeded, RESPONSE_TOOLS, shouldNudgePlainText, TERMINAL_SAFE_TOOLS } from './turn-end.js';
 
 let n = 0;
 const call = (toolName: string, input: Record<string, unknown> = {}) => ({ toolCallId: `c${++n}`, toolName, input });
@@ -70,5 +70,20 @@ describe('endsTurnAfterStep', () => {
 
   it('keeps the lists disjoint', () => {
     for (const t of RESPONSE_TOOLS) expect(TERMINAL_SAFE_TOOLS.has(t)).toBe(false);
+  });
+});
+
+describe('shouldNudgePlainText', () => {
+  const base = { text: 'here is my answer', toolCalls: 0, nudged: false, visible: false, stopping: false, stepsUsed: 1, maxSteps: 12 };
+  it('nudges once after a text-only step with nothing visible', () => {
+    expect(shouldNudgePlainText(base)).toBe(true);
+    expect(shouldNudgePlainText({ ...base, nudged: true })).toBe(false);
+  });
+  it('not for empty text, a step with tool calls, after something visible, when stopping or at the step limit', () => {
+    expect(shouldNudgePlainText({ ...base, text: '  \n' })).toBe(false);
+    expect(shouldNudgePlainText({ ...base, toolCalls: 1 })).toBe(false);
+    expect(shouldNudgePlainText({ ...base, visible: true })).toBe(false);
+    expect(shouldNudgePlainText({ ...base, stopping: true })).toBe(false);
+    expect(shouldNudgePlainText({ ...base, stepsUsed: 12 })).toBe(false);
   });
 });

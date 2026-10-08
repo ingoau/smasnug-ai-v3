@@ -505,6 +505,74 @@ describe('runFrontTurn: a reply or reaction ends the turn', () => {
   });
 });
 
+describe('runFrontTurn: required tool calls and the plain-text nudge', () => {
+  const calls = () => (h.model as any).doStreamCalls as any[];
+  const fallbacks = () => h.slack.filter((c) => c.method === 'chat.postMessage' && /couldn't come up with a reply/.test(String(c.args.text)));
+
+  it('asks for a tool call on every step', async () => {
+    h.model = mockModel([toolStep(['reply', { text: 'one sec', continue_turn: true }]), toolStep(['end_turn', {}])]);
+    await runFrontTurn(turn({ id: 140 }), io().io);
+    expect(calls()).toHaveLength(2);
+    for (const c of calls()) expect(c.toolChoice).toEqual({ type: 'required' });
+  });
+
+  it('a text-only step gets one more step with a note; a reply then goes out and no fallback', async () => {
+    h.model = mockModel([textStep('The answer is 42.'), toolStep(['reply', { text: 'The answer is 42.' }])]);
+    const a = io();
+    await runFrontTurn(turn({ id: 141 }), a.io);
+    expect(calls()).toHaveLength(2);
+    const second = JSON.stringify(calls()[1].prompt);
+    expect(second).toContain('The answer is 42.'); // the discarded text stays in the conversation
+    expect(second).toContain("Your text wasn't shown to anyone");
+    expect(calls()[1].toolChoice).toEqual({ type: 'required' });
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['The answer is 42.']);
+    expect(fallbacks()).toHaveLength(0);
+    expect(h.events.filter((e) => e.type === 'discarded_text').map((e) => e.payload.text)).toEqual(['The answer is 42.']);
+    expect(h.events.some((e) => e.type === 'plain_text_nudge')).toBe(true);
+    expect(a.phases).toEqual(['final']);
+  });
+
+  it('end_turn after the nudge stays silent', async () => {
+    h.model = mockModel([textStep('nothing to add here'), toolStep(['end_turn', {}])]);
+    await runFrontTurn(turn({ id: 142, isMention: false }), io(false).io);
+    expect(calls()).toHaveLength(2);
+    expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
+  });
+
+  it('plain text again after the nudge ends the turn with the fallback (only one nudge)', async () => {
+    h.model = mockModel([textStep('first try'), textStep('second try'), toolStep(['reply', { text: 'never' }])]);
+    await runFrontTurn(turn({ id: 143 }), io().io);
+    expect(calls()).toHaveLength(2);
+    expect(fallbacks()).toHaveLength(1);
+    expect(h.events.filter((e) => e.type === 'discarded_text').map((e) => e.payload.text)).toEqual(['first try', 'second try']);
+    expect(h.events.filter((e) => e.type === 'plain_text_nudge')).toHaveLength(1);
+  });
+
+  it('no nudge for an empty step, after something visible went out, or when stopping', async () => {
+    h.model = mockModel([textStep(''), toolStep(['reply', { text: 'never' }])]);
+    await runFrontTurn(turn({ id: 144, isMention: false }), io(false).io);
+    expect(calls()).toHaveLength(1);
+
+    h.model = mockModel([toolStep(['react', { emoji: 'eyes', continue_turn: true }]), textStep('all done'), toolStep(['reply', { text: 'never' }])]);
+    await runFrontTurn(turn({ id: 145 }), io().io);
+    expect(calls()).toHaveLength(2);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+
+    h.slack = [];
+    let stop = false;
+    h.model = new MockLanguageModelV4({
+      doStream: async () => {
+        stop = true; // `!stop` arrives while the model writes its text
+        return { stream: simulateReadableStream({ chunks: textStep('half an answer') }) as any };
+      },
+    });
+    await runFrontTurn(turn({ id: 146 }), { ...io().io, stopRequested: async () => stop });
+    expect(calls()).toHaveLength(1);
+    expect(fallbacks()).toHaveLength(0);
+    expect(h.events.some((e) => e.type === 'plain_text_nudge')).toBe(false);
+  });
+});
+
 describe('runFrontTurn: lookup guard', () => {
   const calls = () => (h.model as any).doStreamCalls as any[];
   const toolNames = (i: number) => (calls()[i].tools ?? []).map((t: any) => t.name);

@@ -83,3 +83,19 @@ export function endsTurnAfterStep(calls: StepCall[], results: StepResultPart[]):
   }
   return responded;
 }
+
+/**
+ * The note added before the one extra step a front turn gets when a step ended with plain text and no tool call.
+ * The front runs with `toolChoice: 'required'`, so this is the backup for a provider that ignores it.
+ */
+export const PLAIN_TEXT_NUDGE_NOTE =
+  "<system_note>Your text wasn't shown to anyone: only tool calls reach the thread. Send it with reply, or call end_turn if no reply is needed.</system_note>";
+
+/**
+ * Nudge once after a step that ended with plain text and no tool calls? Only when the text is non-empty, nothing
+ * visible went out yet, this turn wasn't nudged already, it isn't being stopped, and a step is left under the limit.
+ * Otherwise the turn ends as before (silent, or the fallback reply for a mention).
+ */
+export function shouldNudgePlainText(o: { text: string; toolCalls: number; nudged: boolean; visible: boolean; stopping: boolean; stepsUsed: number; maxSteps: number }): boolean {
+  return Boolean(o.text.trim()) && o.toolCalls === 0 && !o.nudged && !o.visible && !o.stopping && o.stepsUsed < o.maxSteps;
+}

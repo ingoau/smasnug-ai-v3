@@ -1,5 +1,5 @@
 // OWNER: agent module. Front agent turn: the only agent that talks to users.
-import { hasToolCall, streamText, stepCountIs, type ModelMessage, type Tool } from 'ai';
+import { hasToolCall, streamText, stepCountIs, ToolChoiceViolationError, type ModelMessage, type Tool } from 'ai';
 import { env, limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { filesCreatedByRuns } from '../files/store.js';
@@ -32,7 +32,7 @@ import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread } from './subagents.js';
 import { cursorInstructRefusal, cursorRefusal, isCursorAdmin } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
-import { endsTurnAfterStep, type StepCall, type StepResultPart } from './turn-end.js';
+import { endsTurnAfterStep, PLAIN_TEXT_NUDGE_NOTE, shouldNudgePlainText, type StepCall, type StepResultPart } from './turn-end.js';
 import { countLookupSteps, LOOKUP_RESTRICT_NOTE, lookupGuard, lookupNudgeNote, nonLookupTools, type LookupGuard } from './lookup-guard.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
 import { noteBotReply } from '../pipeline/store.js';
@@ -711,127 +711,163 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   let guardStage: LookupGuard = 'none';
   /** Every tool call of this turn, for the next turn's <previous_turn_tools>. */
   const turnCalls: { tool: string; args: unknown }[] = [];
+  /** The next model call's messages: the turn message, plus the earlier call's steps and the note after a nudge. */
+  const convo: ModelMessage[] = [...messages];
+  /** Tool names per finished step of this turn (all model calls), for the step limit and the lookup guard. */
+  const doneSteps: string[][] = [];
+  /** Whether this turn already got the one plain-text nudge (turn-end.ts shouldNudgePlainText). */
+  let nudged = false;
+  const anyVisible = () => state.visible.size > 0 || replies.anyVisible;
   try {
     if (await checkStop()) throw new TurnStopped();
     timing.mark('model_request');
-    const result = streamText({
-      model: chatModel(MODELS.front),
-      // parallel_tool_calls is the provider default; set explicitly because the prompt relies on several calls per step
-      // (the AI SDK runs a step's tool calls concurrently).
-      providerOptions: { openrouter: { reasoning: { effort: env.FRONT_REASONING_EFFORT }, usage: { include: true }, parallel_tool_calls: true } },
-      instructions: system,
-      messages,
-      tools,
-      abortSignal: stopAbort.signal,
-      // A step without tool calls ends the loop, and so does a step whose reply / reaction went out with nothing
-      // else in it still needing a look (turn-end.ts; `continue_turn: true` keeps going); end_turn ends a silent turn.
-      // A stop request (`!stop`) ends it at the next step boundary.
-      stopWhen: [
-        stepCountIs(MAX_STEPS),
-        hasToolCall('end_turn'),
-        ({ steps }) => {
-          const last = steps.at(-1);
-          return Boolean(last && endsTurnAfterStep(last.toolCalls as StepCall[], last.toolResults as StepResultPart[]));
-        },
-        () => checkStop(),
-      ],
-      prepareStep: async ({ messages: current, steps }) => {
-        const extra: ModelMessage[] = [];
-        // Lookup guard (lookup-guard.ts): nudge towards delegating after several lookup-only steps, then turn the
-        // research tools off. The notes go in once; the restriction holds for every later step.
-        const lookupSteps = countLookupSteps(steps.map((s) => s.toolCalls.map((c) => c.toolName)));
-        const guard = lookupGuard(lookupSteps, { nudgeAfter: limits.frontLookupNudgeSteps, restrictAfter: limits.frontLookupRestrictSteps });
-        if (guard !== 'none' && guardStage === 'none') extra.push({ role: 'user', content: lookupNudgeNote(lookupSteps) });
-        if (guard === 'restrict' && guardStage !== 'restrict') extra.push({ role: 'user', content: LOOKUP_RESTRICT_NOTE });
-        if (guard !== guardStage && guard !== 'none') {
-          log.info({ turnId, lookupSteps, guard }, 'front lookup guard');
-          await appendEvent(turn.threadId, 'lookup_guard', 'system', { turnId, lookupSteps, guard }).catch(() => {});
-          guardStage = guard;
-        }
-        const activeTools = guardStage === 'restrict' ? nonLookupTools(Object.keys(tools)) : undefined;
-        const inbox = await takeInbox();
-        if (inbox.length) {
-          inbox.forEach((m) => seenTs.add(m.ts));
-          const latest = latestTs(inbox.map((m) => m.ts));
-          if (latest && (!extras[EXTRAS.defaultReactTs] || Number(latest) > Number(extras[EXTRAS.defaultReactTs]))) extras[EXTRAS.defaultReactTs] = latest;
-          const rendered = await renderMessages(turn.threadId, inbox.map((m) => m.ts)).catch(() => inbox.map((m) => m.text).join('\n'));
-          extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
-          await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
-        }
-        return { ...(extra.length ? { messages: [...current, ...extra] } : {}), ...(activeTools ? { activeTools } : {}) };
-      },
-    });
-
-    let stepText = '';
-    let stepTools: string[] = [];
-    let stepCalls: StepCall[] = [];
-    let stepResults: StepResultPart[] = [];
     turnCalls.length = 0;
-    for await (const part of result.fullStream) {
-      if (part.type !== 'start' && part.type !== 'start-step') timing.mark('first_chunk');
-      switch (part.type) {
-        case 'text-delta':
-          stepText += part.text;
-          break;
-        case 'tool-input-start':
-          timing.mark('first_tool_input');
-          if (part.toolName === 'reply') timing.mark('first_reply_input');
-          announce(part.id, part.toolName);
-          if (ph.current === 'final' && part.toolName !== 'reply' && part.toolName !== 'react') await setPhase('tools');
-          break;
-        case 'tool-call':
-          announce(part.toolCallId, part.toolName);
-          stepTools.push(part.toolName);
-          stepCalls.push({ toolCallId: part.toolCallId, toolName: part.toolName, input: part.input });
-          turnCalls.push({ tool: part.toolName, args: part.input });
-          break;
-        case 'tool-result': {
-          replies.activityDone(part.toolCallId); // its activity card is finished (never left in progress)
-          turnCard.done(part.toolCallId);
-          stepResults.push({ toolCallId: part.toolCallId, toolName: part.toolName, output: part.output });
-          const v = VISIBLE_TOOLS[part.toolName];
-          if (v) state.visible.add(v);
-          if (v === 'send') replies.notePostedInThread(); // posted below any open activity message
-          break;
+    // One model call normally. A step that ends with plain text and no tool call ends the SDK's loop; when nothing
+    // visible went out, the turn gets exactly one more call with a note asking it to send the text with reply (or
+    // end_turn). `toolChoice: 'required'` should make that rare: this is the backup for a provider that ignores it.
+    for (;;) {
+      const earlierSteps = doneSteps.length;
+      const result = streamText({
+        model: chatModel(MODELS.front),
+        // parallel_tool_calls is the provider default; set explicitly because the prompt relies on several calls per step
+        // (the AI SDK runs a step's tool calls concurrently).
+        providerOptions: { openrouter: { reasoning: { effort: env.FRONT_REASONING_EFFORT }, usage: { include: true }, parallel_tool_calls: true } },
+        instructions: system,
+        messages: convo,
+        tools,
+        // Every step calls a tool: plain text is never shown, so silence goes through end_turn. reply and end_turn are
+        // always offered (the lookup guard only switches research tools off), so a required call is always possible.
+        toolChoice: 'required',
+        abortSignal: stopAbort.signal,
+        // A step whose reply / reaction went out with nothing else in it still needing a look ends the loop
+        // (turn-end.ts; `continue_turn: true` keeps going); end_turn ends a silent turn. A stop request (`!stop`) ends
+        // it at the next step boundary. A step without tool calls (only if the provider ignored 'required') ends it too.
+        stopWhen: [
+          stepCountIs(MAX_STEPS - earlierSteps),
+          hasToolCall('end_turn'),
+          ({ steps }) => {
+            const last = steps.at(-1);
+            return Boolean(last && endsTurnAfterStep(last.toolCalls as StepCall[], last.toolResults as StepResultPart[]));
+          },
+          () => checkStop(),
+        ],
+        prepareStep: async ({ messages: current, steps }) => {
+          const extra: ModelMessage[] = [];
+          // Lookup guard (lookup-guard.ts): nudge towards delegating after several lookup-only steps, then turn the
+          // research tools off. The notes go in once; the restriction holds for every later step.
+          const lookupSteps = countLookupSteps([...doneSteps.slice(0, earlierSteps), ...steps.map((s) => s.toolCalls.map((c) => c.toolName))]);
+          const guard = lookupGuard(lookupSteps, { nudgeAfter: limits.frontLookupNudgeSteps, restrictAfter: limits.frontLookupRestrictSteps });
+          if (guard !== 'none' && guardStage === 'none') extra.push({ role: 'user', content: lookupNudgeNote(lookupSteps) });
+          if (guard === 'restrict' && guardStage !== 'restrict') extra.push({ role: 'user', content: LOOKUP_RESTRICT_NOTE });
+          if (guard !== guardStage && guard !== 'none') {
+            log.info({ turnId, lookupSteps, guard }, 'front lookup guard');
+            await appendEvent(turn.threadId, 'lookup_guard', 'system', { turnId, lookupSteps, guard }).catch(() => {});
+            guardStage = guard;
+          }
+          const activeTools = guardStage === 'restrict' ? nonLookupTools(Object.keys(tools)) : undefined;
+          const inbox = await takeInbox();
+          if (inbox.length) {
+            inbox.forEach((m) => seenTs.add(m.ts));
+            const latest = latestTs(inbox.map((m) => m.ts));
+            if (latest && (!extras[EXTRAS.defaultReactTs] || Number(latest) > Number(extras[EXTRAS.defaultReactTs]))) extras[EXTRAS.defaultReactTs] = latest;
+            const rendered = await renderMessages(turn.threadId, inbox.map((m) => m.ts)).catch(() => inbox.map((m) => m.text).join('\n'));
+            extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
+            await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
+          }
+          return { ...(extra.length ? { messages: [...current, ...extra] } : {}), ...(activeTools ? { activeTools } : {}) };
+        },
+      });
+
+      let stepText = '';
+      let stepTools: string[] = [];
+      let stepCalls: StepCall[] = [];
+      let stepResults: StepResultPart[] = [];
+      /** The call's last step: its plain text and how many tool calls it made (for the nudge). */
+      let lastText = '';
+      let lastCalls = 0;
+      for await (const part of result.fullStream) {
+        if (part.type !== 'start' && part.type !== 'start-step') timing.mark('first_chunk');
+        switch (part.type) {
+          case 'text-delta':
+            stepText += part.text;
+            break;
+          case 'tool-input-start':
+            timing.mark('first_tool_input');
+            if (part.toolName === 'reply') timing.mark('first_reply_input');
+            announce(part.id, part.toolName);
+            if (ph.current === 'final' && part.toolName !== 'reply' && part.toolName !== 'react') await setPhase('tools');
+            break;
+          case 'tool-call':
+            announce(part.toolCallId, part.toolName);
+            stepTools.push(part.toolName);
+            stepCalls.push({ toolCallId: part.toolCallId, toolName: part.toolName, input: part.input });
+            turnCalls.push({ tool: part.toolName, args: part.input });
+            break;
+          case 'tool-result': {
+            replies.activityDone(part.toolCallId); // its activity card is finished (never left in progress)
+            turnCard.done(part.toolCallId);
+            stepResults.push({ toolCallId: part.toolCallId, toolName: part.toolName, output: part.output });
+            const v = VISIBLE_TOOLS[part.toolName];
+            if (v) state.visible.add(v);
+            if (v === 'send') replies.notePostedInThread(); // posted below any open activity message
+            break;
+          }
+          case 'tool-error':
+            replies.activityDone(part.toolCallId, false); // a real failure: its card shows as failed
+            turnCard.done(part.toolCallId, false);
+            log.warn({ tool: part.toolName, error: String((part as any).error) }, 'front tool error');
+            break;
+          case 'finish-step': {
+            timing.add('model_steps', 1);
+            timing.add('input_tokens', part.usage.inputTokens);
+            timing.add('output_tokens', part.usage.outputTokens);
+            timing.add('reasoning_tokens', part.usage.outputTokenDetails?.reasoningTokens);
+            timing.add('cached_tokens', part.usage.inputTokenDetails?.cacheReadTokens);
+            timing.mark(`step${timing.counters.model_steps}_end`);
+            ((timing.notes.step_tools ??= []) as string[][]).push([...stepTools]);
+            void recordModelUsage({
+              userId: turn.authorId,
+              threadId: turn.threadId,
+              model: MODELS.front,
+              inputTokens: part.usage.inputTokens,
+              outputTokens: part.usage.outputTokens,
+              cachedInputTokens: part.usage.inputTokenDetails?.cacheReadTokens,
+            }).catch((err) => log.warn({ err }, 'recordModelUsage failed'));
+            if (stepText.trim()) await appendEvent(turn.threadId, 'discarded_text', 'bot', { turnId, text: stepText });
+            doneSteps.push([...stepTools]);
+            lastText = stepText;
+            lastCalls = stepCalls.length;
+            // Final step detection: a step whose reply/reaction went out ends the loop (endsTurnAfterStep, same rule
+            // as stopWhen), and so does a step without tool calls unless it gets the nudge: new messages then start a
+            // fresh turn instead.
+            const nudgeNext = shouldNudgePlainText({ text: stepText, toolCalls: stepCalls.length, nudged, visible: anyVisible(), stopping: stopped, stepsUsed: doneSteps.length, maxSteps: MAX_STEPS });
+            if ((part.finishReason !== 'tool-calls' && !nudgeNext) || endsTurnAfterStep(stepCalls, stepResults)) await setPhase('final');
+            stepText = '';
+            stepTools = [];
+            stepCalls = [];
+            stepResults = [];
+            break;
+          }
+          case 'error':
+            // A step without a tool call despite 'required': the SDK reports it here, then still finishes the step
+            // (its text arrives as discarded_text) and ends the loop. Handled below like any text-only step.
+            if (ToolChoiceViolationError.isInstance(part.error)) {
+              log.info({ turnId, finishReason: part.error.finishReason }, 'front step without a tool call');
+              break;
+            }
+            throw part.error;
+          case 'abort':
+            throw new TurnStopped();
+          default:
+            break;
         }
-        case 'tool-error':
-          replies.activityDone(part.toolCallId, false); // a real failure: its card shows as failed
-          turnCard.done(part.toolCallId, false);
-          log.warn({ tool: part.toolName, error: String((part as any).error) }, 'front tool error');
-          break;
-        case 'finish-step': {
-          timing.add('model_steps', 1);
-          timing.add('input_tokens', part.usage.inputTokens);
-          timing.add('output_tokens', part.usage.outputTokens);
-          timing.add('reasoning_tokens', part.usage.outputTokenDetails?.reasoningTokens);
-          timing.add('cached_tokens', part.usage.inputTokenDetails?.cacheReadTokens);
-          timing.mark(`step${timing.counters.model_steps}_end`);
-          ((timing.notes.step_tools ??= []) as string[][]).push([...stepTools]);
-          void recordModelUsage({
-            userId: turn.authorId,
-            threadId: turn.threadId,
-            model: MODELS.front,
-            inputTokens: part.usage.inputTokens,
-            outputTokens: part.usage.outputTokens,
-            cachedInputTokens: part.usage.inputTokenDetails?.cacheReadTokens,
-          }).catch((err) => log.warn({ err }, 'recordModelUsage failed'));
-          if (stepText.trim()) await appendEvent(turn.threadId, 'discarded_text', 'bot', { turnId, text: stepText });
-          // Final step detection: a step without tool calls ends the loop, and so does a step whose reply/reaction
-          // went out (endsTurnAfterStep, same rule as stopWhen): new messages then start a fresh turn instead.
-          if (part.finishReason !== 'tool-calls' || endsTurnAfterStep(stepCalls, stepResults)) await setPhase('final');
-          stepText = '';
-          stepTools = [];
-          stepCalls = [];
-          stepResults = [];
-          break;
-        }
-        case 'error':
-          throw part.error;
-        case 'abort':
-          throw new TurnStopped();
-        default:
-          break;
       }
+      const nudge = shouldNudgePlainText({ text: lastText, toolCalls: lastCalls, nudged, visible: anyVisible(), stopping: await checkStop(), stepsUsed: doneSteps.length, maxSteps: MAX_STEPS });
+      if (!nudge) break;
+      nudged = true;
+      log.info({ turnId, steps: doneSteps.length }, 'front plain-text step: nudging once');
+      await appendEvent(turn.threadId, 'plain_text_nudge', 'system', { turnId, step: doneSteps.length }).catch(() => {});
+      convo.push(...(await result.responseMessages), { role: 'user', content: PLAIN_TEXT_NUDGE_NOTE });
     }
     timing.mark('loop_done');
   } catch (err) {
