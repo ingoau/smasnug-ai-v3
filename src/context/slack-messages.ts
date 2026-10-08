@@ -38,7 +38,7 @@ export async function storeMessages(channelId: string, threadId: string | null, 
 export async function fetchReplies(
   channelId: string,
   threadTs: string,
-  opts: { latest?: string; maxMessages?: number; slack?: Pick<SlackCallOpts, 'maxWaitMs' | 'priority' | 'onWait'> } = {},
+  opts: { latest?: string; maxMessages?: number; slack?: Pick<SlackCallOpts, 'maxWaitMs' | 'priority' | 'onWait' | 'signal'> } = {},
 ): Promise<any[]> {
   const max = opts.maxMessages ?? 1000;
   const out: any[] = [];

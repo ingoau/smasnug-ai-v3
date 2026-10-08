@@ -101,7 +101,7 @@ export function isFreshProfile(row: Pick<PersonRow, 'syncedAt'>, now = Date.now(
 }
 
 /** Rate-limit options for the lookup (SlackCallOpts subset): a tool inside a subagent step passes a wait cap. */
-export type UserLookupOpts = Pick<SlackCallOpts, 'maxWaitMs' | 'priority' | 'onWait'>;
+export type UserLookupOpts = Pick<SlackCallOpts, 'maxWaitMs' | 'priority' | 'onWait' | 'signal'>;
 
 async function directoryRows(ids: string[]): Promise<Map<string, PersonRow>> {
   try {

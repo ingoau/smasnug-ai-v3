@@ -43,6 +43,19 @@ describe('acquireRateSlot', () => {
     expect(await redis.zcard(`${key}:qb`)).toBe(0);
   });
 
+  it('stops waiting as soon as its signal is aborted (a cancelled run), and leaves the queue', async () => {
+    const key = newKey();
+    await acquireRateSlot(key, { perMin: 1, windowMs: 5000 });
+    const controller = new AbortController();
+    const t0 = Date.now();
+    const waiting = acquireRateSlot(key, { perMin: 1, windowMs: 5000, priority: 'background', signal: controller.signal }).catch((e) => e);
+    await sleep(100);
+    controller.abort(new Error('cancelled'));
+    expect((await waiting).message).toBe('cancelled');
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(await redis.zcard(`${key}:qb`)).toBe(0);
+  });
+
   it('serves waiting callers in arrival order (FIFO)', async () => {
     const key = newKey();
     const order: number[] = [];

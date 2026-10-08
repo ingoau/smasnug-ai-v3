@@ -65,6 +65,8 @@ export interface SlackCallOpts {
   priority?: SlackPriority;
   /** Told when the call has to wait for the limiter or a 429 pause (start and end), e.g. for an activity label. */
   onWait?: (ev: SlackWaitEvent) => void;
+  /** Stops a wait for the limiter or a 429 pause (e.g. the subagent run was cancelled): rejects with the signal's reason. */
+  signal?: AbortSignal;
 }
 
 /** Thrown when a call with `maxWaitMs` would have had to wait longer for a rate limit. */
@@ -220,6 +222,8 @@ export interface AcquireOpts {
   onWait?: (estimateMs: number) => void;
   /** Window length: 60 s in production, shorter in tests. */
   windowMs?: number;
+  /** Stop waiting (and leave the queue) when aborted: rejects with the signal's reason. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -238,6 +242,7 @@ export async function acquireRateSlot(key: string, opts: AcquireOpts): Promise<n
   let notified = false;
   try {
     for (;;) {
+      opts.signal?.throwIfAborted();
       const [waitMs, ahead] = (await redis.eval(
         ACQUIRE_LUA,
         keys.length,
@@ -269,7 +274,7 @@ export async function acquireRateSlot(key: string, opts: AcquireOpts): Promise<n
         } catch {}
       }
       // Sleep until the slot should free, re-checking at least every MAX_POLL_MS; never past the deadline.
-      await sleep(Math.max(5, Math.min(waitMs + 5, MAX_POLL_MS, deadline - Date.now())));
+      await sleep(Math.max(5, Math.min(waitMs + 5, MAX_POLL_MS, deadline - Date.now())), opts.signal);
     }
   } finally {
     // Leaving early (busy, error): give up the place in the queue right away.
@@ -283,14 +288,14 @@ export async function acquireRateSlot(key: string, opts: AcquireOpts): Promise<n
  */
 export const pauseKey = (token: TokenKind, method: string) => `slack:429:${token}:${method}`;
 
-async function pauseFor(token: TokenKind, method: string, deadline: number, wait: WaitReporter) {
+async function pauseFor(token: TokenKind, method: string, deadline: number, wait: WaitReporter, signal?: AbortSignal) {
   const until = Number(await redis.get(pauseKey(token, method)));
   if (until && until > deadline) throw new SlackBusyError(method, until - Date.now());
   if (until && until > Date.now()) {
     const ms = until - Date.now();
     const started = Date.now();
     wait.start('429', ms);
-    await sleep(ms);
+    await sleep(ms, signal);
     wait.end('429', ms, Date.now() - started);
   }
 }
@@ -391,8 +396,8 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
   if (FAKE && process.env.SLACK_FAKE_LIMITER !== '1') return (await fakeCall(method, args, token)) as T;
   const wait = waitReporter(method, opts.onWait);
   for (let attempt = 0; ; attempt++) {
-    await pauseFor(token, method, deadline, wait);
-    await throttle(method, token, channel, { deadline, priority: opts.priority, wait });
+    await pauseFor(token, method, deadline, wait, opts.signal);
+    await throttle(method, token, channel, { deadline, priority: opts.priority, wait, signal: opts.signal });
     try {
       return (FAKE ? await fakeCall(method, args, token) : await clients[token].apiCall(method, args)) as T;
     } catch (err: any) {
@@ -405,7 +410,7 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
         continue;
       }
       if (err?.code === 'slack_webapi_request_error' && attempt < 3) {
-        await sleep(500 * 2 ** attempt);
+        await sleep(500 * 2 ** attempt, opts.signal);
         continue;
       }
       throw err;
@@ -437,7 +442,7 @@ async function throttle(
   method: string,
   token: TokenKind,
   channel: string | undefined,
-  o: { deadline: number; priority?: SlackPriority; wait: WaitReporter },
+  o: { deadline: number; priority?: SlackPriority; wait: WaitReporter; signal?: AbortSignal },
 ) {
   const take = async (key: string, perMin: number, reserve: number, windowMs = DEFAULT_WINDOW_MS) => {
     let estimate = 0;
@@ -447,6 +452,7 @@ async function throttle(
       windowMs,
       priority: o.priority,
       deadline: o.deadline,
+      signal: o.signal,
       onWait: (ms) => {
         estimate = ms;
         o.wait.start('rate_limit', ms);
@@ -473,4 +479,30 @@ export async function getBotIdentity() {
   return botIdentity;
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Sleeps `ms`; with a signal, rejects with its reason as soon as it's aborted. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((r) => setTimeout(r, ms));
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(signal.reason);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/** `p`, or a rejection with the signal's reason once it's aborted (for a call shared with other waiters). */
+export function untilAborted<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}

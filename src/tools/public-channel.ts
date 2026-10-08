@@ -111,7 +111,7 @@ async function fetchHistory(
       ...(opts.oldest ? { oldest: opts.oldest } : {}),
       ...(opts.inclusive !== undefined ? { inclusive: opts.inclusive } : {}),
     },
-    { token: opts.token ?? 'user', maxWaitMs: opts.slack?.maxWaitMs, priority: opts.slack?.priority, onWait: opts.slack?.onWait },
+    { token: opts.token ?? 'user', maxWaitMs: opts.slack?.maxWaitMs, priority: opts.slack?.priority, onWait: opts.slack?.onWait, signal: opts.slack?.signal },
   );
   return [...(res.messages ?? [])].sort((a, b) => compareTs(a.ts, b.ts));
 }

@@ -2,8 +2,8 @@ import { createHash } from 'node:crypto';
 import { tool } from 'ai';
 import { z } from 'zod';
 import { limits } from '../config.js';
-import { registerTool, type ToolContext } from '../core/tools.js';
-import { SlackBusyError, slackCall, slackErrorCode, type SlackPriority, type SlackWaitEvent } from '../core/slack.js';
+import { registerTool, STOPPED_TOOL_RESULT, type ToolContext } from '../core/tools.js';
+import { SlackBusyError, slackCall, slackErrorCode, untilAborted, type SlackPriority, type SlackWaitEvent } from '../core/slack.js';
 import { redis } from '../core/redis.js';
 import { takeLimit } from '../features/guard.js';
 import { renderSlackText, tsLabel } from '../context/format.js';
@@ -51,6 +51,8 @@ export interface SlackWaitOpts {
   priority?: SlackPriority;
   maxWaitMs?: number;
   onWait?: SlackWaitCallback;
+  /** The turn's / run's stop signal: a cancelled subagent stops waiting for the limiter right away. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -67,11 +69,11 @@ export function slackMaxWaitMs(priority: SlackPriority, kind: 'search' | 'read' 
  * SlackWaitOpts for a tool call in `ctx`: priority by role, the subagent runner's wait callback, and the wait cap for
  * that priority (`slackMaxWaitMs`; `cap` picks search vs read caps, or gives one in ms).
  */
-export function slackWaitOpts(ctx: Pick<ToolContext, 'role' | 'extras'>, cap: 'search' | 'read' | number = 'read'): SlackWaitOpts {
+export function slackWaitOpts(ctx: Pick<ToolContext, 'role' | 'extras' | 'abortSignal'>, cap: 'search' | 'read' | number = 'read'): SlackWaitOpts {
   const onWait = typeof ctx.extras[SLACK_WAIT_EXTRA] === 'function' ? (ctx.extras[SLACK_WAIT_EXTRA] as SlackWaitCallback) : undefined;
   const priority: SlackPriority = ctx.role === 'child' ? 'background' : 'interactive';
   const maxWaitMs = typeof cap === 'number' ? cap : slackMaxWaitMs(priority, cap);
-  return { priority, maxWaitMs, ...(onWait ? { onWait } : {}) };
+  return { priority, maxWaitMs, ...(onWait ? { onWait } : {}), ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}) };
 }
 
 const retrySeconds = (waitMs: number) => Math.max(1, Math.ceil(waitMs / 1000));
@@ -139,7 +141,7 @@ export async function channelVisibility(ids: string[], opts: SlackWaitOpts = {})
         let verdict: string;
         let channel: any = null;
         try {
-          const res = await slackCall<any>('conversations.info', { channel: id }, { maxWaitMs: opts.maxWaitMs, priority: opts.priority, onWait: opts.onWait });
+          const res = await slackCall<any>('conversations.info', { channel: id }, { maxWaitMs: opts.maxWaitMs, priority: opts.priority, onWait: opts.onWait, signal: opts.signal });
           const ok = res?.ok !== false && res?.channel?.id === id && isPublicChannelInfo(res.channel);
           verdict = ok ? `public:${typeof res.channel.name === 'string' ? res.channel.name : ''}` : 'private';
           if (ok) channel = res.channel;
@@ -336,7 +338,7 @@ const inflight = new Map<string, Promise<{ matches: any[]; skipped: number }>>()
 export async function searchPublicMatches(
   query: string,
   sort: SearchSort | undefined,
-  opts: { priority: SlackPriority; maxWaitMs: number; onWait?: SlackWaitCallback },
+  opts: { priority: SlackPriority; maxWaitMs: number; onWait?: SlackWaitCallback; signal?: AbortSignal },
 ): Promise<{ matches: any[]; cached: boolean; skipped: number }> {
   const key = searchCacheKey(query, sort);
   const hit = await redis.get(key).catch(() => null);
@@ -349,6 +351,8 @@ export async function searchPublicMatches(
   const flightKey = `${key}:${opts.priority}`;
   let p = inflight.get(flightKey);
   if (!p) {
+    // Shared with identical searches: one caller's stop signal mustn't abort it for the others (each races its own below).
+    const { signal: _signal, ...shared } = opts;
     p = (async () => {
       const res = await slackCall<any>(
         'search.messages',
@@ -359,10 +363,10 @@ export async function searchPublicMatches(
           sort: sort === 'recent' || sort === 'oldest' ? 'timestamp' : 'score',
           sort_dir: sort === 'oldest' ? 'asc' : 'desc',
         },
-        { token: 'user', maxWaitMs: opts.maxWaitMs, priority: opts.priority, onWait: opts.onWait },
+        { token: 'user', maxWaitMs: shared.maxWaitMs, priority: shared.priority, onWait: shared.onWait },
       );
       // Only the filtered list is ever kept or described: never `messages.total`/pagination (they count private hits).
-      const filtered = await filterPublicMatchesDetailed(res.messages?.matches ?? [], opts);
+      const filtered = await filterPublicMatchesDetailed(res.messages?.matches ?? [], shared);
       const pub = filtered.matches.slice(0, MAX_RESULTS).map(slimMatch);
       // Incomplete (some channels unverified): not cached, so the next identical search can find them.
       if (!filtered.skipped) await redis.set(key, JSON.stringify(pub), 'EX', limits.slackSearchCacheTtlS).catch((err) => log.debug({ err }, 'search cache write failed'));
@@ -370,7 +374,7 @@ export async function searchPublicMatches(
     })().finally(() => inflight.delete(flightKey));
     inflight.set(flightKey, p);
   }
-  return { ...(await p), cached: false };
+  return { ...(await untilAborted(p, opts.signal)), cached: false };
 }
 
 /** Appended to search results when some matches were left out because their channel couldn't be verified in time. */
@@ -401,7 +405,7 @@ registerTool({
     let calls = 0;
     // Front-agent turns are a user waiting on an answer (fail fast); subagent research is background work that waits
     // up to about one search window for a slot (see SlackPriority, slackMaxWaitMs).
-    const { priority = 'interactive', onWait, maxWaitMs = limits.slackSearchMaxWaitMs } = slackWaitOpts(ctx, 'search');
+    const { priority = 'interactive', onWait, maxWaitMs = limits.slackSearchMaxWaitMs, signal } = slackWaitOpts(ctx, 'search');
     const withBudget = (text: string, skipped = 0) => {
       const notes = [skippedNote(skipped), ctx.role === 'child' ? searchBudgetNote(calls) : null].filter(Boolean);
       return [text, ...notes].join('\n');
@@ -421,13 +425,14 @@ registerTool({
         const over = await takeLimit('search', ctx.speakerId, ctx.threadId);
         if (over) return over;
         try {
-          const { matches: pub, skipped } = await searchPublicMatches(query, sort, { priority, maxWaitMs, onWait });
+          const { matches: pub, skipped } = await searchPublicMatches(query, sort, { priority, maxWaitMs, onWait, signal });
           if (!pub.length) return withBudget(`No public-channel results for "${query}".`, skipped);
-          const names = await getUserNames(searchUserIds(pub), { priority, maxWaitMs, onWait });
+          const names = await getUserNames(searchUserIds(pub), { priority, maxWaitMs, onWait, signal });
           const { text, shown } = formatSearchMatches(pub, names);
           return withBudget(untrusted('slack search', `Results for "${query}" (${shown} shown, public channels only):\n${text}`), skipped);
         } catch (err) {
           if (err instanceof SlackBusyError) return withBudget(searchBusyText(err.waitMs));
+          if (signal?.aborted) return STOPPED_TOOL_RESULT;
           log.warn({ err, query }, 'slack_search failed');
           return `Slack search failed: ${errMsg(err)}`;
         }

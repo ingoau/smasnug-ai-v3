@@ -55,7 +55,7 @@ async function fetchThread(channel: string, ts: string, maxMessages = MAX_FETCH,
     const res = await slackCall<any>(
       'conversations.replies',
       { channel, ts, limit: 200, ...(cursor ? { cursor } : {}) },
-      { token, maxWaitMs: slack.maxWaitMs, priority: slack.priority, onWait: slack.onWait },
+      { token, maxWaitMs: slack.maxWaitMs, priority: slack.priority, onWait: slack.onWait, signal: slack.signal },
     );
     out.push(...(res.messages ?? []));
     cursor = res.has_more ? res.response_metadata?.next_cursor || undefined : undefined;
