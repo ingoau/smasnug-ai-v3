@@ -63,6 +63,8 @@ describe('frontSystemPrompt delegation and scope rules', () => {
 
   it('fans independent parts out (items, separate questions, comparisons); dependent steps stay one task / a later round', () => {
     expect(p).toMatch(/whatever splits into parts that can be researched independently gets one subagent per part, all in ONE spawn_subagent call/);
+    expect(p).toMatch(/Parallelize by default: before spawning, list the request's parts/);
+    expect(p).toMatch(/one task that bundles several parts is slower and shallower than one task each: when in doubt, split/);
     expect(p).toMatch(/several named items \([^)]*frameworks[^)]*\), several separate questions or numbered parts in one message, and "A vs B vs C" or "compare A, B and C": a task per item, never one "compare" task/);
     expect(p).toMatch(/Keep one task only when the parts are trivially small or each needs the previous one's finding/);
     expect(p).toMatch(/each task's instructions quote its part of the request word for word, plus every requirement that applies to all parts/);
