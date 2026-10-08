@@ -44,7 +44,7 @@ export const buttonsSchema = z
   .array(z.string())
   .optional()
   .describe(
-    `Optional quick-reply buttons under the message, when it ends with a question that has a few clear answers (options like "price, size or wireless?", a "which one?", a yes/no like "want me to dig deeper?"). 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars), each exactly what the user would type back; a press posts that label as their message. Omit for open questions and normal answers.`,
+    `Optional quick-reply buttons under the message. Use them whenever the message asks a question with a few clear answers (options like "price, size or wireless?", a "which one?", a yes/no). And when there's a logical next step the user would likely want (dig deeper, draft or write it, run it, set a reminder, send it), end with one short offer plus buttons, e.g. "want me to draft it?" → ["Yes, draft it", "No thanks"]. At most one offer per message, only when genuinely useful: never on bare greetings or thanks, or while the user is mid-task giving you instructions. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars), each exactly what the user would type back; a press posts that label as their message. Omit for open questions and when there's no clear next step.`,
   );
 
 registerTool({
