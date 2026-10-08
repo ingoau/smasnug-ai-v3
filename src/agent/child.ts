@@ -3,7 +3,8 @@
  * cancel flag checked exactly at step boundaries (never mid tool call). Progress goes to `runs.details` and the
  * card is re-rendered (coalesced). History is persisted (compacted) at run end.
  */
-import { streamText, stepCountIs, type ModelMessage } from 'ai';
+import { streamText, stepCountIs, tool, type ModelMessage } from 'ai';
+import { z } from 'zod';
 import { env, limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
@@ -17,7 +18,8 @@ import { FIRST_STEP_DETAILS, THINKING_DETAILS, WRITING_DETAILS } from './card-re
 import { childSystemPrompt } from './prompts/child.js';
 import { failRuns, finishRun, type RunRow, type SubagentRow } from './subagents.js';
 import { WEB_SEARCH_TOOL, webSearchSources } from '../tools/web-search.js';
-import { SLACK_WAIT_EXTRA } from '../tools/slack-search.js';
+import { SEARCH_DEFER_EXTRA, SLACK_WAIT_EXTRA, type DeferFn } from '../tools/slack-search.js';
+import { DeferredQueue } from './deferred.js';
 import type { SlackWaitEvent } from '../core/slack.js';
 import { addSource, compactHistory, describeToolStep, oneLine, splitResult, urlsInText, type RunSource } from './util.js';
 import { onSandboxRunFinished } from '../sandbox/hooks.js';
@@ -106,6 +108,14 @@ export const SLACK_WAIT_LABEL = 'Waiting on Slack';
 const SLACK_WAIT_PREFIX = SLACK_WAIT_LABEL;
 /** Shorter waits don't change the label (no flicker). */
 const SLACK_WAIT_LABEL_MIN_MS = 1000;
+/** Card label while a run that wants to finish waits for its queued (background) Slack searches. */
+export const QUEUED_SEARCHES_LABEL = 'Waiting for queued Slack searches';
+/** wait_for_searches returns after this long at most (the model can call it again or carry on). */
+const WAIT_FOR_SEARCHES_MAX_MS = 45_000;
+
+/** First message of a block of background search results added to the run's conversation. */
+export const BACKGROUND_RESULTS_HEADER = '[Background results] Slack searches you queued earlier have finished:';
+
 export const slackWaitLabel = (ms: number) => `${SLACK_WAIT_LABEL} (${Math.max(1, Math.ceil(ms / 1000))}s)`;
 /** While a wait lasts, its label counts down this often. */
 export const SLACK_WAIT_TICK_MS = 5000;
@@ -226,6 +236,14 @@ async function runClaimed(run: RunRow): Promise<void> {
   let cancelRequested = false;
 
   const { channelId, threadTs } = parseThreadId(run.threadId);
+  // Slack searches that couldn't get a slot soon run here in the background (src/agent/deferred.ts); counted per step.
+  const deferred = new DeferredQueue(limits.deferredSearchesPerRun, controller.signal);
+  let stepDeferred = 0;
+  const deferSearch: DeferFn = (job) => {
+    const id = deferred.defer(job);
+    if (id) stepDeferred++;
+    return id;
+  };
   const tools = toolsFor('child', {
     threadId: run.threadId,
     channelId,
@@ -235,7 +253,20 @@ async function runClaimed(run: RunRow): Promise<void> {
     runId: run.id,
     abortSignal: controller.signal,
     // queueUserImage deliberately unset: Luna accepts images in tool results.
-    extras: { [SLACK_WAIT_EXTRA]: (ev: SlackWaitEvent) => onSlackWait(ev) },
+    extras: { [SLACK_WAIT_EXTRA]: (ev: SlackWaitEvent) => onSlackWait(ev), [SEARCH_DEFER_EXTRA]: deferSearch },
+  });
+  tools.wait_for_searches = tool({
+    description:
+      'Wait for your queued background Slack searches (slack_search said "Queued as background search …") and get their results. Only when nothing else is left to do meanwhile; results also arrive by themselves before later steps.',
+    inputSchema: z.object({}),
+    execute: async () => {
+      if (!deferred.outstanding) return 'No background searches are pending.';
+      await deferred.waitAny(Math.max(0, Math.min(WAIT_FOR_SEARCHES_MAX_MS, wrapUpAt - Date.now())), controller.signal);
+      const results = deferred.take();
+      const still = deferred.pendingLabels();
+      const rest = still.length ? `Still running: ${still.join(', ')}.` : '';
+      return results ? [results, rest].filter(Boolean).join('\n\n') : `No results yet. ${rest} Carry on, or call wait_for_searches again.`;
+    },
   });
   if (!sandbox) for (const name of SANDBOX_TOOL_NAMES) delete tools[name];
   const instructions = sandbox ? `${childSystemPrompt()}\n\n${sandboxChildPrompt({ previews: previewsConfigured() })}` : childSystemPrompt();
@@ -353,6 +384,8 @@ async function runClaimed(run: RunRow): Promise<void> {
       }
       const inbox = await drainSubagentInbox(sa.id);
       for (const text of inbox) messages.push({ role: 'user', content: `[Orchestrator update] ${text}` });
+      const background = deferred.take();
+      if (background) messages.push({ role: 'user', content: `${BACKGROUND_RESULTS_HEADER}\n\n${background}` });
 
       const overBudget = tokens >= limits.runMaxTokens || step >= MAX_STEPS || Date.now() >= wrapUpAt;
       if (overBudget) {
@@ -367,6 +400,7 @@ async function runClaimed(run: RunRow): Promise<void> {
 
       const stepStart = Date.now();
       stepSlackWaitMs = 0;
+      stepDeferred = 0;
       let firstChunkAt = 0;
       let stepTools: string[] = [];
       const result = streamText({
@@ -406,6 +440,7 @@ async function runClaimed(run: RunRow): Promise<void> {
             firstChunkMs: firstChunkAt ? firstChunkAt - stepStart : null,
             tools: stepTools,
             ...(stepSlackWaitMs ? { slackWaitMs: stepSlackWaitMs } : {}),
+            ...(stepDeferred ? { deferredSearches: stepDeferred } : {}),
             sources: sources.length,
             inputTokens: part.usage.inputTokens,
             outputTokens: part.usage.outputTokens,
@@ -426,6 +461,24 @@ async function runClaimed(run: RunRow): Promise<void> {
       messages.push(...(await result.responseMessages));
       await saveSources().catch((err) => log.warn({ err, runId: run.id }, 'saving run sources failed'));
       if (finishReason === 'tool-calls' && !overBudget) continue;
+
+      // About to finish with queued searches outstanding: wait for them and have the report written with them.
+      if (!overBudget && deferred.outstanding) {
+        const waitStart = Date.now();
+        await setDetails(QUEUED_SEARCHES_LABEL);
+        // Never past the wrap-up point: a run that times out hands back nothing.
+        await deferred.waitAll(Math.max(0, wrapUpAt - Date.now()), controller.signal);
+        if (controller.signal.aborted) throw controller.signal.reason ?? new Error('aborted');
+        const late = deferred.take();
+        void appendEvent(run.threadId, 'run_bg_wait', `subagent:${run.subagentId}`, { runId: run.id, step, ms: Date.now() - waitStart, delivered: !!late }).catch(() => {});
+        if (late) {
+          messages.push({
+            role: 'user',
+            content: `${BACKGROUND_RESULTS_HEADER}\n\n${late}\n\n[Orchestrator update] These arrived after you wrote the report above, so it isn't final yet: take them into account (follow strong new leads if needed), then write the complete final report again, ending with the SUMMARY line.`,
+          });
+          continue;
+        }
+      }
 
       finalText = stepText;
       // No citations / fetches recorded: fall back to the URLs the result itself cites.
@@ -460,6 +513,7 @@ async function runClaimed(run: RunRow): Promise<void> {
     clearInterval(heartbeat);
     clearInterval(elapsedTicker);
     stopWaitTicker();
+    deferred.close();
     active.delete(run.id);
     if (sandbox) void onSandboxRunFinished(run.id).catch((err) => log.warn({ err, runId: run.id }, 'sandbox run-finished hook failed'));
   }

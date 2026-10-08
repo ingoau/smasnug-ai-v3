@@ -227,6 +227,15 @@ export const limits = {
   slackToolMaxWaitMs: 15_000,
   /** The same reads in background work (subagents, watches): wait up to about one search window too. */
   slackToolBackgroundMaxWaitMs: 32_000,
+  /**
+   * A subagent's slack_search that would wait longer than this for a slot is queued in the background instead
+   * (src/agent/deferred.ts): the run keeps working and gets the results at a later step.
+   */
+  slackSearchDeferAfterMs: 3_000,
+  /** A queued (background) search waits up to this long for a slot: nothing is blocked on it. */
+  slackSearchDeferredMaxWaitMs: 90_000,
+  /** Background searches pending per subagent run at most; past that a search waits in its step as before. */
+  deferredSearchesPerRun: 6,
   /** search.messages slots per 30-s window only interactive calls (front-agent turns) may use; background (subagents, watches) get the rest. */
   slackSearchInteractiveReserve: 4,
   /** Identical searches (query, sort, page) share their public results for this long (Redis; public matches only). */

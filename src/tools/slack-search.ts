@@ -290,6 +290,20 @@ export function formatSearchMatches(matches: any[], names: Map<string, string>, 
 export const SLACK_WAIT_EXTRA = 'onSlackWait';
 export type SlackWaitCallback = (ev: SlackWaitEvent) => void;
 
+/**
+ * `ToolContext.extras` key for the subagent run's background queue (src/agent/deferred.ts): a slack_search that would
+ * wait longer than `limits.slackSearchDeferAfterMs` for a slot is handed to it and returns "queued" at once.
+ */
+export const SEARCH_DEFER_EXTRA = 'deferSearch';
+export interface DeferredJob {
+  /** What it is, shown with its results (the search query). */
+  label: string;
+  /** The work; the signal fires when the run ends or is cancelled. Resolves to the model-facing result text. */
+  run: (signal: AbortSignal) => Promise<string>;
+}
+/** Queue a job: its id ("S1"), or null when the run has the most jobs pending already (the caller waits inline). */
+export type DeferFn = (job: DeferredJob) => string | null;
+
 export type SearchSort = 'relevance' | 'recent' | 'oldest';
 
 /**
@@ -324,7 +338,17 @@ export function searchCacheKey(query: string, sort: SearchSort | undefined, page
   return `slack:search:cache:${createHash('sha256').update(JSON.stringify([query.trim(), sort ?? 'relevance', page])).digest('hex').slice(0, 32)}`;
 }
 
-/** Identical searches in flight in this process share one Slack call (per priority: a front turn never sits out a subagent's wait). */
+export interface SearchOpts {
+  priority: SlackPriority;
+  /** Wait cap for the Slack calls (search.messages unless `searchMaxWaitMs`, the visibility checks). */
+  maxWaitMs: number;
+  /** A different cap for search.messages itself (a subagent's quick try before it queues the search). */
+  searchMaxWaitMs?: number;
+  onWait?: SlackWaitCallback;
+  signal?: AbortSignal;
+}
+
+/** Identical searches in flight in this process share one Slack call (see the flight key). */
 const inflight = new Map<string, Promise<{ matches: any[]; skipped: number }>>();
 
 /**
@@ -338,7 +362,7 @@ const inflight = new Map<string, Promise<{ matches: any[]; skipped: number }>>()
 export async function searchPublicMatches(
   query: string,
   sort: SearchSort | undefined,
-  opts: { priority: SlackPriority; maxWaitMs: number; onWait?: SlackWaitCallback; signal?: AbortSignal },
+  opts: SearchOpts,
 ): Promise<{ matches: any[]; cached: boolean; skipped: number }> {
   const key = searchCacheKey(query, sort);
   const hit = await redis.get(key).catch(() => null);
@@ -348,7 +372,8 @@ export async function searchPublicMatches(
       if (Array.isArray(parsed)) return { ...(await filterPublicMatchesDetailed(parsed, opts)), cached: true };
     } catch {}
   }
-  const flightKey = `${key}:${opts.priority}`;
+  // Per priority and wait cap: a front turn never sits out a subagent's wait, a quick try never a queued search's.
+  const flightKey = `${key}:${opts.priority}:${opts.searchMaxWaitMs ?? opts.maxWaitMs}`;
   let p = inflight.get(flightKey);
   if (!p) {
     // Shared with identical searches: one caller's stop signal mustn't abort it for the others (each races its own below).
@@ -363,7 +388,7 @@ export async function searchPublicMatches(
           sort: sort === 'recent' || sort === 'oldest' ? 'timestamp' : 'score',
           sort_dir: sort === 'oldest' ? 'asc' : 'desc',
         },
-        { token: 'user', maxWaitMs: shared.maxWaitMs, priority: shared.priority, onWait: shared.onWait },
+        { token: 'user', maxWaitMs: shared.searchMaxWaitMs ?? shared.maxWaitMs, priority: shared.priority, onWait: shared.onWait },
       );
       // Only the filtered list is ever kept or described: never `messages.total`/pagination (they count private hits).
       const filtered = await filterPublicMatchesDetailed(res.messages?.matches ?? [], shared);
@@ -381,6 +406,12 @@ export async function searchPublicMatches(
 export function skippedNote(skipped: number): string | null {
   if (!skipped) return null;
   return `[Note: ${skipped} more ${skipped === 1 ? 'result was' : 'results were'} skipped because Slack's rate limit kept me from checking that ${skipped === 1 ? 'its channel is' : 'their channels are'} public. Searching again in a minute may show ${skipped === 1 ? 'it' : 'them'}.]`;
+}
+
+/** Model-facing result of a search queued in the background (a subagent's search that couldn't get a slot soon). */
+export function searchQueuedText(id: string, query: string, waitMs: number): string {
+  const s = retrySeconds(waitMs);
+  return `Queued as background search ${id}: Slack search is busy (~${s}s until a slot frees), so "${query}" runs in the background and its results arrive as "[Background search ${id}: …]" before a later step. Don't repeat it. Meanwhile work your other leads (open the hits you have, read threads, web_search, fetch_url); call wait_for_searches only when nothing else is left to do.`;
 }
 
 /** Model-facing result when the shared limiter is full (longer than the caller may wait): says when to retry. */
@@ -406,9 +437,25 @@ registerTool({
     // Front-agent turns are a user waiting on an answer (fail fast); subagent research is background work that waits
     // up to about one search window for a slot (see SlackPriority, slackMaxWaitMs).
     const { priority = 'interactive', onWait, maxWaitMs = limits.slackSearchMaxWaitMs, signal } = slackWaitOpts(ctx, 'search');
-    const withBudget = (text: string, skipped = 0) => {
-      const notes = [skippedNote(skipped), ctx.role === 'child' ? searchBudgetNote(calls) : null].filter(Boolean);
+    const withBudget = (text: string, skipped: number, n: number) => {
+      const notes = [skippedNote(skipped), ctx.role === 'child' ? searchBudgetNote(n) : null].filter(Boolean);
       return [text, ...notes].join('\n');
+    };
+    /** One search, rendered for the model (throws SlackBusyError past the wait caps in `o`). */
+    const search = async (query: string, sort: SearchSort | undefined, n: number, o: SearchOpts): Promise<string> => {
+      const { matches: pub, skipped } = await searchPublicMatches(query, sort, o);
+      if (!pub.length) return withBudget(`No public-channel results for "${query}".`, skipped, n);
+      const names = await getUserNames(searchUserIds(pub), { priority: o.priority, maxWaitMs: o.maxWaitMs, onWait: o.onWait, signal: o.signal });
+      const { text, shown } = formatSearchMatches(pub, names);
+      return withBudget(untrusted('slack search', `Results for "${query}" (${shown} shown, public channels only):\n${text}`), skipped, n);
+    };
+    // A subagent run's background queue: a search that can't get a slot soon is queued there instead of stalling the step.
+    const defer = ctx.role === 'child' && typeof ctx.extras[SEARCH_DEFER_EXTRA] === 'function' ? (ctx.extras[SEARCH_DEFER_EXTRA] as DeferFn) : undefined;
+    const failed = (err: unknown, query: string, n: number) => {
+      if (err instanceof SlackBusyError) return withBudget(searchBusyText(err.waitMs), 0, n);
+      if (signal?.aborted) return STOPPED_TOOL_RESULT;
+      log.warn({ err, query }, 'slack_search failed');
+      return `Slack search failed: ${errMsg(err)}`;
     };
     return tool({
       description:
@@ -421,20 +468,29 @@ registerTool({
           .describe('Default relevance. "recent" = newest first; "oldest" = earliest first (find where something started).'),
       }),
       execute: async ({ query, sort }) => {
-        calls++;
+        const n = ++calls;
         const over = await takeLimit('search', ctx.speakerId, ctx.threadId);
         if (over) return over;
+        const opts: SearchOpts = { priority, maxWaitMs, onWait, signal };
         try {
-          const { matches: pub, skipped } = await searchPublicMatches(query, sort, { priority, maxWaitMs, onWait, signal });
-          if (!pub.length) return withBudget(`No public-channel results for "${query}".`, skipped);
-          const names = await getUserNames(searchUserIds(pub), { priority, maxWaitMs, onWait, signal });
-          const { text, shown } = formatSearchMatches(pub, names);
-          return withBudget(untrusted('slack search', `Results for "${query}" (${shown} shown, public channels only):\n${text}`), skipped);
+          return await search(query, sort, n, defer ? { ...opts, searchMaxWaitMs: limits.slackSearchDeferAfterMs } : opts);
         } catch (err) {
-          if (err instanceof SlackBusyError) return withBudget(searchBusyText(err.waitMs));
-          if (signal?.aborted) return STOPPED_TOOL_RESULT;
-          log.warn({ err, query }, 'slack_search failed');
-          return `Slack search failed: ${errMsg(err)}`;
+          if (!defer || !(err instanceof SlackBusyError) || signal?.aborted) return failed(err, query, n);
+          // Queued: no wait label or step wait time (nothing waits on it); the run's end or cancel stops it.
+          const id = defer({
+            label: query,
+            run: (sig) =>
+              search(query, sort, n, { priority, maxWaitMs: limits.slackSearchDeferredMaxWaitMs, signal: sig }).catch((e) =>
+                e instanceof SlackBusyError ? withBudget(searchBusyText(e.waitMs), 0, n) : Promise.reject(e),
+              ),
+          });
+          if (id) return searchQueuedText(id, query, err.waitMs);
+          // The run's queue is full: wait in the step as before.
+          try {
+            return await search(query, sort, n, opts);
+          } catch (err2) {
+            return failed(err2, query, n);
+          }
         }
       },
     });

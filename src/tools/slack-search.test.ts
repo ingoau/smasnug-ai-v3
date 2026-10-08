@@ -17,7 +17,7 @@ import './index.js';
 import { channelFromSlack } from './directory/fields.js';
 import { handleDirectoryEvent } from './directory/events.js';
 import { upsertChannels } from './directory/store.js';
-import { channelVisibility, formatSearchMatches, searchBudgetNote, searchBusyText, searchCacheKey, searchUserIds, slackBusyText, slackMaxWaitMs, slackWaitOpts, SLACK_WAIT_EXTRA, slimMatch } from './slack-search.js';
+import { channelVisibility, formatSearchMatches, searchBudgetNote, searchBusyText, searchCacheKey, searchQueuedText, SEARCH_DEFER_EXTRA, type DeferredJob, searchUserIds, slackBusyText, slackMaxWaitMs, slackWaitOpts, SLACK_WAIT_EXTRA, slimMatch } from './slack-search.js';
 
 const r = Math.random().toString(36).slice(2, 8).toUpperCase();
 const channel = `C2SS${r}`;
@@ -64,6 +64,8 @@ const MATCHES = [
 
 let searchCalls: { query: string; sort: string; sortDir: string }[] = [];
 let busyQueries = new Set<string>();
+/** Busy on the first call only (a quick try that gets queued; the queued search then gets a slot). */
+let busyOnce = new Set<string>();
 let slowQuery = '';
 const removers = [
   addFakeHandler(async (method, args) => {
@@ -74,6 +76,7 @@ const removers = [
     const q = String(args.query);
     searchCalls.push({ query: q, sort: String(args.sort), sortDir: String(args.sort_dir) });
     if (busyQueries.has(q)) throw new SlackBusyError('slack:rl:user:search.messages', 42_000);
+    if (busyOnce.delete(q)) throw new SlackBusyError('slack:rl:user:search.messages', 20_000);
     if (q === slowQuery) await new Promise((res) => setTimeout(res, 150));
     return { ok: true, messages: { total: 999, matches: MATCHES } };
   }),
@@ -176,6 +179,46 @@ describe('slack_search busy + budget', () => {
     // Says when to retry (e.g. after a long 429 pause that outlasts even the background wait).
     expect(searchBusyText(45_000)).toMatch(/search again in ~45s/);
     expect(slackBusyText('that thread', 40_200)).toMatch(/try again in ~41s/);
+  });
+});
+
+describe('slack_search queued in the background (subagent runs)', () => {
+  const deferInto = (jobs: DeferredJob[], id: string | null = 'S1') => ({ [SEARCH_DEFER_EXTRA]: (job: DeferredJob) => (jobs.push(job), id) });
+
+  it('a subagent search that can\'t get a slot soon is queued: "queued" at once, the job then runs the search', async () => {
+    busyOnce.add(q('queued'));
+    const jobs: DeferredJob[] = [];
+    const out: string = await exec(toolsFor('child', ctx(deferInto(jobs))).slack_search, { query: q('queued') });
+    expect(out).toBe(searchQueuedText('S1', q('queued'), 20_000));
+    expect(out).toMatch(/Don't repeat it/);
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.label).toBe(q('queued'));
+    const results = await jobs[0]!.run(new AbortController().signal);
+    expect(results).toContain(`Results for "${q('queued')}" (2 shown, public channels only)`);
+  });
+
+  it('a queued search that still finds Slack busy resolves to the busy text', async () => {
+    busyQueries.add(q('queued busy'));
+    const jobs: DeferredJob[] = [];
+    await exec(toolsFor('child', ctx(deferInto(jobs))).slack_search, { query: q('queued busy') });
+    expect(await jobs[0]!.run(new AbortController().signal)).toBe(searchBusyText(42_000));
+    busyQueries.delete(q('queued busy'));
+  });
+
+  it('a full queue (defer → null) waits in the step as before', async () => {
+    busyOnce.add(q('queue full'));
+    const jobs: DeferredJob[] = [];
+    const out: string = await exec(toolsFor('child', ctx(deferInto(jobs, null))).slack_search, { query: q('queue full') });
+    expect(out).toContain(`Results for "${q('queue full')}"`);
+  });
+
+  it('front-agent turns never queue', async () => {
+    busyQueries.add(q('front busy'));
+    const jobs: DeferredJob[] = [];
+    const out: string = await exec(toolsFor('front', ctx(deferInto(jobs))).slack_search, { query: q('front busy') });
+    expect(out).toBe(searchBusyText(42_000));
+    expect(jobs).toHaveLength(0);
+    busyQueries.delete(q('front busy'));
   });
 });
 

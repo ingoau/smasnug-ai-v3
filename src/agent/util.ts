@@ -162,6 +162,8 @@ export function describeToolStep(toolName: string, input: unknown, opts: { fileN
       return q('query') ? `Searching the web for “${q('query')}”` : 'Searching the web';
     case 'slack_search':
       return q('query') ? `Searching Slack for “${q('query')}”` : 'Searching Slack';
+    case 'wait_for_searches':
+      return 'Waiting for queued Slack searches';
     case 'find_people':
       return q('query') ? `Looking up “${q('query')}” in the directory` : 'Looking people up';
     case 'find_channels':
