@@ -111,11 +111,13 @@ thread's first text is within ~0.1s of the single-thread number; subagent runs s
 
 ### Evaluated, not changed
 
-- **Front reasoning effort** (`FRONT_REASONING_EFFORT`, default `none`): kept `none`. In real Slack turns even
-  29–59 reasoning tokens took ~4.0–4.3s to the first token vs ~1.2–1.5s without; `low` was slower and sometimes
-  ended the turn with plain text instead of calling `reply` (→ the "couldn't come up with a reply" fallback). Probe
-  with a tiny prompt and one tool: 0.8–1.1s, so the 8k-token prompt (98% cached) costs ~0.2s at most; not worth
-  trimming tool descriptions.
+- **Front reasoning effort** (`FRONT_REASONING_EFFORT`; changed `none` → `low`): in real Slack turns even 29–59
+  reasoning tokens took ~4.0–4.3s to the first token vs ~1.2–1.5s without. `none` was kept at first because `low`
+  sometimes ended the turn with plain text instead of calling `reply` (5 of 40 eval answers got the "couldn't come
+  up with a reply" fallback). Fixed: every front step must call a tool (`toolChoice: 'required'`), and a step that
+  still ends with plain text gets one nudge step (send it with `reply` or `end_turn`), so the front now runs at
+  `low`. Probe with a tiny prompt and one tool: 0.8–1.1s, so the 8k-token prompt (98% cached) costs ~0.2s at most;
+  not worth trimming tool descriptions.
 - **Subagent reasoning effort** (`CHILD_REASONING_EFFORT`; the exception here: changed `low` → `medium`):
   subagent-researched answers were ~86% correct at medium and high vs ~69% at low; high was slower and costlier
   with no gain.

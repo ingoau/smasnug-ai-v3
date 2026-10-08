@@ -40,8 +40,11 @@ const Env = z.object({
    * Slack's "Working…" only. The old values `overlay` / `text` (deprecated assistant.threads.setStatus) mean `tasks`.
    */
   STATUS_ACTIVITY_MODE: z.preprocess((v) => (v === 'overlay' || v === 'text' ? 'tasks' : v), z.enum(['tasks', 'off'])).default('tasks'),
-  /** Front agent reasoning effort on OpenRouter (see docs/perf.md for the latency/quality comparison). */
-  FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('none'),
+  /**
+   * Front agent reasoning effort on OpenRouter (see docs/perf.md for the latency/quality comparison). `low` relies on
+   * required tool calls + the one-time plain-text nudge (front.ts) so it doesn't end turns with unshown text.
+   */
+  FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('low'),
   /**
    * Reasoning effort for subagent runs; `default` = the model's own default. `medium`: researched answers are right
    * more often than at `low` (which is faster); `high` gained nothing (docs/perf.md).
