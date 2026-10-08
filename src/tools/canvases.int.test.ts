@@ -269,6 +269,25 @@ describe.skipIf(!INTEGRATION)('canvas tools', () => {
     expect(callsOf('canvases.edit')[0]!.args.changes[0].document_content.markdown).toContain('## Again\n\n## Report @​channel');
   });
 
+  it('from_files: publishes text files joined in order (the read_file access rule); not together with from_subagent', async () => {
+    const c = await ctx(PUB);
+    const { createFile } = await import('../files/store.js');
+    const mk = (name: string, text: string, threadId = c.threadId, ownerId = 'USPEAK') =>
+      createFile({ threadId, ownerId, name, content: Buffer.from(text), description: name, createdRunId: null, createdTurnId: null, createdSubagentId: null });
+    const p1 = await mk('p1.md', '## Part 1\none');
+    const p2 = await mk('p2.md', '## Part 2\ntwo <!channel>');
+    const out = await exec('front', c, 'create_canvas', { title: 'Joined', content: 'Intro.', from_files: [p1.id, p2.id] });
+    expect(out).toContain('Published 2 files: p1.md, p2.md');
+    expect(content.get(linkOf(out)![2]!)).toBe('Intro.\n\n## Part 1\none\n\n## Part 2\ntwo @\u200bchannel\n');
+    const foreign = await mk('secret.md', 'nope', `${PUB}:1790000999.000100`, 'USOMEONE');
+    expect(await exec('front', c, 'create_canvas', { title: 'X', from_files: [foreign.id] })).toMatch(/^Not created: No file/);
+    expect(await exec('front', c, 'create_canvas', { title: 'X', from_files: [p1.id], from_subagent: 'sa_x' })).toMatch(/not both/);
+    calls = [];
+    const id = linkOf(out)![2]!;
+    expect(await exec('front', c, 'edit_canvas', { canvas: id, action: 'append', from_files: [p2.id] })).toMatch(/Canvas updated/);
+    expect(callsOf('canvases.edit')[0]!.args.changes[0].document_content.markdown).toContain('## Part 2');
+  });
+
   it('edit: a deleted canvas drops its row', async () => {
     const c = await ctx(PUB);
     const id = linkOf(await exec('front', c, 'create_canvas', { title: 'Gone', content: 'a' }))![2]!;

@@ -32,7 +32,7 @@ const OPAQUE: ReadonlySet<FileKind> = new Set(['pdf', 'audio', 'video', 'archive
 /** Known binary types are not downloaded just to say they can't be read (octet-stream is sniffed). */
 const metadataOnly = (f: FileMeta, kind: FileKind) => OPAQUE.has(kind) || (kind === 'binary' && !!f.mime && f.mime !== 'application/octet-stream');
 
-const accessCtx = (ctx: ToolContext) => ({ threadId: ctx.threadId, speakerId: ctx.speakerId });
+const accessCtx = (ctx: Pick<ToolContext, 'threadId' | 'speakerId'>) => ({ threadId: ctx.threadId, speakerId: ctx.speakerId });
 
 function whoMade(f: FileMeta, ctx: ToolContext): string {
   if (f.origin === 'created') return f.ownerId === ctx.speakerId ? 'made by you for the speaker' : `made by you for <@${f.ownerId}>`;
@@ -43,6 +43,42 @@ function whoMade(f: FileMeta, ctx: ToolContext): string {
 function asText(f: FileMeta, bytes: Buffer): string | null {
   if (!isTextMime(f.mime) && !looksLikeText(bytes)) return null;
   return bytes.toString('utf8').replace(/^﻿/, '');
+}
+
+/** Most files one `from_files` may join. */
+export const MAX_JOIN_FILES = 20;
+
+/**
+ * The text of several files the context may use (the read_file access rule), in order, joined with a blank line,
+ * under an optional `intro`: a long document assembled server-side (e.g. the sections subagents saved) instead of
+ * re-typing it as tool args. Text files only; the first unusable id is the error.
+ */
+export async function joinFiles(
+  ctx: Pick<ToolContext, 'threadId' | 'speakerId'>,
+  ids: string[],
+  intro?: string,
+): Promise<{ text: string; names: string[] } | { error: string }> {
+  const refs = ids.map((id) => id.trim()).filter(Boolean);
+  if (!refs.length) return { error: 'from_files is empty.' };
+  if (refs.length > MAX_JOIN_FILES) return { error: `from_files takes at most ${MAX_JOIN_FILES} files.` };
+  const parts: string[] = [];
+  const names: string[] = [];
+  for (const ref of refs) {
+    const f = await resolveFile(ref, accessCtx(ctx));
+    if ('error' in f) return { error: f.error };
+    let bytes: Buffer;
+    try {
+      bytes = await loadFileBytes(f);
+    } catch (err) {
+      return { error: `${f.name} (${f.id}) couldn't be opened: ${err instanceof FileError ? err.message : errMsg(err)}.` };
+    }
+    const text = asText(f, bytes);
+    if (text === null) return { error: `${f.name} (${f.id}) is not a text file; only text files can be joined.` };
+    parts.push(text.trim());
+    names.push(f.name);
+  }
+  const head = intro?.trim();
+  return { text: [...(head ? [head] : []), ...parts].join('\n\n') + '\n', names };
 }
 
 const binaryNote = (f: FileMeta) =>
@@ -203,15 +239,29 @@ registerTool({
     return tool({
       description: `Create a file (code, HTML page, CSV, markdown, config…) in the file store and get its id. ${
         ctx.role === 'front' ? 'Post it with reply(files: [id]).' : 'It is listed with your result automatically (id, name, size, description); mention what it is in your result.'
-      } Text content (UTF-8); small binaries as base64 with encoding "base64". Max ${formatBytes(limits.fileMaxBytes)}.`,
+      } Text content (UTF-8); small binaries as base64 with encoding "base64". Max ${formatBytes(limits.fileMaxBytes)}. To assemble a long document from text files you or subagents already made (e.g. one section each), pass their ids in \`from_files\` instead of re-typing them: they're joined in order, server-side, below \`content\`.`,
       inputSchema: z.object({
         name: z.string().min(1).max(200).describe('File name with extension, e.g. "index.html", "signups.csv", "bot.py"'),
-        content: z.string().describe('The full file content'),
+        content: z.string().optional().describe('The full file content. With from_files: an optional intro placed above the joined files (e.g. a title and attribution)'),
+        from_files: z
+          .array(z.string())
+          .max(MAX_JOIN_FILES)
+          .optional()
+          .describe('Ids (file_…) of text files to join, in this order, into this file (a blank line between them), e.g. the sections subagents saved'),
         description: z.string().max(400).describe('One line (≤ 200 chars) saying what the file is, e.g. "Landing page for the robotics club, dark theme, one HTML file"'),
         encoding: z.enum(['utf8', 'base64']).optional().describe('"base64" for small binary files; default utf8 text'),
       }),
-      execute: async ({ name, content, description, encoding }) => {
+      execute: async ({ name, content: given, from_files, description, encoding }) => {
         if (made >= limits.createFileMaxPerTurn) return `create_file already used ${limits.createFileMaxPerTurn} times this turn.`;
+        let content = given ?? '';
+        let joined = '';
+        if (from_files?.length) {
+          if (encoding === 'base64') return 'from_files joins text files; it can\'t be combined with encoding "base64".';
+          const doc = await joinFiles(ctx, from_files, given);
+          if ('error' in doc) return `Not created: ${doc.error}`;
+          content = doc.text;
+          joined = ` Joined ${doc.names.length} files: ${doc.names.join(', ')}.`;
+        } else if (!given) return 'Not created: pass `content` (or `from_files`).';
         const bytes = encoding === 'base64' ? Buffer.from(content.replace(/\s+/g, ''), 'base64') : Buffer.from(content, 'utf8');
         if (encoding === 'base64' && !bytes.byteLength && content.trim()) return 'The base64 content could not be decoded.';
         const scope = ctx.runId ? `run:${ctx.runId}` : ctx.turnId ? `turn:${ctx.turnId}` : null;
@@ -234,7 +284,7 @@ registerTool({
             mime: f.mime,
             size: f.size,
             description: f.description,
-            note: ctx.role === 'front' ? `Created. Post it with reply(files: ["${f.id}"]).` : 'Created. It is listed with your result automatically.',
+            note: `${ctx.role === 'front' ? `Created. Post it with reply(files: ["${f.id}"]).` : 'Created. It is listed with your result automatically.'}${joined}`,
           };
         } catch (err) {
           if (err instanceof FileError) return err.message;

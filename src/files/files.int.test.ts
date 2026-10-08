@@ -72,6 +72,27 @@ describe.skipIf(!INTEGRATION)('file store', () => {
     await sql.end();
   });
 
+  it('create_file from_files joins text files in order under an optional intro; access rule, text only, needs content or files', async () => {
+    const threadId = threadOf(CH);
+    const ctx = ctxOf(threadId, 'U_ALICE', { runId: 7 });
+    const a = await exec('child', ctx, 'create_file', { name: 'q1.md', content: '## Q1\nfirst part\n\n', description: 'part 1' });
+    const b = await exec('child', ctx, 'create_file', { name: 'q2.md', content: '## Q2\nsecond part', description: 'part 2' });
+    const front = ctxOf(threadId, 'U_ALICE');
+    const joined = await exec('front', front, 'create_file', { name: 'answers.md', content: '# Answers\nBy Lily.', from_files: [a.file_id, b.file_id], description: 'all answers' });
+    expect(joined.note).toContain('Joined 2 files: q1.md, q2.md');
+    const f = await S.resolveFile(joined.file_id, { threadId, speakerId: 'U_ALICE' });
+    if ('error' in f) throw new Error(f.error);
+    expect((await S.loadFileBytes(f)).toString('utf8')).toBe('# Answers\nBy Lily.\n\n## Q1\nfirst part\n\n## Q2\nsecond part\n');
+
+    // Another thread's file (someone else's) can't be joined; ids can't be probed.
+    const elsewhere = ctxOf(threadOf(CH), 'U_BOB');
+    expect(await exec('front', elsewhere, 'create_file', { name: 'x.md', from_files: [a.file_id], description: 'x' })).toMatch(/^Not created: No file/);
+    // Binary files are refused; so is a call with neither content nor files.
+    const png = await exec('child', ctx, 'create_file', { name: 'dot.png', content: (await sharp({ create: { width: 2, height: 2, channels: 3, background: '#000' } }).png().toBuffer()).toString('base64'), encoding: 'base64', description: 'dot' });
+    expect(await exec('front', front, 'create_file', { name: 'x.md', from_files: [a.file_id, png.file_id], description: 'x' })).toMatch(/dot\.png .* is not a text file/);
+    expect(await exec('front', front, 'create_file', { name: 'x.md', description: 'x' })).toMatch(/pass `content` \(or `from_files`\)/);
+  });
+
   it('create_file → reply(files) uploads it to the thread (external upload flow), once per turn, and maps the Slack copy back', async () => {
     const threadId = threadOf(CH);
     const ctx = ctxOf(threadId, 'U_ALICE');

@@ -26,6 +26,7 @@ import { registerTool, type ToolContext } from '../core/tools.js';
 import { sql } from '../db/index.js';
 import { takeLimit } from '../features/guard.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
+import { joinFiles, MAX_JOIN_FILES } from '../files/tools.js';
 import { log } from '../log.js';
 import {
   canEditCanvas,
@@ -252,6 +253,35 @@ export async function subagentDocument(threadId: string, subagentId: string, int
   return { content: head ? `${head}\n\n${body}` : body, note };
 }
 
+const FROM_FILES_DESC =
+  'Ids (file_…) of text files to publish, joined in this order, server-side (e.g. the sections subagents saved): use this instead of re-typing them. `content` then is an optional short intro placed above them.';
+
+/** A canvas document from text files (joinFiles, the read_file access rule), cut to the canvas write limit. */
+async function filesDocument(ctx: Pick<ToolContext, 'threadId' | 'speakerId'>, ids: string[], intro: string | undefined): Promise<{ content: string; note: string } | { error: string }> {
+  if ((intro?.trim().length ?? 0) > MAX_INTRO_CHARS) return { error: `the intro (\`content\`) is too long (max ${MAX_INTRO_CHARS} chars); the files are the document.` };
+  const doc = await joinFiles(ctx, ids, intro);
+  if ('error' in doc) return doc;
+  if (doc.text.length <= limits.canvasWriteMaxChars) return { content: doc.text, note: ` Published ${doc.names.length} files: ${doc.names.join(', ')}.` };
+  const room = limits.canvasWriteMaxChars - 100;
+  let cut = doc.text.slice(0, room);
+  const nl = cut.lastIndexOf('\n');
+  if (nl > room * 0.8) cut = cut.slice(0, nl);
+  return { content: `${cut}\n\n_(The rest didn't fit in the canvas.)_`, note: ` The files were longer than a canvas allows and were cut at ${limits.canvasWriteMaxChars} chars.` };
+}
+
+/** One source for a canvas write: from_subagent, from_files, or `content` as given. */
+async function documentFrom(
+  ctx: Pick<ToolContext, 'threadId' | 'speakerId'>,
+  input: { content?: string; from_subagent?: string; from_files?: string[] },
+): Promise<{ content: string; note: string } | { error: string } | null> {
+  const sub = input.from_subagent?.trim();
+  const files = input.from_files?.filter((f) => f.trim());
+  if (sub && files?.length) return { error: 'pass from_subagent or from_files, not both.' };
+  if (sub) return subagentDocument(ctx.threadId, sub, input.content);
+  if (files?.length) return filesDocument(ctx, files, input.content);
+  return null;
+}
+
 const canvasMarkdownHint =
   'Markdown: # / ## / ### headings, lists, checklists (- [ ]), tables (max 300 cells), code blocks, links, quotes. Mention people as <@U123> and channels as <#C123>.';
 
@@ -267,18 +297,17 @@ registerTool({
         content: z
           .string()
           .optional()
-          .describe('The full document in markdown. Start with the content, not with the title (the title is shown above it). With from_subagent: an optional short intro.'),
+          .describe('The full document in markdown. Start with the content, not with the title (the title is shown above it). With from_subagent / from_files: an optional short intro.'),
         from_subagent: z.string().optional().describe(FROM_SUBAGENT_DESC),
+        from_files: z.array(z.string()).max(MAX_JOIN_FILES).optional().describe(FROM_FILES_DESC),
       }),
-      execute: async ({ title, content: given, from_subagent }) => {
+      execute: async ({ title, content: given, from_subagent, from_files }) => {
         const cleanTitle = neutralizeBroadcasts(title.replace(/\s+/g, ' ').trim()).slice(0, 150) || 'Untitled';
         let content = given ?? '';
         let note = '';
-        if (from_subagent?.trim()) {
-          const doc = await subagentDocument(ctx.threadId, from_subagent, given);
-          if ('error' in doc) return `Not created: ${doc.error}`;
-          ({ content, note } = doc);
-        }
+        const doc = await documentFrom(ctx, { content: given, from_subagent, from_files });
+        if (doc && 'error' in doc) return `Not created: ${doc.error}`;
+        if (doc) ({ content, note } = doc);
         if (!content.trim()) return 'Not created: the content is empty.';
         if (content.length > limits.canvasWriteMaxChars) return `Not created: the content is too long (${content.length} chars, max ${limits.canvasWriteMaxChars}). Shorten it.`;
         const key = `${ctx.turnId ?? ctx.runId ?? ctx.threadId}:${hash(`${cleanTitle}\n${content}`)}`;
@@ -353,8 +382,9 @@ registerTool({
       inputSchema: z.object({
         canvas: z.string().describe('Canvas link or id (F…)'),
         action: z.enum(EDIT_ACTIONS),
-        content: z.string().optional().describe('Markdown for append / replace_section / replace_all (with from_subagent: an optional short intro)'),
+        content: z.string().optional().describe('Markdown for append / replace_section / replace_all (with from_subagent / from_files: an optional short intro)'),
         from_subagent: z.string().optional().describe(`append / replace_section / replace_all: ${FROM_SUBAGENT_DESC}`),
+        from_files: z.array(z.string()).max(MAX_JOIN_FILES).optional().describe(`append / replace_section / replace_all: ${FROM_FILES_DESC}`),
         heading: z.string().optional().describe('replace_section: the heading text of the section to replace'),
         title: z.string().optional().describe('rename: the new title'),
       }),
@@ -367,11 +397,13 @@ registerTool({
         if (!row) return "I can only edit canvases I created, and this one isn't mine. I can read it (if it's shared here or in a public channel) and make a new canvas instead.";
         if (!canEditCanvas(row, ctx.speakerId))
           return `That canvas belongs to <@${row.creatorId}> (they asked for it); only they can have me edit it. I can make a new canvas instead.`;
-        if (input.from_subagent?.trim() && input.action !== 'rename') {
-          const doc = await subagentDocument(ctx.threadId, input.from_subagent, input.content);
-          if ('error' in doc) return `Not edited: ${doc.error}`;
-          input = { ...input, content: doc.content };
-          note = doc.note;
+        if (input.action !== 'rename') {
+          const doc = await documentFrom(ctx, input);
+          if (doc && 'error' in doc) return `Not edited: ${doc.error}`;
+          if (doc) {
+            input = { ...input, content: doc.content };
+            note = doc.note;
+          }
         }
         const key = `${ctx.turnId ?? ctx.threadId}:${hash(JSON.stringify([canvasId, input.action, input.heading ?? '', input.title ?? '', input.content ?? '']))}`;
         const over = await takeLimit('canvas_write', ctx.speakerId, ctx.threadId);
