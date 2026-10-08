@@ -1058,7 +1058,7 @@ describe('runFrontTurn: status activity', () => {
     h.model = mockModel([toolStep(['search_emojis', { query: 'x' }]), spawnStreamed, replyStep('On it.'), textStep('')]);
     const { io: tio, activity } = ioWithActivity(false);
     await runFrontTurn(turn({ id: 60, isMention: false }), tio);
-    expect(activity).toEqual(['Starting a subagent…']);
+    expect(activity).toEqual(['Digging in…']);
   });
 
   it('web_search is a client tool: announced as "Searching the web…", Exa results go back to the model', async () => {
@@ -1190,16 +1190,16 @@ describe('runFrontTurn: status activity', () => {
 
     it('reply + spawn in one step, posted whole (subagents running): the live plan becomes the reply message with its card', async () => {
       h.activeRuns = 1;
-      h.cardBlock = () => ({ type: 'plan', block_id: 'card_5_plan', title: 'Running 1 subagent', tasks: [] });
+      h.cardBlock = () => ({ type: 'plan', block_id: 'card_5_plan', title: 'Task 1', tasks: [] });
       h.model = mockModel([spawnAndReplyStep('On it, I started a subagent.'), textStep('never reached')], 2);
       await runFrontTurn(turn({ id: 71 }), ioWithActivity(true).io);
       expect(h.model.doStreamCalls).toHaveLength(1); // the step ended the turn
       const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
       expect(chat.map((c) => c.method)).toEqual(['chat.startStream', 'chat.stopStream', 'chat.update']);
       expect(chat[0]!.args.task_display_mode).toBe('plan');
-      expect(cards(chat[0]!)).toEqual(['Starting a subagent…:in_progress']);
+      expect(cards(chat[0]!)).toEqual(['Digging in…:in_progress']);
       // the stop finishes the task (Slack shows a task still in progress at the stop as failed), no error status
-      expect(cards(chat[1]!)).toEqual(['Starting a subagent…:complete']);
+      expect(cards(chat[1]!)).toEqual(['Digging in…:complete']);
       expect(chat.flatMap(cards).some((c) => c.endsWith(':error'))).toBe(false);
       // the message is rewritten as [card, reply]; the card lives there
       expect(chat[2]!.args.ts).toBe(chat[1]!.args.ts);
@@ -1214,7 +1214,7 @@ describe('runFrontTurn: status activity', () => {
       const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
       expect(chat.filter((c) => c.method === 'chat.startStream')).toHaveLength(1);
       const ts = chat.find((c) => c.method === 'chat.stopStream')!.args.ts;
-      expect(statusesAtStop(ts)).toEqual({ 'Starting a subagent…': 'complete' });
+      expect(statusesAtStop(ts)).toEqual({ 'Digging in…': 'complete' });
       expect(chat.flatMap(cards).some((c) => c.endsWith(':error'))).toBe(false);
       expect(chat.at(-1)).toMatchObject({ method: 'chat.update', args: { blocks: [{ type: 'markdown', text: 'On it, I started a subagent.' }] } });
     });

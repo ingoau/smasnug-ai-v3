@@ -102,7 +102,7 @@ describe('ActivityTrail', () => {
     const a = await t.adopt();
     expect(a).toEqual({ ts: expect.stringMatching(/^1700000000\./), chunks: [{ type: 'task_update', id: 'activity-1', title: 'Searching Slack…', status: 'complete' }], cards: 1, stopKey: 'activity:7:0:stop' });
     expect(t.isOpen).toBe(false);
-    t.activity('Starting a subagent…');
+    t.activity('Digging in…');
     await sleep(10);
     expect(methods()).toEqual(['chat.startStream', 'chat.startStream']);
     await t.close();
@@ -153,17 +153,17 @@ describe('ActivityTrail', () => {
     const t = trail();
     t.activity('Searching Slack…', 'x');
     await sleep(10);
-    t.activity('Starting a subagent…', 's1');
+    t.activity('Digging in…', 's1');
     t.toolDone('s1');
     await sleep(150);
     expect(methods()).toEqual(['chat.startStream']);
     t.toolDone('x');
-    t.activity('Starting a subagent…', 's2');
+    t.activity('Digging in…', 's2');
     t.toolDone('s2');
     await sleep(150);
     expect(cardsOf('chat.appendStream')).toEqual([['Searching Slack…:complete']]);
     const fresh = trail();
-    fresh.activity('Starting a subagent…', 's3');
+    fresh.activity('Digging in…', 's3');
     fresh.toolDone('s3'); // before the first flush ran
     await sleep(20);
     expect(methods()).toEqual(['chat.startStream', 'chat.appendStream']);
@@ -305,12 +305,12 @@ describe('ReplyManager with activity cards', () => {
 
   it('a posted reply (subagents running) is written into the activity message, its task finished at the stop', async () => {
     const rm = new ReplyManager(target(1));
-    rm.activity('Updating a subagent…');
+    rm.activity('Updating the task…');
     await sleep(10);
     await rm.finish('tc1', 'Told the subagent.');
     await rm.closeActivity();
     expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.update']);
-    expect(cardsOf('chat.stopStream')).toEqual([['Updating a subagent…:complete']]);
+    expect(cardsOf('chat.stopStream')).toEqual([['Updating the task…:complete']]);
     const ts = calls[1]!.args.ts;
     expect(calls[2]!.args).toMatchObject({ ts, text: 'Told the subagent.', blocks: [{ type: 'markdown', text: 'Told the subagent.' }] });
     expect(rm.lastDelivered).toEqual({ ts, text: 'Told the subagent.', streamed: false });
@@ -318,7 +318,7 @@ describe('ReplyManager with activity cards', () => {
 
   it('…and when the activity message cannot take it, it is deleted before the reply is posted (never above it)', async () => {
     const rm = new ReplyManager(target(1));
-    rm.activity('Updating a subagent…');
+    rm.activity('Updating the task…');
     await sleep(10);
     failOn = (m) => (m === 'chat.update' ? 'cant_update_message' : null);
     await rm.finish('tc1', 'Told the subagent.');
@@ -329,7 +329,7 @@ describe('ReplyManager with activity cards', () => {
 
   it('a posted reply into an activity stream Slack already ended: still written into it (no delete + post gap)', async () => {
     const rm = new ReplyManager(target(1));
-    rm.activity('Updating a subagent…');
+    rm.activity('Updating the task…');
     await sleep(10);
     failOn = (m) => (m === 'chat.stopStream' ? 'message_not_in_streaming_state' : null);
     await rm.finish('tc1', 'Told the subagent.');
@@ -341,7 +341,7 @@ describe('ReplyManager with activity cards', () => {
 
   it('the turn card goes above a posted reply and is recorded with its message', async () => {
     const attached: string[] = [];
-    const card = { type: 'plan', block_id: 'card_5_plan', title: 'Running 1 subagent', tasks: [] } as const;
+    const card = { type: 'plan', block_id: 'card_5_plan', title: 'Task 1', tasks: [] } as const;
     const rm = new ReplyManager(target(1, { card: { block: async () => card, attached: async (ts: string) => void attached.push(ts) } }));
     await rm.finish('tc1', 'On it.');
     const post = calls.find((c) => c.method === 'chat.postMessage')!;
@@ -366,19 +366,19 @@ describe('ReplyManager with activity cards', () => {
 
   it('reply + spawn in one step (posted whole): the spawn card completes on its result; nothing in progress or failed at the stop', async () => {
     const rm = new ReplyManager(target(1));
-    rm.activity('Starting a subagent…', 's1');
+    rm.activity('Digging in…', 's1');
     await sleep(10);
     rm.activityDone('s1');
     await rm.finish('tc1', 'On it.');
     await rm.closeActivity();
     expect(methods()).toEqual(['chat.startStream', 'chat.stopStream', 'chat.update']);
     expect(finalStatuses()).toEqual({ 'activity-1': 'complete' });
-    expect(cardsOf('chat.stopStream')).toEqual([['Starting a subagent…:complete']]);
+    expect(cardsOf('chat.stopStream')).toEqual([['Digging in…:complete']]);
   });
 
   it('reply + spawn in one step (streamed): the reply adopts the finished card; nothing in progress or failed at the stop', async () => {
     const rm = new ReplyManager(target(0));
-    rm.activity('Starting a subagent…', 's1');
+    rm.activity('Digging in…', 's1');
     await sleep(10);
     rm.activityDone('s1');
     const text = 'On it, a subagent is looking into it.';
@@ -393,7 +393,7 @@ describe('ReplyManager with activity cards', () => {
     const rm = new ReplyManager(target(1));
     const done = rm.finish('tc1', 'On it.');
     await new Promise((r) => setImmediate(r)); // the post is under way
-    rm.activity('Starting a subagent…', 's1');
+    rm.activity('Digging in…', 's1');
     await done;
     await sleep(20);
     await rm.closeActivity();

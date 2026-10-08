@@ -13,6 +13,7 @@ import { chatModel, MODELS } from '../models.js';
 import { log } from '../log.js';
 import { WORKER_ID } from '../worker/identity.js';
 import { scheduleCardRender } from './cards.js';
+import { FIRST_STEP_DETAILS, THINKING_DETAILS, WRITING_DETAILS } from './card-render.js';
 import { childSystemPrompt } from './prompts/child.js';
 import { failRuns, finishRun, type RunRow, type SubagentRow } from './subagents.js';
 import { WEB_SEARCH_TOOL, webSearchSources } from '../tools/web-search.js';
@@ -31,15 +32,15 @@ const MAX_STEPS = 50;
  */
 export const WRAP_UP_BEFORE_TIMEOUT_MS = 90_000;
 
-/** Card text while the first step runs (until its first tool call). */
-export const FIRST_STEP_DETAILS = 'Researching…';
+/**
+ * Card text while the first step runs (until its first tool call) / while the model works between tool calls (the
+ * step's tools have all returned) / while it writes its final answer (text, no tool call in the step). Defined in
+ * card-render.ts, which shows the run's title instead of these in the plan title.
+ */
+export { FIRST_STEP_DETAILS, THINKING_DETAILS, WRITING_DETAILS };
 /** A step running longer than this shows its elapsed time on the card, refreshed at this interval. */
 export const ELAPSED_TICK_MS = 15_000;
 
-/** Card text while the model works between tool calls (the step's tools have all returned). */
-export const THINKING_DETAILS = 'Thinking…';
-/** Card text while the model writes its final answer (text, no tool call in the step). */
-export const WRITING_DETAILS = 'Writing up…';
 /** Text shorter than this at the start of a step may be a preamble before tool calls: no "Writing up…" yet. */
 const WRITING_MIN_CHARS = 40;
 

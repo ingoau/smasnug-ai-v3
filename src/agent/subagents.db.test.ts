@@ -166,7 +166,7 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     calls = (await fakeCalls()).slice(b4);
     const re = calls.filter((c) => c.method === 'chat.update' && c.args.ts === '1790001000.000100').at(-1)!;
     expect(re.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown']);
-    expect(re.args.blocks[0]).toMatchObject({ title: 'Ran 1 subagent', tasks: [{ task_id: expect.stringMatching(/^run_/), title: 'Card test', status: 'error' }] });
+    expect(re.args.blocks[0]).toMatchObject({ title: 'Card test', tasks: [{ task_id: expect.stringMatching(/^run_/), title: 'Card test', status: 'error' }] });
     expect(re.args.blocks[1].text).toBe('On it — checking.');
 
     // Attaching fails (e.g. Slack refuses to update a streamed message) → standalone card.

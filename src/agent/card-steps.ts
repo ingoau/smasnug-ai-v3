@@ -58,11 +58,9 @@ export function stepTitle(step: CardStep): string {
   return step.status === 'in_progress' ? k.live : k.done;
 }
 
-const plural = (n: number) => `${n} subagent${n === 1 ? '' : 's'}`;
-
 /**
- * Short summary of what the card did, in order of first appearance: "searched Slack, read 2 pages, ran 3
- * subagents". Empty when there is nothing to sum up.
+ * Short summary of what the card did, in order of first appearance: "searched Slack, read 2 pages, worked on 3
+ * tasks" (runs are tasks to users, never "subagents"). Empty when there is nothing to sum up.
  */
 export function summarizeSteps(steps: CardStep[], runs: { status: RunStatus }[] = []): string {
   const counts = new Map<string, number>();
@@ -73,7 +71,7 @@ export function summarizeSteps(steps: CardStep[], runs: { status: RunStatus }[] 
   const parts = [...counts].map(([key, n]) => KINDS[key]!.summary(n));
   if (runs.length) {
     const failed = runs.filter((r) => r.status === 'error').length;
-    parts.push(`ran ${plural(runs.length)}${failed ? ` (${failed} failed)` : ''}`);
+    parts.push(`worked on ${runs.length === 1 ? 'a task' : `${runs.length} tasks`}${failed ? ` (${failed} failed)` : ''}`);
   }
   return parts.join(', ');
 }

@@ -17,17 +17,24 @@ const run = (id: number, over: Partial<CardRun> = {}): CardRun => ({
 const textOf = (rt: any) => rt?.elements?.[0]?.elements?.[0]?.text;
 
 describe('card titles', () => {
-  it('live title counts active runs', () => {
-    expect(liveTitle([run(1), run(2, { status: 'running' })])).toBe('Running 2 subagents');
-    expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'running' })])).toBe('Running 1 subagent');
-    expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'error' })])).toBe('Ran 2 subagents');
+  it('live title says what the work is, never "subagent"', () => {
+    expect(liveTitle([run(1), run(2, { status: 'running' })])).toBe('Working on 2 tasks');
+    // One active run: what it is doing right now, else its title (queued, or only thinking / writing up).
+    expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'running', details: 'Searching Slack for “demo day”' })])).toBe('Searching Slack for “demo day”');
+    for (const details of [null, '  ', 'Researching…', 'Thinking…', 'Writing up…', 'Thinking… (30s)']) {
+      expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'running', details })])).toBe('Task 2');
+    }
+    expect(liveTitle([run(1, { status: 'running', details: 'Reading example.com (45s)' })])).toBe('Reading example.com (45s)');
+    expect(liveTitle([run(1, { details: 'stale' })])).toBe('Task 1');
+    expect(liveTitle([run(1, { status: 'running', subagentTitle: ' ' })])).toBe('Task');
+    expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'error' })])).toBe('Worked on 2 tasks');
   });
 
   it('frozen title is the model title, falling back only when missing', () => {
-    expect(frozenTitle('Compared 3 hosting options', 3)).toBe('Compared 3 hosting options');
-    expect(frozenTitle(null, 3)).toBe('Ran 3 subagents');
-    expect(frozenTitle('   ', 1)).toBe('Ran 1 subagent');
-    expect(frozenTitle('x'.repeat(41), 2)).toBe('x'.repeat(41)); // the model's title as written, even if long
+    expect(frozenTitle('Compared 3 hosting options', [run(1), run(2), run(3)])).toBe('Compared 3 hosting options');
+    expect(frozenTitle(null, [run(1), run(2), run(3)])).toBe('Worked on 3 tasks');
+    expect(frozenTitle('   ', [run(1, { subagentTitle: 'Check the venue' })])).toBe('Check the venue');
+    expect(frozenTitle('x'.repeat(41), [run(1), run(2)])).toBe('x'.repeat(41)); // the model's title as written, even if long
   });
 });
 
@@ -44,7 +51,7 @@ describe('renderCard', () => {
     const { blocks, text } = renderCard({ id: 9, title: null, frozen: false }, runs);
     const plan = blocks[0] as any;
     expect(plan.type).toBe('plan');
-    expect(plan.title).toBe('Running 3 subagents');
+    expect(plan.title).toBe('Working on 3 tasks');
     const [q, r, c, e, x, resumed] = plan.tasks;
     expect(q).toMatchObject({ type: 'task_card', task_id: 'run_1', status: 'pending', title: 'Task 1' });
     expect(textOf(q.details)).toBe('Queued');
@@ -60,7 +67,7 @@ describe('renderCard', () => {
     expect(resumed.title).toBe('↻ Task 6');
     // No buttons: just the plan
     expect(blocks.map((b) => b.type)).toEqual(['plan']);
-    expect(text).toContain('Running 3 subagents');
+    expect(text).toContain('Working on 3 tasks');
     expect(text.length).toBeGreaterThan(0);
   });
 
@@ -72,7 +79,7 @@ describe('renderCard', () => {
     const done = renderCard({ id: 1, title: null, frozen: false }, runs);
     expect(done.blocks).toHaveLength(1);
     const plan = done.blocks[0] as any;
-    expect(plan).toMatchObject({ type: 'plan', block_id: 'card_1_plan', title: 'Ran 2 subagents' });
+    expect(plan).toMatchObject({ type: 'plan', block_id: 'card_1_plan', title: 'Worked on 2 tasks' });
     // The subagent runs are still listed (Slack shows the plan collapsed to its title, expandable on click).
     expect(plan.tasks.map((t: any) => [t.task_id, t.title, t.status])).toEqual([
       ['run_1', 'Task 1', 'complete'],
@@ -81,7 +88,7 @@ describe('renderCard', () => {
     expect(textOf(plan.tasks[0].output)).toBe('ok');
     expect(plan.tasks[0].sources).toEqual([{ type: 'url', url: 'https://example.com/a', text: 'Doc A' }]);
     expect(textOf(plan.tasks[1].output)).toBe('Cancelled');
-    expect(done.text.split('\n')[0]).toBe('Ran 2 subagents');
+    expect(done.text.split('\n')[0]).toBe('Worked on 2 tasks');
     const frozen = renderCard({ id: 1, title: 'Checked the docs', frozen: true }, runs);
     expect((frozen.blocks[0] as any).title).toBe('Checked the docs');
     expect((frozen.blocks[0] as any).tasks).toEqual(plan.tasks);
@@ -140,7 +147,7 @@ describe('turn steps on the card', () => {
     const r = renderCard({ id: 6, title: null, frozen: false, steps: steps(['slack_search', 'complete'], ['fetch_url', 'error']) }, [run(1, { status: 'running' })]);
     const plan = r.blocks[0] as any;
     expect(r.blocks.filter((b) => b.type === 'plan')).toHaveLength(1);
-    expect(plan.title).toBe('Running 1 subagent');
+    expect(plan.title).toBe('Task 1');
     expect(plan.tasks.map((t: any) => [t.task_id, t.title, t.status])).toEqual([
       ['step_1', 'Searched Slack', 'complete'],
       ['step_2', 'Read a page', 'error'],
@@ -176,7 +183,7 @@ describe('turn steps on the card', () => {
     const runs = [run(1, { status: 'complete', output: 'ok' }), run(2, { status: 'error', error: 'x' }), run(3, { status: 'complete', output: 'ok' })];
     const card = { id: 8, frozen: true, steps: steps(['slack_search', 'complete'], ['fetch_url', 'complete'], ['fetch_url', 'complete']) };
     const untitled = renderCard({ ...card, title: null }, runs);
-    expect((untitled.blocks[0] as any).title).toBe('Searched Slack, read 2 pages, ran 3 subagents (1 failed)');
+    expect((untitled.blocks[0] as any).title).toBe('Searched Slack, read 2 pages, worked on 3 tasks (1 failed)');
     const r = renderCard({ ...card, title: 'Compared frontend libraries' }, runs);
     const plan = r.blocks[0] as any;
     expect(plan.title).toBe('Compared frontend libraries');
@@ -205,7 +212,7 @@ describe('card steps', () => {
     expect(summarizeSteps([s('web_search'), s('web_search'), s('web_search')])).toBe('searched the web 3 times');
     expect(summarizeSteps([s('fetch_url')])).toBe('read a page');
     expect(summarizeSteps([s('read_thread'), s('ask_thread')])).toBe('read the thread twice');
-    expect(summarizeSteps([], [{ status: 'complete' }])).toBe('ran 1 subagent');
+    expect(summarizeSteps([], [{ status: 'complete' }])).toBe('worked on a task');
     expect(summarizeSteps([])).toBe('');
   });
 });
@@ -363,7 +370,7 @@ describe('no empty text elements (Slack rejects the card: invalid_blocks, "must 
     expect(tasks[1].output.elements).toHaveLength(1); // nothing visible in the result: the summary alone
     expect(textOf(tasks[2].output)).toBe('Failed');
     expect(textOf(tasks[3].details)).toBe('Working…');
-    expect(tasks[4].title).toBe('Subagent');
+    expect(tasks[4].title).toBe('Task');
     expect(tasks[4].sources).toEqual([{ type: 'url', url: 'https://example.com/', text: 'example.com' }]);
   });
 });
