@@ -61,9 +61,11 @@ describe('CODING_AGENTS_PROMPT', () => {
 describe('frontSystemPrompt delegation and scope rules', () => {
   const p = frontSystemPrompt('smasnug ai');
 
-  it('fans named independent items out, also for comparisons; dependent steps stay one task / a later round', () => {
-    expect(p).toMatch(/Several named items that each need their own research \([^)]*frameworks[^)]*\) get one task per item in ONE spawn_subagent call: "A vs B vs C" or "compare A, B and C" is a task per item, never one "compare" task/);
-    expect(p).toMatch(/Keep one task only for trivially small items/);
+  it('fans independent parts out (items, separate questions, comparisons); dependent steps stay one task / a later round', () => {
+    expect(p).toMatch(/whatever splits into parts that can be researched independently gets one subagent per part, all in ONE spawn_subagent call/);
+    expect(p).toMatch(/several named items \([^)]*frameworks[^)]*\), several separate questions or numbered parts in one message, and "A vs B vs C" or "compare A, B and C": a task per item, never one "compare" task/);
+    expect(p).toMatch(/Keep one task only when the parts are trivially small or each needs the previous one's finding/);
+    expect(p).toMatch(/each task's instructions quote its part of the request word for word, plus every requirement that applies to all parts/);
     expect(p).toMatch(/When the items must be found first \("the top 3 X"\), that's rounds: the first round only finds the list \(one task\), then one subagent per item/);
   });
 
