@@ -283,7 +283,7 @@ export function formatSearchMatches(matches: any[], names: Map<string, string>, 
 
 /**
  * `ToolContext.extras` key for a callback told about rate-limit waits of this tool's Slack calls (the subagent
- * runner sets it to show "Waiting for Slack's search rate limit" on the card).
+ * runner sets it to show "Waiting on Slack (20s)" on the card).
  */
 export const SLACK_WAIT_EXTRA = 'onSlackWait';
 export type SlackWaitCallback = (ev: SlackWaitEvent) => void;

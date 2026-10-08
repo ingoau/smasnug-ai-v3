@@ -1,6 +1,7 @@
 /** Pure helpers for the agent module (no I/O; unit-tested). */
 import type { ModelMessage } from 'ai';
 import { sliceUnits } from '../tools/util.js';
+import { activityForTool, DEFAULT_ACTIVITY } from './activity.js';
 
 // ---------- Reply delivery ----------
 
@@ -138,10 +139,24 @@ export function compactHistory(messages: ModelMessage[]): ModelMessage[] {
 
 // ---------- Progress lines ----------
 
-/** Human-readable current step for the card, from a child's tool call. */
-export function describeToolStep(toolName: string, input: unknown): string {
+/** "docs.fly.io" for a page URL (the site, not the whole URL); the URL clipped if it doesn't parse. */
+function siteOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '') || oneLine(url, 60);
+  } catch {
+    return oneLine(url, 60);
+  }
+}
+
+/**
+ * Human-readable current step for the card, from a child's tool call. Users see it (also as the plan title), so it
+ * never shows tool names or file ids: `fileName` is the name of the file a read_file / ask_file call opens (resolved
+ * by the caller under the file access rule), else the step says "a file".
+ */
+export function describeToolStep(toolName: string, input: unknown, opts: { fileName?: string } = {}): string {
   const i = (input ?? {}) as Record<string, unknown>;
   const q = (k: string) => (typeof i[k] === 'string' ? oneLine(i[k] as string, 60) : '');
+  const file = opts.fileName?.trim() ? oneLine(opts.fileName, 60) : '';
   switch (toolName) {
     case 'web_search':
       return q('query') ? `Searching the web for “${q('query')}”` : 'Searching the web';
@@ -152,7 +167,7 @@ export function describeToolStep(toolName: string, input: unknown): string {
     case 'find_channels':
       return q('query') ? `Looking for channels about “${q('query')}”` : 'Looking for channels';
     case 'fetch_url':
-      return q('url') ? `Reading ${q('url')}` : 'Reading a page';
+      return typeof i.url === 'string' && i.url.trim() ? `Reading ${siteOf(i.url.trim())}` : 'Reading a page';
     case 'read_thread':
       return 'Reading the thread';
     case 'ask_thread':
@@ -164,9 +179,11 @@ export function describeToolStep(toolName: string, input: unknown): string {
     case 'read_channel':
       return 'Reading the channel';
     case 'read_file':
-      return q('file_id') ? `Opening ${q('file_id')}` : 'Opening a file';
+      return file ? `Opening ${file}` : 'Opening a file';
     case 'ask_file':
-      return q('file_id') ? `Reading ${q('file_id')}` : 'Reading a file';
+      return file ? `Reading ${file}` : 'Reading a file';
+    case 'read_canvas':
+      return 'Reading a canvas';
     case 'create_file':
       return q('name') ? `Writing ${q('name')}` : 'Writing a file';
     case 'sandbox_exec':
@@ -182,8 +199,9 @@ export function describeToolStep(toolName: string, input: unknown): string {
     case 'request_preview':
       return 'Preparing a live preview';
     default: {
-      const first = Object.values(i).find((v) => typeof v === 'string') as string | undefined;
-      return first ? `${toolName}: ${oneLine(first, 50)}` : `Using ${toolName}`;
+      // The status-indicator label for the tool ("Reading the canvas…" → "Reading the canvas"), else "Working…".
+      const label = activityForTool(toolName) ?? DEFAULT_ACTIVITY;
+      return label === DEFAULT_ACTIVITY ? label : label.replace(/…$/, '');
     }
   }
 }

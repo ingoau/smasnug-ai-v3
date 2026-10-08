@@ -18,11 +18,14 @@ const textOf = (rt: any) => rt?.elements?.[0]?.elements?.[0]?.text;
 
 describe('card titles', () => {
   it('live title says what the work is, never "subagent"', () => {
+    // Several tasks: how many, and how many are done once any are (a long round visibly moves).
     expect(liveTitle([run(1), run(2, { status: 'running' })])).toBe('Working on 2 tasks');
-    // One active run: what it is doing right now, else its title (queued, or only thinking / writing up).
-    expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'running', details: 'Searching Slack for “demo day”' })])).toBe('Searching Slack for “demo day”');
-    for (const details of [null, '  ', 'Researching…', 'Thinking…', 'Writing up…', 'Thinking… (30s)']) {
-      expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'running', details })])).toBe('Task 2');
+    expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'running', details: 'Searching Slack for “x”' }), run(3)])).toBe('Working on 3 tasks · 1 done');
+    expect(liveTitle([run(1, { status: 'complete' }), run(2, { status: 'error' }), run(3, { status: 'running' })])).toBe('Working on 3 tasks · 2 done');
+    // One task: what it is doing right now, else its title (queued, or only thinking / writing up).
+    expect(liveTitle([run(1, { status: 'running', details: 'Searching Slack for “demo day”' })])).toBe('Searching Slack for “demo day”');
+    for (const details of [null, '  ', 'Researching…', 'Thinking…', 'Writing up…', 'Working…', 'Thinking… (30s)']) {
+      expect(liveTitle([run(2, { status: 'running', details })])).toBe('Task 2');
     }
     expect(liveTitle([run(1, { status: 'running', details: 'Reading example.com (45s)' })])).toBe('Reading example.com (45s)');
     expect(liveTitle([run(1, { details: 'stale' })])).toBe('Task 1');
@@ -51,7 +54,7 @@ describe('renderCard', () => {
     const { blocks, text } = renderCard({ id: 9, title: null, frozen: false }, runs);
     const plan = blocks[0] as any;
     expect(plan.type).toBe('plan');
-    expect(plan.title).toBe('Working on 3 tasks');
+    expect(plan.title).toBe('Working on 6 tasks · 3 done');
     const [q, r, c, e, x, resumed] = plan.tasks;
     expect(q).toMatchObject({ type: 'task_card', task_id: 'run_1', status: 'pending', title: 'Task 1' });
     expect(textOf(q.details)).toBe('Queued');
@@ -67,7 +70,7 @@ describe('renderCard', () => {
     expect(resumed.title).toBe('↻ Task 6');
     // No buttons: just the plan
     expect(blocks.map((b) => b.type)).toEqual(['plan']);
-    expect(text).toContain('Working on 3 tasks');
+    expect(text).toContain('Working on 6 tasks · 3 done');
     expect(text.length).toBeGreaterThan(0);
   });
 

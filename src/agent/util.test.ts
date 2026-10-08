@@ -67,9 +67,21 @@ describe('compactHistory', () => {
 
 describe('describeToolStep', () => {
   it('produces readable progress lines', () => {
-    expect(describeToolStep('fetch_url', { url: 'https://example.com' })).toBe('Reading https://example.com');
     expect(describeToolStep('slack_search', { query: 'hackathon' })).toBe('Searching Slack for “hackathon”');
-    expect(describeToolStep('mystery', {})).toBe('Using mystery');
+  });
+
+  it('never shows tool names, file ids or whole URLs (users see these, also as the plan title)', () => {
+    expect(describeToolStep('fetch_url', { url: 'https://www.docs.fly.io/reference/regions/?x=1' })).toBe('Reading docs.fly.io');
+    expect(describeToolStep('fetch_url', { url: 'not a url' })).toBe('Reading not a url');
+    expect(describeToolStep('fetch_url', {})).toBe('Reading a page');
+    expect(describeToolStep('read_file', { file_id: 'file_abc123defg' }, { fileName: 'budget.xlsx' })).toBe('Opening budget.xlsx');
+    expect(describeToolStep('ask_file', { file_id: 'file_abc123defg', question: 'q' }, { fileName: 'notes.pdf' })).toBe('Reading notes.pdf');
+    expect(describeToolStep('read_file', { file_id: 'file_abc123defg' })).toBe('Opening a file');
+    expect(describeToolStep('ask_file', { file_id: 'file_abc123defg' }, { fileName: '  ' })).toBe('Reading a file');
+    expect(describeToolStep('read_canvas', { canvas: 'F123' })).toBe('Reading a canvas');
+    // No label of its own: the status-indicator label, else "Working…".
+    expect(describeToolStep('set_reminder', { text: 'x' })).toBe('Setting a reminder');
+    expect(describeToolStep('mystery', { secret: 'internal' })).toBe('Working…');
   });
 });
 
