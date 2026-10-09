@@ -611,7 +611,7 @@ the admin-only coding section keeps the base cacheable. It says:
 **Front.**
 - **What you can do:** the section lists running code, data / file processing and live previews, so "what can you do"
   includes them (only when sandboxes are configured).
-- **Delegate with `sandbox: true` only when code must run:** installs, data processing or charts, analysing uploaded
+- **Delegate with `sandbox: true` only when code must run:** installs, data processing, a custom plot or image (a bar, line, area or pie chart is the reply's charts, no sandbox), analysing uploaded
   files (pass the `file_…` ids), a headless browser, multi-file builds or a live preview. A single file the front
   agent can write itself (page, script, CSV, text) is `create_file` with no sandbox; research needs none.
 - **Posting:** `reply(files: [...])` with the ids from the result and a one-line description each.

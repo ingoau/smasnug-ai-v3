@@ -9,6 +9,7 @@ import { sql } from '../db/index.js';
 import { registerTool } from '../core/tools.js';
 import { cancelSubagent, messageSubagent, spawnSubagent, ToolError } from './subagents.js';
 import { MAX_BUTTONS, MAX_LABEL_CHARS } from './reply-buttons.js';
+import { chartsSchema } from './charts.js';
 import { turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
 import { prepareOutgoingFiles } from './files.js';
@@ -65,11 +66,12 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        'Post a message in the current Slack thread (markdown). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction instead). A reply ends your turn unless continue_turn is true (calls in the same step that need their results, like searches, still run and come back to you). Usually one reply per turn; never send two replies that say the same thing.',
+        'Post a message in the current Slack thread (markdown, optional charts). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction instead). A reply ends your turn unless continue_turn is true (calls in the same step that need their results, like searches, still run and come back to you). Usually one reply per turn; never send two replies that say the same thing.',
       inputSchema: z.object({
-        text: z.string().describe('Message text in Slack-flavoured markdown. Keep it concise.'),
+        text: z.string().describe('Message text in Slack-flavoured markdown. Keep it concise. State the takeaway even when you also send a chart.'),
         files: replyFilesSchema,
         buttons: buttonsSchema,
+        charts: chartsSchema,
         continue_turn: continueTurnSchema,
       }),
       onInputStart: ({ toolCallId }) => {
@@ -78,11 +80,11 @@ registerTool({
       onInputDelta: ({ toolCallId, inputTextDelta }) => {
         turnState(ctx).replies.delta(toolCallId, inputTextDelta);
       },
-      execute: async ({ text, files, buttons }, { toolCallId }) => {
+      execute: async ({ text, files, buttons, charts }, { toolCallId }) => {
         const s = turnState(ctx);
         // At most 10 files per message (Slack); access is checked per id (this thread, or the speaker's own files).
         const prepared = await prepareOutgoingFiles({ threadId: ctx.threadId, speakerId: ctx.speakerId, turnId: ctx.turnId }, files?.slice(0, 10));
-        const res = await s.replies.finish(toolCallId, text, prepared.files, buttons);
+        const res = await s.replies.finish(toolCallId, text, prepared.files, buttons, charts);
         const notes = [...prepared.errors, ...((files?.length ?? 0) > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
         const fileNote = notes.length ? ` File problems: ${notes.join(' ')}` : '';
         if (res.startsWith('Replied')) {

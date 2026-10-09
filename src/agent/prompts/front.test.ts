@@ -14,6 +14,7 @@ describe('frontSystemPrompt About you', () => {
 
   it('lists real harness capabilities without inventing infra', () => {
     expect(p).toMatch(/search Slack/);
+    expect(p).toMatch(/bar, line, area and pie charts/);
     expect(p).toMatch(/the web/);
     expect(p).toMatch(/fetch pages/);
     expect(p).toMatch(/read threads, channels, images, uploaded files and canvases/);

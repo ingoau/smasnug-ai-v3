@@ -1,6 +1,6 @@
 /**
  * Plan cards: one card per turn that did work (its own steps, card-steps.ts) or started runs, living in a reply
- * message of that turn (blocks: card, reply markdown, buttons) — or, for runs, in a message of its own when the turn
+ * message of that turn (blocks: card, reply markdown, charts, buttons) — or, for runs, in a message of its own when the turn
  * didn't reply. One card per message. The message is a pure render of DB state
  * (card-render.ts); children write progress to the DB and call `scheduleCardRender`, which coalesces updates per
  * card to at most one per `limits.cardCoalesceMs` via a Redis flag + delayed `card-render` job. Updates always go
@@ -17,7 +17,10 @@ import { renderCard, renderCardBlock, type CardRun, type CardState, type PlanBlo
 import type { CardStep } from './card-steps.js';
 import { buttonsBlock, buttonsFallbackText } from './reply-buttons.js';
 import { buttonsForMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
-import { markdownMessage } from './reply.js';
+import { chartsForMessage } from './charts-store.js';
+import { chartsFallback, withChartIds, type DataVisualizationBlock } from './charts.js';
+import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS, replyMessage } from './slack-markdown.js';
+import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 
 export interface CardRow {
   id: number;
@@ -34,6 +37,8 @@ export interface CardRow {
   steps: CardStep[];
   /** Loaded alongside (not a column): the quick-reply buttons of the reply the card lives in. */
   buttons?: ReplyButtonsRow | null;
+  /** Loaded alongside (not a column): charts posted on that reply. */
+  charts?: DataVisualizationBlock[];
 }
 
 export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: CardRun[] } | undefined> {
@@ -72,7 +77,8 @@ export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: C
     finishedAt: r.finishedAt,
   }));
   const buttons = card.replyText != null ? await buttonsForMessage(card.channelId, card.messageTs) : undefined;
-  return { card: { ...card, id: Number(card.id), steps: Array.isArray(card.steps) ? card.steps : [], buttons: buttons ?? null }, runs };
+  const charts = card.replyText != null ? await chartsForMessage(card.channelId, card.messageTs) : [];
+  return { card: { ...card, id: Number(card.id), steps: Array.isArray(card.steps) ? card.steps : [], buttons: buttons ?? null, charts }, runs };
 }
 
 /** Get or create this turn's card row (not yet posted). */
@@ -93,6 +99,8 @@ export interface ReplyRef {
   text: string;
   /** Delivered via chat.startStream/stopStream. */
   streamed: boolean;
+  /** Charts on that reply, so attaching the card doesn't drop them. */
+  charts?: DataVisualizationBlock[];
 }
 
 /** This turn's card, if it has one. */
@@ -140,7 +148,7 @@ export async function postCard(cardId: number, reply?: ReplyRef | null): Promise
   if (!runs.length && (!card.steps.length || !reply)) return;
   if (reply) {
     const buttons = await buttonsForMessage(card.channelId, reply.ts).catch(() => undefined);
-    const msg = renderCard({ ...toState(card), replyText: reply.text, buttons: buttons ? toButtonsState(buttons) : null }, runs);
+    const msg = renderCard({ ...toState(card), replyText: reply.text, buttons: buttons ? toButtonsState(buttons) : null, ...(reply.charts?.length ? { charts: reply.charts } : {}) }, runs);
     try {
       await editCardMessage({ channel: card.channelId, ts: reply.ts, text: msg.text, blocks: msg.blocks });
       await sql`update cards set message_ts = ${reply.ts}, reply_text = ${reply.text} where id = ${cardId} and message_ts is null`;
@@ -239,7 +247,7 @@ export async function freezeCard(cardId: number): Promise<void> {
 }
 
 function toState(card: CardRow): CardState {
-  return { id: card.id, title: card.title, frozen: card.frozen, replyText: card.replyText ?? null, buttons: card.buttons ? toButtonsState(card.buttons) : null, steps: card.steps };
+  return { id: card.id, title: card.title, frozen: card.frozen, replyText: card.replyText ?? null, buttons: card.buttons ? toButtonsState(card.buttons) : null, charts: card.charts?.length ? card.charts : null, steps: card.steps };
 }
 
 /**
@@ -255,6 +263,9 @@ export async function rerenderButtonsMessage(row: ReplyButtonsRow): Promise<void
     return;
   }
   const state = toButtonsState(row);
-  const msg = row.replyText != null ? markdownMessage(row.replyText) : { text: buttonsFallbackText(state), blocks: [] };
-  await slackCall('chat.update', { channel: row.channelId, ts: row.messageTs, text: msg.text, blocks: [...msg.blocks, buttonsBlock(state)] });
+  const charts = await chartsForMessage(row.channelId, row.messageTs);
+  const viz = withChartIds(charts, (i) => `chart_${i + 1}`);
+  const msg = row.replyText != null && (row.replyText.trim() || !viz.length) ? replyMessage(row.replyText, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - viz.length }) : { text: '', blocks: [] as unknown[] };
+  const text = row.replyText != null ? neutralizeBroadcasts(chartsFallback(row.replyText, viz, MAX_FALLBACK_TEXT)) : buttonsFallbackText(state);
+  await slackCall('chat.update', { channel: row.channelId, ts: row.messageTs, text, blocks: [...msg.blocks, ...viz, buttonsBlock(state)] });
 }

@@ -141,6 +141,15 @@ describe('renderCard', () => {
     expect((r.blocks[2] as any).elements[0]).toEqual({ type: 'rich_text_preformatted', language: 'html', elements: [{ type: 'text', text: '<h1>Hello, world!</h1>' }] });
     expect(r.text).toBe(replyText);
   });
+
+  it('keeps a chart between the reply and the buttons', () => {
+    const chart = { type: 'data_visualization' as const, title: 'Signups', chart: { type: 'bar' as const, series: [{ name: 'N', data: [{ label: 'Mon', value: 1 }] }], axis_config: { categories: ['Mon'] } } };
+    const r = renderCard({ id: 3, title: null, frozen: false, replyText: 'up this week', buttons: { id: 9, labels: ['A'] }, charts: [chart] }, [run(1)]);
+    expect(r.blocks.map((b) => b.type)).toEqual(['plan', 'markdown', 'data_visualization', 'actions']);
+    expect(r.blocks[2]).toMatchObject({ block_id: 'card_3_chart_1', title: 'Signups' });
+    expect(r.text).toContain('up this week');
+    expect(r.text).toContain('Signups (bar)');
+  });
 });
 
 describe('turn steps on the card', () => {
