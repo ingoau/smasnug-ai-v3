@@ -15,6 +15,7 @@ import { cleanRichElements, markdownToRich, type RichTextElement, type RichTextI
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { sliceUnits } from '../tools/util.js';
 import { buttonsBlock, type ButtonsActionsBlock, type ButtonsState, type ContextBlock } from './reply-buttons.js';
+import { chartsFallback, withChartIds, type DataVisualizationBlock } from './charts.js';
 import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS, replyBlocks, type ReplyBlock } from './slack-markdown.js';
 
 // Shapes mirror @slack/types PlanBlock / TaskCardBlock (not a direct dependency).
@@ -70,6 +71,8 @@ export interface CardState {
   replyText?: string | null;
   /** Quick-reply buttons of that reply (kept on every re-render: the buttons, or the "pressed" note). */
   buttons?: ButtonsState | null;
+  /** Charts on that reply (Slack data_visualization), kept on every re-render. */
+  charts?: DataVisualizationBlock[] | null;
   /** The turn's own steps (lookups), in call order. */
   steps?: CardStep[];
 }
@@ -261,7 +264,7 @@ function statusWord(run: CardRun) {
 
 export interface RenderedCard {
   text: string;
-  blocks: (MarkdownBlock | ReplyBlock | PlanBlock | ActionsBlock | ButtonsActionsBlock | ContextBlock)[];
+  blocks: (MarkdownBlock | ReplyBlock | PlanBlock | ActionsBlock | ButtonsActionsBlock | ContextBlock | DataVisualizationBlock)[];
 }
 
 /** True when the card is finished: frozen (after its synthesis), or no step in progress and no run queued / running. */
@@ -311,22 +314,27 @@ function cardText(card: CardState, runs: CardRun[]): string {
 }
 
 /**
- * The message a card lives in: [card, reply text, buttons / pressed note] when it lives in a reply, else the card
- * alone. With the plain-text fallback.
+ * The message a card lives in: [card, reply text, charts, buttons / pressed note] when it lives in a reply, else the
+ * card alone. With the plain-text fallback (the reply, plus a one-line chart summary when the reply has charts).
  */
 export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   // A card with nothing on it (no step, no run) shows nothing.
   const blocks: RenderedCard['blocks'] = runs.length || card.steps?.length ? [renderCardBlock(card, runs)] : [];
   const reply = card.replyText;
+  const charts = withChartIds(card.charts ?? [], (i) => `card_${card.id}_chart_${i + 1}`);
   if (reply != null) {
     // The reply exactly as delivered (slack-markdown.ts: prose as markdown, code as rich_text), leaving room for the
-    // card and the buttons.
-    const parts = replyBlocks(reply, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - (card.buttons ? 1 : 0) });
-    parts.forEach((b, i) => blocks.push({ ...b, block_id: i === 0 ? `card_${card.id}_reply` : `card_${card.id}_reply_${i}` }));
-    // The reply's buttons (or the note that replaced them) stay right under its text.
+    // card, the charts, and the buttons.
+    const room = MAX_MESSAGE_BLOCKS - Math.max(blocks.length, 1) - charts.length - (card.buttons ? 1 : 0);
+    if (reply.trim() || !charts.length) {
+      const parts = replyBlocks(reply, { maxBlocks: room });
+      parts.forEach((b, i) => blocks.push({ ...b, block_id: i === 0 ? `card_${card.id}_reply` : `card_${card.id}_reply_${i}` }));
+    }
+    blocks.push(...charts);
+    // The reply's buttons (or the note that replaced them) stay under the text and charts.
     if (card.buttons) blocks.push(buttonsBlock(card.buttons));
   }
   // Plain-text fallback: the reply's own text when the card lives in a reply, else a summary of the card.
-  const text = neutralizeBroadcasts((reply != null ? reply : cardText(card, runs)).slice(0, MAX_FALLBACK_TEXT));
+  const text = neutralizeBroadcasts(reply != null ? chartsFallback(reply, charts, MAX_FALLBACK_TEXT) : cardText(card, runs).slice(0, MAX_FALLBACK_TEXT));
   return { text, blocks };
 }

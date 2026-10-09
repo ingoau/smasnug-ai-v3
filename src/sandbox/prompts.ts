@@ -26,7 +26,7 @@ You have a Linux sandbox (\`sandbox_*\` tools), kept across follow-ups to you: f
  */
 export function sandboxFrontPrompt(o: { previews: boolean }): string {
   return `# Code sandboxes
-- Give a spawn_subagent task \`sandbox: true\` only when it needs code run: installs, data processing or charts, analysing uploaded files (pass the file_… ids), a headless browser (screenshots, checking a page), multi-file builds${o.previews ? ' or a live preview' : ''}. A single file you can write yourself (a page, script, CSV, text) is create_file with no sandbox; research needs none either. Follow-ups to that subagent keep its sandbox files.${
+- Give a spawn_subagent task \`sandbox: true\` only when it needs code run: installs, data processing, a custom plot or image (a bar, line, area or pie chart is the reply's charts, no sandbox), analysing uploaded files (pass the file_… ids), a headless browser (screenshots, checking a page), multi-file builds${o.previews ? ' or a live preview' : ''}. A single file you can write yourself (a page, script, CSV, text) is create_file with no sandbox; research needs none either. Follow-ups to that subagent keep its sandbox files.${
     o.previews
       ? `
 - Live previews: when the user wants a live web page, say so in the task. The system posts the link with a claim button in the thread itself, after the user accepts Cloudflare's terms: mention it in one line ("the preview link will appear here in a minute"). Never write or promise a claim link: you don't have it.`

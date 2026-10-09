@@ -14,6 +14,7 @@ vi.mock('../core/slack.js', () => ({
 }));
 vi.mock('../core/events.js', () => ({ appendEvent: vi.fn(async () => {}) }));
 vi.mock('./files.js', () => ({ uploadFiles: vi.fn(async () => {}) }));
+vi.mock('./charts-store.js', () => ({ saveReplyCharts: vi.fn(async () => {}) }));
 vi.mock('./reply-buttons-store.js', () => ({
   createReplyButtons: vi.fn(async (o: any) => ({ id: 42, threadId: o.threadId, channelId: o.channelId, turnId: o.turnId, messageTs: null, replyText: null, labels: o.labels, pressedBy: null, pressedLabel: null, pressedMessageTs: null, pressedAt: null })),
   setButtonsMessage: vi.fn(async () => {}),
@@ -129,6 +130,67 @@ describe('reply: code is delivered exactly as written', () => {
     expect(calls.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
     const upd = calls.find((c) => c.method === 'chat.update')!;
     expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'rich_text', 'rich_text']);
+  });
+});
+
+describe('reply charts', () => {
+  const charts = [{ title: 'Weekly signups', type: 'bar', series: [{ name: 'Signups', data: [{ label: 'Mon', value: 10 }, { label: 'Tue', value: 4 }] }], x_label: 'Day', y_label: 'Count' }];
+
+  it('posts a data_visualization block between the text and the buttons', async () => {
+    calls.length = 0;
+    failOn = null;
+    const res = await new ReplyManager(target('user', 1)).finish('tc1', 'signups dipped tuesday', undefined, ['More'], charts);
+    expect(res).toMatch(/^Replied \(posted\)/);
+    const post = calls.find((c) => c.method === 'chat.postMessage')!;
+    expect(post.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'data_visualization', 'actions']);
+    expect(post.args.blocks[1]).toMatchObject({
+      type: 'data_visualization',
+      block_id: 'chart_1',
+      title: 'Weekly signups',
+      chart: { type: 'bar', axis_config: { categories: ['Mon', 'Tue'], x_label: 'Day', y_label: 'Count' } },
+    });
+    expect(post.args.text).toContain('signups dipped tuesday');
+    expect(post.args.text).toContain('Weekly signups (bar)');
+    expect(JSON.stringify(post.args)).not.toMatch(/<!(channel|here|everyone)/);
+  });
+
+  it('a streamed reply gets the chart on stopStream and in the final layout', async () => {
+    calls.length = 0;
+    failOn = null;
+    const rm = new ReplyManager(target('user'));
+    await streamIn(rm, 'signups dipped tuesday');
+    await rm.finish('tc1', 'signups dipped tuesday', undefined, undefined, charts);
+    const stop = calls.find((c) => c.method === 'chat.stopStream')!;
+    expect(stop.args.blocks.map((b: any) => b.type)).toEqual(['data_visualization']);
+    const upd = calls.find((c) => c.method === 'chat.update')!;
+    expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'data_visualization']);
+    expect(upd.args.blocks[1].chart.series[0].data).toEqual([{ label: 'Mon', value: 10 }, { label: 'Tue', value: 4 }]);
+  });
+
+  it('a failed stream whose update fails still posts the chart', async () => {
+    calls.length = 0;
+    failOn = (m) => (m === 'chat.appendStream' || m === 'chat.update' ? 'invalid_blocks' : null);
+    const text = 'signups dipped tuesday and then recovered quite a lot over the week';
+    const rm = new ReplyManager(target('user'));
+    await streamIn(rm, text);
+    await rm.finish('tc1', text, undefined, undefined, charts);
+    failOn = null;
+    const post = calls.find((c) => c.method === 'chat.postMessage');
+    expect(post?.args.blocks.some((b: any) => b.type === 'data_visualization')).toBe(true);
+    expect(post?.args.blocks.find((b: any) => b.type === 'data_visualization').chart.axis_config.categories).toEqual(['Mon', 'Tue']);
+  });
+
+  it('a chart-only reply posts, and a chart with no title does not block the text', async () => {
+    calls.length = 0;
+    const res = await new ReplyManager(target('synthesis')).finish('tc1', '   ', undefined, undefined, [{ title: 'Candy', type: 'pie', segments: [{ label: 'A', value: 2 }, { label: 'B', value: 1 }] }]);
+    expect(res).toMatch(/^Replied \(posted\)/);
+    const post = calls.find((c) => c.method === 'chat.postMessage')!;
+    expect(post.args.blocks.map((b: any) => b.type)).toEqual(['data_visualization']);
+    expect(post.args.text).toContain('Candy (pie)');
+    calls.length = 0;
+    const kept = await new ReplyManager(target('synthesis')).finish('tc1', 'just the words', undefined, undefined, [{ type: 'pie', segments: [{ label: 'A', value: 1 }] }]);
+    expect(kept).toMatch(/no title/);
+    expect(calls.find((c) => c.method === 'chat.postMessage')!.args.blocks.map((b: any) => b.type)).toEqual(['markdown']);
   });
 });
 
