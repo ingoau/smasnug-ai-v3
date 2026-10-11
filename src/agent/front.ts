@@ -128,7 +128,7 @@ function recordReactVisibility(tools: Record<string, Tool>, state: FrontTurnStat
 
 async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
-  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured() });
+  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), adminUserId: env.ADMIN_USER_ID });
   if (huddleFmConfigured()) system = `${system}\n\n${HUDDLE_DJ_PROMPT}`;
   if (sandboxConfigured()) system = `${system}\n\n${sandboxFrontPrompt({ previews: previewsConfigured() })}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;

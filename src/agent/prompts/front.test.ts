@@ -98,3 +98,15 @@ describe('frontSystemPrompt delegation and scope rules', () => {
     expect(p).toMatch(/write the file yourself with create_file/);
   });
 });
+
+describe('frontSystemPrompt self-knowledge', () => {
+  it('names the public repo and maintainer, and delegates self-questions to a subagent reading it', () => {
+    const p = frontSystemPrompt('smasnug ai', { adminUserId: 'U0ADMIN' });
+    expect(p).toContain('https://github.com/ingoau/smasnug-ai-v3');
+    expect(p).toMatch(/<@U0ADMIN> \(Ingo\)/);
+    expect(p).toMatch(/Spawn a subagent to read your repo/);
+    expect(p).toContain('raw.githubusercontent.com/ingoau/smasnug-ai-v3/main/');
+    expect(p).toMatch(/@smasnug ai !stop/);
+    expect(frontSystemPrompt('smasnug ai')).not.toMatch(/<@undefined>/);
+  });
+});
