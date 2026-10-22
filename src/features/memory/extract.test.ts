@@ -27,7 +27,7 @@ const base = {
   participantMessages: ["Honestly I've switched to TypeScript for everything now", 'I finished the weather station last week!'],
   otherPeople: [{ id: 'USAM', name: 'Sam' }],
 };
-const op = (o: Partial<MemoryOp>): MemoryOp => ({ op: 'add', user_id: P, fact_id: null, text: null, evidence: null, ...o });
+const op = (o: Partial<MemoryOp>): MemoryOp => ({ op: 'add', user_id: P, fact_id: null, text: null, kind: null, evidence: null, ...o });
 
 describe('validateOps', () => {
   it('accepts a fact quoted from the participant', () => {

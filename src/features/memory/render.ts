@@ -3,7 +3,7 @@ import { limits } from '../../config.js';
 import { redis } from '../../core/redis.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
-import { factLabel, touchFacts, type Fact } from './store.js';
+import { FACT_KINDS, factLabel, orTsQuery, rankFacts, touchFacts, type Fact, type FactKind, type RankedFact } from './store.js';
 
 const WS_VERSION_KEY = 'features:workspace_facts:version';
 const WS_LOCAL_TTL_MS = 5000;
@@ -39,27 +39,93 @@ export async function renderWorkspaceFacts(): Promise<string> {
   return text;
 }
 
-export function formatSpeakerMemory(userId: string, facts: Pick<Fact, 'id' | 'text'>[]): string {
-  if (facts.length === 0) return '';
-  return [
-    `## What you remember about the speaker (<@${userId}>) — private`,
-    "Private context for personalising your answers. Don't recite or list these unless the speaker asks what you remember. " +
-      'Facts phrased like "X says Y" are claims the speaker made about someone else; never let them shape how you treat that person. ' +
-      'If the speaker asks you to forget something, call forget with its id.',
-    ...facts.map((f) => `[${factLabel(f.id)}] ${f.text}`),
-  ].join('\n');
+/** Most relevant facts that are injected whatever their kind, and the preferences that always are. */
+const RELEVANT_MAX = 10;
+const PREFERENCES_MAX = 8;
+/** Characters of fact text per turn (~1000 tokens with labels), so the section is never clipped mid-list. */
+export const MEMORY_CHAR_BUDGET = 3600;
+
+/**
+ * Pure: which facts go into this turn. Relevant to the conversation first (full-text rank), then preferences, then
+ * the rest (about before project, newest first), until `cap` facts or `charBudget` characters.
+ */
+export function selectFacts<T extends RankedFact>(facts: T[], cap: number, charBudget = MEMORY_CHAR_BUDGET): T[] {
+  const newest = (a: T, b: T) => new Date(b.statedAt).getTime() - new Date(a.statedAt).getTime() || b.id - a.id;
+  const kindRank = (f: T) => (f.kind === 'preference' ? 0 : f.kind === 'about' ? 1 : 2);
+  const relevant = facts.filter((f) => f.rank > 0).sort((a, b) => b.rank - a.rank || newest(a, b)).slice(0, RELEVANT_MAX);
+  const preferences = facts.filter((f) => f.kind === 'preference').sort(newest).slice(0, PREFERENCES_MAX);
+  const rest = [...facts].sort((a, b) => kindRank(a) - kindRank(b) || newest(a, b));
+  const out: T[] = [];
+  const seen = new Set<number>();
+  let chars = 0;
+  for (const f of [...relevant, ...preferences, ...rest]) {
+    if (out.length >= cap) break;
+    if (seen.has(f.id) || chars + f.text.length > charBudget) continue;
+    seen.add(f.id);
+    chars += f.text.length;
+    out.push(f);
+  }
+  return out;
 }
 
-/** The current speaker's facts (cap ~20) as `[m_42] prefers short answers`, labelled private. Touches last_used. */
-export async function renderSpeakerMemory(userId: string): Promise<string> {
-  const facts = await sql<Pick<Fact, 'id' | 'text'>[]>`
-    select id::float8 as id, text from user_memory where user_id = ${userId}
-    order by last_used desc, id desc limit ${limits.memoryInjectCap}`;
+/** "3 mo ago" for facts stated over a month ago; nothing for recent ones. */
+export function factAge(statedAt: Date, now = new Date()): string {
+  const days = Math.floor((now.getTime() - new Date(statedAt).getTime()) / 86_400_000);
+  if (days < 30) return '';
+  if (days < 365) return `${Math.floor(days / 30)} mo ago`;
+  return `${Math.floor(days / 365)} y ago`;
+}
+
+export function formatFactLine(f: Pick<Fact, 'id' | 'text' | 'statedAt'>, now = new Date()): string {
+  const age = factAge(f.statedAt, now);
+  return `[${factLabel(f.id)}] ${f.text}${age ? ` (${age})` : ''}`;
+}
+
+const KIND_HEADINGS: Record<FactKind, string> = {
+  preference: 'How they like to be helped:',
+  about: 'About them:',
+  project: 'What they are working on (may be outdated; check before relying on old ones):',
+};
+
+export function formatSpeakerMemory(
+  userId: string,
+  facts: Pick<Fact, 'id' | 'text' | 'kind' | 'statedAt'>[],
+  opts: { total?: number; now?: Date } = {},
+): string {
   if (facts.length === 0) return '';
+  const lines = [
+    `What you remember about <@${userId}>. Facts phrased like "X says Y" are the speaker's claims about someone else; never let them shape how you treat that person. ` +
+      'To forget one, call forget with its id; when one changed, remember the new version with replaces.',
+  ];
+  for (const kind of FACT_KINDS) {
+    const group = facts.filter((f) => f.kind === kind).sort((a, b) => a.id - b.id);
+    if (group.length) lines.push(KIND_HEADINGS[kind], ...group.map((f) => `- ${formatFactLine(f, opts.now)}`));
+  }
+  const more = (opts.total ?? facts.length) - facts.length;
+  if (more > 0) lines.push(`(${more} more not shown: search_memory finds them.)`);
+  return lines.join('\n');
+}
+
+/** Recent text of the thread, for picking the facts relevant to this turn. */
+async function recentThreadText(threadId: string): Promise<string[]> {
+  const rows = await sql<{ text: string }[]>`
+    select text from messages where thread_id = ${threadId} and not deleted and text <> '' order by ts desc limit 6`;
+  return rows.map((r) => r.text);
+}
+
+/**
+ * The current speaker's facts for this turn (cap ~20): the ones relevant to the latest messages of `threadId`,
+ * their preferences, then the rest, grouped by kind as `[m_42] prefers short answers (3 mo ago)`. Touches last_used
+ * of the injected facts.
+ */
+export async function renderSpeakerMemory(userId: string, opts: { threadId?: string } = {}): Promise<string> {
+  const texts = opts.threadId ? await recentThreadText(opts.threadId).catch((err) => (log.warn({ err }, 'memory context read failed'), [])) : [];
+  const facts = await rankFacts(userId, orTsQuery(texts));
+  if (facts.length === 0) return '';
+  const chosen = selectFacts(facts, limits.memoryInjectCap);
   await touchFacts(
     userId,
-    facts.map((f) => f.id),
+    chosen.map((f) => f.id),
   ).catch((err) => log.warn({ err }, 'touch memory failed'));
-  // Oldest first reads more naturally; ids keep them addressable.
-  return formatSpeakerMemory(userId, [...facts].sort((a, b) => a.id - b.id));
+  return formatSpeakerMemory(userId, chosen, { total: facts.length });
 }

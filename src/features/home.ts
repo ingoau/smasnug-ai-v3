@@ -3,7 +3,8 @@ import { env } from '../config.js';
 import type { ActionContext } from '../core/actions.js';
 import { slackCall } from '../core/slack.js';
 import { log } from '../log.js';
-import { deleteAllFacts, deleteFact, factLabel, listFacts, parseFactId } from './memory/store.js';
+import { factAge } from './memory/render.js';
+import { deleteAllFacts, deleteFact, factLabel, listFacts, parseFactId, type FactKind } from './memory/store.js';
 import { pendingBotReportsCount } from './bot-reports.js';
 import { confirmDialog, pendingReportsCount } from './reports.js';
 import { getState, listBlocks, setPaused } from './state.js';
@@ -17,6 +18,7 @@ const USER_FACTS_SHOWN = 25;
 const PENDING_FACTS_SHOWN = 8;
 const APPROVED_FACTS_SHOWN = 15;
 const BLOCKS_SHOWN = 10;
+const KIND_LABELS: Record<FactKind, string> = { preference: 'preference', about: 'about you', project: 'project' };
 
 const btn = (action_id: string, text: string, value: string, extra: object = {}) => ({
   type: 'button',
@@ -42,9 +44,11 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
   );
   if (facts.length === 0) blocks.push(section("_I don't remember anything about you yet._"));
   for (const f of facts.slice(0, USER_FACTS_SHOWN)) {
-    blocks.push(section(`\`${factLabel(f.id)}\` ${truncate(mrkdwnEscape(f.text), 2800)}`, btn('mem:delete', 'Delete', String(f.id))));
+    const age = factAge(f.statedAt);
+    const meta = `_${KIND_LABELS[f.kind]}${age ? `, ${age}` : ''}_`;
+    blocks.push(section(`\`${factLabel(f.id)}\` ${truncate(mrkdwnEscape(f.text), 2800)}\n${meta}`, btn('mem:delete', 'Delete', String(f.id))));
   }
-  if (facts.length > USER_FACTS_SHOWN) blocks.push(context(`…and ${facts.length - USER_FACTS_SHOWN} more (oldest-used not shown).`));
+  if (facts.length > USER_FACTS_SHOWN) blocks.push(context(`…and ${facts.length - USER_FACTS_SHOWN} more (older ones not shown).`));
   if (facts.length > 0) {
     blocks.push({
       type: 'actions',

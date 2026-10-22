@@ -387,8 +387,8 @@ Keyword message search answers "which person / bot / channel is X" badly in a wo
 ## Memory
 Two kinds: per-user memory, written mostly by a background pass, and a small workspace knowledge base that you approve. Thread memory is the event log itself.
 ### Per-user memory
-**Storage.** One row per fact: `id`, `user_id`, `text`, `source_thread`, `created_at`, `last_used`. Facts not used for about six months expire.
-**Background extraction.** When a thread has been idle for about 30 minutes, a Luna pass reads it alongside each participant's existing facts and adds, updates or removes facts. It only runs over conversations with the bot, never over the wider workspace.
+**Storage.** One row per fact: `id`, `user_id`, `text`, `kind`, `source_thread`, `created_at`, `stated_at`, `last_used`. Kinds: `preference` (how they want to be helped), `about` (who they are: role, skills, interests, time zone, stack), `project` (what they're working on now). `stated_at` is when the fact was last added or updated; facts stated over a month ago show their age ("3 mo ago") in the prompt and App Home, so old project facts can be hedged. Facts not used (injected or found by `search_memory`) for about six months expire. At most 200 facts per user, 300 characters each.
+**Background extraction.** When a thread has been idle for about 30 minutes, a Luna pass reads it alongside all of each participant's existing facts (with kind and age) and adds, updates or removes facts, each with a kind; it also tidies up (removes the older of two duplicates, updates finished projects). It only runs over conversations with the bot, never over the wider workspace. Threads are picked and claimed in one statement (`update … for update skip locked`), and a thread is processed again whenever the conversation continues after its last pass. Every new or updated fact must quote the participant's own message (matched ignoring case, whitespace and punctuation), and near-duplicates of existing facts (word overlap ≥ 0.75) are dropped.
 - 
 Only facts users stated about themselves, never inferences.
 - 
@@ -397,12 +397,14 @@ A fact from a user's messages can only be written to that user's memory (enforce
 No sensitive categories (health, family situations and similar) and nothing about other people's private lives.
 **Tools.** The tools take no user ID; the user is always the current speaker.
 - 
-`remember(fact)` writes to the speaker's memory immediately. The front agent calls it on its own initiative, in the same step as its reply and without announcing it, whenever the speaker mentions something lasting about themselves (a project, stack or tools, skills, role, interests, time zone, answer preferences), not only when asked; background extraction is the backstop. Each extraction pass logs one `memory extraction pass` line (proposed / applied / rejection reasons), also when it proposes nothing.
+`remember(fact, kind, replaces?)` writes to the speaker's memory immediately; `replaces` (a fact id) updates that fact instead of adding a second one, and a near-duplicate of an existing fact is refused with its id. The front agent calls it on its own initiative, in the same step as its reply and without announcing it, whenever the speaker mentions something lasting about themselves (a project, stack or tools, skills, role, interests, time zone, answer preferences), not only when asked; background extraction is the backstop. Each extraction pass logs one `memory extraction pass` line (proposed / applied / rejection reasons), also when it proposes nothing.
 - 
 `forget(fact_id)` deletes one of the speaker's facts. Injected facts show IDs, e.g. `[m_42] prefers short answers`.
 - 
+`search_memory(query)` finds the speaker's facts that weren't injected (full-text, then substring match; at most 10).
+- 
 Facts about other people are stored in the speaker's own memory, attributed: `Ingo says Sam is handling venues`. They never shape how the bot treats Sam.
-**Reading.** Only the current speaker's facts are injected into a turn, capped at about 20, labelled as private context for personalising answers, not for reciting. Other participants' memories are never included. When a user's facts outgrow the cap, add pgvector embeddings and a speaker-scoped `search_memory` tool.
+**Reading.** Only the current speaker's facts are injected into a turn, capped at about 20 (and ~3600 characters), labelled as private context for personalising answers, not for reciting. Picked in order: the facts relevant to the thread's latest 6 messages (Postgres full-text rank, `english` config, an OR query over their content words), then their preferences, then the rest (about before project, newest first); rendered grouped by kind, with a note when more exist (`search_memory` finds them). Only injected facts get `last_used` touched. Other participants' memories are never included. If full-text relevance proves too weak, add pgvector embeddings behind the same selection.
 **Subagents** never read or write memory. The front agent passes anything relevant in its instructions.
 ### Workspace knowledge
 Facts about the Slack itself (what channels are for, recurring events). The front agent calls `propose_workspace_fact(fact)`, which sends the fact to the moderation channel for approval. Each fact keeps its source thread and proposer. Approved facts are injected into every turn; only Ingo can delete them. Subagent findings reach this through the front agent.
