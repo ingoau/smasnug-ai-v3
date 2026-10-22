@@ -197,6 +197,8 @@ export const limits = {
   cardTitleMaxChars: 40,
   pendingSendTtlMs: 5 * 60 * 1000,
   memoryExtractIdleMs: 30 * 60 * 1000,
+  /** Threads quiet for longer than this are never extracted (a backlog would spend the model budget on stale talk). */
+  memoryExtractMaxAgeMs: 14 * 24 * 60 * 60 * 1000,
   memoryFactExpiryMs: 180 * 24 * 60 * 60 * 1000,
   memoryInjectCap: 20,
   retentionMs: 30 * 24 * 60 * 60 * 1000,

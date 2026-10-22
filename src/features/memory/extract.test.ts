@@ -27,7 +27,7 @@ const base = {
   participantMessages: ["Honestly I've switched to TypeScript for everything now", 'I finished the weather station last week!'],
   otherPeople: [{ id: 'USAM', name: 'Sam' }],
 };
-const op = (o: Partial<MemoryOp>): MemoryOp => ({ op: 'add', user_id: P, fact_id: null, text: null, evidence: null, ...o });
+const op = (o: Partial<MemoryOp>): MemoryOp => ({ op: 'add', user_id: P, fact_id: null, text: null, kind: null, evidence: null, ...o });
 
 describe('validateOps', () => {
   it('accepts a fact quoted from the participant', () => {
@@ -93,14 +93,81 @@ describe('validateOps', () => {
     const { accepted, rejected } = validateOps(
       [
         op({ op: 'update', fact_id: 7, text: 'prefers TypeScript', evidence: 'switched to TypeScript for everything' }),
-        op({ op: 'remove', fact_id: 8 }),
-        op({ op: 'remove', fact_id: 8 }),
-        op({ text: 'Prefers  python', evidence: 'switched to TypeScript for everything' }),
+        op({ op: 'remove', fact_id: 8, evidence: 'finished the weather station' }),
+        op({ op: 'remove', fact_id: 8, evidence: 'finished the weather station' }),
+        op({ text: 'Prefers  TypeScript.', evidence: 'switched to TypeScript for everything' }),
       ],
       base,
     );
     expect(accepted.map((a) => a.op)).toEqual(['update', 'remove']);
     expect(rejected.map((r) => r.reason)).toEqual(['unknown_fact', 'duplicate']);
+  });
+
+  it('removes only what the participant took back, or a duplicate of a fact that stays', () => {
+    const existing = [
+      { id: 7, text: 'prefers Python' },
+      { id: 8, text: 'is building a weather station' },
+      { id: 9, text: 'is building a weather station!' },
+      { id: 10, text: 'lives in Sydney' },
+    ];
+    const { accepted, rejected } = validateOps(
+      [
+        op({ op: 'remove', fact_id: 10 }), // nothing said about it: no silent wipe
+        op({ op: 'remove', fact_id: 7, evidence: 'something they never said' }),
+        op({ op: 'remove', fact_id: 7, evidence: 'I finished the weather station' }), // their words, but not about this fact
+        op({ op: 'remove', fact_id: 8 }), // duplicate of 9, which stays
+        op({ op: 'remove', fact_id: 9 }), // no longer a duplicate once 8 is gone
+      ],
+      { ...base, existing },
+    );
+    expect(accepted.map((a) => a.fact_id)).toEqual([8]);
+    expect(rejected.map((r) => [r.op.fact_id, r.reason])).toEqual([
+      [10, 'no_evidence'],
+      [7, 'no_evidence'],
+      [7, 'no_evidence'],
+      [9, 'no_evidence'],
+    ]);
+  });
+
+  it('lets an update restate its own fact but not duplicate another, and tells negations and short words apart', () => {
+    const existing = [
+      { id: 7, text: 'prefers Python' },
+      { id: 8, text: 'uses Go at work' },
+      { id: 9, text: 'can use Docker' },
+    ];
+    const msgs = { ...base, existing, participantMessages: ["I prefer Python, I use C at work and I can't use Docker anymore"] };
+    const { accepted, rejected } = validateOps(
+      [
+        op({ op: 'update', fact_id: 7, text: 'prefers python', evidence: 'I prefer Python' }),
+        op({ text: 'uses C at work', evidence: 'I use C at work' }),
+        op({ text: "can't use Docker", evidence: "can't use Docker anymore" }),
+        op({ op: 'update', fact_id: 8, text: 'Prefers Python.', evidence: 'I prefer Python' }),
+      ],
+      msgs,
+    );
+    expect(accepted.map((a) => a.text)).toEqual(['prefers python', 'uses C at work', "can't use Docker"]);
+    expect(rejected.map((r) => r.reason)).toEqual(['duplicate']);
+  });
+
+  it('accepts a removal with evidence about the fact, and only the lower id of two duplicates', () => {
+    const existing = [
+      { id: 8, text: 'is building a weather station' },
+      { id: 9, text: 'is building a weather station!' },
+      { id: 10, text: 'lives in Sydney' },
+    ];
+    const msgs = { ...base, existing, participantMessages: ['I finished the weather station last week!', "I don't live there anymore"] };
+    const { accepted, rejected } = validateOps(
+      [op({ op: 'remove', fact_id: 9 }), op({ op: 'remove', fact_id: 8, evidence: 'finished the weather station' }), op({ op: 'remove', fact_id: 10, evidence: "don't live there anymore" })],
+      msgs,
+    );
+    expect(accepted.map((a) => a.fact_id)).toEqual([8, 10]);
+    expect(rejected.map((r) => [r.op.fact_id, r.reason])).toEqual([[9, 'no_evidence']]);
+  });
+
+  it('rejects facts naming another participant by any part of their name', () => {
+    const msgs = { ...base, participantMessages: ['Sam is handling venues with me'], otherPeople: [{ id: 'USAM', name: 'Sam Smith (he/him)' }] };
+    const { rejected } = validateOps([op({ text: 'works on venues with Sam', evidence: 'Sam is handling venues' })], msgs);
+    expect(rejected.map((r) => r.reason)).toEqual(['about_others']);
   });
 
   it('caps the number of ops per pass', () => {

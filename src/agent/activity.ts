@@ -22,6 +22,7 @@ const LABELS: Record<string, string> = {
   cancel_subagent: 'Stopping the task…',
   remember: 'Saving a note…',
   forget: 'Forgetting a note…',
+  search_memory: 'Checking my notes…',
   propose_workspace_fact: 'Noting a workspace fact…',
   send_message: 'Preparing a message…',
   read_canvas: 'Reading the canvas…',

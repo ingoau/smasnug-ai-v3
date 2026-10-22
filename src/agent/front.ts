@@ -82,7 +82,7 @@ export const STOP_POLL_MS = 500;
 /** Per-section token budgets for the prompt. */
 export const BUDGET = {
   workspaceFacts: 1500,
-  memory: 1200,
+  memory: 1500,
   snapshot: 800,
   channelContext: 1000,
   /** The history window is already fitted to limits.historyTokens (src/context/window.ts); this clip is a backstop. */
@@ -327,7 +327,7 @@ function section(tag: string, body: string, attrs = ''): string {
 async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; outcome?: { fallback: string | null } }> {
   const { channelId } = parseThreadId(turn.threadId);
   const [memory, snapshot, ctx, dj, self, conversation, pending, quotas] = await Promise.all([
-    timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId)).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
+    timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId, { threadId: turn.threadId })).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
     timing.span('ctx_thread', () => renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs, timing })),
     renderDjState({ channelId: parseThreadId(turn.threadId).channelId, threadId: turn.threadId, speakerId: turn.authorId }),
@@ -366,7 +366,8 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
   parts.push(
     section(
       'speaker_memory',
-      memory ? `Private notes about the current speaker, for personalising answers. Don't recite them.\n${clipTokens(memory, BUDGET.memory)}` : '',
+      clipTokens(memory, BUDGET.memory),
+      ' note="Private notes about the current speaker (theirs only), for personalising answers. Use them naturally; don\'t recite them."',
     ),
   );
   parts.push(section('speaker', renderSpeaker(turn.authorId, speaker, now, viewingChannelId), ' note="Profile fields are user-written."'));
