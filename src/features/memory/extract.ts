@@ -277,23 +277,24 @@ export async function extractThread(threadId: string, since: Date | null) {
 /** Maintenance task: process idle threads with new bot conversation since the last pass. */
 export async function runMemoryExtraction() {
   const idleSeconds = limits.memoryExtractIdleMs / 1000;
+  // Pick and claim in one statement so concurrent runs don't process a thread twice. (Comparing the old
+  // memory_extracted_at after a round trip through JS never matched: a Date drops the microseconds, so a thread
+  // was never claimed again after its first pass, and those threads then filled every slot.)
   const threads = await sql<{ id: string; memoryExtractedAt: Date | null }[]>`
-    select t.id, t.memory_extracted_at from threads t
-    where t.last_activity_at < now() - ${idleSeconds} * interval '1 second'
-      and exists (
-        select 1 from turns u
-        where u.thread_id = t.id and u.kind = 'user'
-          and u.created_at > coalesce(t.memory_extracted_at, '-infinity'::timestamptz))
-    order by t.last_activity_at
-    limit ${THREADS_PER_RUN}`;
+    with picked as (
+      select t.id, t.memory_extracted_at as prev from threads t
+      where t.last_activity_at < now() - ${idleSeconds} * interval '1 second'
+        and exists (
+          select 1 from turns u
+          where u.thread_id = t.id and u.kind = 'user'
+            and u.created_at > coalesce(t.memory_extracted_at, '-infinity'::timestamptz))
+      order by t.last_activity_at
+      limit ${THREADS_PER_RUN}
+      for update of t skip locked)
+    update threads t set memory_extracted_at = now() from picked where t.id = picked.id
+    returning t.id, picked.prev as memory_extracted_at`;
 
   for (const t of threads) {
-    // Claim the thread so concurrent runs don't process it twice.
-    const claimed = await sql`
-      update threads set memory_extracted_at = now()
-      where id = ${t.id} and memory_extracted_at is not distinct from ${t.memoryExtractedAt}
-      returning id`;
-    if (claimed.length === 0) continue;
     try {
       await extractThread(t.id, t.memoryExtractedAt);
     } catch (err) {
