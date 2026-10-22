@@ -70,7 +70,7 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
   await run(
     'files_uploads_deleted',
     sql`delete from files f where f.origin = 'upload' and f.message_ts is not null and exists (
-          select 1 from messages m where m.channel_id = f.channel_id and m.ts = f.message_ts and m.deleted)
+          select 1 from messages m where m.channel_id = coalesce(f.source_channel_id, f.channel_id) and m.ts = f.message_ts and m.deleted)
         returning f.id`,
   );
   await run('usage', sql`delete from usage where created_at < ${older(long)} returning id`);

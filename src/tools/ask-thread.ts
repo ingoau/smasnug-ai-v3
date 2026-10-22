@@ -16,6 +16,8 @@ import { annotateTsDates, formatMessage, userIdsIn, type FormatEnv, type RenderM
 import { fetchReplies } from '../context/slack-messages.js';
 import { getUserNames } from '../context/users.js';
 import { log } from '../log.js';
+import { byFilePriority, registerExternalFiles } from '../files/store.js';
+import { contextFileLabel } from '../files/format.js';
 import { askThreadMaxCalls, askThreadSystemPrompt, askThreadUserPrompt, fitThread } from './ask-thread-prompt.js';
 import { citationHint, loadPublicThread, visibleWithAttachments } from './public-thread.js';
 import { slackBusyText, slackWaitOpts, type SlackWaitOpts } from './slack-search.js';
@@ -33,14 +35,25 @@ interface LoadedThread {
   msgs: RenderMsg[];
   /** Citation hint for another thread's messages. */
   hint?: string;
+  /** Another thread's channel (its files are registered here with this source). */
+  source?: { channelId: string; public: boolean };
 }
+
+/** Files listed under the answer at most (the newest). */
+const MAX_LISTED_FILES = 15;
 
 async function loadThread(ctx: ToolContext, permalink: string | undefined): Promise<LoadedThread | { error: string }> {
   const slack = slackWaitOpts(ctx);
   if (permalink?.trim()) {
     const t = await loadPublicThread({ permalink }, { speakerId: ctx.speakerId, threadId: ctx.threadId, channelId: ctx.channelId }, { maxMessages: MAX_FETCH, tool: ASK_THREAD_TOOL, slack });
     if ('error' in t) return t;
-    return { where: `${t.chLabel}, thread ${t.rootTs}`, rootTs: t.rootTs, msgs: t.msgs, ...(t.origin ? { hint: citationHint(t.origin, t.channel, t.rootTs) } : {}) };
+    return {
+      where: `${t.chLabel}, thread ${t.rootTs}`,
+      rootTs: t.rootTs,
+      msgs: t.msgs,
+      source: { channelId: t.channel, public: t.visibility === 'public' },
+      ...(t.origin ? { hint: citationHint(t.origin, t.channel, t.rootTs) } : {}),
+    };
   }
   try {
     const raws = await fetchReplies(ctx.channelId, ctx.threadTs, { maxMessages: MAX_FETCH, slack });
@@ -54,13 +67,35 @@ async function loadThread(ctx: ToolContext, permalink: string | undefined): Prom
   }
 }
 
-/** Render the thread for the answering model: context format, large per-message cut, overall cap. */
-async function renderTranscript(t: LoadedThread, slack: SlackWaitOpts): Promise<{ text: string; shown: number; omitted: number }> {
-  const [names, self] = await Promise.all([getUserNames(userIdsIn(t.msgs), slack), getBotIdentity().catch(() => undefined)]);
-  // No file ids: the answering model can't open files; they stay `[file: …]` placeholders.
-  const fenv: FormatEnv = { names, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.askThreadMessageTokens * 4 };
+/**
+ * Render the thread for the answering model: context format, large per-message cut, overall cap. Its files get ids
+ * in the asking thread (registered, newest first up to the cap), so the answer can name them and `files` lists them.
+ */
+async function renderTranscript(
+  ctx: ToolContext,
+  t: LoadedThread,
+  slack: SlackWaitOpts,
+): Promise<{ text: string; shown: number; omitted: number; files: string[] }> {
+  const newestFirst = [...t.msgs].reverse();
+  // The root (always in the transcript) first, then newest; capped like the other reads (also the current thread,
+  // whose files are mostly registered already).
+  const [names, self, files] = await Promise.all([
+    getUserNames(userIdsIn(t.msgs), slack),
+    getBotIdentity().catch(() => undefined),
+    registerExternalFiles(ctx.threadId, byFilePriority(t.msgs, [t.rootTs]), t.source ? { sourceChannelId: t.source.channelId, sourcePublic: t.source.public } : {}),
+  ]);
+  const fenv: FormatEnv = { names, files, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.askThreadMessageTokens * 4 };
   const lines = t.msgs.filter((m) => !m.deleted).map((m) => ({ ts: m.ts, line: formatMessage({ ...m, replyCount: undefined }, fenv) }));
-  return fitThread(lines, t.rootTs, limits.askThreadMaxTokens * 4);
+  const listed: string[] = [];
+  for (const m of newestFirst) {
+    if (m.deleted) continue;
+    for (const f of m.files ?? []) {
+      const cf = files.get(f.id);
+      const from = m.userId ? (names.get(m.userId) ?? m.username ?? m.userId) : m.username || 'unknown';
+      if (cf && listed.length < MAX_LISTED_FILES) listed.push(`- ${contextFileLabel(cf, from)} (ts ${m.ts})`);
+    }
+  }
+  return { ...fitThread(lines, t.rootTs, limits.askThreadMaxTokens * 4), files: listed };
 }
 
 registerTool({
@@ -86,7 +121,7 @@ registerTool({
         if ('error' in t) return t.error;
         if (!t.msgs.length) return `No visible messages in ${t.where}.`;
         try {
-          const transcript = await renderTranscript(t, slackWaitOpts(ctx));
+          const transcript = await renderTranscript(ctx, t, slackWaitOpts(ctx));
           const signals = [ctx.abortSignal, options?.abortSignal, AbortSignal.timeout(limits.askThreadTimeoutMs)].filter((s): s is AbortSignal => !!s);
           const reasoningEffort = env.CHILD_REASONING_EFFORT !== 'default' ? env.CHILD_REASONING_EFFORT : null;
           const res = await generateText({
@@ -109,7 +144,10 @@ registerTool({
           const answer = annotateTsDates(res.text.trim()); // its cited ts get their UTC date
           if (!answer) return `ask_thread got no answer for ${t.where}. Try read_thread / read_public_thread.`;
           const head = `Answer about ${t.where} (${t.msgs.length} ${t.msgs.length === 1 ? 'message' : 'messages'}${transcript.omitted ? `; the ${transcript.omitted} oldest replies were over the size cap and not read` : ''}), from a model that read the thread:`;
-          return untrusted('ask_thread answer', [head, ...(t.hint ? [t.hint] : []), '', answer].join('\n'));
+          const fileList = transcript.files.length
+            ? ['', 'Files in that thread, newest first (read_file / ask_file to open, reply(files) to post, sandbox_import in a sandbox):', ...transcript.files]
+            : [];
+          return untrusted('ask_thread answer', [head, ...(t.hint ? [t.hint] : []), '', answer, ...fileList].join('\n'));
         } catch (err) {
           log.warn({ err, threadId: ctx.threadId }, 'ask_thread failed');
           return `ask_thread failed (${errMsg(err)}). Use read_thread / read_public_thread instead.`;

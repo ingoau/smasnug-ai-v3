@@ -1,5 +1,5 @@
 /**
- * File store tools (front + children): create_file, read_file, ask_file. Every id goes through resolveFile (the
+ * File store tools (front + children): create_file, save_url, read_file, ask_file. Every id goes through resolveFile (the
  * access rule). Posting is `reply(files)` (agent module) / `send_message(files)` (features), not here.
  *
  * - read_file: text is paged (limits.fileReadPageChars, with position and continue hints); an image goes into the
@@ -19,8 +19,10 @@ import { chatModel, MODELS } from '../models.js';
 import { log } from '../log.js';
 import { EXTRAS, getExtra } from '../tools/extras.js';
 import { errMsg, untrusted } from '../tools/util.js';
+import { BlockedUrlError, safeFetch } from '../tools/safe-fetch.js';
+import { takeLimit } from '../features/guard.js';
 import { requestDescription } from './describe.js';
-import { fileKind, fileListingLine, formatBytes, isTextMime, looksLikeText, sanitizeFileName, textPage, textPageHeader, type FileKind } from './format.js';
+import { downloadFileName, fileKind, isSlackUrl, fileListingLine, formatBytes, isTextMime, looksLikeText, sanitizeFileName, textPage, textPageHeader, type FileKind } from './format.js';
 import { loadImageForModel, type LoadedImage } from './images.js';
 import { askFileSystemPrompt, askFileUserPrompt } from './prompts.js';
 import { createFile, FileError, loadFileBytes, resolveFile, type FileMeta } from './store.js';
@@ -296,3 +298,71 @@ registerTool({
   },
 });
 
+
+/**
+ * save_url: download a public URL (an image, PDF, dataset…) into the file store as a created file, so it can be
+ * posted with reply(files), opened with read_file / ask_file, or imported into a sandbox. Through safeFetch (SSRF
+ * filtering, size and time caps), at most limits.fileMaxBytes; counts as a page fetch. Idempotent per turn / run +
+ * URL + content.
+ */
+registerTool({
+  name: 'save_url',
+  roles: ['front', 'child'],
+  build: (ctx) => {
+    let saved = 0;
+    return tool({
+      description: `Download a file from a public URL (an image, PDF, CSV, zip…) into the file store and get its id: then ${
+        ctx.role === 'front' ? 'post it with reply(files: [id]), ' : ''
+      }look at it with read_file / ask_file, or sandbox_import it. Use the direct file URL (e.g. raw.githubusercontent.com or ?raw=true for GitHub, the image's own URL), not the page showing it. Max ${formatBytes(limits.fileMaxBytes)}. Not for Slack files: those already have file_… ids. To read a web page's text, use fetch_url.`,
+      inputSchema: z.object({
+        url: z.string().describe('Absolute http(s) URL of the file'),
+        name: z.string().max(200).optional().describe('File name with extension (default: from the URL)'),
+        description: z.string().max(400).describe('One line (≤ 200 chars) saying what the file is, e.g. "Hack Club logo, PNG, from the brand page"'),
+      }),
+      execute: async ({ url, name, description }) => {
+        if (saved >= limits.createFileMaxPerTurn) return `save_url already used ${limits.createFileMaxPerTurn} times this ${ctx.runId ? 'run' : 'turn'}.`;
+        if (isSlackUrl(url)) return 'save_url can\'t download Slack URLs. Slack files in this conversation, search results and threads you read already have file_… ids: use those.';
+        // Counted up front (parallel calls in one step), given back unless a file was saved.
+        saved++;
+        let kept = false;
+        try {
+          const over = await takeLimit('fetch', ctx.speakerId, ctx.threadId);
+          if (over) return over;
+          const res = await safeFetch(url, { maxBytes: limits.fileMaxBytes, timeoutMs: limits.saveUrlTimeoutMs, maxRedirects: 5, signal: ctx.abortSignal });
+          if (res.status >= 400) return `Download failed: HTTP ${res.status} for ${res.url}`;
+          if (res.truncated) return `Not saved: the file is larger than ${formatBytes(limits.fileMaxBytes)}.`;
+          if (!res.body.byteLength) return `Not saved: ${res.url} returned an empty response.`;
+          const fileName = downloadFileName(res.url, res.body, res.contentType, name);
+          // A page instead of the file (e.g. GitHub's blob view, a login wall): refused unless an .html file was asked
+          // for, so a page is never stored under an image's name.
+          const html = res.contentType.toLowerCase().includes('text/html') || /^\s*<(!doctype html|html)/i.test(res.body.subarray(0, 200).toString('utf8'));
+          if (html && !/\.html?$/i.test(fileName)) {
+            return `Not saved: ${res.url} returned an HTML page, not a file. Use the file's direct URL (e.g. raw.githubusercontent.com or ?raw=true for GitHub, the image's own src; fetch_url shows a page's links). To save the page itself, name it something.html.`;
+          }
+          const scope = ctx.runId ? `run:${ctx.runId}` : ctx.turnId ? `turn:${ctx.turnId}` : null;
+          const f = await createFile({
+            threadId: ctx.threadId,
+            ownerId: ctx.speakerId,
+            name: fileName,
+            content: res.body,
+            description,
+            createdTurnId: ctx.runId ? null : (ctx.turnId ?? null),
+            createdRunId: ctx.runId ?? null,
+            createdSubagentId: ctx.subagentId ?? null,
+            ...(scope ? { idempotencyKey: `${scope}:url:${createHash('sha256').update(url).update('\0').update(fileName).update('\0').update(res.body).digest('hex').slice(0, 32)}` } : {}),
+          });
+          kept = true;
+          const note = ctx.role === 'front' ? `Saved. Post it with reply(files: ["${f.id}"]).` : 'Saved. It is listed with your result automatically.';
+          return { file_id: f.id, name: f.name, mime: f.mime, size: f.size, kind: fileKind(f.mime, f.name), source: res.url, note };
+        } catch (err) {
+          if (err instanceof BlockedUrlError) return `Blocked: ${err.message}`;
+          if (err instanceof FileError) return err.message;
+          log.debug({ err, url }, 'save_url failed');
+          return `Download failed: ${errMsg(err)}`;
+        } finally {
+          if (!kept) saved--;
+        }
+      },
+    });
+  },
+});

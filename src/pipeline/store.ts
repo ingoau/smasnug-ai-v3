@@ -1,7 +1,7 @@
 /** Stored copies of Slack messages and thread rows. */
 import { sql, type Sql } from '../db/index.js';
 import type { MessageAttachment, SlackFileRef, StoredMessage } from '../core/types.js';
-import { attachmentsFromSlack } from '../context/normalize.js';
+import { attachmentsFromSlack, slackFileRefs } from '../context/normalize.js';
 import { removeMessageFiles } from '../files/store.js';
 import { log } from '../log.js';
 
@@ -44,10 +44,8 @@ export function isBotMessage(m: SlackMessage): boolean {
 }
 
 export function fileRefs(m: SlackMessage): SlackFileRef[] {
-  // Tombstones: a file deleted from the message (Slack keeps a placeholder).
-  return (m.files ?? [])
-    .filter((f) => f && f.id && f.mode !== 'tombstone' && f.mode !== 'hidden_by_limit')
-    .map((f) => ({ id: f.id, name: f.name, mimetype: f.mimetype, urlPrivate: f.url_private, ...(typeof f.size === 'number' ? { size: f.size } : {}) }));
+  // Its own files and forwarded messages' files; tombstones (a file deleted from the message) dropped.
+  return slackFileRefs(m);
 }
 
 const slackTsDate = (ts: string) => new Date(Math.round(Number(ts) * 1000));

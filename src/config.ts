@@ -263,6 +263,8 @@ export const limits = {
   autoSuspendReporters: 3,
   fetchMaxBytes: 3 * 1024 * 1024,
   fetchTimeoutMs: 10_000,
+  /** save_url: downloads up to fileMaxBytes, so a little longer than a page fetch. */
+  saveUrlTimeoutMs: 30_000,
   webSearchDefaultResults: 5,
   webSearchMaxResults: 10,
   webSearchTimeoutMs: 10_000,
