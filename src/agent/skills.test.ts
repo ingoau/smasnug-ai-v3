@@ -82,5 +82,7 @@ describe('the repo skills', () => {
     expect(skillsPrompt('child', all)).toMatch(/- bot-source: /);
     expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/!stop/);
     expect(readSkill('child', 'bot-source', undefined, all)).toContain('raw.githubusercontent.com/ingoau/smasnug-ai-v3/main/');
+    expect(readSkill('child', 'bot-source', undefined, all)).toContain('git clone --filter=blob:none https://github.com/ingoau/smasnug-ai-v3 /work/repo');
+    expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/`sandbox: true` if answering means searching the code/);
   });
 });
