@@ -21,7 +21,17 @@ describe('parseSkillFile', () => {
   });
 
   it('no frontmatter: everything is the body', () => {
-    expect(parseSkillFile('just text')).toEqual({ meta: {}, body: 'just text' });
+    expect(parseSkillFile('just text')).toEqual({ meta: {}, body: 'just text', errors: [] });
+  });
+
+  it('a BOM, CRLF line ends and comment lines are fine', () => {
+    const r = parseSkillFile('\uFEFF---\r\n# a comment\r\nname: x\r\ndescription: d\r\n---\r\nbody');
+    expect(r).toEqual({ meta: { name: 'x', description: 'd' }, body: 'body', errors: [] });
+  });
+
+  it('multi-line values are errors, not a description of ">"', () => {
+    expect(parseSkillFile('---\ndescription: >\n  long\n  text\n---\nbody').errors).toHaveLength(3);
+    expect(parseSkillFile('---\ndescription: |-\n---\nbody').errors).toEqual(["description: multi-line values aren't supported, put it on one line"]);
   });
 });
 
@@ -34,6 +44,7 @@ describe('loadSkills', () => {
     'no-desc/SKILL.md': '---\nname: no-desc\n---\nbody',
     'Bad Name/SKILL.md': '---\ndescription: d\n---\nbody',
     'bad-role/SKILL.md': '---\ndescription: d\nroles: [gate]\n---\nbody',
+    'folded/SKILL.md': '---\ndescription: >\n  folded text\n---\nbody',
     'empty-dir/.keep': '',
     'README.md': '# not a skill',
   });

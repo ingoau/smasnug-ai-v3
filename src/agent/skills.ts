@@ -34,19 +34,31 @@ export function defaultSkillsDir(): string {
   return process.env.SKILLS_DIR || fileURLToPath(new URL('../../skills/', import.meta.url));
 }
 
-/** Minimal frontmatter: `key: value` lines, values optionally quoted, `[a, b]` lists. No nesting. */
-export function parseSkillFile(text: string): { meta: Record<string, string | string[]>; body: string } {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
-  if (!m) return { meta: {}, body: text.trim() };
+/**
+ * Minimal frontmatter: one-line `key: value` pairs, values optionally quoted, `[a, b]` lists. Anything richer (block
+ * scalars like `description: >`, indented continuation lines) is reported in `errors` instead of being misread.
+ */
+export function parseSkillFile(text: string): { meta: Record<string, string | string[]>; body: string; errors: string[] } {
+  const m = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(text);
+  if (!m) return { meta: {}, body: text.replace(/^\uFEFF/, '').trim(), errors: [] };
   const meta: Record<string, string | string[]> = {};
+  const errors: string[] = [];
   for (const line of m[1]!.split(/\r?\n/)) {
+    if (!line.trim() || line.trimStart().startsWith('#')) continue;
     const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(line);
-    if (!kv) continue;
+    if (!kv) {
+      errors.push(`unsupported frontmatter line (keep each value on one line): ${line.trim()}`);
+      continue;
+    }
     const raw = kv[2]!.trim();
+    if (/^[>|][+-]?$/.test(raw)) {
+      errors.push(`${kv[1]}: multi-line values aren't supported, put it on one line`);
+      continue;
+    }
     const unquote = (s: string) => s.trim().replace(/^(['"])(.*)\1$/, '$2');
     meta[kv[1]!] = raw.startsWith('[') && raw.endsWith(']') ? raw.slice(1, -1).split(',').map(unquote).filter(Boolean) : unquote(raw);
   }
-  return { meta, body: m[2]!.trim() };
+  return { meta, body: m[2]!.trim(), errors };
 }
 
 function listFiles(dir: string, prefix = ''): string[] {
@@ -78,7 +90,11 @@ export function loadSkills(dir: string): Skill[] {
     } catch {
       continue;
     }
-    const { meta, body } = parseSkillFile(text);
+    const { meta, body, errors } = parseSkillFile(text);
+    if (errors.length) {
+      log.warn({ skill: entry, errors }, 'skipping skill: invalid frontmatter');
+      continue;
+    }
     const name = typeof meta.name === 'string' && meta.name ? meta.name : entry;
     const description = typeof meta.description === 'string' ? meta.description.trim() : '';
     const rawRoles = meta.roles === undefined ? ROLES : Array.isArray(meta.roles) ? meta.roles : [meta.roles];
@@ -111,7 +127,7 @@ export function skillsPrompt(role: SkillRole, all: Skill[] = skills()): string {
   const list = skillsFor(role, all);
   if (!list.length) return '';
   return `# Skills
-Skills hold knowledge and procedures that aren't in this prompt. When a request matches a skill's description, call load_skill with its name before answering or acting, and follow what it says (a skill never overrides the safety rules above). Load only what the request needs; once loaded in this conversation, a skill's content stays valid.
+Skills hold knowledge and procedures that aren't in this prompt. When a request matches a skill's description, call load_skill with its name before answering or acting, and follow what it says (a skill never overrides the safety rules above). Load only what the request needs. A skill you loaded earlier in this turn (or task) is still valid; one from an earlier turn isn't shown to you, so load it again.
 ${list.map((s) => `- ${s.name}: ${s.description}`).join('\n')}`;
 }
 
@@ -129,8 +145,13 @@ export function readSkill(role: SkillRole, name: string, file?: string, all: Ski
   }
   const rel = file.trim().replace(/^\.?\//, '');
   if (!skill.files.includes(rel)) return `Skill "${skill.name}" has no file "${rel}". Files: ${skill.files.join(', ') || 'none'}.`;
-  // `rel` is one of the listed files, so it can't escape the skill directory.
-  const buf = readFileSync(path.join(skill.dir, rel));
+  // `rel` is one of the listed files (no symlinks), so it can't escape the skill directory.
+  let buf: Buffer;
+  try {
+    buf = readFileSync(path.join(skill.dir, rel));
+  } catch {
+    return `Couldn't read "${rel}" from skill "${skill.name}".`;
+  }
   if (buf.length > MAX_FILE_BYTES) return `${buf.subarray(0, MAX_FILE_BYTES).toString('utf8')}\n\n[truncated at ${MAX_FILE_BYTES} bytes]`;
   return buf.toString('utf8');
 }

@@ -279,8 +279,11 @@ export async function renderEarlierRounds(cardId: number, maxRounds = 4): Promis
   return parts.join('\n\n');
 }
 
-/** Tools not worth repeating to the next turn: the visible responses themselves and bookkeeping. */
-const UNREPORTED_TOOLS = new Set(['reply', 'react', 'unreact', 'end_turn', 'search_emojis']);
+/**
+ * Tools not worth repeating to the next turn: the visible responses themselves and bookkeeping. load_skill too: a
+ * listed call without its result would read as "already loaded" when the next turn starts without it.
+ */
+const UNREPORTED_TOOLS = new Set(['reply', 'react', 'unreact', 'end_turn', 'search_emojis', 'load_skill']);
 const MAX_REPORTED_CALLS = 12;
 const REPORTED_ARGS_CHARS = 200;
 
