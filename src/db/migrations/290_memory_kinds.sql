@@ -8,4 +8,4 @@ alter table user_memory alter column stated_at set default now();
 alter table user_memory alter column stated_at set not null;
 -- Best-effort backfill: facts phrased as preferences.
 update user_memory set kind = 'preference'
-where kind = 'about' and text ~* '^(prefers|likes|dislikes|hates|wants|doesn''t want|does not want|loves|would rather)\M';
+where kind = 'about' and text ~* '^(prefers|wants|doesn''t want|does not want|would rather)\M';

@@ -33,7 +33,8 @@ const header = (text: string) => ({ type: 'header', text: { type: 'plain_text', 
 
 export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
   const blocks: unknown[] = [];
-  const facts = await listFacts(userId);
+  // Newest first, so the hidden tail (over USER_FACTS_SHOWN) is the oldest.
+  const facts = (await listFacts(userId)).sort((a, b) => new Date(b.statedAt).getTime() - new Date(a.statedAt).getTime() || b.id - a.id);
 
   blocks.push(header('What I remember about you'));
   blocks.push(

@@ -43,34 +43,58 @@ export function asKind(k: string | null | undefined): FactKind {
 // ---------- pure text helpers ----------
 
 const STOPWORDS = new Set(
-  'the and for are but not you all any can had her was one our out has him his how its may new now old see two way who did get got let put say she too use with that this have from they will would there their what about which when your been were them then than into more some just also like very want does dont cant wont isnt its im ive youre thats whats here only over such make know think really much even well need help could should'.split(
+  'the and for are but you all any can had her was one our out has him his how its may new now old see two way who did get got let put say she too use with that this have from they will would there their what about which when your been were them then than into more some just also like very want does its im ive youre thats whats here only over such make know think really much even well need help could should a an i me my is am be to of in on at it or as so by do if'.split(
     ' ',
   ),
 );
+/** Negations survive as "not", so "can't use Docker" never matches "can use Docker". */
+const NEGATIONS = new Set(['not', 'no', 'never', 'cant', 'cannot', 'dont', 'doesnt', 'didnt', 'isnt', 'arent', 'wasnt', 'wont', 'neither', 'nor']);
 
-/** Lowercased content words (letters/digits, 3+ chars or containing a digit, no stopwords), a trailing plural "s" dropped. */
-export function contentWords(text: string): string[] {
-  const words = text
-    .toLowerCase()
-    .replace(/<[@#!][^>]*>/g, ' ')
-    .replace(/['’]/g, '')
-    .match(/[\p{L}\p{N}]+/gu);
-  return (words ?? [])
-    .filter((w) => (w.length >= 3 || /\d/.test(w)) && !STOPWORDS.has(w)).map((w) => (w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w));
+function words(text: string): string[] {
+  return (
+    text
+      .toLowerCase()
+      .replace(/<[@#!][^>]*>/g, ' ')
+      .replace(/['’]/g, '')
+      .match(/[\p{L}\p{N}]+/gu) ?? []
+  );
 }
 
-/** Word-set overlap (Jaccard) of two facts, 0..1. ≥ DUPLICATE_SIMILARITY counts as the same fact. */
+/**
+ * Words for search (3+ chars, or 2+ outside ASCII such as 東京, or containing a digit; no stopwords or negations).
+ * Postgres' stemmer handles plurals.
+ */
+export function contentWords(text: string): string[] {
+  return words(text).filter((w) => (w.length >= 3 || /\d/.test(w) || (w.length >= 2 && /[^\x00-\x7f]/.test(w))) && !STOPWORDS.has(w) && !NEGATIONS.has(w));
+}
+
+/** Words for comparing two facts: every non-stopword (also "go", "c", "js"), negations as "not", plurals folded. */
+export function similarityWords(text: string): string[] {
+  return words(text)
+    .map((w) => (NEGATIONS.has(w) ? 'not' : w))
+    .filter((w) => w === 'not' || !STOPWORDS.has(w))
+    .map((w) => (w.length > 3 && w.endsWith('s') && !/(ss|us|is)$/.test(w) ? w.slice(0, -1) : w));
+}
+
+/**
+ * Overlap (Jaccard) of two facts' words and word pairs, 0..1, so word order counts too ("TypeScript over Python" vs
+ * "Python over TypeScript"). ≥ DUPLICATE_SIMILARITY counts as the same fact.
+ */
 export function factSimilarity(a: string, b: string): number {
-  const A = new Set(contentWords(a));
-  const B = new Set(contentWords(b));
+  const grams = (t: string) => {
+    const w = similarityWords(t);
+    return new Set([...w, ...w.slice(1).map((x, i) => `${w[i]} ${x}`)]);
+  };
+  const A = grams(a);
+  const B = grams(b);
   if (A.size === 0 || B.size === 0) return a.trim().toLowerCase() === b.trim().toLowerCase() ? 1 : 0;
   let both = 0;
-  for (const w of A) if (B.has(w)) both++;
+  for (const g of A) if (B.has(g)) both++;
   return both / (A.size + B.size - both);
 }
 export const DUPLICATE_SIMILARITY = 0.75;
 
-/** The existing fact that `text` duplicates, if any. */
+/** The existing fact that `text` duplicates (the closest one), if any. */
 export function findDuplicate<T extends { text: string }>(text: string, facts: T[]): T | undefined {
   let best: T | undefined;
   let bestScore = 0;
@@ -81,13 +105,30 @@ export function findDuplicate<T extends { text: string }>(text: string, facts: T
   return bestScore >= DUPLICATE_SIMILARITY ? best : undefined;
 }
 
+/** Same fact, same words: nothing to change. */
+export function sameFact(a: string, b: string) {
+  return similarityWords(a).join(' ') === similarityWords(b).join(' ');
+}
+
 /**
- * An OR tsquery (`'robot' | 'arm'`) over the content words of `texts`, for to_tsquery('english', …): only
- * letters/digits survive, so it can't carry tsquery syntax. Empty when there is nothing to search for.
+ * An OR tsquery (`robot | arm`) over the content words of `texts` (in order, so put the most important text first),
+ * for to_tsquery('english', …): only letters/digits survive, so it can't carry tsquery syntax. Empty when there is
+ * nothing to search for.
  */
 export function orTsQuery(texts: string[], maxWords = 40): string {
-  const words = [...new Set(texts.flatMap(contentWords))].filter((w) => /^[a-z0-9]+$/.test(w)).slice(0, maxWords);
-  return words.join(' | ');
+  return [...new Set(texts.flatMap(contentWords))].slice(0, maxWords).join(' | ');
+}
+
+/** What memory never stores (prompts of the remember tool and extraction; isSensitive backs it up in code). */
+export const NEVER_STORE =
+  'health (physical or mental), family situations, relationships or dating, sexuality, religion, politics, money, school grades, contact details, passwords, precise location';
+
+/** Cheap filter for sensitive categories (backs up the prompts; false positives are fine). */
+const SENSITIVE =
+  /\b(health|illness|sick|disease|diagnos\w*|disorders?|depress\w*|anxiety|adhd|autis\w*|bipolar|ocd|ptsd|therap\w*|medicat\w*|meds|hospital\w*|surgery|cancer|diabet\w*|pregnan\w*|disabilit\w*|disabled|mental|suicid\w*|self[- ]?harm|anorexi\w*|bulimi\w*|eating disorder|divorc\w*|custody|foster|orphan\w*|abus\w*|grie(f|ving)|passed away|funeral|religio\w*|church|mosque|synagogue|temple|gay|lesbian|bisexual|queer|transgender|sexual\w*|girlfriend|boyfriend|dating|crush|immigra\w*|asylum|refugee|home address|phone number|password|salary|debt|police|arrest\w*|jail|prison)\b/i;
+
+export function isSensitive(text: string) {
+  return SENSITIVE.test(text);
 }
 
 // ---------- queries ----------
@@ -149,7 +190,7 @@ export async function rankFacts(userId: string, tsquery: string): Promise<Ranked
           : sql`0::float8`
       } as rank
     from user_memory where user_id = ${userId}
-    order by id limit ${FACTS_PER_USER_MAX + 50}`;
+    order by id desc limit ${FACTS_PER_USER_MAX + 50}`;
   return rows.map(norm);
 }
 

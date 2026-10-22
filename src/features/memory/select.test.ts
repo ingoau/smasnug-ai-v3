@@ -22,7 +22,7 @@ const fact = (id: number, text: string, kind: FactKind = 'about', rank = 0, days
 
 describe('text helpers', () => {
   it('extracts content words without stopwords, mentions or punctuation', () => {
-    expect(contentWords("Hey <@U123ABC>, I'm building robot arms with ROS2!")).toEqual(['hey', 'building', 'robot', 'arm', 'ros2']);
+    expect(contentWords("Hey <@U123ABC>, I'm building robot arms with ROS2!")).toEqual(['hey', 'building', 'robot', 'arms', 'ros2']);
   });
 
   it('scores near-duplicates high and different facts low', () => {
@@ -31,11 +31,18 @@ describe('text helpers', () => {
     expect(factSimilarity('prefers TypeScript', 'lives in Sydney')).toBe(0);
     expect(findDuplicate('prefers typescript over python', [{ id: 1, text: 'lives in Sydney' }, { id: 2, text: 'prefers TypeScript over Python' }])?.id).toBe(2);
     expect(findDuplicate('prefers Rust over Python', [{ id: 2, text: 'prefers TypeScript over Python' }])).toBeUndefined();
+    // Short words, negations and word order count.
+    expect(factSimilarity('uses Go', 'uses C')).toBeLessThan(0.75);
+    expect(factSimilarity('is a morning person', 'is not a morning person')).toBeLessThan(0.75);
+    expect(factSimilarity("can use Docker", "can't use Docker")).toBeLessThan(0.75);
+    expect(factSimilarity('prefers TypeScript over Python', 'prefers Python over TypeScript')).toBeLessThan(0.75);
+    expect(factSimilarity('works on the status page', 'works on the status pages')).toBe(1);
   });
 
   it('builds a safe OR tsquery', () => {
     expect(orTsQuery(["what's up with my robot arm?", 'robot & !arm | servo:*'])).toBe('robot | arm | servo');
     expect(orTsQuery(['the and for'])).toBe('');
+    expect(orTsQuery(['café in München, 東京'])).toBe('café | münchen | 東京');
   });
 });
 

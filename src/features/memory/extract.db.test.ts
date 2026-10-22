@@ -17,12 +17,15 @@ if (LIVE) {
 const calls: string[] = [];
 vi.mock('ai', async (orig) => ({
   ...(await orig<typeof import('ai')>()),
-  generateText: async (opts: { prompt: string }) => {
+  generateText: async (opts: { instructions: string; prompt: string }) => {
+    // Other test files' threads may be extracted in the same run: only this test's participant gets ops.
+    if (!opts.instructions.includes('U_MEMX')) return { output: { ops: [] }, usage: { inputTokens: 1, outputTokens: 1 } };
     calls.push(opts.prompt);
-    const fact = calls.length === 1 ? 'is building a robot arm' : 'prefers Rust over Python';
-    const evidence = calls.length === 1 ? 'building a robot arm' : 'prefer Rust over Python';
+    const second = opts.prompt.includes('prefer Rust');
+    const fact = second ? 'prefers Rust over Python' : 'is building a robot arm';
+    const evidence = second ? 'prefer Rust over Python' : 'building a robot arm';
     return {
-      output: { ops: [{ op: 'add', user_id: 'U_MEMX', fact_id: null, text: fact, evidence }] },
+      output: { ops: [{ op: 'add', user_id: 'U_MEMX', fact_id: null, text: fact, kind: second ? 'preference' : 'project', evidence }] },
       usage: { inputTokens: 1, outputTokens: 1 },
     };
   },
@@ -118,10 +121,17 @@ describe.skipIf(!LIVE)('memory reading and tools (DB)', () => {
     expect(await run(remember, { fact: 'Prefers short answers.', kind: 'preference' })).toMatch(/^Already remembered as m_\d+/);
     const saved = await run(remember, { fact: 'uses Rust for embedded work', kind: 'about' });
     const id = /m_(\d+)/.exec(saved)![1];
-    expect(await run(remember, { fact: 'uses Zig for embedded work now', kind: 'about', replaces: `m_${id}` })).toBe(`Updated m_${id}.`);
+    expect(await run(remember, { fact: 'uses Zig for embedded work now', kind: 'about', replaces: `m_${id}` })).toMatch(new RegExp(`^Updated m_${id} \\(was: "uses Rust`));
+    // A near-duplicate without replaces updates the existing fact instead of adding a second one.
+    const before = await store.countFacts(user);
+    expect(await run(remember, { fact: 'is learning Haskell for a compilers course at uni', kind: 'project' })).toMatch(/^Updated m_\d+ \(was: "is learning Haskell/);
+    expect(await store.countFacts(user)).toBe(before);
+    expect(await run(remember, { fact: 'has ADHD', kind: 'about' })).toMatch(/^Not saved/);
     const search = tools.searchMemoryTool(ctx());
     expect(await run(search, { query: 'zig' })).toContain(`[m_${id}] uses Zig for embedded work now [about]`);
-    expect(await run(search, { query: 'compilers' })).toContain('is learning Haskell for a compilers course');
+    expect(await run(search, { query: 'compilers' })).toContain('is learning Haskell for a compilers course at uni');
+    await run(remember, { fact: 'uses Go at work', kind: 'about' });
+    expect(await run(search, { query: 'go' })).toContain('uses Go at work');
     expect(await run(search, { query: 'kubernetes' })).toBe('No saved fact matches.');
   });
 });

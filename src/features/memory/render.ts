@@ -47,11 +47,12 @@ export const MEMORY_CHAR_BUDGET = 3600;
 
 /**
  * Pure: which facts go into this turn. Relevant to the conversation first (full-text rank), then preferences, then
- * the rest (about before project, newest first), until `cap` facts or `charBudget` characters.
+ * the rest (about, project, further preferences; newest first), until `cap` facts or `charBudget` characters.
  */
 export function selectFacts<T extends RankedFact>(facts: T[], cap: number, charBudget = MEMORY_CHAR_BUDGET): T[] {
   const newest = (a: T, b: T) => new Date(b.statedAt).getTime() - new Date(a.statedAt).getTime() || b.id - a.id;
-  const kindRank = (f: T) => (f.kind === 'preference' ? 0 : f.kind === 'about' ? 1 : 2);
+  // Preferences beyond PREFERENCES_MAX come last.
+  const kindRank = (f: T) => (f.kind === 'about' ? 0 : f.kind === 'project' ? 1 : 2);
   const relevant = facts.filter((f) => f.rank > 0).sort((a, b) => b.rank - a.rank || newest(a, b)).slice(0, RELEVANT_MAX);
   const preferences = facts.filter((f) => f.kind === 'preference').sort(newest).slice(0, PREFERENCES_MAX);
   const rest = [...facts].sort((a, b) => kindRank(a) - kindRank(b) || newest(a, b));
@@ -106,10 +107,15 @@ export function formatSpeakerMemory(
   return lines.join('\n');
 }
 
-/** Recent text of the thread, for picking the facts relevant to this turn. */
-async function recentThreadText(threadId: string): Promise<string[]> {
+/**
+ * Recent text of the thread for picking the facts relevant to this turn: the speaker's own latest messages first
+ * (their words win the query's word cap, and others can't steer much), then the latest others.
+ */
+async function recentThreadText(threadId: string, userId: string): Promise<string[]> {
   const rows = await sql<{ text: string }[]>`
-    select text from messages where thread_id = ${threadId} and not deleted and text <> '' order by ts desc limit 6`;
+    select text from (
+      select text, user_id, ts from messages where thread_id = ${threadId} and not deleted and text <> '' order by ts desc limit 6
+    ) m order by (user_id is not distinct from ${userId}) desc, ts desc`;
   return rows.map((r) => r.text);
 }
 
@@ -119,7 +125,7 @@ async function recentThreadText(threadId: string): Promise<string[]> {
  * of the injected facts.
  */
 export async function renderSpeakerMemory(userId: string, opts: { threadId?: string } = {}): Promise<string> {
-  const texts = opts.threadId ? await recentThreadText(opts.threadId).catch((err) => (log.warn({ err }, 'memory context read failed'), [])) : [];
+  const texts = opts.threadId ? await recentThreadText(opts.threadId, userId).catch((err) => (log.warn({ err }, 'memory context read failed'), [])) : [];
   const facts = await rankFacts(userId, orTsQuery(texts));
   if (facts.length === 0) return '';
   const chosen = selectFacts(facts, limits.memoryInjectCap);

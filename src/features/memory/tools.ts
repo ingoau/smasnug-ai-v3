@@ -11,17 +11,22 @@ import { formatFactLine } from './render.js';
 import {
   addFact,
   cleanFactText,
-  contentWords,
   deleteFact,
+  DUPLICATE_SIMILARITY,
   FACT_KINDS,
   FACT_MAX_CHARS,
   FACTS_PER_USER_MAX,
   factLabel,
+  factSimilarity,
   findDuplicate,
+  isSensitive,
   listFacts,
+  NEVER_STORE,
   orTsQuery,
   parseFactId,
   rankFacts,
+  sameFact,
+  similarityWords,
   touchFacts,
   updateFact,
 } from './store.js';
@@ -39,8 +44,8 @@ export function rememberTool(ctx: ToolContext) {
       'about themselves (a project, their stack or tools, skills, role, interests, time zone, how they like answers) or asks you ' +
       'to remember something, in the same step as your reply and without announcing it. Write it short, in third person ("prefers short answers", ' +
       '"is building a robot arm for Blueprint"). When it changes a fact you already have (shown with its id), pass that id as ' +
-      'replaces instead of adding a second one. Facts about other people must be attributed to the speaker, e.g. ' +
-      '"Ingo says Sam is handling venues". Never save health, family situations or other sensitive details about other people.',
+      'replaces; a near-duplicate of a saved fact updates that fact instead of adding a second one. Facts about other people must be ' +
+      `attributed to the speaker, e.g. "Ingo says Sam is handling venues". Never save ${NEVER_STORE}, about anyone.`,
     inputSchema: z.object({
       fact: z.string().min(1).max(FACT_MAX_CHARS),
       kind: z
@@ -48,18 +53,28 @@ export function rememberTool(ctx: ToolContext) {
         .describe('preference: how they want you to help (style, language, tools); about: who they are (role, skills, interests, time zone); project: what they are working on now'),
       replaces: z.union([z.string(), z.number()]).optional().describe('id of the existing fact this one updates (e.g. "m_42"), if any'),
     }),
+    // Usually called alongside the reply, which ends the turn, so the model rarely sees this result: every outcome
+    // here must be right without a follow-up call.
     execute: async ({ fact, kind, replaces }) => {
       const text = cleanFactText(fact);
       if (!text) return 'Nothing to remember.';
-      if (replaces != null && replaces !== '') {
-        const id = parseFactId(replaces);
-        if (!id || !(await updateFact(ctx.speakerId, id, text, ctx.threadId, kind))) return `No fact ${replaces} in this speaker's memory to replace.`;
-        await logEvent(ctx, 'memory_update', { factId: id });
-        return `Updated ${factLabel(id)}.`;
-      }
+      if (isSensitive(text)) return `Not saved: memory never keeps ${NEVER_STORE}.`;
       const existing = await listFacts(ctx.speakerId);
-      const dup = findDuplicate(text, existing);
-      if (dup) return `Already remembered as ${factLabel(dup.id)}: "${dup.text}". If it changed, call remember again with replaces: "${factLabel(dup.id)}".`;
+      const replacedId = replaces != null && replaces !== '' ? parseFactId(replaces) : null;
+      let target = existing.find((f) => f.id === replacedId);
+      if (!target) {
+        const dup = findDuplicate(text, existing);
+        if (dup && sameFact(dup.text, text) && dup.kind === kind) return `Already remembered as ${factLabel(dup.id)}.`;
+        target = dup;
+      }
+      if (target) {
+        // One fact per thing: other facts the new text duplicates go.
+        const merged = existing.filter((f) => f.id !== target.id && factSimilarity(text, f.text) >= DUPLICATE_SIMILARITY);
+        for (const f of merged) await deleteFact(ctx.speakerId, f.id);
+        await updateFact(ctx.speakerId, target.id, text, ctx.threadId, kind);
+        await logEvent(ctx, 'memory_update', { factId: target.id, merged: merged.map((f) => f.id) });
+        return `Updated ${factLabel(target.id)} (was: "${target.text}")${merged.length ? `, merged ${merged.map((f) => factLabel(f.id)).join(', ')}` : ''}.`;
+      }
       if (existing.length >= FACTS_PER_USER_MAX)
         return `Memory is full (${FACTS_PER_USER_MAX} facts). Ask the speaker to forget something first (App Home lists everything).`;
       const row = await addFact(ctx.speakerId, text, ctx.threadId, kind);
@@ -77,10 +92,10 @@ export function searchMemoryTool(ctx: ToolContext) {
     inputSchema: z.object({ query: z.string().min(1).max(200).describe('words to look for, e.g. "robot arm" or "rust"') }),
     execute: async ({ query }) => {
       const facts = await rankFacts(ctx.speakerId, orTsQuery([query]));
-      const words = contentWords(query);
-      // Full-text first, then a plain substring match (names, ids and words the english stemmer mangles).
+      // Full-text first, then whole words of any length ("go", "js", names the english stemmer mangles).
+      const terms = new Set(similarityWords(query));
       const hits = facts
-        .map((f) => ({ f, score: f.rank > 0 ? 1 + f.rank : words.some((w) => f.text.toLowerCase().includes(w)) ? 0.5 : 0 }))
+        .map((f) => ({ f, score: f.rank > 0 ? 1 + f.rank : similarityWords(f.text).some((w) => terms.has(w)) ? 0.5 : 0 }))
         .filter((h) => h.score > 0)
         .sort((a, b) => b.score - a.score)
         .slice(0, SEARCH_RESULTS_MAX)
