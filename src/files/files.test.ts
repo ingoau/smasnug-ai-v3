@@ -225,6 +225,8 @@ describe('files from elsewhere and save_url', () => {
     expect(downloadFileName('https://x.com/a/b.jpg', png, '', 'chart')).toBe('chart.png');
     expect(downloadFileName('https://x.com/a/b.jpg', png, '', '../../etc/passwd')).toBe('passwd.png');
     expect(downloadFileName('https://x.com/p', Buffer.from([0xff, 0xd8, 0xff, 0]), '')).toBe('p.jpg');
+    // Never .html from the served type: a page where a file was expected stays recognisable for save_url's refusal.
+    expect(downloadFileName('https://hackclub.com/brand', Buffer.from('<!doctype html>'), 'text/html; charset=utf-8')).toBe('brand');
   });
 
   it('recognises Slack URLs', () => {

@@ -222,12 +222,16 @@ describe('slackFileRefs', () => {
         { is_share: true, text: 'fwd', files: [{ id: 'F4', title: 'spec.pdf' }, { id: 'F1', name: 'a.png' }] },
         { is_share: true, text: '## secret', files: [{ id: 'F5', name: 'hidden.png' }] },
         { is_share: true, text: 'no files' },
+        // A link unfurl of a message elsewhere (maybe a private channel): its files aren't shared here.
+        { is_msg_unfurl: true, text: 'unfurled', files: [{ id: 'F6', name: 'private.png' }] },
       ],
     };
     expect(slackFileRefs(raw)).toEqual([
       { id: 'F1', name: 'a.png', mimetype: 'image/png', urlPrivate: 'https://files.slack.com/a', size: 10 },
-      { id: 'F4', name: 'spec.pdf', mimetype: undefined, urlPrivate: undefined },
+      { id: 'F4', name: 'spec.pdf', mimetype: undefined, urlPrivate: undefined, forwarded: true },
     ]);
+    // The flag survives the search cache's Slack-shaped copy.
+    expect(slackFileRefs({ ts: '1', files: [{ id: 'F7', forwarded: true }] })[0]!.forwarded).toBe(true);
     expect(fromSlack(raw)!.files.map((f) => f.id)).toEqual(['F1', 'F4']);
     expect(slackFileRefs({ ts: '1' })).toEqual([]);
   });

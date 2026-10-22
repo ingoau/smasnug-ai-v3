@@ -37,7 +37,9 @@ export async function downloadSlackFile(urlPrivate: string, maxBytes: number, ex
   const secret = token === 'user' ? env.SLACK_USER_TOKEN : env.SLACK_BOT_TOKEN;
   if (!fake && secret) headers.authorization = `Bearer ${secret}`;
   const res = await safeFetch(url.toString(), { maxBytes, timeoutMs: 30_000, headers, authOrigin: SLACK_FILES_ORIGIN });
-  if (res.status >= 400 && res.status < 500) throw new SlackDownloadDeniedError(`download failed: HTTP ${res.status}`);
+  // Bounced off files.slack.com (e.g. to the login page): denied, also for an HTML file, whose body would be that page.
+  if (!fake && new URL(res.url).origin !== SLACK_FILES_ORIGIN) throw new SlackDownloadDeniedError(`download redirected to ${new URL(res.url).origin}`);
+  if (res.status >= 400 && res.status < 500 && res.status !== 429) throw new SlackDownloadDeniedError(`download failed: HTTP ${res.status}`);
   if (res.status >= 400) throw new Error(`download failed: HTTP ${res.status}`);
   if (res.truncated) throw new Error(`the file is larger than ${formatBytes(maxBytes)}`);
   // Slack serves an HTML login page (200) when auth is missing/invalid.

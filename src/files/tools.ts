@@ -322,9 +322,12 @@ registerTool({
       execute: async ({ url, name, description }) => {
         if (saved >= limits.createFileMaxPerTurn) return `save_url already used ${limits.createFileMaxPerTurn} times this ${ctx.runId ? 'run' : 'turn'}.`;
         if (isSlackUrl(url)) return 'save_url can\'t download Slack URLs. Slack files in this conversation, search results and threads you read already have file_… ids: use those.';
-        const over = await takeLimit('fetch', ctx.speakerId, ctx.threadId);
-        if (over) return over;
+        // Counted up front (parallel calls in one step), given back unless a file was saved.
+        saved++;
+        let kept = false;
         try {
+          const over = await takeLimit('fetch', ctx.speakerId, ctx.threadId);
+          if (over) return over;
           const res = await safeFetch(url, { maxBytes: limits.fileMaxBytes, timeoutMs: limits.saveUrlTimeoutMs, maxRedirects: 5, signal: ctx.abortSignal });
           if (res.status >= 400) return `Download failed: HTTP ${res.status} for ${res.url}`;
           if (res.truncated) return `Not saved: the file is larger than ${formatBytes(limits.fileMaxBytes)}.`;
@@ -346,9 +349,9 @@ registerTool({
             createdTurnId: ctx.runId ? null : (ctx.turnId ?? null),
             createdRunId: ctx.runId ?? null,
             createdSubagentId: ctx.subagentId ?? null,
-            ...(scope ? { idempotencyKey: `${scope}:url:${createHash('sha256').update(url).update('\0').update(res.body).digest('hex').slice(0, 32)}` } : {}),
+            ...(scope ? { idempotencyKey: `${scope}:url:${createHash('sha256').update(url).update('\0').update(fileName).update('\0').update(res.body).digest('hex').slice(0, 32)}` } : {}),
           });
-          saved++;
+          kept = true;
           const note = ctx.role === 'front' ? `Saved. Post it with reply(files: ["${f.id}"]).` : 'Saved. It is listed with your result automatically.';
           return { file_id: f.id, name: f.name, mime: f.mime, size: f.size, kind: fileKind(f.mime, f.name), source: res.url, note };
         } catch (err) {
@@ -356,6 +359,8 @@ registerTool({
           if (err instanceof FileError) return err.message;
           log.debug({ err, url }, 'save_url failed');
           return `Download failed: ${errMsg(err)}`;
+        } finally {
+          if (!kept) saved--;
         }
       },
     });

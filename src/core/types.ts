@@ -69,4 +69,6 @@ export interface SlackFileRef {
   urlPrivate?: string;
   /** Bytes, as Slack reports it (file store metadata before the content is fetched). */
   size?: number;
+  /** On a forwarded message the message carries (attachments[].files): not the poster's own upload. */
+  forwarded?: boolean;
 }

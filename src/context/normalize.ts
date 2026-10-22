@@ -51,14 +51,14 @@ export function attachmentsFromSlack(raw: unknown): MessageAttachment[] {
 const MAX_FORWARDED_FILES = 10;
 
 /**
- * A Slack message's files (pure): its own, then those of forwarded messages it carries (`attachments[].files`, so
- * a forwarded screenshot gets a file id like an upload). Tombstones (removed files), files hidden by the plan's
+ * A Slack message's files (pure): its own, then those of forwarded messages it carries (`attachments[].files` of
+ * `is_share` attachments, marked `forwarded`, so a forwarded screenshot gets a file id like an upload). Tombstones (removed files), files hidden by the plan's
  * limit and files on forwarded `##` content are dropped.
  */
 export function slackFileRefs(raw: any): SlackFileRef[] {
   const out: SlackFileRef[] = [];
   const seen = new Set<string>();
-  const add = (f: any) => {
+  const add = (f: any, forwarded = false) => {
     if (!f?.id || typeof f.id !== 'string' || seen.has(f.id) || f.mode === 'tombstone' || f.mode === 'hidden_by_limit') return;
     seen.add(f.id);
     out.push({
@@ -67,17 +67,20 @@ export function slackFileRefs(raw: any): SlackFileRef[] {
       mimetype: f.mimetype || undefined,
       urlPrivate: f.url_private || undefined,
       ...(typeof f.size === 'number' ? { size: f.size } : {}),
+      ...(forwarded || f.forwarded === true ? { forwarded: true } : {}),
     });
   };
   for (const f of Array.isArray(raw?.files) ? raw.files : []) add(f);
   let forwarded = 0;
   for (const a of Array.isArray(raw?.attachments) ? raw.attachments : []) {
-    if (!a || typeof a !== 'object' || !Array.isArray(a.files)) continue;
+    // Forwards only: a link unfurl (is_msg_unfurl) of a message elsewhere, e.g. in a private channel, shows its
+    // files to whoever sees the unfurl, but they aren't shared here, so they never get ids.
+    if (!a || typeof a !== 'object' || !a.is_share || !Array.isArray(a.files)) continue;
     if (isHiddenMessage(String(a.text || a.fallback || '')) || isHiddenMessage(a.pretext)) continue;
     for (const f of a.files) {
       if (forwarded >= MAX_FORWARDED_FILES) break;
       const before = out.length;
-      add(f);
+      add(f, true);
       if (out.length > before) forwarded++;
     }
   }
@@ -122,6 +125,7 @@ export function fromStored(m: StoredMessage | (StoredMessage & Record<string, an
     mimetype: f.mimetype,
     urlPrivate: f.urlPrivate ?? f.url_private ?? f.urlPrivateDownload,
     ...(typeof f.size === 'number' ? { size: f.size } : {}),
+    ...(f.forwarded ? { forwarded: true } : {}),
   }));
   return {
     ts: m.ts,

@@ -136,7 +136,9 @@ describe.skipIf(!INTEGRATION)('files from elsewhere', () => {
     const metas = await Promise.all(ids.map(async (id) => (await S.fileStore.metadata(id))!));
     expect(metas.map((m) => m.slackFileId).sort()).toEqual([FWD, SHOT].sort());
     expect(metas.every((m) => m.sourceChannelId === PUB && m.sourcePublic && m.threadId === threadA)).toBe(true);
-    expect(metas.find((m) => m.slackFileId === FWD)!.ownerId).toBe('U_ALEX');
+    // A forwarded file isn't the forwarder's: no owner (the owner rule would let them use it anywhere).
+    expect(metas.find((m) => m.slackFileId === FWD)!.ownerId).toBeNull();
+    expect(metas.find((m) => m.slackFileId === SHOT)!.ownerId).toBe('U_SAM');
 
     // Content is fetched on first use, like an upload.
     const shot = metas.find((m) => m.slackFileId === SHOT)!;
@@ -165,6 +167,34 @@ describe.skipIf(!INTEGRATION)('files from elsewhere', () => {
     expect(reg.has(`FCAP${r}${S.MAX_EXTERNAL_FILES}`)).toBe(false);
   });
 
+  it('search: one cap per result across channels, matches before nearby messages', async () => {
+    const files = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => ({ id: `${prefix}${r}${i}`, name: `${prefix}${i}.txt` }));
+    const matches = [
+      { channel: { id: PUB, name: 'design' }, user: 'U_SAM', ts: '1790000030.000100', text: 'a', files: files('FSA', 20), next: { ts: '1790000030.000200', user: 'U_SAM', text: 'n', files: files('FSN', 5) } },
+      { channel: { id: `${PUB}2`, name: 'other' }, user: 'U_SAM', ts: '1790000031.000100', text: 'b', files: files('FSB', 20) },
+    ];
+    const { registerSearchFiles } = await import('../tools/slack-search.js');
+    const reg = await registerSearchFiles(threadA, matches);
+    expect(reg.size).toBe(S.MAX_EXTERNAL_FILES);
+    expect(reg.has(`FSB${r}9`)).toBe(true); // second match's files before the first match's nearby message
+    expect(reg.has(`FSN${r}0`)).toBe(false);
+    const b0 = (await S.fileStore.metadata(reg.get(`FSB${r}0`)!.id))!;
+    expect(b0.sourceChannelId).toBe(`${PUB}2`);
+  });
+
+  it("the bot's own post seen from elsewhere maps back only when usable here; else it gets its own row", async () => {
+    const made = await S.createFile({ threadId: threadB, ownerId: 'U_OWNER', name: 'secret-plan.md', content: Buffer.from('# plan'), description: 'written in a DM' });
+    const slackId = `FPOST${r}`;
+    await S.recordFilePosts([{ fileId: made.id, slackFileId: slackId, channelId: OTHER, threadId: threadB }]);
+    const msg = { ts: '1790000040.000100', userId: 'UBOT', botId: 'BBOT', username: null, text: '', files: [{ id: slackId, name: 'secret-plan.md', urlPrivate: 'https://files.slack.com/p' }] };
+    const reg = await S.registerExternalFiles(threadA, [msg], { sourceChannelId: PUB, sourcePublic: true });
+    const cf = reg.get(slackId)!;
+    expect(cf.id).not.toBe(made.id);
+    expect(cf.description).toBeNull();
+    // In the thread it was posted to, it still maps back.
+    expect((await S.registerSlackFiles(threadB, [msg])).get(slackId)!.id).toBe(made.id);
+  });
+
   it('deleting the source message removes the copies; a file deleted in Slack stops resolving', async () => {
     const ts = '1790000020.000100';
     const del = `FDEL${r}`;
@@ -184,10 +214,13 @@ describe.skipIf(!INTEGRATION)('files from elsewhere', () => {
       sourcePublic: true,
     });
     const fid = reg2.get(gid)!.id;
+    // The same Slack file in one of the bot's own conversations (no source): files.info's answer doesn't remove it.
+    const own = (await S.registerSlackFiles(threadB, [{ ts: '1790000021.000200', userId: 'U_SAM', botId: null, username: null, text: '', files: [{ id: gid, name: 'g.png' }] }])).get(gid)!.id;
     gone.add(gid);
     const res = await S.resolveFile(fid, { threadId: threadA, speakerId: 'U_ASKER' });
     expect(res).toEqual({ error: expect.stringContaining('was deleted in Slack') });
     expect(await S.fileStore.metadata(fid)).toBeNull();
+    expect(await S.fileStore.metadata(own)).not.toBeNull();
   });
 
   it('save_url stores a downloaded file (name from the URL, type sniffed), idempotent per turn; refuses Slack URLs', async () => {
@@ -207,6 +240,8 @@ describe.skipIf(!INTEGRATION)('files from elsewhere', () => {
       fetchOverride.fn = async (u) => ({ status: 200, url: u, contentType: 'text/html; charset=utf-8', headers: {}, body: Buffer.from('<!doctype html><html></html>'), truncated: false });
       expect(await exec(ctx, 'save_url', { url: 'https://github.com/hackclub/x/blob/main/logo.png', description: 'logo' })).toMatch(/HTML page, not a file.*direct URL/);
       expect(await exec(ctx, 'save_url', { url: 'https://github.com/hackclub/x/blob/main/logo.png', name: 'logo.png', description: 'logo' })).toMatch(/HTML page/);
+      expect(await exec(ctx, 'save_url', { url: 'https://hackclub.com/brand', description: 'brand' })).toMatch(/HTML page/); // no extension: not "brand.html"
+      expect(await exec(ctx, 'save_url', { url: 'https://example.com/', description: 'home' })).toMatch(/HTML page/);
       const page = await exec(ctx, 'save_url', { url: 'https://example.com/', name: 'page.html', description: 'the page' });
       expect(page).toMatchObject({ name: 'page.html', kind: 'html' });
 

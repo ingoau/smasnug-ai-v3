@@ -172,8 +172,8 @@ export const MAX_EXTERNAL_FILES = 30;
 export interface RegisterOpts {
   /** The channel the messages are in, when it isn't the thread's (public reads, search). */
   sourceChannelId?: string;
-  /** Per message ts, when the messages come from several channels (search results). */
-  sourceChannelByTs?: ReadonlyMap<string, string>;
+  /** Per message, when the messages come from several channels (search results); falls back to sourceChannelId. */
+  sourceChannelOf?: (m: RenderMsg) => string | undefined;
   /** The source channel(s) were verified public. */
   sourcePublic?: boolean;
   /** At most this many new rows (the rest render as plain placeholders). */
@@ -203,8 +203,9 @@ export async function registerSlackFiles(threadId: string, msgs: RenderMsg[], op
     for (const f of m.files ?? []) {
       if (!f?.id || seen.has(f.id)) continue;
       seen.add(f.id);
-      const source = opts.sourceChannelByTs?.get(m.ts) ?? opts.sourceChannelId ?? null;
-      candidates.push({ file: f, ownerId: m.botId ? null : m.userId, messageTs: m.ts, sourceChannelId: source && source !== channelId ? source : null });
+      const source = opts.sourceChannelOf?.(m) ?? opts.sourceChannelId ?? null;
+      // A forwarded file isn't the forwarder's (the owner rule would let them use it anywhere): no owner.
+      candidates.push({ file: f, ownerId: m.botId || f.forwarded ? null : m.userId, messageTs: m.ts, sourceChannelId: source && source !== channelId ? source : null });
     }
   }
   const out = new Map<string, ContextFile>();
@@ -212,10 +213,15 @@ export async function registerSlackFiles(threadId: string, msgs: RenderMsg[], op
   const put = (r: ContextRow) => out.set(r.slackFileId, { id: r.id, name: r.name, mime: r.mime, description: r.description });
   const ids = candidates.map((c) => c.file.id);
 
-  const posted = await sql<ContextRow[]>`
-    select p.slack_file_id, f.id, f.name, f.mime, f.description from file_posts p join files f on f.id = p.file_id
+  // The bot's own posts map back to the stored file, but a post seen from elsewhere only when that file is usable
+  // here (made or posted in this thread); otherwise it gets its own upload row (no id that won't open, and no
+  // description written for another conversation).
+  const external = new Set(candidates.filter((c) => c.sourceChannelId).map((c) => c.file.id));
+  const posted = await sql<(ContextRow & { postedThreadId: string; fileThreadId: string })[]>`
+    select p.slack_file_id, f.id, f.name, f.mime, f.description, p.thread_id as posted_thread_id, f.thread_id as file_thread_id
+    from file_posts p join files f on f.id = p.file_id
     where p.slack_file_id in ${sql(ids)} and not f.internal`;
-  posted.forEach(put);
+  posted.filter((r) => !external.has(r.slackFileId) || r.postedThreadId === threadId || r.fileThreadId === threadId).forEach(put);
   const lookup = async () => {
     const left = ids.filter((id) => !out.has(id));
     if (!left.length) return;
@@ -262,7 +268,8 @@ export async function registerSlackFiles(threadId: string, msgs: RenderMsg[], op
 
 /**
  * Register files on messages read from outside this conversation (public reads, search, ask_thread), capped at
- * MAX_EXTERNAL_FILES new rows. Never throws: on failure the files render as plain placeholders.
+ * MAX_EXTERNAL_FILES new rows taken in `msgs` order (callers put the messages that matter most first, see
+ * byFilePriority). Never throws: on failure the files render as plain placeholders.
  */
 export async function registerExternalFiles(
   threadId: string,
@@ -293,6 +300,19 @@ export async function removeMessageFiles(channelId: string, messageTs: string, s
     : await sql`delete from files where ${where} returning id`;
   if (slackFileIds) await sql`delete from file_posts where slack_file_id in ${sql(slackFileIds)}`;
   return rows.length;
+}
+
+/**
+ * Messages in registration order for a capped registration: the `pinned` ts first (a linked message, a thread's
+ * root), then newest first, so a long read gives ids to what the model is most likely to need.
+ */
+export function byFilePriority<T extends { ts: string }>(msgs: readonly T[], pinned: readonly (string | undefined)[] = []): T[] {
+  const pins = pinned.filter((t): t is string => !!t);
+  const rank = (m: T) => {
+    const i = pins.indexOf(m.ts);
+    return i < 0 ? pins.length : i;
+  };
+  return [...msgs].sort((a, b) => rank(a) - rank(b) || Number(b.ts) - Number(a.ts));
 }
 
 // ---------- access ----------
@@ -351,7 +371,9 @@ export async function sourceFileGone(slackFileId: string, sourcePublic: boolean)
       return false;
     }
     await redis.set(key, 'gone', 'EX', SOURCE_CHECK_TTL_S).catch(() => {});
-    await sql`delete from files where origin = 'upload' and slack_file_id = ${slackFileId}`;
+    // Only copies seen from elsewhere: file_not_found may just mean this token can't see it any more, and copies in
+    // the bot's own conversations go with their message's deletion events.
+    await sql`delete from files where origin = 'upload' and slack_file_id = ${slackFileId} and source_channel_id is not null`;
     return true;
   }
 }
@@ -360,7 +382,22 @@ export async function sourceFileGone(slackFileId: string, sourcePublic: boolean)
 
 export type FileDownloader = (meta: FileMeta, maxBytes: number) => Promise<Buffer>;
 
+/** url_private from files.info, for files registered without one (e.g. some forwarded files); stored for next time. */
+async function lookupSlackUrl(meta: FileMeta): Promise<string | null> {
+  if (!meta.slackFileId) return null;
+  try {
+    const res = await slackCall<any>('files.info', { file: meta.slackFileId, count: 1 }, { token: downloadTokens(meta.sourcePublic)[0], maxWaitMs: 5_000 });
+    const url = typeof res.file?.url_private === 'string' ? res.file.url_private : null;
+    if (url) await sql`update files set slack_url = ${url} where id = ${meta.id}`;
+    return url;
+  } catch (err) {
+    log.info({ err, fileId: meta.id }, 'files.info for a download URL failed');
+    return null;
+  }
+}
+
 const defaultDownloader: FileDownloader = async (meta, maxBytes) => {
+  if (!meta.slackUrl) meta.slackUrl = await lookupSlackUrl(meta);
   if (!meta.slackUrl) throw new FileError('this upload has no download URL');
   const tokens = downloadTokens(meta.sourcePublic);
   for (const [i, token] of tokens.entries()) {

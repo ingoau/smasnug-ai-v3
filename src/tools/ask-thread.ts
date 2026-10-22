@@ -16,8 +16,8 @@ import { annotateTsDates, formatMessage, userIdsIn, type FormatEnv, type RenderM
 import { fetchReplies } from '../context/slack-messages.js';
 import { getUserNames } from '../context/users.js';
 import { log } from '../log.js';
-import { registerExternalFiles, registerSlackFiles } from '../files/store.js';
-import { contextFileLabel, type ContextFile } from '../files/format.js';
+import { byFilePriority, registerExternalFiles } from '../files/store.js';
+import { contextFileLabel } from '../files/format.js';
 import { askThreadMaxCalls, askThreadSystemPrompt, askThreadUserPrompt, fitThread } from './ask-thread-prompt.js';
 import { citationHint, loadPublicThread, visibleWithAttachments } from './public-thread.js';
 import { slackBusyText, slackWaitOpts, type SlackWaitOpts } from './slack-search.js';
@@ -77,15 +77,12 @@ async function renderTranscript(
   slack: SlackWaitOpts,
 ): Promise<{ text: string; shown: number; omitted: number; files: string[] }> {
   const newestFirst = [...t.msgs].reverse();
+  // The root (always in the transcript) first, then newest; capped like the other reads (also the current thread,
+  // whose files are mostly registered already).
   const [names, self, files] = await Promise.all([
     getUserNames(userIdsIn(t.msgs), slack),
     getBotIdentity().catch(() => undefined),
-    t.source
-      ? registerExternalFiles(ctx.threadId, newestFirst, { sourceChannelId: t.source.channelId, sourcePublic: t.source.public })
-      : registerSlackFiles(ctx.threadId, t.msgs).catch((err) => {
-          log.warn({ err }, 'ask_thread: registering files failed');
-          return new Map<string, ContextFile>();
-        }),
+    registerExternalFiles(ctx.threadId, byFilePriority(t.msgs, [t.rootTs]), t.source ? { sourceChannelId: t.source.channelId, sourcePublic: t.source.public } : {}),
   ]);
   const fenv: FormatEnv = { names, files, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.askThreadMessageTokens * 4 };
   const lines = t.msgs.filter((m) => !m.deleted).map((m) => ({ ts: m.ts, line: formatMessage({ ...m, replyCount: undefined }, fenv) }));

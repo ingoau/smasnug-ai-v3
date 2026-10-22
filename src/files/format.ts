@@ -137,7 +137,8 @@ export function downloadFileName(url: string, bytes: Buffer, contentType: string
   if (!extensionOf(name)) {
     const server = contentType.split(';')[0]!.trim().toLowerCase();
     const mime = sniffMime(bytes) ?? (server && server !== 'application/octet-stream' ? server : undefined);
-    const ext = mime ? extensionForMime(mime) : undefined;
+    // Never .html from the type: a page served where a file was expected must stay recognisable (save_url refuses it).
+    const ext = mime && !mime.startsWith('text/html') ? extensionForMime(mime) : undefined;
     if (ext) name = sanitizeFileName(`${name}.${ext}`, 'download');
   }
   return name;

@@ -266,32 +266,44 @@ function searchRenderMsg(x: any): RenderMsg {
 
 /**
  * Give the files on search results (and their nearby messages) file ids in this thread, so they can be opened,
- * posted or imported like uploads. Grouped per channel (each row records its source channel).
+ * posted or imported like uploads. Pass only the results that are shown. One registration (one cap for the whole
+ * result, matches before their nearby messages, in result order); each row records its message's channel.
  */
 export async function registerSearchFiles(threadId: string, matches: any[]): Promise<Map<string, ContextFile>> {
-  const byChannel = new Map<string, RenderMsg[]>();
+  const channelOf = new Map<RenderMsg, string>();
+  const msgs: RenderMsg[] = [];
+  const nearby: RenderMsg[] = [];
   for (const m of matches) {
     const chan = m?.channel?.id;
     if (typeof chan !== 'string') continue;
     const { before, after } = matchContext(m);
-    const msgs = [m, ...before, ...after].map(searchRenderMsg).filter((r) => r.files.length);
-    if (msgs.length) byChannel.set(chan, [...(byChannel.get(chan) ?? []), ...msgs]);
+    for (const [i, x] of [m, ...before, ...after].entries()) {
+      const r = searchRenderMsg(x);
+      if (!r.files.length) continue;
+      channelOf.set(r, chan);
+      (i === 0 ? msgs : nearby).push(r);
+    }
   }
-  const out = new Map<string, ContextFile>();
-  const maps = await Promise.all([...byChannel].map(([chan, msgs]) => registerExternalFiles(threadId, msgs, { sourceChannelId: chan, sourcePublic: true })));
-  for (const m of maps) for (const [k, v] of m) out.set(k, v);
-  return out;
+  return registerExternalFiles(threadId, [...msgs, ...nearby], { sourceChannelOf: (r) => channelOf.get(r), sourcePublic: true });
 }
 
-/** A search message's files: `[file file_…: name, kind, from …]` when registered, else a plain `[file: name]`. */
+/** Files labelled per search message at most (the rest are counted), so file-heavy messages can't crowd out results. */
+const MAX_FILE_LABELS = 3;
+
+/**
+ * A search message's files: `[file file_…: name, kind, from …]` when registered, else a plain `[file: name]`.
+ * Without a `files` map (watches: no ids to give) files aren't shown.
+ */
 function fileLabels(x: any, names: Map<string, string>, files?: Map<string, ContextFile>): string {
+  if (!files) return '';
   const from = x?.user ? (names.get(x.user) ?? x.username ?? x.user) : x?.username || 'unknown';
-  return slackFileRefs(x)
-    .map((f) => {
-      const cf = files?.get(f.id);
-      return cf ? contextFileLabel(cf, from) : `[file: ${sanitizeFileName(f.name || 'file')}]`;
-    })
-    .join(' ');
+  const refs = slackFileRefs(x);
+  const labels = refs.slice(0, MAX_FILE_LABELS).map((f) => {
+    const cf = files.get(f.id);
+    return cf ? contextFileLabel(cf, from) : `[file: ${sanitizeFileName(f.name || 'file')}]`;
+  });
+  if (refs.length > MAX_FILE_LABELS) labels.push(`[+${refs.length - MAX_FILE_LABELS} more files: open the message with read_public_thread / read_public_channel]`);
+  return labels.join(' ');
 }
 
 export function formatSearchMatch(m: any, i: number, names: Map<string, string>, files?: Map<string, ContextFile>): string {
@@ -353,11 +365,11 @@ export type DeferFn = (job: DeferredJob) => string | null;
 
 export type SearchSort = 'relevance' | 'recent' | 'oldest';
 
-/** A message's files (incl. forwarded ones) in Slack's shape, for the cache; nothing when it has none. */
+/** A message's files (incl. forwarded ones, flagged) in Slack's shape, for the cache; nothing when it has none. */
 function slimFiles(x: any): { files?: any[] } {
   const refs = slackFileRefs(x);
   if (!refs.length) return {};
-  return { files: refs.map((f) => ({ id: f.id, name: f.name, mimetype: f.mimetype, url_private: f.urlPrivate, ...(typeof f.size === 'number' ? { size: f.size } : {}) })) };
+  return { files: refs.map((f) => ({ id: f.id, name: f.name, mimetype: f.mimetype, url_private: f.urlPrivate, ...(typeof f.size === 'number' ? { size: f.size } : {}), ...(f.forwarded ? { forwarded: true } : {}) })) };
 }
 
 /**
@@ -371,6 +383,7 @@ export function slimMatch(m: any): any {
     text: textWithAttachments(x),
     ...slimFiles(x),
     ...(typeof x.user === 'string' ? { user: x.user } : {}),
+    ...(typeof x.bot_id === 'string' ? { bot_id: x.bot_id } : {}),
     ...(typeof x.username === 'string' ? { username: x.username } : {}),
     ...(typeof x.permalink === 'string' ? { permalink: x.permalink } : {}),
   });
@@ -500,10 +513,10 @@ registerTool({
     const search = async (query: string, sort: SearchSort | undefined, n: number, o: SearchOpts): Promise<string> => {
       const { matches: pub, skipped } = await searchPublicMatches(query, sort, o);
       if (!pub.length) return withBudget(`No public-channel results for "${query}".`, skipped, n);
-      const [names, files] = await Promise.all([
-        getUserNames(searchUserIds(pub), { priority: o.priority, maxWaitMs: o.maxWaitMs, onWait: o.onWait, signal: o.signal }),
-        registerSearchFiles(ctx.threadId, pub),
-      ]);
+      const names = await getUserNames(searchUserIds(pub), { priority: o.priority, maxWaitMs: o.maxWaitMs, onWait: o.onWait, signal: o.signal });
+      // Files get ids only on the results that fit the output (a first pass with placeholders says which).
+      const fits = formatSearchMatches(pub, names, MAX_OUTPUT_CHARS, new Map()).shown;
+      const files = await registerSearchFiles(ctx.threadId, pub.slice(0, fits));
       const { text, shown } = formatSearchMatches(pub, names, MAX_OUTPUT_CHARS, files);
       return withBudget(untrusted('slack search', `Results for "${query}" (${shown} shown, public channels only):\n${text}`), skipped, n);
     };
