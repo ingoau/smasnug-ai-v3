@@ -397,7 +397,7 @@ A fact from a user's messages can only be written to that user's memory (enforce
 No sensitive categories (health, family situations and similar) and nothing about other people's private lives.
 **Tools.** The tools take no user ID; the user is always the current speaker.
 - 
-`remember(fact)` writes to the speaker's memory immediately.
+`remember(fact)` writes to the speaker's memory immediately. The front agent calls it on its own initiative, in the same step as its reply and without announcing it, whenever the speaker mentions something lasting about themselves (a project, stack or tools, skills, role, interests, time zone, answer preferences), not only when asked; background extraction is the backstop. Each extraction pass logs one `memory extraction pass` line (proposed / applied / rejection reasons), also when it proposes nothing.
 - 
 `forget(fact_id)` deletes one of the speaker's facts. Injected facts show IDs, e.g. `[m_42] prefers short answers`.
 - 

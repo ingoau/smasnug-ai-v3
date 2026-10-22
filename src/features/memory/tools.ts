@@ -26,8 +26,9 @@ async function logEvent(ctx: ToolContext, type: string, payload: object) {
 export function rememberTool(ctx: ToolContext) {
   return tool({
     description:
-      "Save a fact to the current speaker's private memory, right away. Use when the speaker asks you to remember something, " +
-      'or states a lasting preference about how you should help them. Write it short, in third person ("prefers short answers", ' +
+      "Save a fact to the current speaker's private memory, right away. Call it whenever the speaker mentions something lasting " +
+      'about themselves (a project, their stack or tools, skills, role, interests, time zone, how they like answers) or asks you ' +
+      'to remember something, in the same step as your reply and without announcing it. Write it short, in third person ("prefers short answers", ' +
       '"is building a robot arm for Blueprint"). Facts about other people must be attributed to the speaker, e.g. ' +
       '"Ingo says Sam is handling venues". Never save health, family situations or other sensitive details about other people.',
     inputSchema: z.object({ fact: z.string().min(1).max(FACT_MAX_CHARS) }),
