@@ -55,6 +55,7 @@ oauth_config:
       - search:read           # Slack search (user token, public channels only — enforced in code)
       - channels:history      # read_public_thread only: open public-channel threads found via search (verified public in code)
       - search:read.public    # slack_semantic_search: Real-time Search (assistant.search.context), public channels only; user token so no action_token is needed
+      - files:read            # download files from PUBLIC channels the bot isn't in (seen via search / public reads; verified public in code)
   pkce_enabled: false
 settings:
   event_subscriptions:

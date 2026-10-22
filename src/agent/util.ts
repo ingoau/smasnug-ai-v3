@@ -188,6 +188,8 @@ export function describeToolStep(toolName: string, input: unknown, opts: { fileN
       return 'Reading a canvas';
     case 'create_file':
       return q('name') ? `Writing ${q('name')}` : 'Writing a file';
+    case 'save_url':
+      return typeof i.url === 'string' && i.url.trim() ? `Downloading a file from ${siteOf(i.url.trim())}` : 'Downloading a file';
     case 'sandbox_exec':
       return q('command') ? `Running \`${oneLine(q('command'), 50)}\`` : 'Running code';
     case 'sandbox_read_file':

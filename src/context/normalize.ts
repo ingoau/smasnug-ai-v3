@@ -47,6 +47,43 @@ export function attachmentsFromSlack(raw: unknown): MessageAttachment[] {
   return out;
 }
 
+/** At most this many files from forwarded messages per message. */
+const MAX_FORWARDED_FILES = 10;
+
+/**
+ * A Slack message's files (pure): its own, then those of forwarded messages it carries (`attachments[].files`, so
+ * a forwarded screenshot gets a file id like an upload). Tombstones (removed files), files hidden by the plan's
+ * limit and files on forwarded `##` content are dropped.
+ */
+export function slackFileRefs(raw: any): SlackFileRef[] {
+  const out: SlackFileRef[] = [];
+  const seen = new Set<string>();
+  const add = (f: any) => {
+    if (!f?.id || typeof f.id !== 'string' || seen.has(f.id) || f.mode === 'tombstone' || f.mode === 'hidden_by_limit') return;
+    seen.add(f.id);
+    out.push({
+      id: f.id,
+      name: f.name || f.title || undefined,
+      mimetype: f.mimetype || undefined,
+      urlPrivate: f.url_private || undefined,
+      ...(typeof f.size === 'number' ? { size: f.size } : {}),
+    });
+  };
+  for (const f of Array.isArray(raw?.files) ? raw.files : []) add(f);
+  let forwarded = 0;
+  for (const a of Array.isArray(raw?.attachments) ? raw.attachments : []) {
+    if (!a || typeof a !== 'object' || !Array.isArray(a.files)) continue;
+    if (isHiddenMessage(String(a.text || a.fallback || '')) || isHiddenMessage(a.pretext)) continue;
+    for (const f of a.files) {
+      if (forwarded >= MAX_FORWARDED_FILES) break;
+      const before = out.length;
+      add(f);
+      if (out.length > before) forwarded++;
+    }
+  }
+  return out;
+}
+
 /**
  * Slack API message → RenderMsg. Returns null for messages that should never be shown (joins, tombstones, and `##`
  * messages, which the workspace guidelines hide from bots entirely).
@@ -62,15 +99,7 @@ export function fromSlack(raw: any): RenderMsg | null {
       .filter(Boolean)
       .join('\n');
   }
-  const files: SlackFileRef[] = (raw.files ?? [])
-    .filter((f: any) => f?.id && f.mode !== 'tombstone' && f.mode !== 'hidden_by_limit')
-    .map((f: any) => ({
-      id: f.id,
-      name: f.name || f.title || undefined,
-      mimetype: f.mimetype || undefined,
-      urlPrivate: f.url_private || undefined,
-      ...(typeof f.size === 'number' ? { size: f.size } : {}),
-    }));
+  const files = slackFileRefs(raw);
   return {
     ts: raw.ts,
     userId: raw.user ?? null,

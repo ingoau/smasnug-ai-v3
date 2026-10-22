@@ -17,6 +17,7 @@ const LABELS: Record<string, string> = {
   read_file: 'Opening the file…',
   ask_file: 'Reading the file…',
   create_file: 'Writing a file…',
+  save_url: 'Downloading a file…',
   spawn_subagent: 'Digging in…',
   message_subagent: 'Updating the task…',
   cancel_subagent: 'Stopping the task…',

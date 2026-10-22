@@ -111,6 +111,48 @@ export function mimeFromName(name: string | null | undefined): string | undefine
   return EXT_MIME[extensionOf(name)];
 }
 
+/** Preferred extension per MIME type (the first extension mapping to it), for names that lack one. */
+function extensionForMime(mime: string): string | undefined {
+  const base = mime.split(';')[0]!.trim().toLowerCase();
+  if (base === 'image/jpeg') return 'jpg';
+  for (const [ext, m] of Object.entries(EXT_MIME)) if (m === base) return ext;
+  return undefined;
+}
+
+/**
+ * A file name for a download (save_url, pure): the given one, else the URL path's last segment, else "download";
+ * when it has no extension, one for the content's MIME type (sniffed first, then the server's Content-Type).
+ */
+export function downloadFileName(url: string, bytes: Buffer, contentType: string, given?: string): string {
+  let name = given?.trim() ?? '';
+  if (!name) {
+    try {
+      const seg = new URL(url).pathname.split('/').filter(Boolean).pop() ?? '';
+      name = decodeURIComponent(seg);
+    } catch {
+      name = '';
+    }
+  }
+  name = sanitizeFileName(name, 'download');
+  if (!extensionOf(name)) {
+    const server = contentType.split(';')[0]!.trim().toLowerCase();
+    const mime = sniffMime(bytes) ?? (server && server !== 'application/octet-stream' ? server : undefined);
+    const ext = mime ? extensionForMime(mime) : undefined;
+    if (ext) name = sanitizeFileName(`${name}.${ext}`, 'download');
+  }
+  return name;
+}
+
+/** Slack URLs need the bot's own tools (files there already have file ids). */
+export function isSlackUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 'slack.com' || host.endsWith('.slack.com') || host.endsWith('.slack-edge.com');
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Slack `filetype` (https://docs.slack.dev/reference/objects/file-object, the types table) for text files by
  * extension: passed as files.getUploadURLExternal's `snippet_type`, so an .html file shows as HTML, not plain text.

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { annotateTsDates, compareTs, formatMessage, formatMessages, formatThread, isImageFile, reactionsLabel, renderSlackText, selectThread, tsDate, tsLabel, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
 import { applyReaction, reactionsFromSlack } from './reactions.js';
 import { fixtureReplies, FIX_THREAD_TS } from './fixtures.js';
-import { attachmentsFromSlack, fromSlack } from './normalize.js';
+import { attachmentsFromSlack, fromSlack, slackFileRefs } from './normalize.js';
 
 const env = (over: Partial<FormatEnv> = {}): FormatEnv => ({
   names: new Map([
@@ -205,5 +205,30 @@ describe('dates next to Slack timestamps', () => {
     expect(annotateTsDates(link)).toBe(link);
     expect(annotateTsDates('[1788136906.712229 · 2026-08-31 00:41 UTC]')).toBe('[1788136906.712229 · 2026-08-31 00:41 UTC]');
     expect(annotateTsDates('version 1.2.3 and 12345.678')).toBe('version 1.2.3 and 12345.678');
+  });
+});
+
+describe('slackFileRefs', () => {
+  it("a message's files, then forwarded messages' files; tombstones, duplicates and forwarded `##` content dropped", () => {
+    const raw = {
+      ts: '1.1',
+      text: 'look',
+      files: [
+        { id: 'F1', name: 'a.png', mimetype: 'image/png', url_private: 'https://files.slack.com/a', size: 10 },
+        { id: 'F2', mode: 'tombstone' },
+        { id: 'F3', mode: 'hidden_by_limit' },
+      ],
+      attachments: [
+        { is_share: true, text: 'fwd', files: [{ id: 'F4', title: 'spec.pdf' }, { id: 'F1', name: 'a.png' }] },
+        { is_share: true, text: '## secret', files: [{ id: 'F5', name: 'hidden.png' }] },
+        { is_share: true, text: 'no files' },
+      ],
+    };
+    expect(slackFileRefs(raw)).toEqual([
+      { id: 'F1', name: 'a.png', mimetype: 'image/png', urlPrivate: 'https://files.slack.com/a', size: 10 },
+      { id: 'F4', name: 'spec.pdf', mimetype: undefined, urlPrivate: undefined },
+    ]);
+    expect(fromSlack(raw)!.files.map((f) => f.id)).toEqual(['F1', 'F4']);
+    expect(slackFileRefs({ ts: '1' })).toEqual([]);
   });
 });

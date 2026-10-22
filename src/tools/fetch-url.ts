@@ -49,7 +49,7 @@ export async function fetchPage(url: string, extra: Partial<SafeFetchOptions> = 
       }
     }
   } else {
-    text = `[unsupported content type ${ct || 'unknown'}, ${res.body.length} bytes — only HTML, text and JSON can be read]`;
+    text = `[unsupported content type ${ct || 'unknown'}, ${res.body.length} bytes — only HTML, text and JSON can be read. To keep the file itself (to post it, look at an image, or use it in a sandbox), use save_url]`;
   }
   return { url: res.url, status: res.status, contentType: ct, title, text, bytesTruncated: res.truncated };
 }

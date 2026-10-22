@@ -4,7 +4,9 @@ import { canUseFile } from './access.js';
 import {
   contextFileLabel,
   decideMime,
+  downloadFileName,
   fileKind,
+  isSlackUrl,
   fileListingLine,
   isTextMime,
   looksLikeText,
@@ -19,6 +21,7 @@ import {
 } from './format.js';
 import { FILE_ID_RE, isFileId, newFileId, parseFileRef } from './ids.js';
 import { askFileUserPrompt } from './prompts.js';
+import { downloadTokens } from './slack-download.js';
 
 describe('file ids', () => {
   it('are file_ + 10 lowercase alphanumerics', () => {
@@ -202,5 +205,34 @@ describe('text paging', () => {
     expect(textPage('abc', 99, 100).body).toBe('');
     // No line break near the end: a hard cut.
     expect(textPage('x'.repeat(300), 0, 100).end).toBe(100);
+  });
+});
+
+describe('files from elsewhere and save_url', () => {
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
+  it('download tokens: the user token (first) only for files from verified-public channels', () => {
+    expect(downloadTokens(true, true)).toEqual(['user', 'bot']);
+    expect(downloadTokens(false, true)).toEqual(['bot']);
+    expect(downloadTokens(true, false)).toEqual(['bot']);
+  });
+
+  it('names downloads: given name, else the URL path, with an extension from the content when missing', () => {
+    expect(downloadFileName('https://x.com/a/logo', png, '')).toBe('logo.png');
+    expect(downloadFileName('https://x.com/a/logo.png?raw=true', png, 'image/png')).toBe('logo.png');
+    expect(downloadFileName('https://x.com/a/My%20Report.pdf', Buffer.from('%PDF-1.7'), '')).toBe('My Report.pdf');
+    expect(downloadFileName('https://x.com/', Buffer.from('a,b\n1,2'), 'text/csv; charset=utf-8')).toBe('download.csv');
+    expect(downloadFileName('https://x.com/data', Buffer.from([1, 2, 3]), 'application/octet-stream')).toBe('data');
+    expect(downloadFileName('https://x.com/a/b.jpg', png, '', 'chart')).toBe('chart.png');
+    expect(downloadFileName('https://x.com/a/b.jpg', png, '', '../../etc/passwd')).toBe('passwd.png');
+    expect(downloadFileName('https://x.com/p', Buffer.from([0xff, 0xd8, 0xff, 0]), '')).toBe('p.jpg');
+  });
+
+  it('recognises Slack URLs', () => {
+    expect(isSlackUrl('https://files.slack.com/files-pri/T1/x.png')).toBe(true);
+    expect(isSlackUrl('https://hackclub.slack.com/archives/C1/p1')).toBe(true);
+    expect(isSlackUrl('https://slack.com/x')).toBe(true);
+    expect(isSlackUrl('https://a.slack-edge.com/x.png')).toBe(true);
+    expect(isSlackUrl('https://notslack.com/x')).toBe(false);
+    expect(isSlackUrl('not a url')).toBe(false);
   });
 });

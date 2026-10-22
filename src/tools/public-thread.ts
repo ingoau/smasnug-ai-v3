@@ -16,6 +16,7 @@ import { fromSlack } from '../context/normalize.js';
 import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
+import { registerExternalFiles } from '../files/store.js';
 import { notVisibleMessage, resolveLinkAccess } from './private-links.js';
 import { slackBusyText, slackWaitOpts, type SlackWaitOpts } from './slack-search.js';
 import { errMsg, normalizeTs, parseChannelId, parseSlackPermalink, SLACK_PERMALINK_PATTERN, textWithAttachments, untrusted } from './util.js';
@@ -167,12 +168,14 @@ registerTool({
           const n = input.limit ?? DEFAULT_LIMIT;
           const { parent, slice, earlier, later, total } = selectWindow(msgs, rootTs, n, linkedTs);
           if (!parent && !slice.length) return `No visible messages in that thread (${chLabel}, thread ${rootTs}).`;
-          const [names, self] = await Promise.all([
-            getUserNames(userIdsIn([...(parent ? [parent] : []), ...slice]), slack),
+          const shown = [...(parent ? [parent] : []), ...slice];
+          const [names, self, files] = await Promise.all([
+            getUserNames(userIdsIn(shown), slack),
             getBotIdentity().catch(() => undefined),
+            registerExternalFiles(ctx.threadId, shown, { sourceChannelId: channel, sourcePublic: visibility === 'public' }),
           ]);
-          // No file ids: files from other threads stay plain `[file: …]` placeholders (the file store is thread-scoped).
-          const fenv: FormatEnv = { names, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.readMessageTruncateTokens * 4 };
+          // Files get ids in this conversation (registered with their source channel), so they can be read, posted or imported.
+          const fenv: FormatEnv = { names, files, self: { ...self, name: env.BOT_DISPLAY_NAME }, maxChars: limits.readMessageTruncateTokens * 4 };
           const mark = (m: RenderMsg) => formatMessage({ ...m, replyCount: undefined }, fenv) + (linkedTs && m.ts === linkedTs && m.ts !== rootTs ? '  ← linked message' : '');
           const lines = [`Thread in ${chLabel}, root ${rootTs}, ${total} ${total === 1 ? 'reply' : 'replies'}.`];
           // So a specific message can be cited (the ts in brackets, without the dot).

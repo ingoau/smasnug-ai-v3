@@ -17,7 +17,7 @@ import './index.js';
 import { channelFromSlack } from './directory/fields.js';
 import { handleDirectoryEvent } from './directory/events.js';
 import { upsertChannels } from './directory/store.js';
-import { channelVisibility, formatSearchMatches, searchBudgetNote, searchBusyText, searchCacheKey, searchQueuedText, SEARCH_DEFER_EXTRA, type DeferredJob, searchUserIds, slackBusyText, slackMaxWaitMs, slackWaitOpts, SLACK_WAIT_EXTRA, slimMatch } from './slack-search.js';
+import { channelVisibility, formatSearchMatch, formatSearchMatches, searchBudgetNote, searchBusyText, searchCacheKey, searchQueuedText, SEARCH_DEFER_EXTRA, type DeferredJob, searchUserIds, slackBusyText, slackMaxWaitMs, slackWaitOpts, SLACK_WAIT_EXTRA, slimMatch } from './slack-search.js';
 
 const r = Math.random().toString(36).slice(2, 8).toUpperCase();
 const channel = `C2SS${r}`;
@@ -99,6 +99,27 @@ describe('slimMatch', () => {
     const json = JSON.stringify(slim);
     for (const gone of ['hidden neighbour', 'from elsewhere', 'blocks', 'iid', 'team', 'is_private']) expect(json).not.toContain(gone);
     expect(json).toContain('forwarded body');
+  });
+
+  it('keeps files (for file ids); results show registered ids, else plain placeholders', () => {
+    const m = {
+      channel: { id: 'C1', name: 'design' },
+      user: 'U1',
+      ts: '1790000001.000100',
+      text: 'logo',
+      permalink: 'https://x.slack.com/archives/C1/p1790000001000100',
+      files: [{ id: 'FL', name: 'logo.png', mimetype: 'image/png', url_private: 'https://files.slack.com/l', size: 5, extra: 'x' }],
+      next: { ts: '1790000001.000200', user: 'U2', text: 'nice', files: [{ id: 'FN', name: 'other.png' }] },
+    };
+    const slim = slimMatch(m);
+    expect(slim.files).toEqual([{ id: 'FL', name: 'logo.png', mimetype: 'image/png', url_private: 'https://files.slack.com/l', size: 5 }]);
+    expect(slim.next.files).toEqual([{ id: 'FN', name: 'other.png' }]);
+    expect(slimMatch({ ...m, files: undefined, next: undefined })).not.toHaveProperty('files');
+    const names = new Map([['U1', 'Sam']]);
+    const files = new Map([['FL', { id: 'file_abcdefghij', name: 'logo.png', mime: 'image/png', description: null }]]);
+    const out = formatSearchMatch(slim, 0, names, files);
+    expect(out).toContain('logo [file file_abcdefghij: logo.png, image, from Sam]');
+    expect(out).toContain('nice [file: other.png]');
   });
 });
 

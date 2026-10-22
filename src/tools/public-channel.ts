@@ -16,6 +16,7 @@ import { fromSlack } from '../context/normalize.js';
 import { getUserNames } from '../context/users.js';
 import { isHiddenMessage } from '../pipeline/guidelines.js';
 import { log } from '../log.js';
+import { registerExternalFiles } from '../files/store.js';
 import { notVisibleMessage, resolveLinkAccess } from './private-links.js';
 import { slackBusyText, slackWaitOpts, type SlackWaitOpts } from './slack-search.js';
 import { channelPageHeader, estimateRenderedChars, takeWithinBudget, trimAround } from './paging.js';
@@ -257,13 +258,15 @@ registerTool({
             return `No messages in ${chLabel}.`;
           }
 
-          const [names, self] = await Promise.all([
+          const [names, self, files] = await Promise.all([
             getUserNames(userIdsIn(msgs), slack),
             getBotIdentity().catch(() => undefined),
+            registerExternalFiles(ctx.threadId, msgs, { sourceChannelId: channel, sourcePublic: visibility === 'public' }),
           ]);
-          // No file ids: files from other channels stay plain `[file: …]` placeholders.
+          // Files get ids in this conversation (registered with their source channel), so they can be read, posted or imported.
           const fenv: FormatEnv = {
             names,
+            files,
             self: { ...self, name: env.BOT_DISPLAY_NAME },
             maxChars: limits.readMessageTruncateTokens * 4,
           };

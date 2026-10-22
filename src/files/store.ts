@@ -6,7 +6,8 @@
  * - Created files (`createFile`): the bot's own (create_file, reply's inline files; later sandbox exports). Content is
  *   stored right away; the creator gives the one-line description.
  * - Uploads (`registerSlackFiles`): Slack files on messages shown to a model are registered per thread with metadata
- *   only; the content is downloaded with the bot token on first use (`loadFileBytes`) and kept when ≤ the size cap.
+ *   only; the content is downloaded on first use (`loadFileBytes`) and kept when ≤ the size cap. Files on messages
+ *   from elsewhere (public reads, search) are registered in the thread that saw them, with their source channel.
  *   Files on `##` messages never get here (those messages are never stored or rendered).
  * - Everything a model can name goes through `resolveFile`, which applies the access rule.
  */
@@ -19,7 +20,10 @@ import type { RenderMsg } from '../context/format.js';
 import { canUseFile, type FileAccessContext } from './access.js';
 import { decideMime, fileKind, formatBytes, isImageMime, mimeFromName, sanitizeDescription, sanitizeFileName, sniffMime, type ContextFile, type FileListing } from './format.js';
 import { newFileId, parseFileRef } from './ids.js';
-import { downloadSlackFile, MAX_IMAGE_DOWNLOAD_BYTES } from './slack-download.js';
+import { downloadSlackFile, downloadTokens, MAX_IMAGE_DOWNLOAD_BYTES, SlackDownloadDeniedError } from './slack-download.js';
+import { redis } from '../core/redis.js';
+import { slackCall, slackErrorCode } from '../core/slack.js';
+import { log } from '../log.js';
 
 export interface FileMeta {
   id: string;
@@ -35,6 +39,10 @@ export interface FileMeta {
   slackFileId: string | null;
   slackUrl: string | null;
   messageTs: string | null;
+  /** Uploads seen outside this conversation (public reads, search): the channel their message is in. */
+  sourceChannelId: string | null;
+  /** That channel was verified public (the download may use the user token). */
+  sourcePublic: boolean;
   name: string;
   mime: string | null;
   size: number | null;
@@ -58,7 +66,7 @@ export interface FileStore {
 }
 
 const META = () => sql`id, created_at, origin, internal, thread_id, channel_id, owner_id, created_turn_id, created_run_id,
-  created_subagent_id, slack_file_id, slack_url, message_ts, name, mime, size, description, description_source, sha256,
+  created_subagent_id, slack_file_id, slack_url, message_ts, source_channel_id, source_public, name, mime, size, description, description_source, sha256,
   legacy_image_n, content is not null as has_content`;
 
 function normalizeMeta(r: FileMeta): FileMeta {
@@ -158,10 +166,25 @@ export async function createFile(input: CreateFileInput): Promise<FileMeta> {
 
 // ---------- uploads ----------
 
+/** Files seen outside this conversation: at most this many new registrations per tool result. */
+export const MAX_EXTERNAL_FILES = 30;
+
+export interface RegisterOpts {
+  /** The channel the messages are in, when it isn't the thread's (public reads, search). */
+  sourceChannelId?: string;
+  /** Per message ts, when the messages come from several channels (search results). */
+  sourceChannelByTs?: ReadonlyMap<string, string>;
+  /** The source channel(s) were verified public. */
+  sourcePublic?: boolean;
+  /** At most this many new rows (the rest render as plain placeholders). */
+  maxNew?: number;
+}
+
 interface UploadCandidate {
   file: SlackFileRef;
   ownerId: string | null;
   messageTs: string;
+  sourceChannelId: string | null;
 }
 
 type ContextRow = ContextFile & { slackFileId: string };
@@ -171,7 +194,8 @@ type ContextRow = ContextFile & { slackFileId: string };
  * race-safe (unique per thread + Slack file). Metadata only: content is fetched on first use. A Slack file that is
  * the bot's own post of a stored file maps back to that file.
  */
-export async function registerSlackFiles(threadId: string, msgs: RenderMsg[]): Promise<Map<string, ContextFile>> {
+export async function registerSlackFiles(threadId: string, msgs: RenderMsg[], opts: RegisterOpts = {}): Promise<Map<string, ContextFile>> {
+  const { channelId } = parseThreadId(threadId);
   const candidates: UploadCandidate[] = [];
   const seen = new Set<string>();
   for (const m of msgs) {
@@ -179,7 +203,8 @@ export async function registerSlackFiles(threadId: string, msgs: RenderMsg[]): P
     for (const f of m.files ?? []) {
       if (!f?.id || seen.has(f.id)) continue;
       seen.add(f.id);
-      candidates.push({ file: f, ownerId: m.botId ? null : m.userId, messageTs: m.ts });
+      const source = opts.sourceChannelByTs?.get(m.ts) ?? opts.sourceChannelId ?? null;
+      candidates.push({ file: f, ownerId: m.botId ? null : m.userId, messageTs: m.ts, sourceChannelId: source && source !== channelId ? source : null });
     }
   }
   const out = new Map<string, ContextFile>();
@@ -200,11 +225,14 @@ export async function registerSlackFiles(threadId: string, msgs: RenderMsg[]): P
   };
   await lookup();
 
-  const { channelId } = parseThreadId(threadId);
+  // New registrations are capped (in message order) when a caller asks: a busy channel page can't flood the store.
+  const allowed = new Set(candidates.filter((c) => !out.has(c.file.id)).slice(0, opts.maxNew ?? Infinity).map((c) => c.file.id));
   for (let attempt = 0; attempt < 4; attempt++) {
     // A fixed order (by Slack file id): concurrent registrations of the same files then take their unique-index
     // locks in the same order and can't deadlock each other.
-    const missing = candidates.filter((c) => !out.has(c.file.id)).sort((a, b) => (a.file.id < b.file.id ? -1 : a.file.id > b.file.id ? 1 : 0));
+    const missing = candidates
+      .filter((c) => !out.has(c.file.id) && allowed.has(c.file.id))
+      .sort((a, b) => (a.file.id < b.file.id ? -1 : a.file.id > b.file.id ? 1 : 0));
     if (!missing.length) break;
     const rows = missing.map((c) => ({
       id: newFileId(),
@@ -215,12 +243,14 @@ export async function registerSlackFiles(threadId: string, msgs: RenderMsg[]): P
       slack_file_id: c.file.id,
       slack_url: c.file.urlPrivate ?? null,
       message_ts: c.messageTs,
+      source_channel_id: c.sourceChannelId,
+      source_public: Boolean(c.sourceChannelId && opts.sourcePublic),
       name: sanitizeFileName(c.file.name),
       mime: c.file.mimetype ?? mimeFromName(c.file.name) ?? null,
       size: typeof c.file.size === 'number' ? c.file.size : null,
     }));
     const inserted = await sql<ContextRow[]>`
-      insert into files ${sql(rows, 'id', 'origin', 'thread_id', 'channel_id', 'owner_id', 'slack_file_id', 'slack_url', 'message_ts', 'name', 'mime', 'size')}
+      insert into files ${sql(rows, 'id', 'origin', 'thread_id', 'channel_id', 'owner_id', 'slack_file_id', 'slack_url', 'message_ts', 'source_channel_id', 'source_public', 'name', 'mime', 'size')}
       on conflict do nothing
       returning slack_file_id, id, name, mime, description`;
     inserted.forEach(put);
@@ -231,15 +261,36 @@ export async function registerSlackFiles(threadId: string, msgs: RenderMsg[]): P
 }
 
 /**
+ * Register files on messages read from outside this conversation (public reads, search, ask_thread), capped at
+ * MAX_EXTERNAL_FILES new rows. Never throws: on failure the files render as plain placeholders.
+ */
+export async function registerExternalFiles(
+  threadId: string,
+  msgs: RenderMsg[],
+  opts: Omit<RegisterOpts, 'maxNew'>,
+): Promise<Map<string, ContextFile>> {
+  if (!msgs.some((m) => m.files?.length)) return new Map();
+  try {
+    return await registerSlackFiles(threadId, msgs, { ...opts, maxNew: MAX_EXTERNAL_FILES });
+  } catch (err) {
+    log.warn({ err, threadId }, 'registering files from elsewhere failed');
+    return new Map();
+  }
+}
+
+/**
  * Forget the uploads of a Slack message that was deleted (all its files) or edited (`slackFileIds`: the files it no
  * longer has), and the post mappings of those Slack files. Created files the bot posted stay (they are the bot's
  * deliverables, with their own retention).
  */
 export async function removeMessageFiles(channelId: string, messageTs: string, slackFileIds?: string[]): Promise<number> {
   if (slackFileIds && !slackFileIds.length) return 0;
+  // The message's channel: the thread's (source_channel_id null), or the source of a copy seen from elsewhere.
+  const where = sql`origin = 'upload' and message_ts = ${messageTs}
+    and ((channel_id = ${channelId} and source_channel_id is null) or source_channel_id = ${channelId})`;
   const rows = slackFileIds
-    ? await sql`delete from files where origin = 'upload' and channel_id = ${channelId} and message_ts = ${messageTs} and slack_file_id in ${sql(slackFileIds)} returning id`
-    : await sql`delete from files where origin = 'upload' and channel_id = ${channelId} and message_ts = ${messageTs} returning id`;
+    ? await sql`delete from files where ${where} and slack_file_id in ${sql(slackFileIds)} returning id`
+    : await sql`delete from files where ${where} returning id`;
   if (slackFileIds) await sql`delete from file_posts where slack_file_id in ${sql(slackFileIds)}`;
   return rows.length;
 }
@@ -269,16 +320,64 @@ export async function resolveFile(ref: string, ctx: FileAccessContext): Promise<
   if (!row) return { error: notAvailable(ref) };
   const f = { ...normalizeMeta(row), postedThreadIds: row.postedThreadIds ?? [] };
   if (!canUseFile(f, ctx)) return { error: notAvailable(ref) };
+  if (f.sourceChannelId && f.slackFileId && (await sourceFileGone(f.slackFileId, f.sourcePublic))) {
+    return { error: `${f.id} (${f.name}) was deleted in Slack, so it can't be used any more.` };
+  }
   return f;
+}
+
+const SOURCE_CHECK_TTL_S = 10 * 60;
+const GONE_CODES = new Set(['file_not_found', 'file_deleted']);
+
+/**
+ * Files seen outside the bot's conversations: Slack sends no deletion events for channels the bot isn't in, so before
+ * one is used (read, posted, imported) files.info confirms it still exists (cached for 10 minutes). Gone → every copy
+ * leaves the store. Other errors don't block (a Slack hiccup shouldn't make files unusable).
+ */
+export async function sourceFileGone(slackFileId: string, sourcePublic: boolean): Promise<boolean> {
+  const key = `files:source:${slackFileId}`;
+  const cached = await redis.get(key).catch(() => null);
+  if (cached) return cached === 'gone';
+  try {
+    await slackCall('files.info', { file: slackFileId, count: 1 }, { token: downloadTokens(sourcePublic)[0], maxWaitMs: 5_000 });
+    await redis.set(key, 'ok', 'EX', SOURCE_CHECK_TTL_S).catch(() => {});
+    return false;
+  } catch (err) {
+    const code = slackErrorCode(err);
+    if (!code || !GONE_CODES.has(code)) {
+      // E.g. missing_scope before the user token has files:read: allowed, and not re-checked for a minute.
+      log.warn({ err, slackFileId }, 'files.info check failed; allowing the file');
+      await redis.set(key, 'unknown', 'EX', 60).catch(() => {});
+      return false;
+    }
+    await redis.set(key, 'gone', 'EX', SOURCE_CHECK_TTL_S).catch(() => {});
+    await sql`delete from files where origin = 'upload' and slack_file_id = ${slackFileId}`;
+    return true;
+  }
 }
 
 // ---------- content ----------
 
 export type FileDownloader = (meta: FileMeta, maxBytes: number) => Promise<Buffer>;
 
-const defaultDownloader: FileDownloader = (meta, maxBytes) => {
+const defaultDownloader: FileDownloader = async (meta, maxBytes) => {
   if (!meta.slackUrl) throw new FileError('this upload has no download URL');
-  return downloadSlackFile(meta.slackUrl, maxBytes, fileKind(meta.mime, meta.name) === 'html');
+  const tokens = downloadTokens(meta.sourcePublic);
+  for (const [i, token] of tokens.entries()) {
+    try {
+      return await downloadSlackFile(meta.slackUrl, maxBytes, fileKind(meta.mime, meta.name) === 'html', token);
+    } catch (err) {
+      if (!(err instanceof SlackDownloadDeniedError)) throw err;
+      if (i < tokens.length - 1) continue;
+      log.info({ err, fileId: meta.id, token }, 'Slack refused the file download');
+      throw new FileError(
+        meta.sourceChannelId
+          ? "Slack didn't let the bot download it (it may have been deleted, or it is in a channel the bot can't read)"
+          : "Slack didn't let the bot download it (it may have been deleted)",
+      );
+    }
+  }
+  throw new FileError('could not download it');
 };
 
 /**
