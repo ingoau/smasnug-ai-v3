@@ -93,21 +93,48 @@ export function factSimilarity(a: string, b: string): number {
   return both / (A.size + B.size - both);
 }
 export const DUPLICATE_SIMILARITY = 0.75;
+/** Above this, facts are the same even if a distinctive word differs. */
+const NEAR_IDENTICAL = 0.9;
 
-/** The existing fact that `text` duplicates (the closest one), if any. */
-export function findDuplicate<T extends { text: string }>(text: string, facts: T[]): T | undefined {
+/**
+ * True if the words only one of the facts has include a distinctive one: capitalised in the text (a name, a
+ * language, a project) or containing a digit. "…Sam is handling venues…" vs "…Alex is handling venues…".
+ */
+export function differsInDistinctiveWord(a: string, b: string): boolean {
+  const A = new Set(similarityWords(a));
+  const B = new Set(similarityWords(b));
+  const diff = new Set([...A].filter((w) => !B.has(w)).concat([...B].filter((w) => !A.has(w))));
+  if (diff.size === 0) return false;
+  const distinctive = (text: string) =>
+    (text.replace(/['’]/g, '').match(/[\p{L}\p{N}]+/gu) ?? []).filter((w) => /^\p{Lu}/u.test(w) || /\d/.test(w)).flatMap(similarityWords);
+  return [...distinctive(a), ...distinctive(b)].some((w) => diff.has(w));
+}
+
+/**
+ * The existing fact that `text` duplicates (the closest one), if any. `strict` (for anything destructive: merging,
+ * replacing, removing) also requires no distinctive word to differ, unless the facts are near-identical.
+ */
+export function findDuplicate<T extends { text: string }>(text: string, facts: T[], opts: { strict?: boolean } = {}): T | undefined {
   let best: T | undefined;
   let bestScore = 0;
   for (const f of facts) {
     const s = factSimilarity(text, f.text);
     if (s > bestScore) [best, bestScore] = [f, s];
   }
-  return bestScore >= DUPLICATE_SIMILARITY ? best : undefined;
+  if (!best || bestScore < DUPLICATE_SIMILARITY) return undefined;
+  if (opts.strict && bestScore < NEAR_IDENTICAL && differsInDistinctiveWord(text, best.text)) return undefined;
+  return best;
 }
 
-/** Same fact, same words: nothing to change. */
+/** Same text up to case, whitespace and punctuation: nothing to change ("was" vs "is" is a change). */
 export function sameFact(a: string, b: string) {
-  return similarityWords(a).join(' ') === similarityWords(b).join(' ');
+  const norm = (t: string) => t.toLowerCase().replace(/['’]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  return norm(a) === norm(b);
+}
+
+/** True if `a` and `b` are the same fact for merging (see findDuplicate's strict). */
+export function sameThing(a: string, b: string) {
+  return !!findDuplicate(a, [{ text: b }], { strict: true });
 }
 
 /**

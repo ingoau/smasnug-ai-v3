@@ -6,7 +6,7 @@ vi.hoisted(() => {
 vi.mock('../../db/index.js', () => ({ sql: {} }));
 vi.mock('../../core/redis.js', () => ({ redis: {} }));
 
-const { contentWords, factSimilarity, findDuplicate, orTsQuery } = await import('./store.js');
+const { contentWords, factSimilarity, findDuplicate, orTsQuery, sameFact } = await import('./store.js');
 const { factAge, formatSpeakerMemory, selectFacts } = await import('./render.js');
 import type { FactKind, RankedFact } from './store.js';
 
@@ -37,6 +37,17 @@ describe('text helpers', () => {
     expect(factSimilarity("can use Docker", "can't use Docker")).toBeLessThan(0.75);
     expect(factSimilarity('prefers TypeScript over Python', 'prefers Python over TypeScript')).toBeLessThan(0.75);
     expect(factSimilarity('works on the status page', 'works on the status pages')).toBe(1);
+  });
+
+  it('only treats facts as the same thing for merging when no distinctive word differs', () => {
+    const sam = 'Ingo says Sam is handling venues, catering and sponsors for the Sydney hackathon in March 2027';
+    const alex = sam.replace('Sam', 'Alex');
+    expect(findDuplicate(alex, [{ id: 1, text: sam }])?.id).toBe(1); // close enough to refuse as a duplicate…
+    expect(findDuplicate(alex, [{ id: 1, text: sam }], { strict: true })).toBeUndefined(); // …never to overwrite
+    expect(findDuplicate('is building a robot arm for Blueprint', [{ id: 2, text: 'is building a robot arm for Blueprint!' }], { strict: true })?.id).toBe(2);
+    expect(findDuplicate('is building robot arms for Blueprint', [{ id: 2, text: 'is building a robot arm for Blueprint' }], { strict: true })?.id).toBe(2);
+    expect(sameFact('is a Hack Club organiser', 'Is a Hack Club organiser.')).toBe(true);
+    expect(sameFact('is a Hack Club organiser', 'was a Hack Club organiser')).toBe(false);
   });
 
   it('builds a safe OR tsquery', () => {

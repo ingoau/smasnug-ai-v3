@@ -24,6 +24,7 @@ import {
   FACTS_PER_USER_MAX,
   findDuplicate,
   isSensitive,
+  similarityWords,
   listFacts,
   NEVER_STORE,
   updateFact,
@@ -55,6 +56,11 @@ export const MAX_OPS_PER_PASS = 10;
 const EXTRACTED_FACT_MAX_CHARS = 300;
 
 export { isSensitive };
+
+function sharesWord(a: string, b: string) {
+  const B = new Set(similarityWords(b).filter((w) => w !== 'not'));
+  return similarityWords(a).some((w) => B.has(w));
+}
 
 const NAME_WORDS_IGNORED = new Set(['he', 'him', 'his', 'she', 'her', 'hers', 'they', 'them', 'theirs', 'any', 'all', 'pronouns', 'the']);
 
@@ -110,8 +116,12 @@ export function validateOps(ops: MemoryOp[], input: ValidationInput): { accepted
     }
     const evidence = normalizeForMatch(op.evidence ?? '');
     if (op.op === 'remove') {
-      // Only what the participant took back, or a duplicate of a fact that stays: never a silent wipe.
-      if (!fromParticipant(evidence) && !findDuplicate(known.get(op.fact_id!) ?? '', others(op.fact_id))) {
+      // Only what the participant took back (evidence about this fact), or the older of two duplicates: never a
+      // silent wipe.
+      const factText = known.get(op.fact_id!) ?? '';
+      const dup = findDuplicate(factText, others(op.fact_id), { strict: true });
+      const tookBack = fromParticipant(evidence) && sharesWord(evidence, factText);
+      if (!tookBack && !(dup && op.fact_id! < dup.id)) {
         reject('no_evidence');
         continue;
       }
@@ -159,7 +169,8 @@ function mentionsOthers(text: string, others: { id: string; name: string }[]) {
   if (/<@[UW][A-Z0-9]+/.test(text) || /<!(here|channel|everyone|subteam)/.test(text)) return true;
   // Apostrophes split words here ("Sam's" → "sam s"), unlike normalizeForMatch.
   const words = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-  const t = new Set(words(text).split(' '));
+  // Capitalised words only, so a teammate called "Will" or "Max" doesn't block "will" or "max".
+  const t = new Set((text.match(/[\p{L}\p{N}]+/gu) ?? []).filter((w) => /^\p{Lu}/u.test(w)).map((w) => w.toLowerCase()));
   return others.some(({ id, name }) => {
     if (text.includes(id)) return true;
     // Any name word ("Sam" of "Sam Smith (he/him)"), except short ones and pronouns.

@@ -12,12 +12,10 @@ import {
   addFact,
   cleanFactText,
   deleteFact,
-  DUPLICATE_SIMILARITY,
   FACT_KINDS,
   FACT_MAX_CHARS,
   FACTS_PER_USER_MAX,
   factLabel,
-  factSimilarity,
   findDuplicate,
   isSensitive,
   listFacts,
@@ -26,12 +24,15 @@ import {
   parseFactId,
   rankFacts,
   sameFact,
+  sameThing,
   similarityWords,
   touchFacts,
   updateFact,
 } from './store.js';
 
 const SEARCH_RESULTS_MAX = 10;
+/** Too common in facts to match on alone in search_memory's word fallback. */
+const GENERIC_SEARCH_WORDS = new Set(['not', 'use', 'prefer', 'like', 'work', 'working', 'build', 'building', 'learn', 'learning', 'know']);
 
 async function logEvent(ctx: ToolContext, type: string, payload: object) {
   await appendEvent(ctx.threadId, type, ctx.speakerId, payload).catch((err) => log.warn({ err, type }, 'appendEvent failed'));
@@ -63,13 +64,13 @@ export function rememberTool(ctx: ToolContext) {
       const replacedId = replaces != null && replaces !== '' ? parseFactId(replaces) : null;
       let target = existing.find((f) => f.id === replacedId);
       if (!target) {
-        const dup = findDuplicate(text, existing);
+        const dup = findDuplicate(text, existing, { strict: true });
         if (dup && sameFact(dup.text, text) && dup.kind === kind) return `Already remembered as ${factLabel(dup.id)}.`;
         target = dup;
       }
       if (target) {
         // One fact per thing: other facts the new text duplicates go.
-        const merged = existing.filter((f) => f.id !== target.id && factSimilarity(text, f.text) >= DUPLICATE_SIMILARITY);
+        const merged = existing.filter((f) => f.id !== target.id && sameThing(text, f.text));
         for (const f of merged) await deleteFact(ctx.speakerId, f.id);
         await updateFact(ctx.speakerId, target.id, text, ctx.threadId, kind);
         await logEvent(ctx, 'memory_update', { factId: target.id, merged: merged.map((f) => f.id) });
@@ -93,7 +94,7 @@ export function searchMemoryTool(ctx: ToolContext) {
     execute: async ({ query }) => {
       const facts = await rankFacts(ctx.speakerId, orTsQuery([query]));
       // Full-text first, then whole words of any length ("go", "js", names the english stemmer mangles).
-      const terms = new Set(similarityWords(query));
+      const terms = new Set(similarityWords(query).filter((w) => !GENERIC_SEARCH_WORDS.has(w)));
       const hits = facts
         .map((f) => ({ f, score: f.rank > 0 ? 1 + f.rank : similarityWords(f.text).some((w) => terms.has(w)) ? 0.5 : 0 }))
         .filter((h) => h.score > 0)
