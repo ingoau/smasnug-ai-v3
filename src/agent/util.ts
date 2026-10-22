@@ -200,6 +200,8 @@ export function describeToolStep(toolName: string, input: unknown, opts: { fileN
       return q('name') || q('path') ? `Exporting ${(q('name') || q('path')).split('/').pop()}` : 'Exporting a file';
     case 'request_preview':
       return 'Preparing a live preview';
+    case 'load_skill':
+      return 'Checking its notes';
     default: {
       // The status-indicator label for the tool ("Reading the canvas…" → "Reading the canvas"), else "Working…".
       const label = activityForTool(toolName) ?? DEFAULT_ACTIVITY;

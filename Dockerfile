@@ -15,6 +15,7 @@ ENV NODE_ENV=production IMAGE_CACHE_DIR=/app/.cache/images
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY skills ./skills
 RUN mkdir -p .cache/images && chown -R node:node .cache
 USER node
 CMD ["node", "dist/worker/main.js"]
