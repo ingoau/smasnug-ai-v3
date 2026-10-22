@@ -28,6 +28,7 @@ import { freezeCard } from './cards.js';
 import { enqueueCardTitle, enqueueSessionTitle } from './titles.js';
 import { TurnCard } from './turn-card.js';
 import { CODING_AGENTS_PROMPT, frontSystemPrompt } from './prompts/front.js';
+import { skillsPrompt } from './skills.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread, maybeSynthesize } from './subagents.js';
 import { loadSinceRound, renderSinceRound } from './round-since.js';
@@ -131,6 +132,8 @@ async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<strin
   let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), adminUserId: env.ADMIN_USER_ID });
   if (huddleFmConfigured()) system = `${system}\n\n${HUDDLE_DJ_PROMPT}`;
   if (sandboxConfigured()) system = `${system}\n\n${sandboxFrontPrompt({ previews: previewsConfigured() })}`;
+  const skillIndex = skillsPrompt('front');
+  if (skillIndex) system = `${system}\n\n${skillIndex}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
   // Admin-only section last: the shared prefix stays the same for everyone.
   if (opts.codingAgents) system = `${system}\n\n${CODING_AGENTS_PROMPT}`;
@@ -276,8 +279,11 @@ export async function renderEarlierRounds(cardId: number, maxRounds = 4): Promis
   return parts.join('\n\n');
 }
 
-/** Tools not worth repeating to the next turn: the visible responses themselves and bookkeeping. */
-const UNREPORTED_TOOLS = new Set(['reply', 'react', 'unreact', 'end_turn', 'search_emojis']);
+/**
+ * Tools not worth repeating to the next turn: the visible responses themselves and bookkeeping. load_skill too: a
+ * listed call without its result would read as "already loaded" when the next turn starts without it.
+ */
+const UNREPORTED_TOOLS = new Set(['reply', 'react', 'unreact', 'end_turn', 'search_emojis', 'load_skill']);
 const MAX_REPORTED_CALLS = 12;
 const REPORTED_ARGS_CHARS = 200;
 

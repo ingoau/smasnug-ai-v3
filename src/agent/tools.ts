@@ -1,5 +1,6 @@
 /**
- * Agent-module tools (front agent only): reply, spawn_subagent, message_subagent, cancel_subagent (card titles: src/agent/titles.ts, in the background).
+ * Agent-module tools: reply, spawn_subagent, message_subagent, cancel_subagent (front agent only; card titles: src/agent/titles.ts,
+ * in the background) and load_skill (front and children, src/agent/skills.ts).
  * Registered at import time; src/agent/register.ts imports this file.
  */
 import { tool } from 'ai';
@@ -15,6 +16,7 @@ import { continueTurnSchema } from './turn-end.js';
 import { prepareOutgoingFiles } from './files.js';
 import { accessModelText, canUseSandbox, notifyAccess } from '../sandbox/access.js';
 import { sandboxConfigured } from '../sandbox/settings.js';
+import { readSkill } from './skills.js';
 
 /**
  * `reply(files)`: file ids (uploads, subagent results, create_file), or an inline text file that is stored first.
@@ -223,3 +225,18 @@ registerTool({
     }),
 });
 
+
+registerTool({
+  name: 'load_skill',
+  roles: ['front', 'child'],
+  build: (ctx) =>
+    tool({
+      description:
+        'Load a skill listed under "# Skills" in your instructions: knowledge or a procedure for a kind of request. Call it before answering or acting on a request that matches a skill. Returns its instructions and the names of any extra files it has; pass `file` to read one of those.',
+      inputSchema: z.object({
+        name: z.string().describe('Skill name from the list, e.g. "about-yourself"'),
+        file: z.string().optional().describe('Optional: one of the files the skill lists, e.g. "reference.md"'),
+      }),
+      execute: async ({ name, file }) => readSkill(ctx.role === 'child' ? 'child' : 'front', name, file),
+    }),
+});

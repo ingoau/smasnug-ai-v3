@@ -43,6 +43,8 @@ const LABELS: Record<string, string> = {
 const RESPONDING = new Set(['reply', 'react', 'unreact', 'search_emojis', 'end_turn']);
 /** Bookkeeping (leaving / closing the conversation): not work either, no card flashing after a reply. */
 RESPONDING.add('leave_thread');
+/** Reading a skill's instructions (src/agent/skills.ts) is preparation, not visible work. */
+RESPONDING.add('load_skill');
 /** Tools that must stay invisible in the thread (report_user is never hinted at). */
 const SILENT = new Set(['report_user']);
 

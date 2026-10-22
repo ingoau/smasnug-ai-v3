@@ -16,6 +16,7 @@ import { WORKER_ID } from '../worker/identity.js';
 import { scheduleCardRender } from './cards.js';
 import { FIRST_STEP_DETAILS, THINKING_DETAILS, WRITING_DETAILS } from './card-render.js';
 import { childSystemPrompt } from './prompts/child.js';
+import { skillsPrompt } from './skills.js';
 import { failRuns, finishRun, type RunRow, type SubagentRow } from './subagents.js';
 import { WEB_SEARCH_TOOL, webSearchSources } from '../tools/web-search.js';
 import { SEARCH_DEFER_EXTRA, SLACK_WAIT_EXTRA, type DeferFn } from '../tools/slack-search.js';
@@ -269,7 +270,7 @@ async function runClaimed(run: RunRow): Promise<void> {
     },
   });
   if (!sandbox) for (const name of SANDBOX_TOOL_NAMES) delete tools[name];
-  const instructions = sandbox ? `${childSystemPrompt()}\n\n${sandboxChildPrompt({ previews: previewsConfigured() })}` : childSystemPrompt();
+  const instructions = [childSystemPrompt(), skillsPrompt('child'), sandbox ? sandboxChildPrompt({ previews: previewsConfigured() }) : ''].filter(Boolean).join('\n\n');
   // Every subagent runs on MODELS.child (runs.model records it).
   const modelId = MODELS.child;
   const model = chatModel(modelId);
