@@ -7,7 +7,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { sql } from '../db/index.js';
 import { redis } from './redis.js';
 import { addFakeHandler } from './slack-fake.js';
-import { pauseKey, slackCall, SlackBusyError } from './slack.js';
+import { pauseKey, slackCall, SlackBusyError, userbotCookie } from './slack.js';
 
 const METHOD = 'conversations.replies';
 const CHANNEL = 'C429TEST';
@@ -147,5 +147,13 @@ describe('quiet Slack warnings', () => {
     expect(isQuietSlackWarning(['missing_charset'])).toBe(false);
     expect(isQuietSlackWarning(['A message was posted without text; add a fallback'])).toBe(false);
     expect(isQuietSlackWarning([{ x: 1 }])).toBe(false);
+  });
+});
+
+describe('userbot cookie', () => {
+  it('encodes a raw d-cookie value and keeps one that is already encoded', () => {
+    expect(userbotCookie('xoxd-abc/def+')).toBe('xoxd-abc%2Fdef%2B');
+    expect(userbotCookie('d=xoxd-abc')).toBe('xoxd-abc');
+    expect(userbotCookie(' xoxd-abc%2Fdef ')).toBe('xoxd-abc%2Fdef');
   });
 });

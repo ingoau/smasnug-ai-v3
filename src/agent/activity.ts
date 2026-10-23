@@ -18,6 +18,8 @@ const LABELS: Record<string, string> = {
   ask_file: 'Reading the file…',
   create_file: 'Writing a file…',
   save_url: 'Downloading a file…',
+  download_emoji: 'Downloading emoji…',
+  upload_emoji: 'Adding an emoji…',
   spawn_subagent: 'Digging in…',
   message_subagent: 'Updating the task…',
   cancel_subagent: 'Stopping the task…',

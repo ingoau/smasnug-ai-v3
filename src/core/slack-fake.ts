@@ -79,6 +79,10 @@ export async function fakeCall(method: string, args: Record<string, unknown>, to
     case 'chat.appendStream':
     case 'chat.stopStream':
       return { ok: true, channel: args.channel, ts: args.ts };
+    case 'emoji.list':
+      return { ok: true, emoji: {} };
+    case 'emoji.add':
+      return { ok: true };
     case 'chat.getPermalink':
       return { ok: true, permalink: `https://fake.slack.com/archives/${args.channel}/p${String(args.message_ts).replace('.', '')}` };
     case 'users.info': {

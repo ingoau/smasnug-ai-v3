@@ -42,7 +42,7 @@ export async function checkEntry(userId: string, channelId?: string, opts: { cou
   return { ok: true };
 }
 
-export type LimitKind = 'search' | 'websearch' | 'fetch' | 'send' | 'subagent' | 'canvas_read' | 'canvas_write' | 'dj' | 'sandbox_exec' | 'directory';
+export type LimitKind = 'search' | 'websearch' | 'fetch' | 'send' | 'subagent' | 'canvas_read' | 'canvas_write' | 'dj' | 'sandbox_exec' | 'directory' | 'emoji_upload';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -56,6 +56,7 @@ const HOURLY: Record<Exclude<LimitKind, 'subagent'>, { max: number; noun: string
   dj: { max: limits.userDjCommandsPerHour, noun: 'huddle DJ commands' },
   sandbox_exec: { max: limits.userSandboxExecsPerHour, noun: 'sandbox commands' },
   directory: { max: limits.userDirectoryLookupsPerHour, noun: 'directory lookups (find_people / find_channels)' },
+  emoji_upload: { max: limits.userEmojiUploadsPerHour, noun: 'custom emoji uploads' },
 };
 
 /**
@@ -70,6 +71,11 @@ export async function takeLimit(kind: LimitKind, userId: string, threadId?: stri
   if (kind === 'send') {
     const block = (await getState()).blocks.get(userId);
     if (block?.suspended || block?.sendBlocked) return 'This user is blocked from sending messages through the bot.';
+  }
+  if (kind === 'emoji_upload') {
+    // Uploads act as the userbot account for the whole workspace: send-blocked users can't use it either.
+    const block = (await getState()).blocks.get(userId);
+    if (block?.suspended || block?.sendBlocked) return 'This user is blocked from uploading emoji through the bot.';
   }
   const { max, noun } = HOURLY[kind];
   const wait = await slidingWindow(`limit:${kind}:${userId}`, max, HOUR_MS, true);
@@ -135,6 +141,11 @@ export async function peekLimit(kind: Exclude<LimitKind, 'subagent'>, userId: st
   if (kind === 'send') {
     const block = (await getState()).blocks.get(userId);
     if (block?.suspended || block?.sendBlocked) return 'This user is blocked from sending messages through the bot.';
+  }
+  if (kind === 'emoji_upload') {
+    // Uploads act as the userbot account for the whole workspace: send-blocked users can't use it either.
+    const block = (await getState()).blocks.get(userId);
+    if (block?.suspended || block?.sendBlocked) return 'This user is blocked from uploading emoji through the bot.';
   }
   const { max, noun } = HOURLY[kind];
   const wait = await slidingWindow(`limit:${kind}:${userId}`, max, HOUR_MS, false);

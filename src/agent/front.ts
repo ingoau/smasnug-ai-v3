@@ -5,7 +5,7 @@ import { sql } from '../db/index.js';
 import { filesCreatedByRuns } from '../files/store.js';
 import { fileListingLine } from '../files/format.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
-import { getBotIdentity, slackCall } from '../core/slack.js';
+import { getBotIdentity, slackCall, userbotConfigured } from '../core/slack.js';
 import { getUserInfo, type UserInfo } from '../context/users.js';
 import { getConversationInfo, renderConversation } from '../context/conversation.js';
 import { formatUtcNow, pickParticipantIds, privilegesLine, renderParticipants, speakerDetailLines } from '../context/people.js';
@@ -129,7 +129,7 @@ function recordReactVisibility(tools: Record<string, Tool>, state: FrontTurnStat
 
 async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
-  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), adminUserId: env.ADMIN_USER_ID });
+  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID });
   if (huddleFmConfigured()) system = `${system}\n\n${HUDDLE_DJ_PROMPT}`;
   if (sandboxConfigured()) system = `${system}\n\n${sandboxFrontPrompt({ previews: previewsConfigured() })}`;
   const skillIndex = skillsPrompt('front');

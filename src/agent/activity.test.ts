@@ -14,6 +14,7 @@ describe('activityForTool', () => {
     expect(activityForTool('read_file')).toBe('Opening the file…');
     expect(activityForTool('spawn_subagent')).toBe('Digging in…');
     expect(activityForTool('remember')).toBe('Saving a note…');
+    expect(activityForTool('upload_emoji')).toBe('Adding an emoji…');
   });
 
   it('responding tools never show or change the indicator', () => {

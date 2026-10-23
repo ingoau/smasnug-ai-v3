@@ -47,7 +47,106 @@ const clients = {
   user: new WebClient(env.SLACK_USER_TOKEN, { rejectRateLimitedCalls: true, retryConfig: { retries: 0 }, logger: webClientLogger('user') }),
 };
 
-export type TokenKind = keyof typeof clients;
+/**
+ * `userbot`: a logged-in user session (a browser `xoxc-` token plus its `d` cookie), for the web client's own
+ * undocumented methods that no app token can call (emoji.add). Sent the way the web client sends them (userbotCall).
+ */
+export type TokenKind = keyof typeof clients | 'userbot';
+
+/** True when the userbot session is configured (SLACK_USERBOT_TOKEN + SLACK_USERBOT_COOKIE). */
+export function userbotConfigured(): boolean {
+  return Boolean(env.SLACK_USERBOT_TOKEN && env.SLACK_USERBOT_COOKIE);
+}
+
+/** A file argument for a userbot call: sent as a multipart file part. */
+export class SlackUpload {
+  constructor(
+    readonly bytes: Buffer,
+    readonly filename: string,
+    readonly contentType: string,
+  ) {}
+  /** Logged / stored instead of the bytes (fake call log, idempotency results never hold it). */
+  toJSON() {
+    return { upload: this.filename, contentType: this.contentType, bytes: this.bytes.byteLength };
+  }
+}
+
+const USERBOT_UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
+let userbotSession: Promise<{ apiUrl: string; route: string }> | undefined;
+
+/**
+ * Where userbot calls go and their `slack_route`, as the web client computes it (`computeSlackRoute`):
+ * `<enterprise_id>:<team_id>` on Enterprise Grid, else the team id. The team is the bot's own workspace, so a
+ * session from an org-wide (enterprise) login acts in that workspace. The API host is SLACK_USERBOT_API_URL, else the
+ * session's workspace URL from auth.test.
+ */
+function userbotTarget(): Promise<{ apiUrl: string; route: string }> {
+  userbotSession ??= (async () => {
+    const [me, bot] = await Promise.all([
+      postUserbot('https://slack.com/api/', 'auth.test', {}, ''),
+      slackCall<any>('auth.test', {}),
+    ]);
+    const base = env.SLACK_USERBOT_API_URL || (typeof me.url === 'string' ? `${me.url.replace(/\/+$/, '')}/api/` : 'https://slack.com/api/');
+    const teamId: string = bot.team_id ?? me.team_id;
+    const enterpriseId: string | undefined = bot.enterprise_id || me.enterprise_id || undefined;
+    if (me.team_id && teamId && me.team_id !== teamId && !(enterpriseId && me.enterprise_id === enterpriseId)) {
+      log.warn({ userbotTeam: me.team_id, botTeam: teamId }, 'userbot session is for another workspace than the bot');
+    }
+    return { apiUrl: base.endsWith('/') ? base : `${base}/`, route: enterpriseId ? `${enterpriseId}:${teamId}` : teamId };
+  })().catch((err) => {
+    userbotSession = undefined;
+    throw err;
+  });
+  return userbotSession;
+}
+
+/**
+ * One web-client style POST: multipart form with `token` in the body, the `d` cookie, errors shaped like the
+ * WebClient's (`code` + `data.error`, `retryAfter` on 429) so rawCall's retry and slackErrorCode work unchanged.
+ */
+async function postUserbot(apiUrl: string, method: string, args: Record<string, unknown>, route: string, signal?: AbortSignal): Promise<any> {
+  const form = new FormData();
+  form.append('token', env.SLACK_USERBOT_TOKEN ?? '');
+  for (const [k, v] of Object.entries(args)) {
+    if (v === undefined || v === null) continue;
+    if (v instanceof SlackUpload) form.append(k, new Blob([new Uint8Array(v.bytes)], { type: v.contentType }), v.filename);
+    else form.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+  }
+  const url = new URL(method, apiUrl);
+  if (route) url.searchParams.set('slack_route', route);
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      body: form,
+      headers: { cookie: `d=${userbotCookie(env.SLACK_USERBOT_COOKIE ?? '')}`, 'user-agent': USERBOT_UA, origin: 'https://app.slack.com' },
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
+    });
+  } catch (err) {
+    throw Object.assign(new Error(`userbot ${method}: ${(err as Error).message}`), { code: 'slack_webapi_request_error' });
+  }
+  if (res.status === 429) {
+    throw Object.assign(new Error(`userbot ${method} rate limited`), { code: 'slack_webapi_rate_limited_error', retryAfter: Number(res.headers.get('retry-after')) || 1 });
+  }
+  const body = (await res.json().catch(() => null)) as any;
+  if (!body || body.ok !== true) {
+    const error = body?.error ?? `http_${res.status}`;
+    throw Object.assign(new Error(`An API error occurred: ${error}`), { code: 'slack_webapi_platform_error', data: { ok: false, error } });
+  }
+  return body;
+}
+
+/** The `d` cookie as the browser sends it: URL-encoded (a value pasted already encoded is kept as is). */
+export function userbotCookie(raw: string): string {
+  const v = raw.trim().replace(/^d=/, '');
+  return v.includes('%') ? v : encodeURIComponent(v);
+}
+
+async function userbotCall(method: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
+  if (!userbotConfigured()) throw Object.assign(new Error('userbot session not configured'), { code: 'slack_webapi_platform_error', data: { ok: false, error: 'not_configured' } });
+  const { apiUrl, route } = await userbotTarget();
+  return postUserbot(apiUrl, method, args, route, signal);
+}
 
 export interface SlackCallOpts {
   token?: TokenKind;
@@ -399,7 +498,8 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
     await pauseFor(token, method, deadline, wait, opts.signal);
     await throttle(method, token, channel, { deadline, priority: opts.priority, wait, signal: opts.signal });
     try {
-      return (FAKE ? await fakeCall(method, args, token) : await clients[token].apiCall(method, args)) as T;
+      if (FAKE) return (await fakeCall(method, args, token)) as T;
+      return (token === 'userbot' ? await userbotCall(method, args, opts.signal) : await clients[token].apiCall(method, args)) as T;
     } catch (err: any) {
       const retryAfter = err?.retryAfter ?? err?.data?.retryAfter;
       if (err?.code === 'slack_webapi_rate_limited_error' && attempt < 5) {
@@ -409,7 +509,8 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
         if (Date.now() + ms > deadline) throw new SlackBusyError(method, ms);
         continue;
       }
-      if (err?.code === 'slack_webapi_request_error' && attempt < 3) {
+      // Not for the userbot: its methods (emoji.add) aren't idempotent, and a request that timed out may have landed.
+      if (err?.code === 'slack_webapi_request_error' && attempt < 3 && token !== 'userbot') {
         await sleep(500 * 2 ** attempt, opts.signal);
         continue;
       }

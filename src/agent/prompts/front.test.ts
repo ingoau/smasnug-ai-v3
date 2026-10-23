@@ -30,8 +30,10 @@ describe('frontSystemPrompt About you', () => {
   });
 
   it('"what can you do": the capability line names running code when sandboxes are on, previews only when configured', () => {
-    const line = (o: { sandbox?: boolean; previews?: boolean }) => frontSystemPrompt('smasnug ai', o).split('\n').find((l) => l.startsWith('- What the harness gives you'))!;
+    const line = (o: { sandbox?: boolean; previews?: boolean; emojiUpload?: boolean }) => frontSystemPrompt('smasnug ai', o).split('\n').find((l) => l.startsWith('- What the harness gives you'))!;
     expect(line({})).not.toMatch(/sandbox|preview/i);
+    expect(line({})).not.toMatch(/custom emoji/);
+    expect(line({ emojiUpload: true })).toMatch(/add a custom emoji from an image file when someone asks/);
     expect(line({})).toMatch(/Asked what you can do, cover all of these/);
     expect(line({ sandbox: true })).toMatch(/spawn background subagents for longer work; run code in a sandbox \(Python, Node, a headless browser\) to process data and files and build things\./);
     expect(line({ sandbox: true })).not.toMatch(/preview/);
