@@ -20,6 +20,7 @@ import { IMAGE_CACHE_DIR, loadImageForModel } from '../files/images.js';
 import { fileStore } from '../files/store.js';
 import { SANDBOX_TOOL_NAMES, sandboxConfigured } from '../sandbox/settings.js';
 import { settleDescriptions } from '../files/describe.js';
+import { userbotConfigured } from '../core/slack.js';
 import { cleanEmojiName, semojiSearch } from './emoji.js';
 import { buildExaRequest, formatExaResults, webSearchSources, webSearchTool, EXA_SEARCH_URL, type WebSearchOutput } from './web-search.js';
 
@@ -96,8 +97,12 @@ describe('registry', () => {
     if (!sandboxConfigured()) expect(allChild).toEqual(child);
     for (const n of sandboxTools) expect(front).not.toContain(n);
     const gate = Object.keys(toolsFor('gate', baseCtx()));
-    for (const n of ['ask_thread', 'fetch_url', 'web_search', 'slack_search', 'find_people', 'find_channels', 'read_thread', 'read_public_thread', 'read_public_channel', 'read_channel', 'read_file', 'ask_file', 'create_file', 'save_url', 'search_emojis', 'react', 'unreact']) expect(front).toContain(n);
-    expect(child).toEqual(['ask_file', 'ask_thread', 'create_file', 'fetch_url', 'find_channels', 'find_people', 'read_canvas', 'read_channel', 'read_file', 'read_public_channel', 'read_public_thread', 'read_thread', 'save_url', 'slack_search', 'web_search']);
+    for (const n of ['ask_thread', 'fetch_url', 'web_search', 'slack_search', 'find_people', 'find_channels', 'read_thread', 'read_public_thread', 'read_public_channel', 'read_channel', 'read_file', 'ask_file', 'create_file', 'save_url', 'search_emojis', 'download_emoji', 'react', 'unreact']) expect(front).toContain(n);
+    // upload_emoji exists only with a userbot session, and never for children.
+    if (userbotConfigured()) expect(front).toContain('upload_emoji');
+    else expect(front).not.toContain('upload_emoji');
+    expect(child).not.toContain('upload_emoji');
+    expect(child).toEqual(['ask_file', 'ask_thread', 'create_file', 'download_emoji', 'fetch_url', 'find_channels', 'find_people', 'read_canvas', 'read_channel', 'read_file', 'read_public_channel', 'read_public_thread', 'read_thread', 'save_url', 'slack_search', 'web_search']);
     expect(gate).toEqual([]);
     // A normal client tool (Exa), not a provider/server tool.
     const ws = toolsFor('front', baseCtx()).web_search as any;

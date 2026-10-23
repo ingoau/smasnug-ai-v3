@@ -13,6 +13,8 @@ import './ask-thread.js';
 import './public-channel.js';
 import '../files/tools.js';
 import './emoji.js';
+import './emoji-files.js';
+import './emoji-download.js';
 import './canvases.js';
 import './directory/tools.js';
 import { pruneImageCache } from '../files/images.js';

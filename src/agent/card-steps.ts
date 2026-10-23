@@ -38,6 +38,8 @@ const KINDS: Record<string, StepKind> = {
   read_file: { live: 'Opening the file…', done: 'Opened a file', summary: count('opened a file', 'opened # files') },
   create_file: { live: 'Writing a file…', done: 'Wrote a file', summary: count('wrote a file', 'wrote # files') },
   save_url: { live: 'Downloading a file…', done: 'Downloaded a file', summary: count('downloaded a file', 'downloaded # files') },
+  download_emoji: { live: 'Downloading emoji…', done: 'Downloaded emoji', summary: times('downloaded emoji') },
+  upload_emoji: { live: 'Adding an emoji…', done: 'Added an emoji', summary: count('added an emoji', 'added # emoji') },
   read_canvas: { live: 'Reading the canvas…', done: 'Read a canvas', summary: count('read a canvas', 'read # canvases') },
   create_canvas: { live: 'Writing a canvas…', done: 'Wrote a canvas', summary: count('wrote a canvas', 'wrote # canvases') },
   edit_canvas: { live: 'Updating the canvas…', done: 'Updated a canvas', summary: count('updated a canvas', 'updated # canvases') },

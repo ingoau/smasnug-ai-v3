@@ -41,6 +41,7 @@ vi.mock('../db/index.js', () => {
 });
 vi.mock('../core/redis.js', () => ({ redis: { get: async () => null, set: async () => 'OK' }, bullConnection: () => ({}) }));
 vi.mock('../core/slack.js', () => ({
+  userbotConfigured: () => false,
   getBotIdentity: async () => ({ userId: 'UBOT', botId: 'BBOT' }),
   slackErrorCode: (err: any) => err?.data?.error,
   slackCall: async (method: string, args: any) => {

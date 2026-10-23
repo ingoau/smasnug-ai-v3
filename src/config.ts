@@ -7,6 +7,14 @@ const Env = z.object({
   SLACK_APP_TOKEN: z.string().optional(),
   SLACK_BOT_TOKEN: z.string().optional(),
   SLACK_USER_TOKEN: z.string().optional(),
+  /**
+   * Userbot session for upload_emoji (emoji.add, which no app token can call): a browser session's `xoxc-` token and
+   * the value of its `d` cookie (`xoxd-…`, as shown in the browser). Optional API base, e.g.
+   * https://hackclub.slack.com/api/ (default: the session's workspace URL from auth.test).
+   */
+  SLACK_USERBOT_TOKEN: z.string().optional(),
+  SLACK_USERBOT_COOKIE: z.string().optional(),
+  SLACK_USERBOT_API_URL: z.string().optional(),
   MOD_CHANNEL_ID: z.string().optional(),
   ADMIN_USER_ID: z.string().optional(),
   SEMOJI_URL: z.string().default('https://emojis.raygen.dev'),
@@ -410,6 +418,13 @@ export const limits = {
   // Workspace directory (src/tools/directory/): people + public channels, the one profile store.
   /** find_people + find_channels calls per user per hour (generous: they're cheap Postgres queries). */
   userDirectoryLookupsPerHour: 300,
+  /** upload_emoji (userbot emoji.add): per user per hour. */
+  userEmojiUploadsPerHour: 5,
+  /** upload_emoji: largest source image sent to Slack (it resizes; it rejects what is still too big after that). */
+  emojiUploadMaxBytes: 2 * 1024 * 1024,
+  /** download_emoji: emoji per call, and the emoji.list cache (Redis). */
+  emojiDownloadMaxPerCall: 10,
+  emojiListCacheS: 600,
   /** A profile not refreshed (crawl, users.info, event) for this long is re-read with users.info on lookup. */
   directoryProfileMaxAgeMs: 24 * 60 * 60 * 1000,
   /** A crawl kind whose last complete crawl is older than this is crawled again (the weekly re-crawl). */
