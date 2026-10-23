@@ -104,7 +104,7 @@ function userbotTarget(): Promise<{ apiUrl: string; route: string }> {
  * One web-client style POST: multipart form with `token` in the body, the `d` cookie, errors shaped like the
  * WebClient's (`code` + `data.error`, `retryAfter` on 429) so rawCall's retry and slackErrorCode work unchanged.
  */
-async function postUserbot(apiUrl: string, method: string, args: Record<string, unknown>, route: string): Promise<any> {
+async function postUserbot(apiUrl: string, method: string, args: Record<string, unknown>, route: string, signal?: AbortSignal): Promise<any> {
   const form = new FormData();
   form.append('token', env.SLACK_USERBOT_TOKEN ?? '');
   for (const [k, v] of Object.entries(args)) {
@@ -120,7 +120,7 @@ async function postUserbot(apiUrl: string, method: string, args: Record<string, 
       method: 'POST',
       body: form,
       headers: { cookie: `d=${userbotCookie(env.SLACK_USERBOT_COOKIE ?? '')}`, 'user-agent': USERBOT_UA, origin: 'https://app.slack.com' },
-      signal: AbortSignal.timeout(30_000),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
     });
   } catch (err) {
     throw Object.assign(new Error(`userbot ${method}: ${(err as Error).message}`), { code: 'slack_webapi_request_error' });
@@ -142,10 +142,10 @@ export function userbotCookie(raw: string): string {
   return v.includes('%') ? v : encodeURIComponent(v);
 }
 
-async function userbotCall(method: string, args: Record<string, unknown>): Promise<any> {
+async function userbotCall(method: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<any> {
   if (!userbotConfigured()) throw Object.assign(new Error('userbot session not configured'), { code: 'slack_webapi_platform_error', data: { ok: false, error: 'not_configured' } });
   const { apiUrl, route } = await userbotTarget();
-  return postUserbot(apiUrl, method, args, route);
+  return postUserbot(apiUrl, method, args, route, signal);
 }
 
 export interface SlackCallOpts {
@@ -499,7 +499,7 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
     await throttle(method, token, channel, { deadline, priority: opts.priority, wait, signal: opts.signal });
     try {
       if (FAKE) return (await fakeCall(method, args, token)) as T;
-      return (token === 'userbot' ? await userbotCall(method, args) : await clients[token].apiCall(method, args)) as T;
+      return (token === 'userbot' ? await userbotCall(method, args, opts.signal) : await clients[token].apiCall(method, args)) as T;
     } catch (err: any) {
       const retryAfter = err?.retryAfter ?? err?.data?.retryAfter;
       if (err?.code === 'slack_webapi_rate_limited_error' && attempt < 5) {
@@ -509,7 +509,8 @@ async function rawCall<T>(method: string, args: Record<string, unknown>, token: 
         if (Date.now() + ms > deadline) throw new SlackBusyError(method, ms);
         continue;
       }
-      if (err?.code === 'slack_webapi_request_error' && attempt < 3) {
+      // Not for the userbot: its methods (emoji.add) aren't idempotent, and a request that timed out may have landed.
+      if (err?.code === 'slack_webapi_request_error' && attempt < 3 && token !== 'userbot') {
         await sleep(500 * 2 ** attempt, opts.signal);
         continue;
       }

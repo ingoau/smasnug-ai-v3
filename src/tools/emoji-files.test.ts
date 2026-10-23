@@ -87,4 +87,31 @@ describe('upload_emoji', () => {
     expect(emojiImageProblem(big, 'image/png')).toMatchObject({ error: expect.stringMatching(/limit/) });
     expect(emojiImageProblem(PNG, 'application/octet-stream')).toMatchObject({ mime: 'image/png', ext: 'png' });
   });
+  it('counts the hourly limit only for added emoji, and reports a lost answer as unknown', async () => {
+    const usage = async () => Number((await sql`select count(*)::int as n from usage where user_id = ${speakerId} and kind = 'emoji_upload'`)[0]!.n);
+    const before = await usage();
+    const f = await createFile({ threadId, ownerId: speakerId, name: 'x.png', content: PNG, description: 'x' });
+    let off = addFakeHandler((method) => {
+      if (method === 'emoji.add') throw fakeSlackError('error_name_taken');
+      return undefined;
+    });
+    try {
+      expect(await uploadEmoji(ctx(20), 'already_there', f.id)).toBe('That emoji name is already taken.');
+    } finally {
+      off();
+    }
+    expect(await usage()).toBe(before);
+    off = addFakeHandler((method) => {
+      if (method === 'emoji.add') throw Object.assign(new Error('timeout'), { code: 'slack_webapi_request_error' });
+      return undefined;
+    });
+    try {
+      expect(await uploadEmoji(ctx(21), 'slow_one', f.id)).toMatch(/may or may not have been added/);
+    } finally {
+      off();
+    }
+    expect(await usage()).toBe(before);
+    expect(await uploadEmoji(ctx(22), 'fresh_one', f.id)).toBe(`Added :fresh_one: from ${f.id}.`);
+    expect(await usage()).toBe(before + 1);
+  });
 });

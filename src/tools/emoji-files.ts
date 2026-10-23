@@ -9,7 +9,7 @@ import { limits } from '../config.js';
 import { appendEvent } from '../core/events.js';
 import { slackCall, slackErrorCode, SlackUpload, userbotConfigured } from '../core/slack.js';
 import { registerTool, type ToolContext } from '../core/tools.js';
-import { takeLimit } from '../features/guard.js';
+import { peekLimit, takeLimit } from '../features/guard.js';
 import { FileError, loadFileBytes, resolveFile } from '../files/store.js';
 import { formatBytes, sniffMime } from '../files/format.js';
 import { log } from '../log.js';
@@ -45,9 +45,13 @@ export function emojiImageProblem(bytes: Buffer, declaredMime: string | null | u
 
 /**
  * Add `fileId` as a custom emoji named `nameRaw`. The image has to be one the speaker can already use.
- * Counts against the hourly upload limit only once the image is actually sent.
+ * The hourly upload limit is checked before sending and counted only when Slack added the emoji.
  */
-export async function uploadEmoji(ctx: Pick<ToolContext, 'threadId' | 'speakerId' | 'turnId' | 'runId'>, nameRaw: string, fileId: string): Promise<string> {
+export async function uploadEmoji(
+  ctx: Pick<ToolContext, 'threadId' | 'speakerId' | 'turnId' | 'runId' | 'abortSignal'>,
+  nameRaw: string,
+  fileId: string,
+): Promise<string> {
   if (!userbotConfigured()) return 'Emoji upload is not configured (no userbot session).';
   const name = cleanEmojiName(nameRaw);
   if (!NAME_RE.test(name)) return `Emoji name "${name || nameRaw.trim()}" isn't usable. Use letters, numbers, underscores or hyphens.`;
@@ -61,22 +65,31 @@ export async function uploadEmoji(ctx: Pick<ToolContext, 'threadId' | 'speakerId
   }
   const image = emojiImageProblem(bytes, f.mime);
   if ('error' in image) return image.error;
-  const blocked = await takeLimit('emoji_upload', ctx.speakerId, ctx.threadId);
+  const blocked = await peekLimit('emoji_upload', ctx.speakerId);
   if (blocked) return blocked;
+  const scope = ctx.turnId != null ? `turn:${ctx.turnId}` : ctx.runId != null ? `run:${ctx.runId}` : null;
   const filename = f.name.includes('.') ? f.name : `${name}.${image.ext}`;
   try {
     await slackCall(
       'emoji.add',
       { name, mode: 'data', image: new SlackUpload(bytes, filename, image.mime) },
-      { token: 'userbot', idempotencyKey: `emoji-add:${ctx.threadId}:${ctx.turnId ?? ctx.runId ?? 'na'}:${name}:${f.id}` },
+      { token: 'userbot', signal: ctx.abortSignal, ...(scope ? { idempotencyKey: `emoji-add:${ctx.threadId}:${scope}:${name}:${f.id}` } : {}) },
     );
   } catch (err) {
+    if ((err as { code?: string })?.code === 'slack_webapi_request_error') {
+      log.warn({ err, name }, 'emoji.add got no answer');
+      return `Slack didn't answer in time, so :${name}: may or may not have been added. Check before trying again.`;
+    }
     const code = slackErrorCode(err);
     log.debug({ err, code, name }, 'emoji.add failed');
     return ADD_ERRORS[code ?? ''] ?? `Couldn't add :${name}: (${code || errMsg(err)}).`;
   }
+  // Counted once it's added (a taken name or a broken session doesn't use up the user's uploads).
+  await takeLimit('emoji_upload', ctx.speakerId, ctx.threadId).catch((err) => log.warn({ err }, 'emoji_upload usage not recorded'));
   await forgetEmojiList();
-  await appendEvent(ctx.threadId, 'emoji_added', 'bot', { name, fileId: f.id, turnId: ctx.turnId ?? null }).catch((err) => log.debug({ err }, 'emoji_added event failed'));
+  // Emoji are added in the userbot's name: who asked is kept in the logs and the thread's events.
+  log.info({ name, requestedBy: ctx.speakerId, threadId: ctx.threadId, fileId: f.id }, 'custom emoji added');
+  await appendEvent(ctx.threadId, 'emoji_added', 'bot', { name, fileId: f.id, requestedBy: ctx.speakerId, turnId: ctx.turnId ?? null }).catch((err) => log.debug({ err }, 'emoji_added event failed'));
   return `Added :${name}: from ${f.id}.`;
 }
 
