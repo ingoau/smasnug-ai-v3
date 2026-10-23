@@ -35,6 +35,8 @@ describe('lookupEmoji', () => {
     expect(lookupEmoji(LIST, 'yay')).toEqual({ kind: 'standard', name: 'yay' });
     expect(lookupEmoji(LIST, 'thumbsup')).toEqual({ kind: 'missing', name: 'thumbsup' });
     expect(lookupEmoji(LIST, 'loop1').kind).toBe('missing');
+    expect(lookupEmoji(LIST, 'constructor')).toEqual({ kind: 'missing', name: 'constructor' });
+    expect(lookupEmoji({ a: 'alias:__proto__' }, 'a').kind).toBe('standard');
   });
 
   it('only fetches from Slack\'s CDN', () => {
@@ -88,6 +90,8 @@ describe('downloadEmojis', () => {
       expect(await downloadEmojis(ctx, ['partyparrot'], { fetch: html })).toMatch(/isn't an image/);
       const many = Array.from({ length: 11 }, (_, i) => `e${i}`);
       expect(await downloadEmojis(ctx, many)).toMatch(/At most 10/);
+      const png: EmojiFetcher = async () => ({ status: 200, body: PNG, truncated: false });
+      expect(await downloadEmojis(ctx, ['partyparrot'], { fetch: png, budget: { left: 0 } })).toMatch(/not saved: already \d+ files downloaded this run/);
     } finally {
       off();
     }

@@ -14,6 +14,7 @@ import { FileError, loadFileBytes, resolveFile } from '../files/store.js';
 import { formatBytes, sniffMime } from '../files/format.js';
 import { log } from '../log.js';
 import { cleanEmojiName } from './emoji.js';
+import { forgetEmojiList } from './emoji-download.js';
 
 /** Image types emoji.add takes (its error_bad_format: "GIF, JPEG, PNG, or WEBP"). */
 export const EMOJI_MIMES: Record<string, string> = { 'image/png': 'png', 'image/gif': 'gif', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
@@ -74,6 +75,7 @@ export async function uploadEmoji(ctx: Pick<ToolContext, 'threadId' | 'speakerId
     log.debug({ err, code, name }, 'emoji.add failed');
     return ADD_ERRORS[code ?? ''] ?? `Couldn't add :${name}: (${code || errMsg(err)}).`;
   }
+  await forgetEmojiList();
   await appendEvent(ctx.threadId, 'emoji_added', 'bot', { name, fileId: f.id, turnId: ctx.turnId ?? null }).catch((err) => log.debug({ err }, 'emoji_added event failed'));
   return `Added :${name}: from ${f.id}.`;
 }

@@ -9,6 +9,7 @@ import { limits } from '../config.js';
 import { redis } from '../core/redis.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { registerTool, type ToolContext } from '../core/tools.js';
+import { takeLimit } from '../features/guard.js';
 import { createFile, FileError } from '../files/store.js';
 import { formatBytes, sniffMime } from '../files/format.js';
 import { log } from '../log.js';
@@ -49,7 +50,8 @@ export function lookupEmoji(list: Record<string, string>, raw: string): EmojiLoo
   const name = cleanEmojiName(raw).split('::')[0]!;
   let current = name;
   for (let hop = 0; hop <= MAX_ALIAS_HOPS; hop++) {
-    const v = list[current];
+    // Own string entries only: "constructor" / "__proto__" must not resolve to Object.prototype members.
+    const v = Object.hasOwn(list, current) && typeof list[current] === 'string' ? list[current] : undefined;
     if (v === undefined) return hop === 0 ? { kind: 'missing', name } : { kind: 'standard', name };
     if (!v.startsWith('alias:')) return { kind: 'custom', name, url: v, ...(current !== name ? { aliasOf: current } : {}) };
     current = v.slice('alias:'.length);
@@ -75,7 +77,11 @@ const defaultFetcher: EmojiFetcher = (url, signal) =>
 type DownloadCtx = Pick<ToolContext, 'role' | 'threadId' | 'speakerId' | 'turnId' | 'runId' | 'subagentId' | 'abortSignal'>;
 
 /** Save custom emoji into the file store. One line per name: its file id, or why not. */
-export async function downloadEmojis(ctx: DownloadCtx, names: string[], opts: { fetch?: EmojiFetcher } = {}): Promise<string> {
+export async function downloadEmojis(
+  ctx: DownloadCtx,
+  names: string[],
+  opts: { fetch?: EmojiFetcher; budget?: { left: number } } = {},
+): Promise<string> {
   const wanted = [...new Set(names.map((n) => cleanEmojiName(n).split('::')[0]!).filter(Boolean))];
   if (!wanted.length) return 'Give at least one emoji name.';
   if (wanted.length > limits.emojiDownloadMaxPerCall) return `At most ${limits.emojiDownloadMaxPerCall} emoji per call.`;
@@ -92,6 +98,10 @@ export async function downloadEmojis(ctx: DownloadCtx, names: string[], opts: { 
   let saved = 0;
   for (const raw of wanted) {
     const hit = lookupEmoji(list, raw);
+    if (hit.kind === 'custom' && opts.budget && opts.budget.left <= 0) {
+      lines.push(`:${hit.name}: not saved: already ${limits.createFileMaxPerTurn} files downloaded this ${ctx.runId ? 'run' : 'turn'}.`);
+      continue;
+    }
     if (hit.kind === 'missing') {
       lines.push(`:${hit.name}: no custom emoji with that name here (standard emoji can't be downloaded; search_emojis finds custom ones).`);
       continue;
@@ -133,6 +143,7 @@ export async function downloadEmojis(ctx: DownloadCtx, names: string[], opts: { 
         ...(scope ? { idempotencyKey: `${scope}:emoji:${createHash('sha256').update(hit.name).update('\0').update(res.body).digest('hex').slice(0, 32)}` } : {}),
       });
       saved++;
+      if (opts.budget) opts.budget.left--;
       lines.push(`:${hit.name}: ${f.id} (${f.name}, ${formatBytes(f.size)}${hit.aliasOf ? `, alias of :${hit.aliasOf}:` : ''})`);
     } catch (err) {
       if (err instanceof BlockedUrlError || err instanceof FileError) lines.push(`:${hit.name}: ${err.message}`);
@@ -149,12 +160,19 @@ export async function downloadEmojis(ctx: DownloadCtx, names: string[], opts: { 
 registerTool({
   name: 'download_emoji',
   roles: ['front', 'child'],
-  build: (ctx) =>
-    tool({
+  build: (ctx) => {
+    // Files per turn / run, like save_url (a call caps names, not repeated calls).
+    const budget = { left: limits.createFileMaxPerTurn };
+    return tool({
       description: `Save this workspace's custom emoji images as files (by name, aliases followed) and get their file ids: to look at one (read_file), post it (reply files) or use it in a sandbox. Up to ${limits.emojiDownloadMaxPerCall} per call. Standard Unicode emoji have no image here.`,
       inputSchema: z.object({
         names: z.array(z.string()).min(1).max(limits.emojiDownloadMaxPerCall).describe('Emoji names without colons, e.g. ["partyparrot", "yay"]'),
       }),
-      execute: async ({ names }) => downloadEmojis(ctx, names),
-    }),
+      execute: async ({ names }) => {
+        const over = await takeLimit('fetch', ctx.speakerId, ctx.threadId);
+        if (over) return over;
+        return downloadEmojis(ctx, names, { budget });
+      },
+    });
+  },
 });
