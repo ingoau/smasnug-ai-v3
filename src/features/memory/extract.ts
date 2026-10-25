@@ -10,7 +10,7 @@ import { env, limits } from '../../config.js';
 import { redis } from '../../core/redis.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
-import { chatModel, MODELS } from '../../models.js';
+import { chatModel, MODELS, modelOptions } from '../../models.js';
 import { recordModelUsage } from '../guard.js';
 import { userProfile } from '../util.js';
 import { factAge } from './render.js';
@@ -244,7 +244,7 @@ export async function proposeOps(opts: {
     instructions: extractionInstructions(opts.participant),
     prompt: extractionPrompt(opts.transcript, opts.existing),
     output: Output.object({ schema: MemoryOpsSchema, name: 'memory_ops' }),
-    providerOptions: { openrouter: { reasoning: { effort: 'low' } } },
+    providerOptions: modelOptions({ effort: 'low' }),
     maxRetries: 1,
   });
   await recordModelUsage({

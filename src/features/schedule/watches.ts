@@ -21,7 +21,7 @@ import type { ToolContext } from '../../core/tools.js';
 import { getUserInfo, getUserNames } from '../../context/users.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
-import { chatModel, MODELS } from '../../models.js';
+import { chatModel, MODELS, modelOptions } from '../../models.js';
 import { ensureThreadRun } from '../../pipeline/scheduler.js';
 import { fetchPage, type FetchedPage } from '../../tools/fetch-url.js';
 import { BlockedUrlError } from '../../tools/safe-fetch.js';
@@ -123,7 +123,7 @@ export const defaultDeps: WatchDeps = {
       system: JUDGE_SYSTEM,
       prompt: `Source: ${SOURCE_LABEL[o.source]} "${o.target}"\nUser's criteria: ${o.criteria}\n\nChanges since the last check:\n${untrusted('watch check', o.findings)}`,
       // Reasoning off, like the Luna gate fallback.
-      providerOptions: { openrouter: { reasoning: { effort: 'none' } } } as any,
+      providerOptions: modelOptions({ effort: 'none' }),
       maxOutputTokens: 200,
       temperature: 0,
       maxRetries: 1,

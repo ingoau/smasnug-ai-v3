@@ -11,7 +11,7 @@ import { env, limits } from '../config.js';
 import { registerTool, type ToolContext } from '../core/tools.js';
 import { getBotIdentity, SlackBusyError } from '../core/slack.js';
 import { recordModelUsage } from '../features/guard.js';
-import { chatModel, MODELS } from '../models.js';
+import { chatModel, MODELS, modelOptions } from '../models.js';
 import { annotateTsDates, formatMessage, userIdsIn, type FormatEnv, type RenderMsg } from '../context/format.js';
 import { fetchReplies } from '../context/slack-messages.js';
 import { getUserNames } from '../context/users.js';
@@ -128,7 +128,7 @@ registerTool({
             model: chatModel(MODELS.child),
             system: askThreadSystemPrompt(),
             prompt: askThreadUserPrompt({ question, where: t.where, transcript: transcript.text }),
-            providerOptions: { openrouter: { ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}), usage: { include: true } } },
+            providerOptions: modelOptions({ effort: reasoningEffort }),
             maxOutputTokens: MAX_OUTPUT_TOKENS,
             maxRetries: 1,
             abortSignal: AbortSignal.any(signals),

@@ -15,7 +15,7 @@ import { z } from 'zod';
 import { env, limits } from '../config.js';
 import { registerTool, type ToolContext } from '../core/tools.js';
 import { recordModelUsage } from '../features/guard.js';
-import { chatModel, MODELS } from '../models.js';
+import { chatModel, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
 import { EXTRAS, getExtra } from '../tools/extras.js';
 import { errMsg, untrusted } from '../tools/util.js';
@@ -120,7 +120,7 @@ export const fileAnswerer = {
       model: chatModel(MODELS.child),
       system: askFileSystemPrompt(),
       messages: o.messages,
-      providerOptions: { openrouter: { ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}), usage: { include: true } } },
+      providerOptions: modelOptions({ effort: reasoningEffort }),
       maxOutputTokens: ASK_FILE_MAX_OUTPUT_TOKENS,
       maxRetries: 1,
       abortSignal: o.abortSignal,

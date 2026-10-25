@@ -102,7 +102,7 @@ export async function spawnSubagent(opts: {
   }
   const subagentId = shortId('sa');
   const title = oneLine(opts.title, 80) || 'Subagent';
-  const model = MODELS.child;
+  const model = opts.sandbox ? MODELS.sandbox : MODELS.child;
   const cardId = await ensureTurnCard({ threadId: opts.threadId, turnId: opts.turnId });
   const runId = await sql.begin(async (tx) => {
     await tx`insert into subagents (id, thread_id, owner_id, title, status, seeded_from, sandbox) values (${subagentId}, ${opts.threadId}, ${opts.ownerId}, ${title}, 'running', ${seededFrom}, ${opts.sandbox ?? false})`;

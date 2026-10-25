@@ -23,7 +23,7 @@ import { enqueue, QUEUE } from '../../core/queues.js';
 import { redis } from '../../core/redis.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
-import { chatModel, MODELS } from '../../models.js';
+import { chatModel, MODELS, modelOptions } from '../../models.js';
 import { checkEntry, recordModelUsage } from '../guard.js';
 import { sendCommand } from './client.js';
 import { grantLost } from './lifecycle.js';
@@ -135,7 +135,7 @@ async function topUp(session: DjSession, status: HfmMessage, room: number, jobKe
     instructions: PICKER_INSTRUCTIONS,
     prompt: pickerPrompt({ session, nowPlaying: trackLabel(nowPlaying), queue: queue.map((t) => `${trackLabel(t)}${t.automatic ? ' (autoplay)' : ''}`), conversation, count: room + limits.djAutoExtraCandidates }),
     output: Output.object({ schema: PickSchema, name: 'songs' }),
-    providerOptions: { openrouter: { reasoning: { effort: 'low' } } },
+    providerOptions: modelOptions({ effort: 'low' }),
     maxRetries: 1,
     abortSignal: AbortSignal.timeout(60_000),
   });

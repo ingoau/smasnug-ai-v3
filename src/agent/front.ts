@@ -21,7 +21,7 @@ import { loadPendingActions, renderPendingActions } from '../features/pending.js
 import { HUDDLE_DJ_PROMPT, renderDjState } from '../features/huddlefm/render.js';
 import { huddleFmConfigured } from '../features/huddlefm/client.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
-import { chatModel, MODELS } from '../models.js';
+import { chatModel, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
 import { TurnTiming } from '../core/timing.js';
 import { freezeCard } from './cards.js';
@@ -742,14 +742,15 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     turnCalls.length = 0;
     // One model call normally. A step that ends with plain text and no tool call ends the SDK's loop; when nothing
     // visible went out, the turn gets exactly one more call with a note asking it to send the text with reply (or
-    // end_turn). `toolChoice: 'required'` should make that rare: this is the backup for a provider that ignores it.
+    // end_turn). `toolChoice: 'required'` should make that rare: this is the backup for a provider that ignores it, and
+    // for Claude, which runs with 'auto' so it can think before a tool call (models.ts adaptCall).
     for (;;) {
       const earlierSteps = doneSteps.length;
       const result = streamText({
         model: chatModel(MODELS.front),
         // parallel_tool_calls is the provider default; set explicitly because the prompt relies on several calls per step
         // (the AI SDK runs a step's tool calls concurrently).
-        providerOptions: { openrouter: { reasoning: { effort: env.FRONT_REASONING_EFFORT }, usage: { include: true }, parallel_tool_calls: true } },
+        providerOptions: modelOptions({ effort: env.FRONT_REASONING_EFFORT, parallelToolCalls: true }),
         instructions: system,
         messages: convo,
         tools,

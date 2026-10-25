@@ -10,7 +10,7 @@ import { sql } from '../db/index.js';
 import { appendEvent, parseThreadId } from '../core/events.js';
 import { toolsFor } from '../core/tools.js';
 import { recordModelUsage } from '../features/guard.js';
-import { chatModel, MODELS } from '../models.js';
+import { chatModel, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
 import { WORKER_ID } from '../worker/identity.js';
 import { scheduleCardRender } from './cards.js';
@@ -253,7 +253,7 @@ async function runClaimed(run: RunRow): Promise<void> {
     subagentId: sa.id,
     runId: run.id,
     abortSignal: controller.signal,
-    // queueUserImage deliberately unset: Luna accepts images in tool results.
+    // queueUserImage deliberately unset: the chat models accept images in tool results.
     extras: { [SLACK_WAIT_EXTRA]: (ev: SlackWaitEvent) => onSlackWait(ev), [SEARCH_DEFER_EXTRA]: deferSearch },
   });
   tools.wait_for_searches = tool({
@@ -271,8 +271,8 @@ async function runClaimed(run: RunRow): Promise<void> {
   });
   if (!sandbox) for (const name of SANDBOX_TOOL_NAMES) delete tools[name];
   const instructions = [childSystemPrompt(), skillsPrompt('child'), sandbox ? sandboxChildPrompt({ previews: previewsConfigured() }) : ''].filter(Boolean).join('\n\n');
-  // Every subagent runs on MODELS.child (runs.model records it).
-  const modelId = MODELS.child;
+  // Subagents run on MODELS.child, sandbox ones on the stronger MODELS.sandbox (runs.model records it at spawn).
+  const modelId = sandbox ? MODELS.sandbox : MODELS.child;
   const model = chatModel(modelId);
   const reasoningEffort = env.CHILD_REASONING_EFFORT !== 'default' ? env.CHILD_REASONING_EFFORT : null;
   const history: ModelMessage[] = Array.isArray(sa.history) ? sa.history : [];
@@ -412,7 +412,7 @@ async function runClaimed(run: RunRow): Promise<void> {
         activeTools: overBudget ? [] : undefined,
         stopWhen: stepCountIs(1),
         abortSignal: controller.signal,
-        providerOptions: { openrouter: { ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}), usage: { include: true }, ...(overBudget ? {} : { parallel_tool_calls: true }) } },
+        providerOptions: modelOptions({ effort: reasoningEffort, ...(overBudget ? {} : { parallelToolCalls: true }) }),
       });
       let stepText = '';
       let finishReason = '';

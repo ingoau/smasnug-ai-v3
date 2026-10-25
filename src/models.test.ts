@@ -8,6 +8,13 @@ vi.hoisted(() => {
 const {
   withFallback,
   resetProviderCooldown,
+  adaptCall,
+  modelOptions,
+  isClaude,
+  openrouterClaudeId,
+  anthropicClaudeId,
+  claudeEffort,
+  CLAUDE_MIN_OUTPUT_TOKENS,
   classifyProviderFailure,
   classifyProviderError,
   errorStatus,
@@ -190,5 +197,82 @@ describe('withFallback', () => {
     const m = withFallback(fake('hc', { doGenerate: async () => { throw new Error('aborted'); } }), fake('or', { doGenerate: fb }));
     await expect(m.doGenerate({ ...opts, abortSignal: ac.signal })).rejects.toThrow('aborted');
     expect(fb).not.toHaveBeenCalled();
+  });
+});
+
+describe('Claude model ids', () => {
+  it('maps between Anthropic and OpenRouter ids', () => {
+    expect(isClaude('claude-haiku-5-5')).toBe(true);
+    expect(isClaude('anthropic/claude-sonnet-5.5')).toBe(true);
+    expect(isClaude('openai/gpt-6-luna')).toBe(false);
+    expect(openrouterClaudeId('claude-haiku-5-5')).toBe('anthropic/claude-haiku-5.5');
+    expect(openrouterClaudeId('claude-opus-5')).toBe('anthropic/claude-opus-5');
+    expect(openrouterClaudeId('anthropic/claude-sonnet-5.5')).toBe('anthropic/claude-sonnet-5.5');
+    expect(anthropicClaudeId('anthropic/claude-sonnet-5.5')).toBe('claude-sonnet-5-5');
+    expect(anthropicClaudeId('claude-haiku-5-5')).toBe('claude-haiku-5-5');
+  });
+
+  it('Anthropic budget errors (no credit, console spend limit) skip until midnight', () => {
+    const now = Date.parse('2026-10-07T21:30:00Z');
+    for (const text of ['Your credit balance is too low to access the Anthropic API.', 'You have reached your specified API usage limits. You will regain access on 2026-11-01.']) {
+      expect(classifyProviderFailure({ status: 400, text }, now).kind).toBe('budget');
+    }
+  });
+});
+
+describe('adaptCall', () => {
+  const call = (extra: Record<string, unknown> = {}) =>
+    ({
+      prompt: [
+        { role: 'system', content: 'sys' },
+        { role: 'user', content: [{ type: 'text', text: 'a' }] },
+        { role: 'user', content: [{ type: 'text', text: 'b' }] },
+      ],
+      providerOptions: modelOptions({ effort: 'none', parallelToolCalls: true }),
+      toolChoice: { type: 'required' },
+      temperature: 0,
+      maxOutputTokens: 16,
+      ...extra,
+    }) as any;
+
+  it('Luna on OpenRouter: the settings as before, the call otherwise untouched', () => {
+    const out = adaptCall(call(), 'openrouter');
+    expect(out.providerOptions).toEqual({ openrouter: { reasoning: { effort: 'none' }, usage: { include: true }, parallel_tool_calls: true } });
+    expect(out).toMatchObject({ toolChoice: { type: 'required' }, temperature: 0, maxOutputTokens: 16 });
+    expect(out.prompt[0]!.providerOptions).toBeUndefined();
+  });
+
+  it('Claude via Hack Club / OpenRouter: effort at least low, no forced tools or sampling, room for thinking, cache breakpoints', () => {
+    const out = adaptCall(call(), 'openrouter-claude');
+    expect(out.providerOptions).toEqual({ openrouter: { reasoning: { effort: 'low' }, usage: { include: true }, parallel_tool_calls: true } });
+    expect(out.toolChoice).toEqual({ type: 'auto' });
+    expect(out.temperature).toBeUndefined();
+    expect(out.maxOutputTokens).toBe(CLAUDE_MIN_OUTPUT_TOKENS);
+    expect(out.prompt.map((m: any) => m.providerOptions?.anthropic?.cacheControl?.type)).toEqual(['ephemeral', undefined, 'ephemeral']);
+  });
+
+  it('Claude direct: anthropic options with adaptive thinking that tolerates edited history', () => {
+    const out = adaptCall(call({ providerOptions: modelOptions({ effort: 'medium', parallelToolCalls: false }) }), 'anthropic');
+    expect(out.providerOptions).toEqual({
+      anthropic: { thinking: { type: 'adaptive', blockBinding: { prefixMismatchBehavior: 'drop_block' } }, effort: 'medium', disableParallelToolUse: true },
+    });
+    expect(adaptCall(call({ providerOptions: undefined, maxOutputTokens: 9000 }), 'anthropic').maxOutputTokens).toBe(9000);
+    expect(claudeEffort('minimal')).toBe('low');
+    expect(claudeEffort('high')).toBe('high');
+  });
+});
+
+describe('provider chain', () => {
+  it('each tier falls back to the next with its own cooldown', async () => {
+    const hcCooldown = new ProviderCooldown('hc');
+    const anCooldown = new ProviderCooldown('an');
+    const hc = vi.fn(async () => { throw httpError(402); });
+    const an = vi.fn(async () => { throw Object.assign(new Error('Your credit balance is too low'), { statusCode: 400 }); });
+    const or = vi.fn(async () => ({ content: [{ type: 'text', text: 'luna' }] }) as any);
+    const m = withFallback(fake('hc', { doGenerate: hc }), withFallback(fake('an', { doGenerate: an }), fake('or', { doGenerate: or }), anCooldown), hcCooldown);
+    expect((await m.doGenerate(opts)).content).toEqual([{ type: 'text', text: 'luna' }]);
+    await m.doGenerate(opts);
+    expect([hc.mock.calls.length, an.mock.calls.length, or.mock.calls.length]).toEqual([1, 1, 2]);
+    expect(hcCooldown.active() && anCooldown.active()).toBe(true);
   });
 });
