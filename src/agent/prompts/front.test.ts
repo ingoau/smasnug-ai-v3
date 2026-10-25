@@ -96,6 +96,14 @@ describe('frontSystemPrompt delegation and scope rules', () => {
     expect(p).toMatch(/Asked for something your tools don't support here: say so plainly\. Don't ask setup questions/);
   });
 
+  it('does not ping people who are not already in the thread unless asked to contact them', () => {
+    expect(p).toMatch(/Don't ping people who aren't already in this thread unless the speaker explicitly asks you to contact them/);
+    expect(p).toMatch(/Mention people already in this thread as <@U123>/);
+    expect(p).toMatch(/Name anyone else without <@U…> unless the speaker asked you to ping or contact them/);
+    expect(p).toMatch(/send_message only when the speaker clearly asks/);
+    expect(p).toMatch(/never @channel\/@here\/@everyone or group pings/);
+  });
+
   it('single-file deliverables are written with create_file', () => {
     expect(p).toMatch(/write the file yourself with create_file/);
   });
