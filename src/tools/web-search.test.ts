@@ -3,9 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 vi.hoisted(() => {
   process.env.OPENROUTER_KEY ||= 'test';
 });
-vi.mock('../features/guard.js', () => ({ takeLimit: async () => null }));
+vi.mock('../features/guard.js', () => ({ takeLimit: async () => null, recordModelUsage: async () => {} }));
 
-const { runWebSearch, EXA_SEARCH_URL } = await import('./web-search.js');
+const { runWebSearch, EXA_SEARCH_URL, formatAnthropicResults, resetWebSearchCooldown } = await import('./web-search.js');
 const { ProviderCooldown } = await import('../models.js');
 
 const ctx = { speakerId: 'U0WEB', threadId: 'C1:1.0' };
@@ -61,5 +61,62 @@ describe('web_search Hack Club proxy cooldown', () => {
     expect(await runWebSearch(ctx, { query: 'q' }, deps)).toMatch(/^Web search failed \(HTTP 429\)/);
     expect(await runWebSearch(ctx, { query: 'q' }, deps)).toMatch(/^Web search is unavailable right now/);
     expect(urls).toHaveLength(1);
+  });
+});
+
+/** What generateText returns for one Claude call with the web_search server tool (the parts we read). */
+const claudeSearchResult = () => ({
+  content: [
+    { type: 'tool-call', toolName: 'web_search', input: { query: 'q' } },
+    {
+      type: 'tool-result',
+      toolName: 'web_search',
+      output: [
+        { type: 'web_search_result', url: 'https://b.example/', title: 'Uncited', pageAge: null, encryptedContent: 'x' },
+        { type: 'web_search_result', url: 'https://a.example/', title: 'Cited  page', pageAge: 'March 3, 2026', encryptedContent: 'x' },
+        { type: 'web_search_result', url: 'javascript:alert(1)', title: 'bad', pageAge: null, encryptedContent: 'x' },
+      ],
+    },
+    {
+      type: 'text',
+      text: 'A says the thing.',
+      providerMetadata: { anthropic: { citations: [{ type: 'web_search_result_location', url: 'https://a.example/', title: 'Cited page', cited_text: 'the  thing', encrypted_index: 'i' }] } },
+    },
+  ],
+  usage: { inputTokens: 900, outputTokens: 40 },
+});
+
+describe('web_search Anthropic fallback', () => {
+  it('renders cited results first, with their passages and the notes, as untrusted content', () => {
+    const out = formatAnthropicResults('q', claudeSearchResult().content, 5);
+    expect(out.sources).toEqual([
+      { url: 'https://a.example/', title: 'Cited page' },
+      { url: 'https://b.example/', title: 'Uncited' },
+    ]);
+    expect(out.text).toContain('1. Cited page\n   https://a.example/\n   March 3, 2026\n   > the thing');
+    expect(out.text).toContain('Search notes:\nA says the thing.');
+    expect(out.text).not.toContain('javascript:');
+    expect(formatAnthropicResults('q', claudeSearchResult().content, 1).sources).toHaveLength(1);
+    expect(formatAnthropicResults('q', [], 5).text).toBe('No web results for "q".');
+  });
+
+  it('runs after the Hack Club proxy fails and before Exa direct; credit out → skipped until midnight', async () => {
+    resetWebSearchCooldown();
+    const { f, urls } = fakeFetch(() => new Response('boom', { status: 500 }));
+    const search = vi.fn(async () => claudeSearchResult());
+    const deps = { apiKey: 'k_exa', hackclubKey: 'sk-hc', fetch: f, hackclubCooldown: new ProviderCooldown('test exa'), anthropicSearch: search };
+    const out = await runWebSearch(ctx, { query: 'q' }, deps);
+    expect(out).toMatchObject({ sources: [{ url: 'https://a.example/' }, { url: 'https://b.example/' }] });
+    expect(urls).toEqual([expect.stringContaining('hackclub')]);
+
+    const broke = vi.fn(async () => {
+      throw Object.assign(new Error('Your credit balance is too low to access the Anthropic API.'), { statusCode: 400 });
+    });
+    const deps2 = { ...deps, anthropicSearch: broke };
+    expect(await runWebSearch(ctx, { query: 'q' }, deps2)).toMatchObject({ sources: [{ url: 'https://a.example/' }] }); // Exa direct
+    await runWebSearch(ctx, { query: 'q' }, deps2);
+    expect(broke).toHaveBeenCalledTimes(1);
+    expect(urls.filter((u) => u === EXA_SEARCH_URL)).toHaveLength(2);
+    resetWebSearchCooldown();
   });
 });
