@@ -13,6 +13,8 @@ import { log } from '../log.js';
 import { markMessage } from '../core/timing.js';
 import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
+import { holdForConsent } from './consent.js';
+import { hasAgreed } from '../features/privacy.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
 import { answersOtherOffer, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
@@ -163,6 +165,22 @@ async function handleNewMessage(ev: MessageEvent) {
         { channel: channelId, user: authorId, text: RATE_LIMITED_TEXT, ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) },
         { idempotencyKey: `rate-limited:${channelId}:${ev.ts}` },
       ).catch((err) => log.warn({ err }, 'rate-limit ephemeral failed'));
+    }
+    return;
+  }
+
+  // Privacy policy not agreed (consent.ts): a DM / mention is held behind the prompt, anything else dropped. The
+  // message stays stored as context either way.
+  if (!(await hasAgreed(authorId))) {
+    if (decision.reason === 'dm' || decision.reason === 'mention') {
+      await holdForConsent({
+        userId: authorId,
+        channelId,
+        conversation: isDm ? channelId : threadId,
+        ...(ev.thread_ts ? { promptThreadTs: ev.thread_ts } : {}),
+        messageTs: ev.ts,
+        item: { kind: 'batch', threadId, ts: ev.ts, reason: decision.reason },
+      });
     }
     return;
   }

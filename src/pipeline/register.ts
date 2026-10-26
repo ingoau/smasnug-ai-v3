@@ -4,6 +4,8 @@ import { QUEUE, type QueueName } from '../core/queues.js';
 import { registerAction } from '../core/actions.js';
 import { REPLY_CHOICE_ACTION } from '../agent/reply-buttons.js';
 import { handleReplyChoice } from './reply-choice.js';
+import { handlePrivacyAgree } from './consent.js';
+import { PRIVACY_AGREE_ACTION, PRIVACY_READ_ACTION, handlePrivacyRead } from '../features/privacy.js';
 import { processDebounce } from './fire.js';
 import { enableLocalDebounce } from './debounce.js';
 import { recoverOrphanedTurns } from './maintenance.js';
@@ -19,6 +21,9 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
 
 /** Quick-reply buttons under bot replies: a press acts as the presser replying with the label. */
 registerAction(REPLY_CHOICE_ACTION, handleReplyChoice);
+/** Privacy policy prompt (consent.ts): agree (replays held messages) and read (modal; also on App Home). */
+registerAction(PRIVACY_AGREE_ACTION, handlePrivacyAgree);
+registerAction(PRIVACY_READ_ACTION, handlePrivacyRead);
 
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {

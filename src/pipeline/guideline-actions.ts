@@ -9,6 +9,8 @@ import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { addToBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
+import { holdForConsent } from './consent.js';
+import { hasAgreed } from '../features/privacy.js';
 import { groupRedirectText } from './guidelines.js';
 import { RATE_LIMITED_TEXT } from './intake.js';
 import { handleAgentSessionStopped } from './stop.js';
@@ -36,6 +38,11 @@ export async function redirectGroupPing(ev: SlackMessage & { channel: string; us
         log.warn({ err }, 'rate-limit ephemeral failed'),
       );
     }
+    return null;
+  }
+  // Privacy policy not agreed (consent.ts): nothing posted until they agree, then this runs again.
+  if (!(await hasAgreed(authorId))) {
+    await holdForConsent({ userId: authorId, channelId, conversation: threadIdOf(channelId, ev.ts), messageTs: ev.ts, item: { kind: 'redirect', event: ev } });
     return null;
   }
 

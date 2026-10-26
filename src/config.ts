@@ -56,6 +56,8 @@ const Env = z.object({
   GATE_RECENT_PARTNER_THRESHOLD: z.coerce.number().min(0).max(1).default(0.65),
   /** Threshold once the thread is cooling (idle longer than limits.gateCoolingAfterMs). */
   GATE_COOLING_THRESHOLD: z.coerce.number().min(0).max(1).default(0.9),
+  /** Users must agree to PRIVACY.md before the bot works for them (src/features/privacy.ts). Tests default to off. */
+  PRIVACY_CONSENT: z.enum(['on', 'off']).default('on'),
   BOT_DISPLAY_NAME: z.string().default('smasnug ai'),
   LOG_LEVEL: z.string().default('info'),
   /**

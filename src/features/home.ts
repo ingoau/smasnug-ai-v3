@@ -11,6 +11,7 @@ import { getState, listBlocks, setPaused } from './state.js';
 import { isAdmin, mrkdwnEscape, requireAdmin, truncate } from './util.js';
 import { listWorkspaceFacts } from './workspace.js';
 import { scheduleHomeBlocks } from './schedule/home.js';
+import { hasAgreed, PRIVACY_READ_ACTION } from './privacy.js';
 import { sandboxAdminBlocks, sandboxDisclosureBlocks } from '../sandbox/home.js';
 
 const MAX_BLOCKS = 100;
@@ -64,6 +65,13 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
 
   blocks.push(...(await scheduleHomeBlocks(userId).catch((err) => (log.warn({ err }, 'schedule home blocks failed'), []))));
   blocks.push(...sandboxDisclosureBlocks());
+  const agreed = await hasAgreed(userId).catch(() => true);
+  blocks.push(
+    section(
+      agreed ? `*Privacy policy:* you've agreed to ${env.BOT_DISPLAY_NAME}'s current privacy policy.` : `*Privacy policy:* I'll ask you to agree the next time you message me.`,
+      btn(PRIVACY_READ_ACTION, 'Read the privacy policy', 'read'),
+    ),
+  );
   if (isAdmin(userId)) {
     blocks.push(...(await adminBlocks()));
     blocks.push(...(await sandboxAdminBlocks(userId).catch((err) => (log.warn({ err }, 'sandbox home blocks failed'), []))));

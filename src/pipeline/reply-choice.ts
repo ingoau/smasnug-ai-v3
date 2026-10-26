@@ -4,6 +4,7 @@
  *
  * 1. Entry guard (counted like a message; channel disable applies). Blocked users get nothing, rate-limited ones an
  *    ephemeral notice, and the buttons stay for others.
+ * 1b. Privacy policy not agreed (consent.ts): the presser gets the prompt, nothing else happens.
  * 2. Claim the first press atomically; later / double presses get an ephemeral "already answered".
  * 3. Replace the buttons with "<@presser> pressed *label*" (chat.update from DB state; through the plan card when one
  *    lives in that message).
@@ -20,6 +21,8 @@ import { rerenderButtonsMessage } from '../agent/cards.js';
 import { claimPress, loadReplyButtons, setPressedMessageTs } from '../agent/reply-buttons-store.js';
 import { REPLY_CHOICE_ACTION } from '../agent/reply-buttons.js';
 import { guardEntry } from './entry.js';
+import { holdForConsent } from './consent.js';
+import { hasAgreed } from '../features/privacy.js';
 import { neutralizeBroadcasts } from './guidelines.js';
 import { RATE_LIMITED_TEXT } from './intake.js';
 import { scheduleMessages } from './scheduler.js';
@@ -81,6 +84,11 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
   const entry = await guardEntry(ctx.userId, row.channelId);
   if (!entry.ok) {
     if (entry.reason === 'rate_limited') await ephemeral(ctx, row.channelId, threadTs, RATE_LIMITED_TEXT);
+    return;
+  }
+  // Privacy policy not agreed: prompt; the buttons stay, so they can press again after agreeing.
+  if (!(await hasAgreed(ctx.userId))) {
+    await holdForConsent({ userId: ctx.userId, channelId: row.channelId, conversation: row.threadId, promptThreadTs: threadTs, messageTs: pressTs(ctx) });
     return;
   }
 

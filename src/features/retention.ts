@@ -92,6 +92,7 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
 
   await run('pending_sends', sql`delete from pending_sends where created_at < ${older(short)} returning id`);
   await run('idempotency_keys', sql`delete from idempotency_keys where created_at < ${older(short)} returning key`);
+  await run('privacy_held', sql`delete from privacy_held where created_at < ${older(short)} returning id`);
   await run('slack_events_seen', sql`delete from slack_events_seen where received_at < ${older(short)} returning event_id`);
 
   try {
