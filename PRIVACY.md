@@ -1,6 +1,6 @@
 # Privacy policy
 
-smasnug ai is a Slack bot run by Ingo Wolf as a personal project. This policy explains what it collects, why, who it shares it with, and how long it keeps it. By clicking **I agree**, you agree to this policy. If it changes, the bot asks you to agree again.
+smasnug ai is a Slack bot run by Ingo Wolf (@inw) as a personal project. This policy explains what it collects, why, who it shares it with, and how long it keeps it. By clicking **I agree**, you agree to this policy. If it changes, the bot asks you to agree again.
 
 ## What the bot collects
 
@@ -36,8 +36,8 @@ These services handle the data under their own privacy policies.
 
 - See and delete what the bot remembers about you in its App Home.
 - Delete your messages in Slack to remove them from the bot.
-- Stop using the bot at any time, or ask the operator to delete your data.
+- Stop using the bot at any time, or ask the Ingo to delete your data.
 
 ## Contact
 
-Questions or deletion requests: message Ingo Wolf in Slack.
+Questions or deletion requests: message Ingo Wolf (@inw) in Slack.
