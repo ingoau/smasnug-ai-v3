@@ -1,6 +1,6 @@
 /**
  * Background memory extraction. Threads the bot took part in, idle for ~30 min with new conversation since the last
- * pass, get one Luna pass per participant. The model proposes add/update/remove ops; code decides what is applied:
+ * pass, get one model pass per participant. The model proposes add/update/remove ops; code decides what is applied:
  * ops can only target the participant being processed, new/updated facts must quote that participant's own message,
  * and sensitive categories / other people are filtered.
  */
@@ -10,7 +10,7 @@ import { env, limits } from '../../config.js';
 import { redis } from '../../core/redis.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
-import { chatModel, MODELS } from '../../models.js';
+import { chatModel, MODELS, modelOptions } from '../../models.js';
 import { recordModelUsage } from '../guard.js';
 import { userProfile } from '../util.js';
 import { factAge } from './render.js';
@@ -244,7 +244,7 @@ export async function proposeOps(opts: {
     instructions: extractionInstructions(opts.participant),
     prompt: extractionPrompt(opts.transcript, opts.existing),
     output: Output.object({ schema: MemoryOpsSchema, name: 'memory_ops' }),
-    providerOptions: { openrouter: { reasoning: { effort: 'low' } } },
+    providerOptions: modelOptions({ effort: 'low' }),
     maxRetries: 1,
   });
   await recordModelUsage({

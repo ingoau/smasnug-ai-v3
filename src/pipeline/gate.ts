@@ -1,7 +1,7 @@
 /** Relevance gate: a cheap yes/no model call for unmentioned follow-ups in engaged threads. No tools. */
 import { generateText } from 'ai';
 import { env, limits } from '../config.js';
-import { chatModel, MODELS } from '../models.js';
+import { chatModel, MODELS, modelOptions } from '../models.js';
 import type { StoredMessage } from '../core/types.js';
 import { gateSystemPrompt, gateUserPrompt } from './gate-prompt.js';
 
@@ -73,7 +73,7 @@ async function runDecisionsGate(model: string, context: string, newMessages: str
 }
 
 /** Reasoning off for the gate. Verified live: `effort: 'none'` → 0 reasoning tokens, ~1s latency. */
-export const GATE_PROVIDER_OPTIONS = { openrouter: { reasoning: { effort: 'none' } } } as const;
+export const GATE_PROVIDER_OPTIONS = modelOptions({ effort: 'none' });
 
 /** Compact plain rendering for the gate (the full context renderer belongs to the context module). */
 export function renderForGate(msgs: StoredMessage[], botUserId: string, botName = env.BOT_DISPLAY_NAME): string {
@@ -132,7 +132,7 @@ export async function runGate(opts: {
         context: renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId),
         newMessages: renderForGate(opts.newMessages, opts.botUserId),
       }),
-      providerOptions: GATE_PROVIDER_OPTIONS as any,
+      providerOptions: GATE_PROVIDER_OPTIONS,
       maxOutputTokens: 16,
       temperature: 0,
       maxRetries: 1,

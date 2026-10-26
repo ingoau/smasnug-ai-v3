@@ -453,7 +453,7 @@ describe('runFrontTurn: parallel tool calls', () => {
     h.model = mockModel([toolStep(['reply', { text: 'on it' }], ['react', { emoji: 'eyes' }]), textStep('')]);
     await runFrontTurn(turn({ id: 60 }), io().io);
     const call = ((h.model as any).doStreamCalls as any[])[0];
-    expect(call.providerOptions.openrouter.parallel_tool_calls).toBe(true);
+    expect(call.providerOptions.smasnug.parallelToolCalls).toBe(true); // translated per provider in models.ts (adaptCall)
     expect(h.slack.filter((c) => c.method === 'reactions.add')).toHaveLength(1);
   });
 });

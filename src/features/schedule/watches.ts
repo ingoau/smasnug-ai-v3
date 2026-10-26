@@ -7,7 +7,7 @@
  *  - web_search: the result URLs seen so far (web_search's runWebSearch, counts against the owner's limit);
  *  - slack_search: the newest match ts seen (public channels only, verified, `##` dropped, owner/bot messages and
  *    the watch's own thread ignored).
- * A check with candidate changes asks a cheap no-tools model call (Luna, reasoning off) whether they are meaningful
+ * A check with candidate changes asks a cheap no-tools model call (the gate model, lowest reasoning) whether they are meaningful
  * per the owner's criteria; only then a 'scheduled' front turn runs in the watch's thread with the findings as
  * untrusted data. At most one notification per check (unique (watch_id, check_no)), a daily cap per watch, entry
  * checks every check, expiry after at most 30 days.
@@ -21,7 +21,7 @@ import type { ToolContext } from '../../core/tools.js';
 import { getUserInfo, getUserNames } from '../../context/users.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
-import { chatModel, MODELS } from '../../models.js';
+import { chatModel, MODELS, modelOptions } from '../../models.js';
 import { ensureThreadRun } from '../../pipeline/scheduler.js';
 import { fetchPage, type FetchedPage } from '../../tools/fetch-url.js';
 import { BlockedUrlError } from '../../tools/safe-fetch.js';
@@ -122,8 +122,8 @@ export const defaultDeps: WatchDeps = {
       model: chatModel(MODELS.gate),
       system: JUDGE_SYSTEM,
       prompt: `Source: ${SOURCE_LABEL[o.source]} "${o.target}"\nUser's criteria: ${o.criteria}\n\nChanges since the last check:\n${untrusted('watch check', o.findings)}`,
-      // Reasoning off, like the Luna gate fallback.
-      providerOptions: { openrouter: { reasoning: { effort: 'none' } } } as any,
+      // Lowest reasoning, like the gate fallback (Claude: low; Luna: off).
+      providerOptions: modelOptions({ effort: 'none' }),
       maxOutputTokens: 200,
       temperature: 0,
       maxRetries: 1,

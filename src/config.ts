@@ -24,8 +24,23 @@ const Env = z.object({
   /** Hack Club AI (OpenRouter proxy): primary chat provider when set, OpenRouter is the fallback (src/models.ts). */
   HACKCLUB_AI_KEY: z.string().optional(),
   HACKCLUB_AI_URL: z.string().default('https://ai.hackclub.com/proxy/v1'),
+  /**
+   * Anthropic API (Claude models direct, the monthly credit): second chat provider for Claude models (after Hack Club,
+   * before OpenRouter), and web_search's fallback after the Hack Club Exa proxy (src/models.ts, src/tools/web-search.ts).
+   */
+  ANTHROPIC_API_KEY: z.string().optional(),
+  /**
+   * Chat model per role (src/models.ts). A Claude id (`claude-…`) runs on Hack Club (as `anthropic/claude-….x`), then
+   * the Anthropic API, then MODEL_LUNA on OpenRouter (paid credit, so the cheaper model). Any other id (e.g.
+   * `openai/gpt-6-luna`) runs on Hack Club then OpenRouter as before. `sandbox` = subagents spawned with a sandbox.
+   */
+  MODEL_GATE: z.string().default('claude-haiku-5-5'),
+  MODEL_FRONT: z.string().default('claude-haiku-5-5'),
+  MODEL_CHILD: z.string().default('claude-haiku-5-5'),
+  MODEL_SANDBOX: z.string().default('claude-sonnet-5-5'),
+  /** The OpenRouter fallback for Claude roles. */
   MODEL_LUNA: z.string().default('openai/gpt-6-luna'),
-  /** Relevance gate: a decisions model on OpenRouter's Decisions API, or 'luna' to use the chat model. */
+  /** Relevance gate: a decisions model on OpenRouter's Decisions API, or 'luna' to use the chat model (MODEL_GATE). */
   GATE_MODEL: z.string().default('typesafe/jev-1.13'),
   /** Respond when the gate model's probability is at least this (contextual: see gateThreshold in pipeline/rules.ts). */
   GATE_THRESHOLD: z.coerce.number().min(0).max(1).default(0.8),
@@ -49,7 +64,7 @@ const Env = z.object({
    */
   STATUS_ACTIVITY_MODE: z.preprocess((v) => (v === 'overlay' || v === 'text' ? 'tasks' : v), z.enum(['tasks', 'off'])).default('tasks'),
   /**
-   * Front agent reasoning effort on OpenRouter (see docs/perf.md for the latency/quality comparison). `low` relies on
+   * Front agent reasoning effort (Claude: at least `low`, thinking stays on; see docs/perf.md for the latency/quality comparison). `low` relies on
    * required tool calls + the one-time plain-text nudge (front.ts) so it doesn't end turns with unshown text.
    */
   FRONT_REASONING_EFFORT: z.enum(['none', 'minimal', 'low', 'medium']).default('low'),

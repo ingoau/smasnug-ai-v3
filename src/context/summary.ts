@@ -17,7 +17,7 @@ import { getBotIdentity } from '../core/slack.js';
 import { parseThreadId } from '../core/events.js';
 import type { StoredMessage } from '../core/types.js';
 import { recordModelUsage } from '../features/guard.js';
-import { chatModel, MODELS } from '../models.js';
+import { chatModel, MODELS, modelOptions } from '../models.js';
 import { acquireLock } from '../pipeline/lock.js';
 import { log } from '../log.js';
 import { compareTs, formatMessage, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
@@ -118,7 +118,7 @@ export async function processThreadSummary(job: ThreadSummaryJob, opts: { abortS
         model: chatModel(MODELS.child),
         system: summarySystemPrompt(limits.threadSummaryMaxTokens),
         prompt: summaryUserPrompt({ previous: current?.summary, parentLine, messages: batch.map((l) => l.line).join('\n') }),
-        providerOptions: { openrouter: { ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}), usage: { include: true } } },
+        providerOptions: modelOptions({ effort: reasoningEffort }),
         maxOutputTokens: MAX_OUTPUT_TOKENS,
         maxRetries: 1,
         abortSignal: AbortSignal.any(signals),

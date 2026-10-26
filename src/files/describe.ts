@@ -7,7 +7,7 @@
 import { generateText, type ModelMessage } from 'ai';
 import { redis } from '../core/redis.js';
 import { recordModelUsage } from '../features/guard.js';
-import { chatModel, MODELS } from '../models.js';
+import { chatModel, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
 import { fileKind, formatBytes, sanitizeFileName } from './format.js';
 import { loadImageForModel } from './images.js';
@@ -46,7 +46,7 @@ async function generateWithModel(input: DescribeInput): Promise<string> {
     model: chatModel(MODELS.gate),
     system: describeFileSystemPrompt(),
     messages,
-    providerOptions: { openrouter: { reasoning: { effort: 'none' }, usage: { include: true } } },
+    providerOptions: modelOptions({ effort: 'none' }),
     maxOutputTokens: 120,
     maxRetries: 1,
     abortSignal: AbortSignal.timeout(30_000),

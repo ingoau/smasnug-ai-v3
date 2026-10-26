@@ -103,7 +103,7 @@ describe('ask_thread', () => {
     expect(repliesCalls[0]!.token).not.toBe('user'); // the current thread: bot token
     expect(h.prompts).toHaveLength(1);
     expect(h.options[0].tools ?? []).toEqual([]);
-    expect(h.options[0].providerOptions?.openrouter).toMatchObject({ usage: { include: true } }); // children's settings
+    expect(h.options[0].providerOptions?.smasnug).toMatchObject({ effort: 'medium' }); // children's settings (CHILD_REASONING_EFFORT)
     const p = promptText();
     expect(p).toContain('Answer only the question, and only from the thread');
     expect(p).toContain('where should we hold the jam?');

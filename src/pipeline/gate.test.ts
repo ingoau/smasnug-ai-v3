@@ -46,6 +46,6 @@ describe('relevance gate', () => {
     const r = await runGate(opts);
     expect(r.respond).toBe(true);
     expect(r.fallback).toMatch(/503/);
-    expect(r.model).toBe(process.env.MODEL_LUNA ?? 'openai/gpt-6-luna');
+    expect(r.model).toBe(process.env.MODEL_GATE ?? 'claude-haiku-5-5');
   });
 });

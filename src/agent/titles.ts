@@ -7,7 +7,7 @@
  *   all cancelled was finished without one, subagents.ts maybeSynthesize), a job gives the card its
  *   short past-tense title ("Compared 3 hosting options"), the finished plan's title (what Slack shows of it
  *   collapsed).
- * One cheap text call each (Luna, reasoning off), usage recorded. Jobs are idempotent per thread + turn / card + turn.
+ * One cheap text call each (the front model, lowest reasoning), usage recorded. Jobs are idempotent per thread + turn / card + turn.
  */
 import { generateText } from 'ai';
 import { limits } from '../config.js';
@@ -16,7 +16,7 @@ import { getBotIdentity } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { recordModelUsage } from '../features/guard.js';
 import { log } from '../log.js';
-import { chatModel, MODELS } from '../models.js';
+import { chatModel, MODELS, modelOptions } from '../models.js';
 import { cleanTitle, fitTitle, loadSessionInfo, setSessionTitle, SESSION_TITLE_MAX, titleBackoffActive } from '../pipeline/agent-session.js';
 import { scheduleCardRender } from './cards.js';
 
@@ -146,7 +146,7 @@ export const titleModel = {
       system: o.system,
       prompt: o.prompt,
       // Reasoning off: a short label, latency and cost matter more than depth.
-      providerOptions: { openrouter: { reasoning: { effort: 'none' }, usage: { include: true } } } as any,
+      providerOptions: modelOptions({ effort: 'none' }),
       maxOutputTokens: 32,
       temperature: 0.2,
       maxRetries: 1,

@@ -8,10 +8,13 @@ TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK 
 `node_modules/ai/docs`), `@openrouter/ai-sdk-provider`, `@slack/web-api` + `@slack/socket-mode`, Postgres via
 `postgres` (camelCase transform on), Redis via `ioredis`, queues via BullMQ, zod, pino, vitest.
 
-Models: `openai/gpt-6-luna` (gate: reasoning off; front: low (`FRONT_REASONING_EFFORT`; every step must call a tool); children: medium (`CHILD_REASONING_EFFORT`)). Provider: Hack Club AI
-(`HACKCLUB_AI_KEY`, an OpenRouter proxy, free up to $3/day) first, OpenRouter as fallback, via `chatModel()` in
-`src/models.ts` (a spent daily budget: 402, or a 429 mentioning the spending limit/top-up → skip Hack Club until UTC midnight; same rules for the Hack Club Exa proxy). Web search: Exa via Hack Club's Exa proxy, then Exa direct
-(`EXA_API_KEY`, `src/tools/web-search.ts`). Live-test against Hack Club where possible; OpenRouter credit is limited.
+Models (`MODEL_*`, `src/models.ts`): Claude Haiku 5.5 for gate fallback, front (effort low, `FRONT_REASONING_EFFORT`; every step
+must call a tool) and children (medium, `CHILD_REASONING_EFFORT`); Claude Sonnet 5.5 for sandbox children. `chatModel()` tries
+Hack Club AI (`HACKCLUB_AI_KEY`, an OpenRouter proxy, free up to $3/day) → the Anthropic API (`ANTHROPIC_API_KEY`, $100/month
+credit) → `openai/gpt-6-luna` on OpenRouter (paid). A spent budget (402, a 429 mentioning the spending limit/top-up, Anthropic's
+"credit balance is too low") skips that provider until UTC midnight. Pass model settings as `providerOptions: modelOptions({...})`,
+never provider keys: each tier translates them (`adaptCall`). Web search (`src/tools/web-search.ts`): Hack Club's Exa proxy, then
+Anthropic's web search tool, then Exa direct (`EXA_API_KEY`, optional). Live-test against Hack Club where possible; OpenRouter credit is limited.
 Relevance gate: `typesafe/jev-1.13` (a decisions model, OpenRouter's alpha Decisions API, ~0.45s, probability ≥ `GATE_THRESHOLD` 0.8 = respond); falls back to Luna on any error/timeout.
 
 Local infra: `docker compose up -d` (Postgres on 5433, Redis on 6380), `pnpm migrate`.

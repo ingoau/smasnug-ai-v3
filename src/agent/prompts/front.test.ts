@@ -6,7 +6,10 @@ describe('frontSystemPrompt About you', () => {
 
   it('includes maintainer-described model and harness self-awareness', () => {
     expect(p).toContain('# About you');
-    expect(p).toMatch(/GPT-6 Luna/);
+    expect(frontSystemPrompt('smasnug ai', { model: 'Claude Haiku 5.5', fallbackModel: 'GPT-6 Luna' })).toMatch(
+      /describes you as Claude Haiku 5\.5 \(GPT-6 Luna stands in when it's unavailable\), used through/,
+    );
+    expect(frontSystemPrompt('smasnug ai', { model: 'GPT-6 Luna' })).toMatch(/describes you as GPT-6 Luna, used through/);
     expect(p).toMatch(/API access at API rates/);
     expect(p).toMatch(/custom Slack harness/);
     expect(p).toMatch(/what you've been told/i);
