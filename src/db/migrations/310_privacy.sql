@@ -11,6 +11,7 @@ create table if not exists privacy_held (
   id bigserial primary key,
   user_id text not null,
   item jsonb not null,
+  claimed_at timestamptz,                 -- a replay in progress (src/pipeline/consent.ts replayHeld)
   created_at timestamptz not null default now()
 );
 create index if not exists privacy_held_user_idx on privacy_held (user_id);

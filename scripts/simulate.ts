@@ -9,6 +9,7 @@
  * The relevance gate is called live (OpenRouter) for the unmentioned multi-author follow-ups.
  */
 process.env.SLACK_FAKE = '1';
+process.env.PRIVACY_CONSENT ||= 'off'; // synthetic users never agree (a --no-worker worker needs it set too)
 
 const args = process.argv.slice(2);
 const inProcessWorker = !args.includes('--no-worker');

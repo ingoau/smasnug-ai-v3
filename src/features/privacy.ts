@@ -15,6 +15,7 @@ import type { ActionContext } from '../core/actions.js';
 import { slackCall } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
+import { respond } from './util.js';
 
 export const PRIVACY_READ_ACTION = 'privacy:read';
 export const PRIVACY_AGREE_ACTION = 'privacy:agree';
@@ -40,6 +41,7 @@ export function privacyPolicy(): { text: string; version: string } {
 /** Users known to have agreed to the current version (agreement is never withdrawn short of a new version). */
 const agreed = new Set<string>();
 
+/** Only agreement is cached, so a "no" always comes from the DB. */
 export async function hasAgreed(userId: string): Promise<boolean> {
   if (!privacySettings.required || agreed.has(userId)) return true;
   const [row] = await sql`select 1 from privacy_consent where user_id = ${userId} and policy_version = ${privacyPolicy().version}`;
@@ -145,16 +147,22 @@ export function policyBlocks(md: string): unknown[] {
   return blocks.slice(0, MODAL_MAX_BLOCKS);
 }
 
-/** "Read the privacy policy": open it in a modal (needs the click's trigger_id). */
+/**
+ * "Read the privacy policy": open it in a modal. The click's trigger_id expires 3 s after the click (a queue backlog
+ * can miss that): then it's posted as an ephemeral message instead (≤ 50 blocks there).
+ */
 export async function handlePrivacyRead(ctx: ActionContext): Promise<void> {
-  if (!ctx.triggerId) return;
-  await slackCall('views.open', {
-    trigger_id: ctx.triggerId,
-    view: {
-      type: 'modal',
-      title: { type: 'plain_text', text: 'Privacy policy' },
-      close: { type: 'plain_text', text: 'Close' },
-      blocks: policyBlocks(privacyPolicy().text),
-    },
-  }).catch((err) => log.warn({ err }, 'privacy policy modal failed'));
+  const blocks = policyBlocks(privacyPolicy().text);
+  if (ctx.triggerId) {
+    try {
+      await slackCall('views.open', {
+        trigger_id: ctx.triggerId,
+        view: { type: 'modal', title: { type: 'plain_text', text: 'Privacy policy' }, close: { type: 'plain_text', text: 'Close' }, blocks },
+      });
+      return;
+    } catch (err) {
+      log.warn({ err }, 'privacy policy modal failed; posting it instead');
+    }
+  }
+  await respond(ctx.responseUrl, { response_type: 'ephemeral', replace_original: false, text: `${env.BOT_DISPLAY_NAME}'s privacy policy`, blocks: blocks.slice(0, 50) });
 }

@@ -13,7 +13,8 @@ const infra = await setupTestInfra({ name: 'consent', redisDb: 10, redisOffset: 
 const { sql } = await import('../db/index.js');
 const { redis } = await import('../core/redis.js');
 const { queue, QUEUE, closeQueues } = await import('../core/queues.js');
-const { fakeCalls } = await import('../core/slack-fake.js');
+const { addFakeHandler, fakeCalls, fakeSlackError } = await import('../core/slack-fake.js');
+const consent = await import('./consent.js');
 const { processSlackEvent } = await import('./slack-events.js');
 const debounce = await import('./debounce.js');
 const privacy = await import('../features/privacy.js');
@@ -25,7 +26,7 @@ const nextTs = () => `1700000000.${String(tsCounter++).padStart(6, '0')}`;
 const job = <D>(data: D) => ({ data, id: 'test' }) as unknown as Job<D>;
 const messageEnvelope = (ev: Record<string, unknown>) =>
   job({ kind: 'event' as const, body: { event_id: `Ev${Math.random()}`, event: { type: 'message', channel: C, channel_type: 'channel', ...ev } } });
-const click = (user: string, actionId: string, extra: Record<string, unknown> = {}) =>
+const click = (user: string, actionId: string, value = actionId === privacy.PRIVACY_AGREE_ACTION ? privacy.privacyPolicy().version : 'read') =>
   job({
     kind: 'interactive' as const,
     body: {
@@ -35,8 +36,7 @@ const click = (user: string, actionId: string, extra: Record<string, unknown> = 
       container: { type: 'message', channel_id: C, is_ephemeral: true },
       response_url: 'https://hooks.slack.invalid/privacy',
       trigger_id: 'trig-1',
-      actions: [{ action_id: actionId, value: 'x' }],
-      ...extra,
+      actions: [{ action_id: actionId, value }],
     },
   });
 const prompts = async () => (await fakeCalls()).filter((c) => c.method === 'chat.postEphemeral' && JSON.stringify(c.args.blocks ?? []).includes(privacy.PRIVACY_AGREE_ACTION));
@@ -107,12 +107,80 @@ describe.skipIf(!infra)('privacy consent (intake)', () => {
     expect(posts[0]!.args.text).toContain('<@U3>');
   });
 
+  it('a held message deleted (or edited to ##) in Slack is never replayed', async () => {
+    const src = nextTs();
+    await processSlackEvent(messageEnvelope({ user: 'U6', text: '<!subteam^S1|@team> <@UBOT> help?', ts: src }));
+    const root = nextTs();
+    await processSlackEvent(messageEnvelope({ user: 'U6', text: '<@UBOT> question', ts: root }));
+    expect(await sql`select id from privacy_held where user_id = 'U6'`).toHaveLength(2);
+    await processSlackEvent(messageEnvelope({ subtype: 'message_deleted', deleted_ts: src, previous_message: { user: 'U6', text: 'x', ts: src } }));
+    await processSlackEvent(
+      messageEnvelope({
+        subtype: 'message_changed',
+        message: { user: 'U6', text: '## nevermind', ts: root, edited: { ts: '1700000099.000000' } },
+        previous_message: { user: 'U6', text: '<@UBOT> question', ts: root },
+      }),
+    );
+    expect(await sql`select id from privacy_held where user_id = 'U6'`).toHaveLength(0);
+    await processSlackEvent(click('U6', privacy.PRIVACY_AGREE_ACTION));
+    expect((await fakeCalls()).filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+    expect(await batchSeq(`${C}:${root}`, 'U6')).toBe(0);
+  });
+
+  it('a held group ping replays its edited text', async () => {
+    const src = nextTs();
+    await processSlackEvent(messageEnvelope({ user: 'U9', text: '<!subteam^S1|@team> <@UBOT> help?', ts: src }));
+    await processSlackEvent(
+      messageEnvelope({
+        subtype: 'message_changed',
+        message: { user: 'U9', text: '<!subteam^S1|@team> <@UBOT> help with the deploy?', ts: src, edited: { ts: '1700000099.000000' } },
+        previous_message: { user: 'U9', text: '<!subteam^S1|@team> <@UBOT> help?', ts: src },
+      }),
+    );
+    await processSlackEvent(click('U9', privacy.PRIVACY_AGREE_ACTION));
+    expect((await sql`select text from messages where ts = ${src}`)[0]!.text).toContain('help with the deploy?');
+  });
+
+  it('"I agree" on a prompt for an older policy version records nothing and shows the current prompt', async () => {
+    await processSlackEvent(messageEnvelope({ user: 'U7', text: '<@UBOT> hi', ts: nextTs() }));
+    await processSlackEvent(click('U7', privacy.PRIVACY_AGREE_ACTION, 'oldversion'));
+    expect(await sql`select 1 from privacy_consent where user_id = 'U7'`).toHaveLength(0);
+    expect(await sql`select id from privacy_held where user_id = 'U7'`).toHaveLength(1);
+    const reprompt = (await fakeCalls()).filter((c) => c.method === 'response_url' && JSON.stringify(c.args.blocks ?? []).includes(privacy.privacyPolicy().version));
+    expect(reprompt).toHaveLength(1);
+  });
+
+  it('a hold that races an agreement on another worker is replayed, not stranded', async () => {
+    const root = nextTs();
+    await sql`insert into threads (id, channel_id, thread_ts, engaged) values (${`${C}:${root}`}, ${C}, ${root}, true)`;
+    await privacy.recordAgreement('U8'); // the agree click won the race: it found nothing held
+    await consent.holdForConsent({ userId: 'U8', channelId: C, conversation: `${C}:${root}`, messageTs: root, item: { kind: 'batch', threadId: `${C}:${root}`, ts: root, reason: 'mention' } });
+    expect(await sql`select id from privacy_held where user_id = 'U8'`).toHaveLength(0);
+    expect(await batchSeq(`${C}:${root}`, 'U8')).toBe(1);
+    expect(await prompts()).toHaveLength(0);
+  });
+
   it('"Read the privacy policy" opens it in a modal', async () => {
     await processSlackEvent(click('U4', privacy.PRIVACY_READ_ACTION));
     const [open] = (await fakeCalls()).filter((c) => c.method === 'views.open');
     expect(open!.args.trigger_id).toBe('trig-1');
     expect(open!.args.view.type).toBe('modal');
     expect(open!.args.view.blocks.length).toBeGreaterThan(3);
+  });
+
+  it('"Read the privacy policy" falls back to an ephemeral when the trigger expired', async () => {
+    const remove = addFakeHandler((method) => {
+      if (method === 'views.open') throw fakeSlackError('expired_trigger_id');
+      return undefined;
+    });
+    try {
+      await processSlackEvent(click('U4', privacy.PRIVACY_READ_ACTION));
+    } finally {
+      remove();
+    }
+    const [r] = (await fakeCalls()).filter((c) => c.method === 'response_url');
+    expect(r!.args.response_type).toBe('ephemeral');
+    expect(r!.args.blocks.length).toBeGreaterThan(3);
   });
 
   it('is off when not required', async () => {

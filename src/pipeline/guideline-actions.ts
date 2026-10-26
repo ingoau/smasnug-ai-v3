@@ -26,12 +26,17 @@ export async function handleBangStop(channelId: string, threadTs: string, userId
  * Rule 3: a top-level channel message that pings a group and triggers the bot. Instead of replying under it, post a
  * new top-level message (idempotent on the source ts), store the user's message as the first message of that new
  * thread (so the agent sees the question there; the group-ping thread is never engaged) and run the turn there.
- * Returns the new thread id, or null when nothing was started.
+ * Returns the new thread id, or null when nothing was started. `replay`: a held ping replayed after privacy consent.
  */
-export async function redirectGroupPing(ev: SlackMessage & { channel: string; user: string }, bot: { userId: string; botId: string }): Promise<string | null> {
+export async function redirectGroupPing(
+  ev: SlackMessage & { channel: string; user: string },
+  bot: { userId: string; botId: string },
+  opts: { replay?: boolean } = {},
+): Promise<string | null> {
   const channelId = ev.channel;
   const authorId = ev.user;
-  const entry = await guardEntry(authorId, channelId);
+  // A replay after privacy consent (consent.ts) was already counted when it first arrived.
+  const entry = await guardEntry(authorId, channelId, { countMessage: !opts.replay });
   if (!entry.ok) {
     if (entry.reason === 'rate_limited') {
       await slackCall('chat.postEphemeral', { channel: channelId, user: authorId, text: RATE_LIMITED_TEXT }, { idempotencyKey: `rate-limited:${channelId}:${ev.ts}` }).catch((err) =>
