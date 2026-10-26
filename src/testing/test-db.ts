@@ -82,6 +82,7 @@ export function applyBenchEnv(): { databaseUrl: string; redisUrl: string } {
   process.env.DATABASE_URL = out.databaseUrl;
   process.env.REDIS_URL = out.redisUrl;
   process.env.SLACK_FAKE = '1';
+  process.env.PRIVACY_CONSENT ||= 'off'; // tests that need it set privacySettings.required
   return out;
 }
 
@@ -91,4 +92,5 @@ export function applyTestEnv(): void {
   process.env.DATABASE_URL = databaseUrl;
   process.env.REDIS_URL = redisUrl;
   process.env.SLACK_FAKE = '1';
+  process.env.PRIVACY_CONSENT ||= 'off'; // tests that need it set privacySettings.required
 }

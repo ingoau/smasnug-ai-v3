@@ -13,6 +13,8 @@ import { log } from '../log.js';
 import { markMessage } from '../core/timing.js';
 import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
+import { dropHeldMessage, holdForConsent, updateHeldMessage } from './consent.js';
+import { hasAgreed } from '../features/privacy.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
 import { answersOtherOffer, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
@@ -167,6 +169,22 @@ async function handleNewMessage(ev: MessageEvent) {
     return;
   }
 
+  // Privacy policy not agreed (consent.ts): a DM / mention is held behind the prompt, anything else dropped. The
+  // message stays stored as context either way.
+  if (!(await hasAgreed(authorId))) {
+    if (decision.reason === 'dm' || decision.reason === 'mention') {
+      await holdForConsent({
+        userId: authorId,
+        channelId,
+        conversation: isDm ? channelId : threadId,
+        ...(ev.thread_ts ? { promptThreadTs: ev.thread_ts } : {}),
+        messageTs: ev.ts,
+        item: { kind: 'batch', threadId, ts: ev.ts, reason: decision.reason },
+      });
+    }
+    return;
+  }
+
   // DMs and mentions get the status indicator right away, before the debounce window (fire-and-forget).
   if (decision.reason === 'dm' || decision.reason === 'mention') showIntakeStatus(threadId, authorId, ev.ts);
   await addToBatch(threadId, authorId, ev.ts, decision.reason);
@@ -192,8 +210,10 @@ async function handleEdit(ev: MessageEvent) {
     const wasVisible = ev.previous_message ? !isHiddenMessage(ev.previous_message.text) : true;
     if (wasVisible && msg.edited) return handleDelete(ev.channel, msg.ts, ev.previous_message ?? msg);
     await applyDelete(ev.channel, msg.ts);
+    await dropHeldMessage(ev.channel, msg.ts);
     return;
   }
+  if (msg.edited) await updateHeldMessage(ev.channel, msg);
   const applied = await applyEdit(ev.channel, msg);
   let threadId = applied?.threadId ?? null;
   // Only a real change (text or files) is an edit: Slack re-sends a thread root unchanged whenever replies are added.
@@ -225,6 +245,8 @@ async function handleEdit(ev: MessageEvent) {
 
 async function handleDelete(channelId: string, ts: string | undefined, prev?: SlackMessage) {
   if (!ts) return;
+  // Held behind the privacy prompt (consent.ts): a group ping held there has no stored row or thread to go by.
+  await dropHeldMessage(channelId, ts);
   const row = await applyDelete(channelId, ts);
   let threadId = row?.threadId ?? null;
   if (!threadId && prev) {

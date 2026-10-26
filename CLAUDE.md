@@ -71,6 +71,9 @@ Queue processors: export `processors: Partial<Record<QueueName, (job) => Promise
   `<>` messages never trigger unless the bot is mentioned. The bot never pings groups (neutralised in code). Any new
   path that reads Slack messages must drop `##` messages (`fromSlack` does it); slack_search must stay fail-closed
   public-only (verified via the workspace directory or `conversations.info`; unknown → dropped).
+- Privacy policy (`PRIVACY.md`; `src/features/privacy.ts`, `src/pipeline/consent.ts`): a user must agree before a DM/mention
+  starts a turn (held behind an ephemeral prompt, replayed on agreement); editing `PRIVACY.md` re-prompts everyone. Their
+  messages are still stored and read as context. Any new path that starts a turn for a user must check `hasAgreed`.
 - Agent knowledge and procedures that only some requests need go in a skill (`skills/<name>/SKILL.md`, see
   `skills/README.md`; loader `src/agent/skills.ts`), not the system prompt: only names + descriptions are in the prompt and
   the agent calls `load_skill`.
