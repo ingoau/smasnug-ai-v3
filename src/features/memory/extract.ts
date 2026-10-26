@@ -1,6 +1,6 @@
 /**
  * Background memory extraction. Threads the bot took part in, idle for ~30 min with new conversation since the last
- * pass, get one Luna pass per participant. The model proposes add/update/remove ops; code decides what is applied:
+ * pass, get one model pass per participant. The model proposes add/update/remove ops; code decides what is applied:
  * ops can only target the participant being processed, new/updated facts must quote that participant's own message,
  * and sensitive categories / other people are filtered.
  */

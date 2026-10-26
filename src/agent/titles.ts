@@ -7,7 +7,7 @@
  *   all cancelled was finished without one, subagents.ts maybeSynthesize), a job gives the card its
  *   short past-tense title ("Compared 3 hosting options"), the finished plan's title (what Slack shows of it
  *   collapsed).
- * One cheap text call each (Luna, reasoning off), usage recorded. Jobs are idempotent per thread + turn / card + turn.
+ * One cheap text call each (the front model, lowest reasoning), usage recorded. Jobs are idempotent per thread + turn / card + turn.
  */
 import { generateText } from 'ai';
 import { limits } from '../config.js';

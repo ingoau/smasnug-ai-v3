@@ -190,6 +190,22 @@ const defaultAnthropicSearch: AnthropicSearchFn = async (input, signal) => {
   });
 };
 
+/**
+ * Why an Anthropic search call found nothing to show, or null if it searched: every web_search came back as an error
+ * (`tool-error`: too_many_requests, unavailable, max_uses_exceeded, …), or the model answered without searching.
+ * runWebSearch then tries the next provider instead of reporting "no results".
+ */
+export function anthropicSearchProblem(content: any[]): string | null {
+  const parts = (content ?? []).filter((p: any) => p?.toolName === 'web_search');
+  if (parts.some((p: any) => p.type === 'tool-result' && Array.isArray(p.output))) return null;
+  const err = parts.find((p: any) => p.type === 'tool-error');
+  if (err) {
+    const e = err.error;
+    return `anthropic web search failed: ${typeof e === 'string' ? e : (e?.errorCode ?? e?.message ?? JSON.stringify(e ?? null))}`;
+  }
+  return 'anthropic web search: the model did not search';
+}
+
 /** Model-facing rendering of an Anthropic web search call: its results (title, URL, age, cited passages) + its notes. */
 export function formatAnthropicResults(query: string, content: any[], max: number): WebSearchOutput {
   const results: { url: string; title?: string; age?: string }[] = [];
@@ -263,11 +279,17 @@ export async function runWebSearch(ctx: Pick<ToolContext, 'speakerId' | 'threadI
     if ('search' in ep) {
       try {
         const res = await ep.search(input, AbortSignal.any([AbortSignal.timeout(anthropicTimeoutMs), ...(ctx.abortSignal ? [ctx.abortSignal] : [])]));
-        const out = formatAnthropicResults(input.query, res.content, resultCount(input.num_results));
-        log.info({ via: ep.name, mode, results: out.sources.length, ms: Date.now() - started, speaker: ctx.speakerId }, 'web search');
         void recordModelUsage({ userId: ctx.speakerId, threadId: ctx.threadId, model: ANTHROPIC_SEARCH_MODEL, inputTokens: res.usage?.inputTokens, outputTokens: res.usage?.outputTokens }).catch(
           () => {},
         );
+        const problem = anthropicSearchProblem(res.content);
+        if (problem) {
+          log.warn({ via: ep.name, mode, problem, ms: Date.now() - started }, 'web search failed');
+          failure = 'Web search failed. Try a different query, or answer with what you have.';
+          continue;
+        }
+        const out = formatAnthropicResults(input.query, res.content, resultCount(input.num_results));
+        log.info({ via: ep.name, mode, results: out.sources.length, ms: Date.now() - started, speaker: ctx.speakerId }, 'web search');
         return out;
       } catch (err) {
         if (ctx.abortSignal?.aborted) return 'Web search cancelled.';

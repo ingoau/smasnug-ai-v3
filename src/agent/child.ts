@@ -409,7 +409,8 @@ async function runClaimed(run: RunRow): Promise<void> {
         instructions,
         messages,
         tools,
-        activeTools: overBudget ? [] : undefined,
+        // Wrap-up: no more tool calls, but the tool definitions stay (Claude rejects tool history without them).
+        ...(overBudget ? { toolChoice: 'none' as const } : {}),
         stopWhen: stepCountIs(1),
         abortSignal: controller.signal,
         providerOptions: modelOptions({ effort: reasoningEffort, ...(overBudget ? {} : { parallelToolCalls: true }) }),

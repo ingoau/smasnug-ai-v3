@@ -36,6 +36,16 @@ export function openrouterClaudeId(modelId: string): string {
   return `anthropic/${modelId.replace(/-(\d+)-(\d+)$/, '-$1.$2')}`;
 }
 
+/** Name for people: 'claude-haiku-5-5' → 'Claude Haiku 5.5', 'openai/gpt-6-luna' → 'GPT-6 Luna'; else the bare id. */
+export function modelDisplayName(modelId: string): string {
+  const bare = modelId.replace(/^[^/]+\//, '');
+  const claude = /^claude-([a-z]+)-(\d+)(?:[-.](\d+))?$/.exec(bare);
+  if (claude) return `Claude ${claude[1]![0]!.toUpperCase()}${claude[1]!.slice(1)} ${claude[2]}${claude[3] ? `.${claude[3]}` : ''}`;
+  const gpt = /^gpt-([\d.]+)-([a-z]+)$/.exec(bare);
+  if (gpt) return `GPT-${gpt[1]} ${gpt[2]![0]!.toUpperCase()}${gpt[2]!.slice(1)}`;
+  return bare;
+}
+
 /** OpenRouter id → Anthropic API id: 'anthropic/claude-haiku-5.5' → 'claude-haiku-5-5'. */
 export function anthropicClaudeId(modelId: string): string {
   return modelId.replace(/^anthropic\//, '').replace(/\./g, '-');
@@ -305,8 +315,10 @@ const CACHE = { type: 'ephemeral' } as const;
  *  - effort ≥ low with adaptive thinking; sampling parameters dropped (Claude 5.5 rejects them);
  *  - `toolChoice: 'required'` → 'auto': a forced tool call skips thinking (Haiku) or is a 400 (Sonnet 5.5); the front
  *    agent's plain-text nudge (turn-end.ts) covers a step without a tool call;
- *  - prompt caching: breakpoints on the system prompt (covers the tools before it) and the last message, so each
- *    agent step reads the previous step's prefix from cache. The OpenRouter provider reads `anthropic.cacheControl` too;
+ *  - prompt caching: breakpoints on the system prompt (covers the tools before it) and the last message's last part, so
+ *    each agent step reads the previous step's prefix from cache. Part-level on purpose: the OpenRouter provider copies a
+ *    message-level one onto every tool result of a tool message (5+ breakpoints after parallel calls, over Anthropic's
+ *    4). It reads `anthropic.cacheControl` too;
  *  - Anthropic direct: a replayed thinking block whose history changed is dropped instead of failing the request.
  */
 export function adaptCall(options: CallOptions, flavor: Flavor): CallOptions {
@@ -332,9 +344,14 @@ export function adaptCall(options: CallOptions, flavor: Flavor): CallOptions {
   }
   if (!claude) return { ...options, providerOptions };
 
+  const cache = <T extends { providerOptions?: Record<string, any> }>(x: T): T => ({ ...x, providerOptions: { ...x.providerOptions, anthropic: { ...x.providerOptions?.anthropic, cacheControl: CACHE } } });
   const prompt = options.prompt.map((m, i, all) => {
-    const mark = (m.role === 'system' && i === 0) || i === all.length - 1;
-    return mark ? ({ ...m, providerOptions: { ...m.providerOptions, anthropic: { ...m.providerOptions?.anthropic, cacheControl: CACHE } } } as typeof m) : m;
+    if (m.role === 'system') return i === 0 ? cache(m) : m;
+    if (i !== all.length - 1) return m;
+    // Thinking blocks can't carry a breakpoint: the last other part does.
+    const parts = m.content as { type: string; providerOptions?: Record<string, any> }[];
+    const at = parts.findLastIndex((p) => p.type !== 'reasoning');
+    return at < 0 ? m : ({ ...m, content: parts.map((p, j) => (j === at ? cache(p) : p)) } as typeof m);
   });
   const { temperature: _t, topP: _p, topK: _k, ...base } = options;
   return {

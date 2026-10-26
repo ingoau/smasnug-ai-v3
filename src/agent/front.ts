@@ -21,7 +21,7 @@ import { loadPendingActions, renderPendingActions } from '../features/pending.js
 import { HUDDLE_DJ_PROMPT, renderDjState } from '../features/huddlefm/render.js';
 import { huddleFmConfigured } from '../features/huddlefm/client.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
-import { chatModel, MODELS, modelOptions } from '../models.js';
+import { chatModel, isClaude, modelDisplayName, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
 import { TurnTiming } from '../core/timing.js';
 import { freezeCard } from './cards.js';
@@ -127,9 +127,14 @@ function recordReactVisibility(tools: Record<string, Tool>, state: FrontTurnStat
 
 // ---------- Prompt sections ----------
 
+/** The front model's name for "what are you" (Claude roles fall back to MODEL_LUNA on OpenRouter, see models.ts). */
+function frontModelNames(): { model: string; fallbackModel?: string } {
+  return { model: modelDisplayName(MODELS.front), ...(isClaude(MODELS.front) ? { fallbackModel: modelDisplayName(env.MODEL_LUNA) } : {}) };
+}
+
 async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
-  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID });
+  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, ...frontModelNames() });
   if (huddleFmConfigured()) system = `${system}\n\n${HUDDLE_DJ_PROMPT}`;
   if (sandboxConfigured()) system = `${system}\n\n${sandboxFrontPrompt({ previews: previewsConfigured() })}`;
   const skillIndex = skillsPrompt('front');

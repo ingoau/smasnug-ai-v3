@@ -15,6 +15,7 @@ const {
   anthropicClaudeId,
   claudeEffort,
   CLAUDE_MIN_OUTPUT_TOKENS,
+  modelDisplayName,
   classifyProviderFailure,
   classifyProviderError,
   errorStatus,
@@ -248,7 +249,8 @@ describe('adaptCall', () => {
     expect(out.toolChoice).toEqual({ type: 'auto' });
     expect(out.temperature).toBeUndefined();
     expect(out.maxOutputTokens).toBe(CLAUDE_MIN_OUTPUT_TOKENS);
-    expect(out.prompt.map((m: any) => m.providerOptions?.anthropic?.cacheControl?.type)).toEqual(['ephemeral', undefined, 'ephemeral']);
+    expect(out.prompt.map((m: any) => m.providerOptions?.anthropic?.cacheControl?.type)).toEqual(['ephemeral', undefined, undefined]);
+    expect((out.prompt[2] as any).content[0].providerOptions.anthropic.cacheControl).toEqual({ type: 'ephemeral' });
   });
 
   it('Claude direct: anthropic options with adaptive thinking that tolerates edited history', () => {
@@ -274,5 +276,42 @@ describe('provider chain', () => {
     await m.doGenerate(opts);
     expect([hc.mock.calls.length, an.mock.calls.length, or.mock.calls.length]).toEqual([1, 1, 2]);
     expect(hcCooldown.active() && anCooldown.active()).toBe(true);
+  });
+});
+
+describe('adaptCall cache breakpoints', () => {
+  it('marks only the last part of the last message (a tool message after parallel calls stays at one breakpoint)', () => {
+    const results = [1, 2, 3, 4, 5].map((n) => ({ type: 'tool-result', toolCallId: `c${n}`, toolName: 't', output: { type: 'text', value: 'ok' } }));
+    const out = adaptCall(
+      {
+        prompt: [
+          { role: 'system', content: 'sys' },
+          { role: 'user', content: [{ type: 'text', text: 'a' }] },
+          { role: 'assistant', content: [{ type: 'reasoning', text: '' }, { type: 'tool-call', toolCallId: 'c1', toolName: 't', input: {} }] },
+          { role: 'tool', content: results },
+        ],
+        providerOptions: modelOptions({}),
+      } as any,
+      'openrouter-claude',
+    );
+    const marks = JSON.stringify(out.prompt).match(/"cacheControl"/g) ?? [];
+    expect(marks).toHaveLength(2);
+    expect((out.prompt[3] as any).providerOptions).toBeUndefined();
+    expect((out.prompt[3] as any).content.map((p: any) => !!p.providerOptions?.anthropic?.cacheControl)).toEqual([false, false, false, false, true]);
+  });
+
+  it('never marks a thinking block', () => {
+    const out = adaptCall({ prompt: [{ role: 'assistant', content: [{ type: 'text', text: 'x' }, { type: 'reasoning', text: '' }] }] } as any, 'anthropic');
+    expect((out.prompt[0] as any).content.map((p: any) => !!p.providerOptions?.anthropic?.cacheControl)).toEqual([true, false]);
+  });
+});
+
+describe('modelDisplayName', () => {
+  it('names the models for the prompt', () => {
+    expect(modelDisplayName('claude-haiku-5-5')).toBe('Claude Haiku 5.5');
+    expect(modelDisplayName('anthropic/claude-sonnet-5.5')).toBe('Claude Sonnet 5.5');
+    expect(modelDisplayName('claude-opus-5')).toBe('Claude Opus 5');
+    expect(modelDisplayName('openai/gpt-6-luna')).toBe('GPT-6 Luna');
+    expect(modelDisplayName('mock')).toBe('mock');
   });
 });

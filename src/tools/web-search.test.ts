@@ -120,3 +120,22 @@ describe('web_search Anthropic fallback', () => {
     resetWebSearchCooldown();
   });
 });
+
+describe('web_search Anthropic search problems', () => {
+  it('a search error or no search at all falls through to Exa direct instead of "no results"', async () => {
+    resetWebSearchCooldown();
+    const failed = { content: [{ type: 'tool-call', toolName: 'web_search' }, { type: 'tool-error', toolName: 'web_search', error: { errorCode: 'too_many_requests' } }], usage: {} };
+    const skipped = { content: [{ type: 'text', text: 'I think the answer is 42.' }], usage: {} };
+    for (const res of [failed, skipped]) {
+      const { f, urls } = fakeFetch(() => new Response('boom', { status: 500 }));
+      const search = vi.fn(async () => res);
+      const out = await runWebSearch(ctx, { query: 'q' }, { apiKey: 'k_exa', hackclubKey: 'sk-hc', fetch: f, hackclubCooldown: new ProviderCooldown('t'), anthropicSearch: search });
+      expect(search).toHaveBeenCalledTimes(1);
+      expect(out).toMatchObject({ sources: [{ url: 'https://a.example/' }] });
+      expect(urls.at(-1)).toBe(EXA_SEARCH_URL);
+    }
+    // Without Exa direct: a failure message, not "no results".
+    const out = await runWebSearch(ctx, { query: 'q' }, { apiKey: undefined, hackclubKey: undefined, anthropicSearch: async () => failed });
+    expect(out).toMatch(/^Web search failed/);
+  });
+});
