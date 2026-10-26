@@ -14,4 +14,6 @@ create table if not exists privacy_held (
   claimed_at timestamptz,                 -- a replay in progress (src/pipeline/consent.ts replayHeld)
   created_at timestamptz not null default now()
 );
+-- Added after 310 first shipped on the branch (databases that already ran it).
+alter table privacy_held add column if not exists claimed_at timestamptz;
 create index if not exists privacy_held_user_idx on privacy_held (user_id);

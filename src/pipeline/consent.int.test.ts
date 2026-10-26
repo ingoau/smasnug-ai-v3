@@ -160,6 +160,19 @@ describe.skipIf(!infra)('privacy consent (intake)', () => {
     expect(await prompts()).toHaveLength(0);
   });
 
+  it('a replay left claimed by a crash is retried by maintenance', async () => {
+    const root = nextTs();
+    const tid = `${C}:${root}`;
+    await sql`insert into threads (id, channel_id, thread_ts, engaged) values (${tid}, ${C}, ${root}, true)`;
+    await privacy.recordAgreement('U10');
+    const item = { kind: 'batch', threadId: tid, ts: root, reason: 'mention' };
+    await sql`insert into privacy_held (user_id, item, claimed_at) values ('U10', ${sql.json(item)}, now() - interval '10 minutes')`;
+    await sql`insert into privacy_held (user_id, item, claimed_at, created_at) values ('U10', ${sql.json({ ...item, ts: nextTs() })}, now() - interval '10 minutes', now() - interval '2 hours')`;
+    await consent.retryStaleReplays();
+    expect(await debounce.takeBatch({ threadId: tid, authorId: 'U10', seq: await batchSeq(tid, 'U10') })).toEqual([{ ts: root, reason: 'mention' }]);
+    expect(await sql`select id from privacy_held where user_id = 'U10'`).toHaveLength(0); // the 2-hour-old one is dropped unanswered
+  });
+
   it('"Read the privacy policy" opens it in a modal', async () => {
     await processSlackEvent(click('U4', privacy.PRIVACY_READ_ACTION));
     const [open] = (await fakeCalls()).filter((c) => c.method === 'views.open');

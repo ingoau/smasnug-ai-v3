@@ -149,7 +149,7 @@ export function policyBlocks(md: string): unknown[] {
 
 /**
  * "Read the privacy policy": open it in a modal. The click's trigger_id expires 3 s after the click (a queue backlog
- * can miss that): then it's posted as an ephemeral message instead (≤ 50 blocks there).
+ * can miss that): then it's posted as an ephemeral message instead (≤ 50 blocks there), or DMed from App Home.
  */
 export async function handlePrivacyRead(ctx: ActionContext): Promise<void> {
   const blocks = policyBlocks(privacyPolicy().text);
@@ -164,5 +164,8 @@ export async function handlePrivacyRead(ctx: ActionContext): Promise<void> {
       log.warn({ err }, 'privacy policy modal failed; posting it instead');
     }
   }
-  await respond(ctx.responseUrl, { response_type: 'ephemeral', replace_original: false, text: `${env.BOT_DISPLAY_NAME}'s privacy policy`, blocks: blocks.slice(0, 50) });
+  const text = `${env.BOT_DISPLAY_NAME}'s privacy policy`;
+  if (await respond(ctx.responseUrl, { response_type: 'ephemeral', replace_original: false, text, blocks: blocks.slice(0, 50) })) return;
+  // App Home clicks carry no response_url: DM it.
+  await slackCall('chat.postMessage', { channel: ctx.userId, text, blocks: blocks.slice(0, 50) }).catch((err) => log.warn({ err }, 'privacy policy DM failed'));
 }

@@ -79,8 +79,16 @@ export async function handlePrivacyAgree(ctx: ActionContext): Promise<void> {
   const { version } = privacyPolicy();
   if (ctx.value && ctx.value !== version) {
     // The policy changed since this prompt was posted: show the new one instead of recording consent to it unseen.
+    // In a thread, response_url posts land at the channel root, so the new prompt goes in with chat.postEphemeral.
     await ephemeral(ctx, 'The privacy policy changed since that message. Here is the current one.', { replace: true });
-    await respond(ctx.responseUrl, { response_type: 'ephemeral', replace_original: false, text: PROMPT_TEXT, blocks: promptBlocks() });
+    const threadTs = ctx.threadTs && ctx.threadTs !== ctx.messageTs ? ctx.threadTs : undefined;
+    if (ctx.channelId && threadTs) {
+      await slackCall('chat.postEphemeral', { channel: ctx.channelId, user: ctx.userId, thread_ts: threadTs, text: PROMPT_TEXT, blocks: promptBlocks() }).catch((err) =>
+        log.warn({ err }, 'privacy re-prompt failed'),
+      );
+    } else {
+      await respond(ctx.responseUrl, { response_type: 'ephemeral', replace_original: false, text: PROMPT_TEXT, blocks: promptBlocks() });
+    }
     return;
   }
   await recordAgreement(ctx.userId);
@@ -92,9 +100,9 @@ export async function handlePrivacyAgree(ctx: ActionContext): Promise<void> {
 
 /**
  * Replay a user's held messages, oldest first. Each row is claimed (claimed_at, so a concurrent replay skips it), then
- * replayed, then deleted: a crash or error leaves it claimed, and a later replay (any hold of theirs re-checks) picks
- * it up once the claim is CLAIM_STALE_S old. Replaying one twice is harmless: the batch is keyed by ts and the
- * redirect post is idempotent. Rows over HOLD_REPLAY_MS old are deleted without replay.
+ * replayed, then deleted: a crash or error leaves it claimed, and the `pipeline:privacy-replay` maintenance task
+ * (retryStaleReplays) picks it up once the claim is CLAIM_STALE_S old. Replaying one twice is harmless: the batch is
+ * keyed by ts and the redirect post is idempotent. Rows over HOLD_REPLAY_MS old are deleted without replay.
  */
 async function replayHeld(userId: string): Promise<void> {
   const rows = await sql<{ id: string; item: HeldItem; createdAt: Date }[]>`
@@ -125,4 +133,12 @@ async function replayItem(userId: string, item: HeldItem): Promise<void> {
   }
   if (item.reason === 'dm' || item.reason === 'mention') showIntakeStatus(item.threadId, userId, item.ts);
   await addToBatch(item.threadId, userId, item.ts, item.reason);
+}
+
+/** Maintenance: retry replays left claimed by an error or a crash (still young enough to answer). */
+export async function retryStaleReplays(): Promise<void> {
+  const users = await sql<{ userId: string }[]>`
+    select distinct user_id from privacy_held
+    where claimed_at < now() - ${CLAIM_STALE_S} * interval '1 second' and created_at > now() - ${HOLD_REPLAY_MS / 1000} * interval '1 second'`;
+  for (const { userId } of users) await replayHeld(userId).catch((err) => log.warn({ err, userId }, 'retrying a held replay failed'));
 }
