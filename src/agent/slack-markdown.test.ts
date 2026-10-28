@@ -272,3 +272,41 @@ describe('helpers', () => {
     expect(blocksText([{ type: 'context' }])).toBeUndefined();
   });
 });
+
+describe('placement markers', () => {
+  it('a marker line is its own segment; inline or fenced ones are text', () => {
+    expect(splitMarkdown('Look:\n[[image:2]]\nNice.')).toEqual([
+      { kind: 'markdown', text: 'Look:' },
+      { kind: 'marker', ref: 'image:2', raw: '[[image:2]]' },
+      { kind: 'markdown', text: 'Nice.' },
+    ]);
+    expect(splitMarkdown('[[ Table ]]')).toEqual([{ kind: 'marker', ref: 'table:1', raw: '[[ Table ]]' }]);
+    expect(splitMarkdown('see [[image:1]] here')).toEqual([{ kind: 'markdown', text: 'see [[image:1]] here' }]);
+    expect(splitMarkdown('```\n[[image:1]]\n```')[0]!.kind).toBe('code');
+  });
+
+  it('resolve: blocks go in place, markdown merges into the text, null drops the line, none keeps it literal', () => {
+    const img = { type: 'image', alt_text: 'x', image_url: 'https://e/x.png' };
+    const resolve = (ref: string) => (ref === 'image:1' ? { block: img } : ref === 'table:1' ? { markdown: '| a |\n|---|\n| 1 |' } : null);
+    expect(replyBlocks('A\n[[image]]\nB\n[[chart:3]]', { resolve })).toEqual([
+      { type: 'markdown', text: 'A' },
+      img,
+      { type: 'markdown', text: 'B' },
+    ]);
+    expect(replyBlocks('A\n[[table]]', { resolve })).toEqual([{ type: 'markdown', text: 'A\n\n| a |\n|---|\n| 1 |' }]);
+    expect(replyBlocks('A\n[[image]]')).toEqual([{ type: 'markdown', text: 'A' }, { type: 'markdown', text: '[[image]]' }]);
+    expect(replyBlocks('[[chart:9]]', { resolve })).toEqual([]);
+  });
+
+  it('streaming: a marker is a skip unit, and a partial line that may become one is held', () => {
+    const text = 'Here:\n[[image:1]]\nAfter.';
+    const units = expectPrefixStable(text);
+    expect(units.map((u) => u.kind)).toEqual(['md', 'skip', 'md']);
+    expect(streamUnits('Here:\n[[ima', false)).toEqual([{ kind: 'md', start: 0, end: 6 }]);
+    expect(streamUnits('Here:\n[', false)).toEqual([{ kind: 'md', start: 0, end: 6 }]);
+    expect(streamUnits('a\n[[image:1]]\r', false)).toEqual([{ kind: 'md', start: 0, end: 2 }]);
+    expectPrefixStable('a\r\n[[image:1]]\r\nb');
+    // An ordinary link at the start of a line is not held once it can't be a marker.
+    expect(streamUnits('Here:\n[link', false)).toEqual([{ kind: 'md', start: 0, end: 11 }]);
+  });
+});

@@ -248,7 +248,7 @@ export function withChartIds(charts: readonly DataVisualizationBlock[], idFor: (
   return charts.slice(0, MAX_CHARTS).map((c, i) => ({ ...c, block_id: idFor(i) }));
 }
 
-function summarize(block: DataVisualizationBlock): string {
+export function chartSummary(block: DataVisualizationBlock): string {
   const c = block.chart;
   if (c.type === 'pie') return `${block.title} (pie): ${c.segments.map((s) => `${s.label} ${s.value}`).join(', ')}`;
   const body = c.series.map((s) => `${s.name}: ${s.data.map((p) => `${p.label} ${p.value}`).join(', ')}`).join('; ');
@@ -261,7 +261,7 @@ function summarize(block: DataVisualizationBlock): string {
  */
 export function chartsFallback(text: string, charts: readonly DataVisualizationBlock[], max = 3000): string {
   const base = text.trim();
-  const extra = charts.map(summarize).join('\n');
+  const extra = charts.map(chartSummary).join('\n');
   if (!extra) return text.slice(0, max);
   if (!base) return extra.slice(0, max);
   const room = max - base.length - 1;

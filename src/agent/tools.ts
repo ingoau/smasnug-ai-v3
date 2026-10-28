@@ -13,7 +13,8 @@ import { MAX_BUTTONS, MAX_LABEL_CHARS } from './reply-buttons.js';
 import { chartsSchema } from './charts.js';
 import { turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
-import { prepareOutgoingFiles } from './files.js';
+import { prepareImageArgs, prepareOutgoingFiles } from './files.js';
+import { cardsSchema, imagesSchema, MAX_IMAGES, tablesSchema } from './rich-blocks.js';
 import { accessModelText, canUseSandbox, notifyAccess } from '../sandbox/access.js';
 import { sandboxConfigured } from '../sandbox/settings.js';
 import { readSkill } from './skills.js';
@@ -35,7 +36,7 @@ export const replyFilesSchema = z
   )
   .optional()
   .describe(
-    'Optional files to post below the message: file ids (file_…) from this conversation, subagent results, create_file, or the speaker\'s own files from elsewhere ("post the page you made me yesterday"); post subagent-made files without reading them. Or an inline text file {filename, content}. HTML files are fine (Slack shows them).',
+    'Optional files attached to the message: file ids (file_…) from this conversation, subagent results, create_file, or the speaker\'s own files from elsewhere ("post the page you made me yesterday"); post subagent-made files without reading them. Or an inline text file {filename, content}. HTML files are fine (Slack shows them).',
   );
 
 /**
@@ -68,10 +69,17 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        'Post a message in the current Slack thread (markdown, optional charts). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction instead). A reply ends your turn unless continue_turn is true (calls in the same step that need their results, like searches, still run and come back to you). Usually one reply per turn; never send two replies that say the same thing.',
+        'Post a message in the current Slack thread (markdown; optional files, inline images, data tables, link cards, charts). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction instead). A reply ends your turn unless continue_turn is true (calls in the same step that need their results, like searches, still run and come back to you). Usually one reply per turn; never send two replies that say the same thing.',
       inputSchema: z.object({
-        text: z.string().describe('Message text in Slack-flavoured markdown. Keep it concise. State the takeaway even when you also send a chart.'),
+        text: z
+          .string()
+          .describe(
+            'Message text in Slack-flavoured markdown. Keep it concise. State the takeaway even when you also send a chart or table. Images, tables, cards and charts go below the text; to put one inside it instead, write a line that is only its marker: [[image:N]], [[table:N]], [[chart:N]] or [[cards]] (N = its position in that list, from 1).',
+          ),
         files: replyFilesSchema,
+        images: imagesSchema,
+        tables: tablesSchema,
+        cards: cardsSchema,
         buttons: buttonsSchema,
         charts: chartsSchema,
         continue_turn: continueTurnSchema,
@@ -82,12 +90,17 @@ registerTool({
       onInputDelta: ({ toolCallId, inputTextDelta }) => {
         turnState(ctx).replies.delta(toolCallId, inputTextDelta);
       },
-      execute: async ({ text, files, buttons, charts }, { toolCallId }) => {
+      execute: async ({ text, files, images, tables, cards, buttons, charts }, { toolCallId }) => {
         const s = turnState(ctx);
         // At most 10 files per message (Slack); access is checked per id (this thread, or the speaker's own files).
         const prepared = await prepareOutgoingFiles({ threadId: ctx.threadId, speakerId: ctx.speakerId, turnId: ctx.turnId }, files?.slice(0, 10));
-        const res = await s.replies.finish(toolCallId, text, prepared.files, buttons, charts);
-        const notes = [...prepared.errors, ...((files?.length ?? 0) > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
+        const imgs = await prepareImageArgs({ threadId: ctx.threadId, speakerId: ctx.speakerId }, images, MAX_IMAGES);
+        // A file shown inline isn't attached as well; images the block can't show are attached instead.
+        const inline = new Set(imgs.images.flatMap((i) => (i.file?.fileId ? [i.file.fileId] : [])));
+        const all = [...prepared.files.filter((f) => !f.fileId || !inline.has(f.fileId)), ...imgs.attach.filter((a) => !prepared.files.some((f) => f.fileId === a.fileId))];
+        const attach = all.slice(0, 10);
+        const res = await s.replies.finish(toolCallId, text, attach, buttons, charts, { images: imgs.images, tables, cards });
+        const notes = [...prepared.errors, ...imgs.errors, ...((files?.length ?? 0) > 10 || all.length > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
         const fileNote = notes.length ? ` File problems: ${notes.join(' ')}` : '';
         if (res.startsWith('Replied')) {
           s.visible.add('reply');

@@ -67,7 +67,11 @@ export type Segment =
   | { kind: 'markdown'; text: string }
   | { kind: 'code'; code: string; language: string }
   /** Prose rendered as rich_text (inline code with an affected tag, or markdown over the char budget). */
-  | { kind: 'rich'; text: string };
+  | { kind: 'rich'; text: string }
+  /** A placement marker line (`[[image:1]]`): where an extra block of the reply (rich-blocks.ts) goes. */
+  | { kind: 'marker'; ref: string; raw: string }
+  /** A resolved marker: the block itself. */
+  | { kind: 'block'; block: unknown };
 
 export const MAX_MESSAGE_BLOCKS = 50;
 /** Cumulative markdown chars per payload (Slack: 12,000; a little headroom). */
@@ -144,6 +148,21 @@ function starHold(para: string, spans: Span[]): number {
 /** The markdown sent for prose: `*x*` as bold, affected tags escaped. */
 const proseMarkdown = (md: string) => escapeAffectedTags(boldSingleStars(md));
 
+// ---------- Placement markers ----------
+
+/**
+ * A line that is only `[[kind]]` / `[[kind:n]]` places one of the reply's extra blocks (chart, image, table, cards)
+ * there instead of below the text. Normalised ref: `kind:n` (n defaults to 1).
+ */
+const MARKER_LINE = /^[ \t]*\[\[[ \t]*(chart|image|table|cards)s?(?:[ \t]*[: #][ \t]*(\d{1,2}))?[ \t]*\]\][ \t]*$/i;
+/** A partial last line that may still become a marker (held back while streaming). */
+const MARKER_PREFIX = /^[ \t]*\[(?:\[[ \t]*[a-z]*(?:[ \t]*[: #][ \t]*\d{0,2})?[ \t]*\]{0,2}[ \t]*)?\r?$/i;
+
+export function markerRef(line: string): string | null {
+  const m = MARKER_LINE.exec(line);
+  return m ? `${m[1]!.toLowerCase()}:${Number(m[2] ?? 1)}` : null;
+}
+
 // ---------- Code fences ----------
 
 interface Fence {
@@ -180,6 +199,7 @@ function dedent(line: string, n: number): string {
 
 type Region =
   | { type: 'prose'; start: number; end: number; open: boolean }
+  | { type: 'marker'; start: number; end: number; ref: string; raw: string }
   | { type: 'code'; start: number; end: number; code: string; language: string }
   | { type: 'pending'; start: number };
 
@@ -201,7 +221,12 @@ function scan(text: string, final: boolean): Region[] {
     const lineEnd = nl === -1 ? text.length : nl;
     const next = nl === -1 ? text.length : nl + 1;
     const line = text.slice(pos, lineEnd).replace(/\r$/, '');
-    if (!fence) {
+    const ref = fence ? null : markerRef(line);
+    if (ref) {
+      if (pos > proseStart) regions.push({ type: 'prose', start: proseStart, end: pos, open: false });
+      regions.push({ type: 'marker', start: pos, end: next, ref, raw: line.trim() });
+      proseStart = next;
+    } else if (!fence) {
       const f = openFence(line);
       if (f) {
         if (pos > proseStart) regions.push({ type: 'prose', start: proseStart, end: pos, open: false });
@@ -224,7 +249,7 @@ function scan(text: string, final: boolean): Region[] {
     return regions;
   }
   let end = text.length;
-  if (!final && mayBecomeFence(text.slice(pos))) end = pos;
+  if (!final && (mayBecomeFence(text.slice(pos)) || MARKER_PREFIX.test(text.slice(pos)))) end = pos;
   if (end > proseStart) regions.push({ type: 'prose', start: proseStart, end, open: !final });
   return regions;
 }
@@ -332,6 +357,7 @@ export function splitMarkdown(text: string): Segment[] {
   const out: Segment[] = [];
   for (const r of scan(text, true)) {
     if (r.type === 'code') out.push({ kind: 'code', code: r.code, language: r.language });
+    else if (r.type === 'marker') out.push({ kind: 'marker', ref: r.ref, raw: r.raw });
     else if (r.type === 'prose') out.push(...proseSegments(text.slice(r.start, r.end)));
   }
   return out;
@@ -339,7 +365,11 @@ export function splitMarkdown(text: string): Segment[] {
 
 // ---------- Streaming ----------
 
-export type StreamUnit = { kind: 'md'; start: number; end: number } | { kind: 'block'; start: number; end: number; seg: Segment };
+export type StreamUnit =
+  | { kind: 'md'; start: number; end: number }
+  | { kind: 'block'; start: number; end: number; seg: Segment }
+  /** A placement marker: nothing is streamed for it (its block goes in with the final layout). */
+  | { kind: 'skip'; start: number; end: number };
 
 /**
  * What of a (partial) reply can be streamed now, as ordered units over `text` offsets: markdown text (the last
@@ -357,6 +387,10 @@ export function streamUnits(text: string, final: boolean): StreamUnit[] {
   };
   for (const r of scan(text, final)) {
     if (r.type === 'pending') break;
+    if (r.type === 'marker') {
+      units.push({ kind: 'skip', start: r.start, end: r.end });
+      continue;
+    }
     if (r.type === 'code') {
       units.push({ kind: 'block', start: r.start, end: r.end, seg: { kind: 'code', code: r.code, language: r.language } });
       continue;
@@ -537,10 +571,13 @@ export function codeElement(code: string, language: string): RichPreformatted {
 
 function richElements(seg: Segment): RichElement[] {
   if (seg.kind === 'code') return [codeElement(seg.code, seg.language)];
-  return proseToRich(seg.text);
+  if (seg.kind === 'block') return [];
+  return proseToRich(seg.kind === 'marker' ? seg.raw : seg.text);
 }
 
 export function segmentBlock(seg: Segment): ReplyBlock {
+  if (seg.kind === 'block') return seg.block as ReplyBlock;
+  if (seg.kind === 'marker') return { type: 'markdown', text: proseMarkdown(seg.raw) };
   if (seg.kind === 'markdown') return { type: 'markdown', text: proseMarkdown(seg.text) };
   return { type: 'rich_text', elements: nonEmptyElements(richElements(seg)) };
 }
@@ -555,12 +592,14 @@ function nonEmptyElements(els: RichElement[]): RichElement[] {
  * The blocks for a reply's text, within Slack's limits: `maxBlocks` (leave room for e.g. buttons or a plan),
  * the shared markdown budget (overflowing prose → rich_text), and an overall size cap (cut with a note).
  */
-export function replyBlocks(text: string, opts: { maxBlocks?: number } = {}): ReplyBlock[] {
+export function replyBlocks(text: string, opts: ReplyBlocksOpts = {}): ReplyBlock[] {
   const maxBlocks = Math.max(1, opts.maxBlocks ?? MAX_MESSAGE_BLOCKS);
   const src = text.length > MAX_TOTAL_CHARS ? text.slice(0, MAX_TOTAL_CHARS) : text;
-  let segs = splitMarkdown(src);
+  const split = splitMarkdown(src);
+  let segs = resolveMarkers(split, opts.resolve);
   if (src.length < text.length) segs.push({ kind: 'markdown', text: '_[message truncated]_' });
-  if (!segs.length) return [{ type: 'markdown', text: src }];
+  if (!split.length) return [{ type: 'markdown', text: src }];
+  if (!segs.length) return [];
   let budget = MARKDOWN_BUDGET;
   segs = segs.map((s) => {
     if (s.kind !== 'markdown') return s;
@@ -574,8 +613,38 @@ export function replyBlocks(text: string, opts: { maxBlocks?: number } = {}): Re
   return [...head, { type: 'rich_text', elements: nonEmptyElements(segs.slice(maxBlocks - 1).flatMap(richElements)) }];
 }
 
+export interface ReplyBlocksOpts {
+  maxBlocks?: number;
+  /**
+   * Placement markers: the block (or markdown text) for a ref, null to drop the line. Without it a marker line stays
+   * literal text. Resolved blocks count against `maxBlocks` like any other; past it they are dropped.
+   */
+  resolve?: (ref: string) => { block: unknown } | { markdown: string } | null;
+}
+
+function resolveMarkers(segs: Segment[], resolve: ReplyBlocksOpts['resolve']): Segment[] {
+  if (!resolve) return segs;
+  const out: Segment[] = [];
+  for (const s of segs) {
+    if (s.kind !== 'marker') {
+      out.push(s);
+      continue;
+    }
+    const r = resolve(s.ref);
+    if (!r) continue;
+    if ('block' in r) out.push({ kind: 'block', block: r.block });
+    else if (r.markdown.trim()) {
+      // Merged into the markdown around it (one block, as if the model had written it there).
+      const prev = out[out.length - 1];
+      if (prev?.kind === 'markdown') prev.text = `${prev.text}\n\n${r.markdown}`;
+      else out.push({ kind: 'markdown', text: r.markdown });
+    }
+  }
+  return out;
+}
+
 /** A reply as a chat.postMessage / chat.update payload: blocks + the raw text as the `text` fallback. */
-export function replyMessage(text: string, opts: { maxBlocks?: number } = {}): { text: string; blocks: ReplyBlock[] } {
+export function replyMessage(text: string, opts: ReplyBlocksOpts = {}): { text: string; blocks: ReplyBlock[] } {
   return { text: text.slice(0, MAX_FALLBACK_TEXT), blocks: replyBlocks(text, opts) };
 }
 

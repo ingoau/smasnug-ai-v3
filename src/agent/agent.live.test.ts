@@ -559,7 +559,7 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     await runFrontTurn(turn, io());
     const channelId = tid.split(':')[0]!;
     const calls = (await fakeCalls()).slice(before);
-    const complete = calls.filter((c) => c.method === 'files.completeUploadExternal' && c.args.channel_id === channelId);
+    const complete = sharedUploads(calls, channelId);
     const files = await sql<any[]>`select id, name, mime, description, owner_id from files where thread_id = ${tid}`;
     console.log('page:', JSON.stringify(complete.map((c) => c.args.files)), JSON.stringify(files));
     expect(complete).toHaveLength(1);
@@ -568,10 +568,20 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
     await sql`delete from files where thread_id = ${tid}`;
   }, 120_000);
 
-  /** Files the bot posted into a thread's channel since `before` (files.completeUploadExternal). */
+  /**
+   * Uploads that ended up in a channel: shared there directly (completeUploadExternal with channel_id), or uploaded
+   * privately and attached to a reply message there (chat.update file_ids).
+   */
+  function sharedUploads(calls: { method: string; args: any }[], channelId: string) {
+    const attached = new Set(calls.filter((c) => c.method === 'chat.update' && c.args.channel === channelId && Array.isArray(c.args.file_ids)).flatMap((c) => c.args.file_ids));
+    return calls.filter(
+      (c) => c.method === 'files.completeUploadExternal' && (c.args.channel_id === channelId || (!c.args.channel_id && c.args.files?.some((f: any) => attached.has(f.id)))),
+    );
+  }
+
+  /** Files the bot posted into a thread's channel since `before`. */
   async function postedFiles(tid: string, before: number) {
-    const channelId = tid.split(':')[0]!;
-    return (await fakeCalls()).slice(before).filter((c) => c.method === 'files.completeUploadExternal' && c.args.channel_id === channelId);
+    return sharedUploads((await fakeCalls()).slice(before), tid.split(':')[0]!);
   }
 
   it('"@bot ^" after the speaker\'s own unanswered request does that request (no "what do you need?")', async () => {

@@ -77,3 +77,6 @@ export async function onShutdown(): Promise<void> {
 /** Coding agents: the admin's Launch / Cancel on a proposed coding agent (only ADMIN_USER_ID; checked in the handlers). */
 registerAction('coding:launch', handleCodingLaunch);
 registerAction('coding:cancel', handleCodingCancel);
+
+/** Link buttons on reply cards (rich-blocks.ts): Slack opens the URL itself and still sends the click; nothing to do. */
+registerAction('link:', async () => {});
