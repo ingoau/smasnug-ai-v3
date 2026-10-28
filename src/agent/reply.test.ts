@@ -13,8 +13,9 @@ vi.mock('../core/slack.js', () => ({
   slackErrorCode: (err: any) => err?.data?.error,
 }));
 vi.mock('../core/events.js', () => ({ appendEvent: vi.fn(async () => {}) }));
-vi.mock('./files.js', () => ({ uploadFiles: vi.fn(async () => {}) }));
-vi.mock('./charts-store.js', () => ({ saveReplyCharts: vi.fn(async () => {}) }));
+vi.mock('./files.js', () => ({ uploadFiles: vi.fn(async () => {}), uploadPrivateFiles: vi.fn(async (files: any[]) => files.map((f: any, i: number) => ({ slackFileId: `FPRIV${i + 1}`, filename: f.filename, ...(f.fileId ? { fileId: f.fileId } : {}) }))) }));
+vi.mock('../files/store.js', () => ({ recordFilePosts: vi.fn(async () => {}) }));
+vi.mock('./charts-store.js', () => ({ saveReplyExtras: vi.fn(async () => {}) }));
 vi.mock('./reply-buttons-store.js', () => ({
   createReplyButtons: vi.fn(async (o: any) => ({ id: 42, threadId: o.threadId, channelId: o.channelId, turnId: o.turnId, messageTs: null, replyText: null, labels: o.labels, pressedBy: null, pressedLabel: null, pressedMessageTs: null, pressedAt: null })),
   setButtonsMessage: vi.fn(async () => {}),
@@ -191,6 +192,92 @@ describe('reply charts', () => {
     const kept = await new ReplyManager(target('synthesis')).finish('tc1', 'just the words', undefined, undefined, [{ type: 'pie', segments: [{ label: 'A', value: 1 }] }]);
     expect(kept).toMatch(/no title/);
     expect(calls.find((c) => c.method === 'chat.postMessage')!.args.blocks.map((b: any) => b.type)).toEqual(['markdown']);
+  });
+});
+
+describe('reply extras: images, tables, cards, files', () => {
+  const table = { caption: 'Plans', columns: ['Plan', 'Price'], rows: [['Basic', 5], ['Pro', '12']] };
+  const cards = [{ title: 'Repo A', subtitle: 'TypeScript', body: 'Fast', url: 'https://example.com/a' }, { title: 'Repo B', url: 'https://example.com/b' }];
+  const pngFile = { n: 1, file: { fileId: 'file_aaaaaaaaaa', filename: 'cat.png' }, alt: 'A cat' };
+
+  it('posted: images inline at their marker (uploaded privately), table and cards below the text', async () => {
+    calls.length = 0;
+    failOn = null;
+    const { uploadPrivateFiles } = await import('./files.js');
+    const res = await new ReplyManager(target('user', 1)).finish('tc1', 'Look:\n[[image:1]]\nThat is the cat.', undefined, undefined, undefined, {
+      images: [pngFile, { n: 2, url: 'https://example.com/dog.jpg', alt: 'A dog' }],
+      tables: table,
+      cards,
+    });
+    expect(res).toMatch(/^Replied \(posted\)/);
+    expect(vi.mocked(uploadPrivateFiles)).toHaveBeenCalledWith([pngFile.file], 'reply:1:0:images');
+    const post = calls.find((c) => c.method === 'chat.postMessage')!;
+    expect(post.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'image', 'markdown', 'image', 'data_table', 'carousel']);
+    expect(post.args.blocks[1]).toEqual({ type: 'image', alt_text: 'A cat', slack_file: { id: 'FPRIV1' }, block_id: 'image_1' });
+    expect(post.args.blocks[3]).toMatchObject({ type: 'image', image_url: 'https://example.com/dog.jpg', block_id: 'image_2' });
+    const dt = post.args.blocks[4];
+    expect(dt).toMatchObject({ caption: 'Plans', block_id: 'table_1' });
+    expect(dt.rows).toEqual([
+      [{ type: 'raw_text', text: 'Plan' }, { type: 'raw_text', text: 'Price' }],
+      [{ type: 'raw_text', text: 'Basic' }, { type: 'raw_number', value: 5, text: '5' }],
+      [{ type: 'raw_text', text: 'Pro' }, { type: 'raw_number', value: 12, text: '12' }],
+    ]);
+    expect(post.args.blocks[5].elements.map((c: any) => c.title.text)).toEqual(['Repo A', 'Repo B']);
+    expect(post.args.blocks[5].elements[0].actions[0]).toMatchObject({ url: 'https://example.com/a', action_id: 'link:card_1' });
+    // Notification text: no marker lines, one summary per extra.
+    expect(post.args.text).not.toContain('[[');
+    expect(post.args.text).toContain('[table: Plans, 2 rows]');
+  });
+
+  it('Slack refusing the blocks → retried once (just-uploaded image), then sent degraded: fallbacks in the text, image attached', async () => {
+    calls.length = 0;
+    const { imageRetry } = await import('./reply.js');
+    imageRetry.delayMs = 1;
+    failOn = (m, args) => (m === 'chat.postMessage' && args.blocks.some((b: any) => b.type !== 'markdown') ? 'invalid_blocks' : null);
+    const res = await new ReplyManager(target('user', 1)).finish('tc1', 'Prices:\n[[table]]\nDone.', undefined, undefined, undefined, { images: [pngFile], tables: table });
+    failOn = null;
+    expect(res).toMatch(/^Replied \(posted\)/);
+    const posts = calls.filter((c) => c.method === 'chat.postMessage');
+    expect(posts).toHaveLength(3);
+    const last = posts[2]!.args;
+    expect(last.blocks.every((b: any) => b.type === 'markdown')).toBe(true);
+    expect(last.blocks[0].text).toContain('**Plans**\n| Plan | Price |');
+    expect(last.blocks[0].text.indexOf('Prices:')).toBeLessThan(last.blocks[0].text.indexOf('| Plan'));
+    const attach = calls.find((c) => c.method === 'chat.update' && c.args.file_ids)!;
+    expect(attach.args.file_ids).toEqual(['FPRIV1']);
+    expect(attach.args.blocks).toEqual(last.blocks);
+  });
+
+  it('files are attached to the reply message; if that fails they are shared below it', async () => {
+    const { uploadFiles } = await import('./files.js');
+    vi.mocked(uploadFiles).mockClear();
+    calls.length = 0;
+    const file = { fileId: 'file_bbbbbbbbbb', filename: 'notes.md' };
+    await new ReplyManager(target('user', 1)).finish('tc1', 'Here.', [file]);
+    const post = calls.find((c) => c.method === 'chat.postMessage')!;
+    const attach = calls.find((c) => c.method === 'chat.update' && c.args.file_ids)!;
+    expect(attach.args).toMatchObject({ ts: post.args.ts ?? '1700000000.000900', file_ids: ['FPRIV1'], blocks: post.args.blocks, text: post.args.text });
+    expect(vi.mocked(uploadFiles)).not.toHaveBeenCalled();
+
+    calls.length = 0;
+    failOn = (m, args) => (m === 'chat.update' && args.file_ids ? 'unable_to_share_files' : null);
+    const res = await new ReplyManager(target('user', 1)).finish('tc1', 'Here.', [file]);
+    failOn = null;
+    expect(res).toMatch(/^Replied \(posted\)/);
+    expect(vi.mocked(uploadFiles)).toHaveBeenCalledWith(expect.objectContaining({ channelId: 'C1', threadTs: '1.1', files: [file] }));
+  });
+
+  it('streamed: the marker line is never streamed; the final layout puts the table there', async () => {
+    calls.length = 0;
+    const text = 'Here are the numbers for this week:\n[[table:1]]\nPro is the better deal overall.';
+    const rm = new ReplyManager(target('user'));
+    await streamIn(rm, text);
+    await rm.finish('tc1', text, undefined, undefined, undefined, { tables: [table] });
+    const streamed = calls.filter((c) => c.method === 'chat.startStream' || c.method === 'chat.appendStream').map((c) => streamArgsText(c.args)).join('');
+    expect(streamed).not.toContain('[[');
+    expect(streamed).toContain('Pro is the better deal');
+    const upd = calls.filter((c) => c.method === 'chat.update').pop()!;
+    expect(upd.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'data_table', 'markdown']);
   });
 });
 

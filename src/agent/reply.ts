@@ -6,16 +6,20 @@
  * Streams run in `chunks` mode (a stream's mode is fixed at chat.startStream): prose goes out as `markdown_text`
  * chunks; a code block is held until its fence closes and then sent as a `blocks` chunk. A streamed reply that
  * carried blocks chunks is re-rendered with chat.update after stopStream, so its final layout is exactly the
- * posted one whatever Slack does with streamed blocks. Files are uploaded after the message (after stopStream).
+ * posted one whatever Slack does with streamed blocks.
  * Quick-reply buttons (reply-buttons.ts) go into the same message: an actions block in the post, or `blocks` on
  * chat.stopStream ("rendered at the bottom of the finalized message"); if that fails, chat.update adds them, and as
  * a last resort they are posted as a small follow-up message.
- * Charts (charts.ts, Slack data_visualization) sit between the reply and the buttons. A streamed reply includes
- * them in the final chat.update (and on stopStream, so they show if that update fails). They are saved on the
- * message (reply_charts) before a plan card is attached, so a later re-render puts them back.
+ * Extra blocks (rich-blocks.ts: charts, inline images, data tables, link cards) sit between the reply and the buttons,
+ * or inline where the text has a `[[kind:n]]` marker line (nothing is streamed for a marker). A streamed reply gets
+ * them in the final chat.update (and on stopStream, so they show if that update fails). They are saved on the message
+ * (reply_charts) before a plan card is attached, so a later re-render puts them back. If Slack refuses them
+ * (invalid_blocks), the reply goes out degraded: their markdown fallbacks in the text, image files attached.
+ * Files are uploaded privately and attached to the reply message itself (chat.update file_ids); if that fails they
+ * are shared below it as before.
  * Tool activity ("Searching Slack…") shows live as the tasks of a plan in an activity message (activity-trail.ts). A
  * reply adopts that message: a streamed reply streams into it, a posted one is written into it (chat.update). The
- * final layout is [plan card, reply, charts, buttons]: the turn's card (turn-card.ts; a plan block of its steps and runs,
+ * final layout is [plan card, reply with its extras, buttons]: the turn's card (turn-card.ts; a plan block of its steps and runs,
  * which Slack shows collapsed to its title once the stream is over) or none for a turn without lookups or subagents. One card per message. No task is ever left in progress
  * when a stream stops (Slack would show it as failed).
  */
@@ -23,13 +27,14 @@ import { appendEvent } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import type { TurnTiming } from '../core/timing.js';
-import { uploadFiles, type OutgoingFile } from './files.js';
+import { uploadFiles, uploadPrivateFiles, type OutgoingFile } from './files.js';
+import { recordFilePosts } from '../files/store.js';
 import { extractPartialString } from './partial-json.js';
 import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type ButtonsActionsBlock } from './reply-buttons.js';
-import { chartsFallback, normalizeCharts, withChartIds, type DataVisualizationBlock } from './charts.js';
-import { saveReplyCharts } from './charts-store.js';
+import { saveReplyExtras } from './charts-store.js';
+import { buildExtras, degradedFileIds, extrasFallback, imageExtras, replyBody, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
@@ -168,13 +173,34 @@ export function markdownMessage(text: string) {
   return replyMessage(text, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 });
 }
 
-/** A reply message's final layout: [plan card, reply, charts, buttons] (card, charts, and buttons when given). */
-function replyLayout(text: string, actions?: ButtonsActionsBlock, card?: CardBlock | null, charts?: readonly DataVisualizationBlock[]): { text: string; blocks: unknown[] } {
-  const viz = withChartIds(charts ?? [], (i) => `chart_${i + 1}`);
-  const msg = replyMessage(text, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - (card ? 1 : 0) - viz.length });
-  // An empty markdown block is invalid. A chart-only reply is the chart blocks plus a text fallback.
-  const body = text.trim() || !viz.length ? msg.blocks : [];
-  return { text: chartsFallback(text, viz), blocks: [...(card ? [card] : []), ...body, ...viz, ...(actions ? [actions] : [])] };
+/** A reply message's final layout: [plan card, reply with its extras, buttons] (card, extras, and buttons when given). */
+function replyLayout(text: string, actions?: ButtonsActionsBlock, card?: CardBlock | null, extras?: ReplyExtras | null): { text: string; blocks: unknown[] } {
+  const maxBlocks = MAX_MESSAGE_BLOCKS - 1 - (card ? 1 : 0);
+  // An empty markdown block is invalid: an extras-only reply is their blocks plus a text fallback.
+  const body = replyBody(text, extras, { maxBlocks, idPrefix: '' });
+  return { text: extrasFallback(text, extras), blocks: [...(card ? [card] : []), ...body, ...(actions ? [actions] : [])] };
+}
+
+/** Slack refused the blocks (e.g. an image it can't fetch, a block type it doesn't render here). */
+const BLOCKS_ERRORS = new Set(['invalid_blocks', 'invalid_blocks_format']);
+/** Wait before retrying a refused layout that has just-uploaded image files (Slack may still be processing them). */
+export const imageRetry = { delayMs: 1500 };
+
+/** Extra (image) inputs to finish(): files (access already checked) or URLs, numbered as the model listed them. */
+export interface ImageArg {
+  n: number;
+  file?: OutgoingFile;
+  url?: string;
+  alt: string;
+  title?: string;
+}
+
+/** The rich parts of a reply besides text, files and buttons (see rich-blocks.ts). */
+export interface ReplyRich {
+  charts?: unknown;
+  images?: readonly ImageArg[];
+  tables?: unknown;
+  cards?: unknown;
 }
 
 export class ReplyManager {
@@ -185,7 +211,9 @@ export class ReplyManager {
   /** Texts of the replies delivered this turn (for duplicate detection). */
   private deliveredTexts: string[] = [];
   /** The last reply message delivered this turn (the plan card attaches to it). */
-  lastDelivered: { ts: string; text: string; streamed: boolean; charts?: DataVisualizationBlock[] } | null = null;
+  lastDelivered: { ts: string; text: string; streamed: boolean; extras?: ReplyExtras } | null = null;
+  /** The last layout sent to each reply message (attaching files rewrites the message with it). */
+  private layouts = new Map<string, { text: string; blocks: unknown[] }>();
   private readonly trail: ActivityTrail | null;
 
   constructor(private readonly t: ReplyTarget) {
@@ -445,12 +473,21 @@ export class ReplyManager {
   }
 
   /** Called from the tool's execute with the complete, validated input. */
-  async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly string[], chartsRaw?: unknown): Promise<string> {
+  async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly string[], chartsRaw?: unknown, rich: ReplyRich = {}): Promise<string> {
     const e = this.start(toolCallId);
     e.finished = true;
     const text = neutralizeBroadcasts(rawText);
-    const { blocks: charts, notes: chartNotes } = normalizeCharts(chartsRaw);
+    const built = buildExtras({ charts: chartsRaw ?? rich.charts, tables: rich.tables, cards: rich.cards });
+    const extras = built.extras;
+    const chartNotes = built.notes;
+    if (rich.images?.length) {
+      const imgs = await this.prepareImages(e, rich.images, chartNotes);
+      // Images come after charts, before tables and cards.
+      const at = extras.items.findIndex((it) => !it.ref.startsWith('chart:'));
+      extras.items.splice(at < 0 ? extras.items.length : at, 0, ...imageExtras(imgs));
+    }
     const chartSuffix = () => (chartNotes.length ? ` ${chartNotes.join(' ')}` : '');
+    const charts = extras.items;
     if (e.timer) {
       clearTimeout(e.timer);
       e.timer = null;
@@ -504,21 +541,21 @@ export class ReplyManager {
             last = { ts: e.streamTs, text: e.streamed };
             const rest = text.slice(e.rawSent);
             if (rest.trim()) {
-              last = { ts: await this.post(e, rest, ':rest', actions, null, charts), text: rest };
+              last = { ts: await this.post(e, rest, ':rest', actions, null, extras), text: rest };
               buttonsTs = last.ts;
-            } else if (charts.length && e.streamTs && (await this.finalLayout(e, e.streamed, actions, null, charts))) {
+            } else if (charts.length && e.streamTs && (await this.finalLayout(e, e.streamed, actions, null, extras))) {
               if (actions) buttonsTs = e.streamTs;
             }
           } else {
-            const tail = [...withChartIds(charts, (i) => `chart_${i + 1}`), ...(actions ? [actions] : [])];
+            const tail = [...(extras.items.length ? replyBody('', extras, { maxBlocks: MAX_STREAM_BLOCKS, idPrefix: '' }) : []), ...(actions ? [actions] : [])];
             if (actions && (await this.stopStreamTail(e, tail))) buttonsTs = e.streamTs;
             else if (!actions) await this.stopStreamTail(e, tail);
             // The final layout keeps the turn's plan card above the reply (the live plan's tasks become the card).
             const card = await this.cardBlock();
             if (card || e.blocksChunks > 0 || e.activityCards > 0 || charts.length) {
-              if (await this.finalLayout(e, text, actions, card, charts)) {
+              if (await this.finalLayout(e, text, actions, card, extras)) {
                 if (actions) buttonsTs = e.streamTs;
-                await this.rememberCharts(e.streamTs, charts);
+                await this.rememberExtras(e.streamTs, extras);
                 if (card) await this.attachCard(e.streamTs!, text);
               }
             }
@@ -526,39 +563,40 @@ export class ReplyManager {
           }
         } else {
           // Nothing streamed yet (no deltas, or all of it held back): post whole, same visual result.
-          last = { ts: await this.postWhole(e, text, actions, charts), text };
+          last = { ts: await this.postWhole(e, text, actions, extras), text };
           buttonsTs = last.ts;
         }
       } catch (err) {
         log.warn({ err }, 'stream finish failed');
         if (e.streamTs) {
           delivered = 'streamed';
-          ({ last, buttonsTs } = await this.recoverStream(e, text, actions, charts));
+          ({ last, buttonsTs } = await this.recoverStream(e, text, actions, extras));
         } else {
-          last = { ts: await this.postWhole(e, text, actions, charts), text };
+          last = { ts: await this.postWhole(e, text, actions, extras), text };
           buttonsTs = last.ts;
         }
       }
     } else if (e.streamTs) {
       // Stream opened but failed: close it and complete the message.
       delivered = 'streamed';
-      ({ last, buttonsTs } = await this.recoverStream(e, text, actions, charts));
+      ({ last, buttonsTs } = await this.recoverStream(e, text, actions, extras));
     } else {
-      last = { ts: await this.postWhole(e, text, actions, charts), text };
+      last = { ts: await this.postWhole(e, text, actions, extras), text };
       buttonsTs = last.ts;
     }
     // Posted as a message of its own: postWhole removed the activity message first; one a tool running alongside
     // opened meanwhile goes too.
     if (delivered === 'posted') await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
-    if (last.ts) await this.rememberCharts(last.ts, charts);
-    if (btnRow) await this.recordButtons(e, btnRow, buttonsTs && buttonsTs === last.ts ? buttonsTs : null, last, charts);
+    if (last.ts) await this.rememberExtras(last.ts, extras);
+    if (btnRow) await this.recordButtons(e, btnRow, buttonsTs && buttonsTs === last.ts ? buttonsTs : null, last, extras);
     this.delivered++;
-    if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs, ...(charts.length ? { charts } : {}) };
+    if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs, ...(charts.length ? { extras } : {}) };
     this.deliveredTexts.push(text);
     await this.t.onDelivered?.({ ts: last.ts, text, buttons: Boolean(btnRow) }).catch((err) => log.warn({ err }, 'onDelivered failed'));
-    if (files?.length) {
+    if (files?.length || degradedFileIds(extras).length) {
+      const layout = last.ts ? (this.layouts.get(last.ts) ?? replyLayout(last.text, buttonsTs === last.ts ? actions : undefined, null, extras)) : null;
       try {
-        await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files, idempotencyKey: this.key(e, ':files') });
+        await this.attachFiles(e, last.ts, layout, files ?? [], degradedFileIds(extras));
       } catch (err) {
         log.warn({ err }, 'reply file upload failed');
         await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, mode: delivered, text, filesError: String(err) });
@@ -572,26 +610,120 @@ export class ReplyManager {
       text,
       files: files?.map((f) => (f.fileId ? `${f.fileId} (${f.filename})` : f.filename)),
       ...(btnRow ? { buttons: btnRow.labels } : {}),
-      ...(charts.length ? { charts: charts.map((c) => ({ type: c.chart.type, title: c.title })) } : {}),
+      ...(charts.length ? { extras: charts.map((c) => c.summary) } : {}),
+      ...(extras.degraded ? { degraded: true } : {}),
     });
     return `Replied (${delivered})${btnRow ? ` with buttons: ${btnRow.labels.join(' | ')}` : ''}.${chartSuffix()}`;
   }
 
-  /** Persist charts before a plan card can re-render this message (a re-render rebuilds blocks from the DB). */
-  private async rememberCharts(ts: string | null, charts: readonly DataVisualizationBlock[]): Promise<void> {
-    if (!ts || !charts.length) return;
-    await saveReplyCharts(this.t.channelId, ts, charts).catch((err) => log.warn({ err }, 'saving reply charts failed'));
+  /** Persist extras before a plan card can re-render this message (a re-render rebuilds blocks from the DB). */
+  private async rememberExtras(ts: string | null, extras: ReplyExtras): Promise<void> {
+    if (!ts || !extras.items.length) return;
+    await saveReplyExtras(this.t.channelId, ts, extras).catch((err) => log.warn({ err }, 'saving reply extras failed'));
   }
 
-  private async post(e: ReplyEntry, text: string, suffix = '', actions?: ButtonsActionsBlock, card?: CardBlock | null, charts?: readonly DataVisualizationBlock[]): Promise<string | null> {
-    const msg = replyLayout(text, actions, card, charts);
-    const res = await slackCall<any>(
-      'chat.postMessage',
-      { channel: this.t.channelId, thread_ts: this.t.threadTs, text: msg.text, blocks: msg.blocks, unfurl_links: false },
-      { idempotencyKey: this.key(e, suffix) },
-    );
-    this.t.timing?.mark('reply_posted');
-    return res?.ts ?? null;
+  /**
+   * A Slack call carrying the reply's extras. Slack refusing the blocks → tried once more after a moment when there
+   * are just-uploaded image files (they may still be processing), then degraded for good (`extras.degraded`: the
+   * markdown fallbacks instead, rich-blocks.ts). Other errors are thrown as they are.
+   */
+  private async withExtras<T>(extras: ReplyExtras | null | undefined, send: () => Promise<T>): Promise<T> {
+    if (!extras?.items.length || extras.degraded) return send();
+    try {
+      return await send();
+    } catch (err) {
+      if (!BLOCKS_ERRORS.has(slackErrorCode(err) ?? '')) throw err;
+      if (extras.items.some((it) => it.slackFileId)) {
+        await new Promise((r) => setTimeout(r, imageRetry.delayMs));
+        try {
+          return await send();
+        } catch (err2) {
+          if (!BLOCKS_ERRORS.has(slackErrorCode(err2) ?? '')) throw err2;
+        }
+      }
+      log.warn({ err, code: slackErrorCode(err), extras: extras.items.map((it) => it.ref), turnId: this.t.turnId }, 'Slack refused the reply extras; sending their markdown fallbacks');
+      extras.degraded = true;
+      try {
+        return await send();
+      } catch (err3) {
+        // Refused without them too: not the extras' fault (e.g. the message can't be edited). Keep them for the next try.
+        extras.degraded = false;
+        throw err3;
+      }
+    }
+  }
+
+  /** chat.update of a reply message with its layout (remembered for attaching files later). */
+  private async updateLayout(ts: string, layout: () => { text: string; blocks: unknown[] }, extras?: ReplyExtras | null): Promise<void> {
+    await this.withExtras(extras, async () => {
+      const msg = layout();
+      await editMessage('chat.update', { channel: this.t.channelId, ts, ...msg });
+      this.layouts.set(ts, msg);
+    });
+  }
+
+  private async post(e: ReplyEntry, text: string, suffix = '', actions?: ButtonsActionsBlock, card?: CardBlock | null, extras?: ReplyExtras | null): Promise<string | null> {
+    return this.withExtras(extras, async () => {
+      const msg = replyLayout(text, actions, card, extras);
+      const res = await slackCall<any>(
+        'chat.postMessage',
+        { channel: this.t.channelId, thread_ts: this.t.threadTs, text: msg.text, blocks: msg.blocks, unfurl_links: false },
+        { idempotencyKey: this.key(e, suffix) },
+      );
+      this.t.timing?.mark('reply_posted');
+      if (res?.ts) this.layouts.set(res.ts, msg);
+      return res?.ts ?? null;
+    });
+  }
+
+  /**
+   * Image inputs → images ready for blocks: file images are uploaded to Slack privately (not shared anywhere; the
+   * image block shows them). Problems become notes for the model; the rest still goes out.
+   */
+  private async prepareImages(e: ReplyEntry, images: readonly ImageArg[], notes: string[]): Promise<PreparedImage[]> {
+    const out: PreparedImage[] = [];
+    const fileArgs = images.filter((i) => i.file);
+    let uploaded: { slackFileId: string }[] = [];
+    if (fileArgs.length) {
+      try {
+        uploaded = await uploadPrivateFiles(
+          fileArgs.map((i) => i.file!),
+          this.key(e, ':images'),
+        );
+      } catch (err) {
+        log.warn({ err }, 'uploading reply images failed');
+        notes.push('The image files could not be uploaded, so they were left out.');
+      }
+    }
+    let k = 0;
+    for (const img of images) {
+      const base = { n: img.n, alt: img.alt, ...(img.title ? { title: img.title } : {}) };
+      if (img.file) {
+        const up = uploaded[k++];
+        if (up) out.push({ ...base, slackFileId: up.slackFileId });
+      } else if (img.url) out.push({ ...base, url: img.url });
+    }
+    return out;
+  }
+
+  /**
+   * Put files on the delivered reply message: uploaded privately, then attached with chat.update `file_ids` (with its
+   * current layout, which chat.update needs). `extraIds`: Slack files already uploaded (a degraded reply's images).
+   * If attaching fails, the files are shared below the reply instead (a message of their own). Throws if that fails.
+   */
+  private async attachFiles(e: ReplyEntry, ts: string | null, layout: { text: string; blocks: unknown[] } | null, files: OutgoingFile[], extraIds: string[]): Promise<void> {
+    if (ts && layout) {
+      try {
+        const up = files.length ? await uploadPrivateFiles(files, this.key(e, ':files-private')) : [];
+        await editMessage('chat.update', { channel: this.t.channelId, ts, ...layout, file_ids: [...up.map((u) => u.slackFileId), ...extraIds] });
+        const posts = up.flatMap((u) => (u.fileId ? [{ fileId: u.fileId, slackFileId: u.slackFileId, channelId: this.t.channelId, threadId: this.t.threadId }] : []));
+        await recordFilePosts(posts).catch((err) => log.warn({ err }, 'recording attached reply files failed'));
+        return;
+      } catch (err) {
+        log.warn({ err, code: slackErrorCode(err), ts }, 'attaching files to the reply message failed; sharing them below it');
+      }
+    }
+    if (files.length) await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files, idempotencyKey: this.key(e, ':files') });
   }
 
   /** The turn's card for a reply about to go out (null: none). Never throws. */
@@ -611,12 +743,12 @@ export class ReplyManager {
    * update), it is deleted first and the reply posted as a new message, so the cards never sit above it for a moment.
    * No new activity message opens from here on (`posting` counts as visible).
    */
-  private async postWhole(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock, charts?: readonly DataVisualizationBlock[]): Promise<string | null> {
+  private async postWhole(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock, extras?: ReplyExtras): Promise<string | null> {
     e.posting = true;
     try {
       const card = await this.cardBlock();
-      const ts = (await this.postIntoActivity(text, actions, card, charts)) ?? (await this.post(e, text, '', actions, card, charts));
-      await this.rememberCharts(ts, charts ?? []);
+      const ts = (await this.postIntoActivity(text, actions, card, extras)) ?? (await this.post(e, text, '', actions, card, extras));
+      if (extras) await this.rememberExtras(ts, extras);
       if (ts && card) await this.attachCard(ts, text);
       return ts;
     } catch (err) {
@@ -626,7 +758,7 @@ export class ReplyManager {
   }
 
   /** The reply rewritten into the open activity message (see postWhole); null when there is none or it had to go. */
-  private async postIntoActivity(text: string, actions: ButtonsActionsBlock | undefined, card: CardBlock | null, charts?: readonly DataVisualizationBlock[]): Promise<string | null> {
+  private async postIntoActivity(text: string, actions: ButtonsActionsBlock | undefined, card: CardBlock | null, extras?: ReplyExtras): Promise<string | null> {
     if (!this.trail?.isOpen) {
       await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
       return null;
@@ -643,7 +775,7 @@ export class ReplyManager {
           // latest, so the reply is still written into it (no delete + post gap); only a failed update drops it.
           log.info({ code: slackErrorCode(err), turnId: this.t.turnId }, 'stopping the activity message failed (already ended?); updating it anyway');
         }
-        await editMessage('chat.update', { channel: this.t.channelId, ts: a.ts, ...replyLayout(text, actions, card, charts) });
+        await this.updateLayout(a.ts, () => replyLayout(text, actions, card, extras), extras);
         this.t.timing?.mark('reply_posted');
         return a.ts;
       } catch (err) {
@@ -658,19 +790,19 @@ export class ReplyManager {
    * A stream that failed midway (not stopped by the user): close it, then replace its content with the whole reply
    * (chat.update, one message). If that fails too, post the part that wasn't visible yet as its own message.
    */
-  private async recoverStream(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock, charts?: readonly DataVisualizationBlock[]): Promise<{ last: { ts: string | null; text: string }; buttonsTs: string | null }> {
+  private async recoverStream(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock, extras?: ReplyExtras): Promise<{ last: { ts: string | null; text: string }; buttonsTs: string | null }> {
     await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after failure failed'));
     try {
-      await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, ...replyLayout(text, actions, null, charts) });
+      await this.updateLayout(e.streamTs!, () => replyLayout(text, actions, null, extras), extras);
       return { last: { ts: e.streamTs, text }, buttonsTs: actions ? e.streamTs : null };
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), index: e.index }, 'completing a failed stream via chat.update failed; posting the rest');
     }
     const rest = text.slice(e.rawSent);
-    if (!rest.trim() && !charts?.length) return { last: { ts: e.streamTs, text: e.streamed }, buttonsTs: null };
-    // The update didn't land, so the stream has no chart blocks (stopStream above sent none).
-    const ts = await this.post(e, rest, rest.trim() ? ':rest' : ':charts', actions, null, charts);
-    return { last: { ts, text: rest }, buttonsTs: actions || charts?.length ? ts : null };
+    if (!rest.trim() && !extras?.items.length) return { last: { ts: e.streamTs, text: e.streamed }, buttonsTs: null };
+    // The update didn't land, so the stream has no extra blocks (stopStream above sent none).
+    const ts = await this.post(e, rest, rest.trim() ? ':rest' : ':charts', actions, null, extras);
+    return { last: { ts, text: rest }, buttonsTs: actions || extras?.items.length ? ts : null };
   }
 
   /**
@@ -678,9 +810,9 @@ export class ReplyManager {
    * with the posted layout ([card], prose as markdown, code as rich_text, in order, [buttons]), so it ends up exactly
    * like a posted reply. Returns false (logged) when Slack refused it. Never throws.
    */
-  private async finalLayout(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock, card?: CardBlock | null, charts?: readonly DataVisualizationBlock[]): Promise<boolean> {
+  private async finalLayout(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock, card?: CardBlock | null, extras?: ReplyExtras): Promise<boolean> {
     try {
-      await editMessage('chat.update', { channel: this.t.channelId, ts: e.streamTs, ...replyLayout(text, actions, card, charts) });
+      await this.updateLayout(e.streamTs!, () => replyLayout(text, actions, card, extras), extras);
       return true;
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), index: e.index }, 'final layout update of a streamed reply failed; keeping the streamed layout');
@@ -741,7 +873,7 @@ export class ReplyManager {
    * or a fallback path), add them to the delivered message with chat.update; failing that, post them as a small
    * follow-up message. Never throws.
    */
-  private async recordButtons(e: ReplyEntry, row: ReplyButtonsRow, sentWith: string | null, last: { ts: string | null; text: string }, charts?: readonly DataVisualizationBlock[]) {
+  private async recordButtons(e: ReplyEntry, row: ReplyButtonsRow, sentWith: string | null, last: { ts: string | null; text: string }, extras?: ReplyExtras) {
     try {
       if (sentWith) {
         await setButtonsMessage(row.id, sentWith, last.text);
@@ -750,7 +882,7 @@ export class ReplyManager {
       const actions = buttonsActions(row);
       if (last.ts) {
         try {
-          await editMessage('chat.update', { channel: this.t.channelId, ts: last.ts, ...replyLayout(last.text, actions, null, charts) });
+          await this.updateLayout(last.ts, () => replyLayout(last.text, actions, null, extras), extras);
           await setButtonsMessage(row.id, last.ts, last.text);
           return;
         } catch (err) {

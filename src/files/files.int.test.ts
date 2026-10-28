@@ -118,10 +118,16 @@ describe.skipIf(!INTEGRATION)('file store', () => {
       { filename: 'index.html', length: 28, snippet_type: 'html' },
       { filename: 'notes.md', length: 7, snippet_type: 'markdown' },
     ]);
+    // Uploaded privately (no channel), then attached to the reply message itself.
     const complete = calls.filter((c) => c.method === 'files.completeUploadExternal');
     expect(complete).toHaveLength(1);
-    expect(complete[0]!.args).toMatchObject({ channel_id: ctx.channelId, thread_ts: ctx.threadTs });
+    expect(complete[0]!.args.channel_id).toBeUndefined();
     expect(complete[0]!.args.files.map((f: any) => f.title)).toEqual(['index.html', 'notes.md']);
+    const posted0 = calls.find((c) => c.method === 'chat.postMessage')!;
+    const attach = calls.filter((c) => c.method === 'chat.update' && c.args.file_ids);
+    expect(attach).toHaveLength(1);
+    expect(attach[0]!.args).toMatchObject({ channel: ctx.channelId, file_ids: complete[0]!.args.files.map((f: any) => f.id) });
+    expect(attach[0]!.args.blocks).toEqual(posted0.args.blocks);
 
     // The posted copy maps back to the same id, in a thread where it is now usable by anyone.
     const slackId = complete[0]!.args.files[0].id;
