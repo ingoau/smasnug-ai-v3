@@ -24,8 +24,8 @@ afterAll(async () => {
   await sql`delete from idempotency_keys where key like ${'emoji.add:emoji-add:' + threadId + ':%'}`;
   await sql`delete from usage where user_id = ${speakerId}`;
   await redis.del(`limit:emoji_upload:${speakerId}`);
-  delete process.env.SLACK_USERBOT_TOKEN;
-  delete process.env.SLACK_USERBOT_COOKIE;
+  delete process.env.SLACK_TEAM_XOXC;
+  delete process.env.SLACK_XOXD;
   await sql.end();
   redis.disconnect();
 });

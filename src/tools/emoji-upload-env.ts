@@ -4,5 +4,5 @@
  */
 import './test-env.js';
 
-process.env.SLACK_USERBOT_TOKEN = 'xoxc-test';
-process.env.SLACK_USERBOT_COOKIE = 'xoxd-test/value';
+process.env.SLACK_TEAM_XOXC = 'xoxc-test';
+process.env.SLACK_XOXD = 'xoxd-test/value';

@@ -53,9 +53,14 @@ const clients = {
  */
 export type TokenKind = keyof typeof clients | 'userbot';
 
-/** True when the userbot session is configured (SLACK_USERBOT_TOKEN + SLACK_USERBOT_COOKIE). */
+/** The userbot's `xoxc-` token: the workspace session, else the org-wide (enterprise) one. */
+function userbotToken(): string | undefined {
+  return env.SLACK_TEAM_XOXC || env.SLACK_ENTERPRISE_XOXC || undefined;
+}
+
+/** True when the userbot session is configured (SLACK_TEAM_XOXC or SLACK_ENTERPRISE_XOXC, + SLACK_XOXD). */
 export function userbotConfigured(): boolean {
-  return Boolean(env.SLACK_USERBOT_TOKEN && env.SLACK_USERBOT_COOKIE);
+  return Boolean(userbotToken() && env.SLACK_XOXD);
 }
 
 /** A file argument for a userbot call: sent as a multipart file part. */
@@ -106,7 +111,7 @@ function userbotTarget(): Promise<{ apiUrl: string; route: string }> {
  */
 async function postUserbot(apiUrl: string, method: string, args: Record<string, unknown>, route: string, signal?: AbortSignal): Promise<any> {
   const form = new FormData();
-  form.append('token', env.SLACK_USERBOT_TOKEN ?? '');
+  form.append('token', userbotToken() ?? '');
   for (const [k, v] of Object.entries(args)) {
     if (v === undefined || v === null) continue;
     if (v instanceof SlackUpload) form.append(k, new Blob([new Uint8Array(v.bytes)], { type: v.contentType }), v.filename);
@@ -119,7 +124,7 @@ async function postUserbot(apiUrl: string, method: string, args: Record<string, 
     res = await fetch(url, {
       method: 'POST',
       body: form,
-      headers: { cookie: `d=${userbotCookie(env.SLACK_USERBOT_COOKIE ?? '')}`, 'user-agent': USERBOT_UA, origin: 'https://app.slack.com' },
+      headers: { cookie: `d=${userbotCookie(env.SLACK_XOXD ?? '')}`, 'user-agent': USERBOT_UA, origin: 'https://app.slack.com' },
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
     });
   } catch (err) {
