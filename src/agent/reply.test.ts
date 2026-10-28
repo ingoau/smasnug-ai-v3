@@ -279,6 +279,14 @@ describe('reply extras: images, tables, cards, files', () => {
     expect(vi.mocked(uploadFiles)).toHaveBeenCalledWith(expect.objectContaining({ files: [file] }));
   });
 
+  it('a files-only reply whose upload fails is reported as not posted, not left half-visible', async () => {
+    const { uploadFiles } = await import('./files.js');
+    vi.mocked(uploadFiles).mockRejectedValueOnce(new Error('boom'));
+    const rm = new ReplyManager(target('user', 1));
+    expect(await rm.finish('tc1', '', [{ fileId: 'file_dddddddddd', filename: 'a.txt' }])).toBe('Not posted: uploading the files failed.');
+    expect(rm.anyVisible).toBe(false);
+  });
+
   it('degraded images are shared below the reply when attaching fails', async () => {
     const { uploadFiles } = await import('./files.js');
     const { imageRetry } = await import('./reply.js');

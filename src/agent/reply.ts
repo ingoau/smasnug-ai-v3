@@ -485,7 +485,9 @@ export class ReplyManager {
     const extras = built.extras;
     const chartNotes = built.notes;
     if (rich.images?.length) {
-      const imgs = await this.prepareImages(e, rich.images, chartNotes);
+      const { images: imgs, failed } = await this.prepareImages(e, rich.images, chartNotes);
+      // Image files that couldn't be uploaded for the blocks are attached as files instead (another try).
+      if (failed.length) files = [...(files ?? []), ...failed.filter((f) => !files?.some((g) => g.fileId === f.fileId))].slice(0, MAX_MESSAGE_FILES);
       // Images come after charts, before tables and cards.
       const at = extras.items.findIndex((it) => !it.ref.startsWith('chart:'));
       extras.items.splice(at < 0 ? extras.items.length : at, 0, ...imageExtras(imgs));
@@ -516,12 +518,21 @@ export class ReplyManager {
       }
       if (blank && !charts.length && files?.length) {
         // Just files: shared into the thread as a message of their own (there is no text to attach them to).
-        e.posting = true;
         await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
-        await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files, idempotencyKey: this.key(e, ':files') });
+        try {
+          await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files, idempotencyKey: this.key(e, ':files') });
+        } catch (err) {
+          log.warn({ err }, 'reply file upload failed');
+          e.dropped = 'uploading the files failed';
+          await appendEvent(this.t.threadId, 'reply_dropped', 'bot', { turnId: this.t.turnId, index: e.index, reason: e.dropped, filesError: String(err) });
+          return 'Not posted: uploading the files failed.';
+        }
         this.delivered++;
+        this.deliveredTexts.push('');
+        await this.t.onDelivered?.({ ts: null, text: '', buttons: false }).catch((err) => log.warn({ err }, 'onDelivered failed'));
         await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, mode: 'posted', text: '', files: files.map((f) => (f.fileId ? `${f.fileId} (${f.filename})` : f.filename)) });
-        return `Replied (posted) with the files only.${chartSuffix()}`;
+        const btnNote = normalizeButtonLabels(buttons).length ? ' Buttons need message text, so they were left out.' : '';
+        return `Replied (posted) with the files only.${btnNote}${chartSuffix()}`;
       }
     }
     // Files go up (privately) while the reply is delivered, so attaching them right after leaves no gap for another
@@ -617,7 +628,9 @@ export class ReplyManager {
     this.deliveredTexts.push(text);
     await this.t.onDelivered?.({ ts: last.ts, text, buttons: Boolean(btnRow) }).catch((err) => log.warn({ err }, 'onDelivered failed'));
     if (files?.length || degradedFileIds(extras).length) {
-      const layout = last.ts ? (this.layouts.get(last.ts) ?? replyLayout(last.text, buttonsTs === last.ts ? actions : undefined, null, extras)) : null;
+      const lastMsg = last;
+      // Read when attaching (after the upload): the message's latest layout.
+      const layout = () => (lastMsg.ts ? (this.layouts.get(lastMsg.ts) ?? replyLayout(lastMsg.text, buttonsTs === lastMsg.ts ? actions : undefined, null, extras)) : null);
       try {
         const dropped = await this.attachFiles(e, last.ts, layout, files ?? [], filesUpload, degradedFileIds(extras));
         if (dropped) chartNotes.push(`${dropped} file(s) didn't fit (Slack allows 10 per message).`);
@@ -704,7 +717,7 @@ export class ReplyManager {
    * Image inputs → images ready for blocks: file images are uploaded to Slack privately (not shared anywhere; the
    * image block shows them). Problems become notes for the model; the rest still goes out.
    */
-  private async prepareImages(e: ReplyEntry, images: readonly ImageArg[], notes: string[]): Promise<PreparedImage[]> {
+  private async prepareImages(e: ReplyEntry, images: readonly ImageArg[], notes: string[]): Promise<{ images: PreparedImage[]; failed: OutgoingFile[] }> {
     const out: PreparedImage[] = [];
     const fileArgs = images.filter((i) => i.file);
     let uploaded: { slackFileId: string }[] = [];
@@ -716,9 +729,10 @@ export class ReplyManager {
         );
       } catch (err) {
         log.warn({ err }, 'uploading reply images failed');
-        notes.push('The image files could not be uploaded, so they were left out.');
+        notes.push('The image files could not be shown inline, so they were attached as files instead.');
       }
     }
+    const failed = uploaded.length ? [] : fileArgs.map((i) => i.file!);
     let k = 0;
     for (const img of images) {
       const base = { n: img.n, alt: img.alt, ...(img.title ? { title: img.title } : {}) };
@@ -730,7 +744,7 @@ export class ReplyManager {
         }
       } else if (img.url) out.push({ ...base, url: img.url });
     }
-    return out;
+    return { images: out, failed };
   }
 
   /**
@@ -742,17 +756,19 @@ export class ReplyManager {
   private async attachFiles(
     e: ReplyEntry,
     ts: string | null,
-    layout: { text: string; blocks: unknown[] } | null,
+    layoutNow: () => { text: string; blocks: unknown[] } | null,
     files: OutgoingFile[],
     upload: Promise<{ up: Awaited<ReturnType<typeof uploadPrivateFiles>> } | { err: unknown }> | null,
     extraIds: string[],
   ): Promise<number> {
     const total = files.length + extraIds.length;
     const keepExtra = extraIds.slice(0, Math.max(0, MAX_MESSAGE_FILES - files.length));
-    if (ts && layout) {
+    if (ts) {
       try {
         const res = upload ? await upload : { up: [] };
         if ('err' in res) throw res.err;
+        const layout = layoutNow();
+        if (!layout) throw new Error('no layout for the reply message');
         await editMessage('chat.update', { channel: this.t.channelId, ts, ...layout, file_ids: [...res.up.map((u) => u.slackFileId), ...keepExtra] });
         const posts = res.up.flatMap((u) => (u.fileId ? [{ fileId: u.fileId, slackFileId: u.slackFileId, channelId: this.t.channelId, threadId: this.t.threadId }] : []));
         await recordFilePosts(posts).catch((err) => log.warn({ err }, 'recording attached reply files failed'));

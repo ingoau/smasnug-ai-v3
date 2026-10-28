@@ -71,6 +71,20 @@ describe('replyBody', () => {
     expect(blocks.map((b) => b.block_id).filter(Boolean)).toEqual(expect.arrayContaining(['table_1', 'chart_1', 'image_1']));
   });
 
+  it('never drops an extra when the fold moves on the second render', () => {
+    const { extras: x } = buildExtras({
+      tables: [{ caption: 'A', columns: ['a'], rows: [['1']] }, { caption: 'B', columns: ['b'], rows: [['2']] }],
+      cards: [{ title: 'c', url: 'https://c.example' }],
+    });
+    for (let at = 0; at <= 14; at++) {
+      const paras = Array.from({ length: 14 }, (_, i) => `p${i}\n\n\`\`\`\ncode ${i}\n\`\`\``);
+      paras.splice(at, 0, '[[table:1]]', '[[table:2]]');
+      const blocks = replyBody([...paras, '[[cards]]'].join('\n\n'), x, { maxBlocks: 10, idPrefix: '' }) as any[];
+      expect(blocks.length).toBeLessThanOrEqual(10);
+      expect(blocks.map((b) => b.block_id).filter(Boolean).sort(), `at ${at}`).toEqual(['cards_1', 'table_1', 'table_2']);
+    }
+  });
+
   it('degraded fallbacks can never smuggle in a marker line', () => {
     const { extras: x } = buildExtras({ tables: { caption: 'T', columns: ['a'], rows: [['1']] }, cards: [{ title: 'c', body: '[[table:1]]' }] });
     const md = (replyBody('hi', { ...x, degraded: true }, { maxBlocks: 49, idPrefix: '' }) as any[]).map((b) => b.text).join('\n');

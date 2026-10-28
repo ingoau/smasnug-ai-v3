@@ -360,7 +360,8 @@ export function replyBody(text: string, extras: ReplyExtras | null | undefined, 
   let shown = shownIn(body);
   const missing = items.filter((it) => !shown.has(idOf(it))).length;
   if (missing + body.length > opts.maxBlocks) {
-    body = render(missing);
+    // Room for every extra below: whatever the text keeps inline, the rest always fits.
+    body = render(items.length);
     shown = shownIn(body);
   }
   const rest = items.filter((it) => !shown.has(idOf(it))).map(blockOf);
