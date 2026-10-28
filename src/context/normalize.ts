@@ -37,6 +37,7 @@ export function attachmentsFromSlack(raw: unknown): MessageAttachment[] {
     out.push({
       kind: message ? 'forwarded' : link ? 'link' : 'attached',
       ...(field(a.author_name || a.author_subname) ? { author: field(a.author_name || a.author_subname) } : {}),
+      ...(typeof a.author_id === 'string' && /^[UW][A-Z0-9]+$/.test(a.author_id) ? { authorId: a.author_id } : {}),
       ...(field(a.channel_name) ? { channel: field(a.channel_name) } : {}),
       ...(title ? { title } : {}),
       ...(text ? { text } : {}),

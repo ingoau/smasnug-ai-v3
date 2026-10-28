@@ -1,16 +1,7 @@
-/** What the front agent knows about DJ mode: a stable system prompt section and a per-turn state section. */
+/** What the front agent knows about DJ mode: the per-turn <huddle_dj> section (the instructions are the huddle-dj skill). */
 import { log } from '../../log.js';
 import { huddleFmConfigured } from './client.js';
 import { sessionsForTurn, type DjSession } from './store.js';
-
-/** Appended to the front system prompt when HuddleFM is configured (same text every turn: cache friendly). */
-export const HUDDLE_DJ_PROMPT = `# Huddle DJ (HuddleFM)
-You can DJ Slack huddles that run HuddleFM (the huddle music player); <huddle_dj> shows any DJ session for this channel or thread.
-- "be the dj", "take the aux", "play music in the huddle" → \`huddle_dj_mode\` on (the huddle is in this channel unless they say otherwise; in a DM, pass the channel or ask which). The host has to approve it in HuddleFM: say you're waiting on them. No HuddleFM session → tell them to start HuddleFM in the huddle first. Pass a vibe if they said what they want.
-- Once it's on, all music requests go through \`huddle_dj\`. Asked to just play something or pick songs, pick real songs with good taste (at most 5 per ask unless told otherwise). Empty the queue only when someone asks.
-- "let us pick" / "stop picking", "play more X", "stop commenting" → \`huddle_dj_settings\`. "stop being the dj" → \`huddle_dj_mode\` off; you can never end the HuddleFM session.
-- After DJ commands, reply briefly with what you did. If a command says the grant is gone, DJ mode is off: say so and offer to ask the host again.
-- Never DM HuddleFM or paste HuddleFM JSON: the huddle_dj tools are the only way to talk to it.`;
 
 /** `detail`: now playing and up next. Only for the huddle's own channel or its requester's DM (private channels). */
 export function renderSession(s: DjSession, here: { channelId: string }, detail = true): string {
@@ -38,7 +29,8 @@ export async function renderDjState(opts: { channelId: string; threadId: string;
     if (!sessions.length) return '';
     return [
       ...sessions.map((s) => renderSession(s, opts, s.channelId === opts.channelId || (opts.channelId.startsWith('D') && s.requestedBy === opts.speakerId))),
-      'Messages about the music in these huddles (skip this, turn it up, play X) are aimed at you.',
+      // Inline while a session exists, so a "skip this" doesn't need a load_skill step first; setup is the huddle-dj skill.
+      'Messages about the music in these huddles (skip this, turn it up, play X) are aimed at you. Music requests go through huddle_dj: pick real songs with good taste (at most 5 per ask unless told otherwise), empty the queue only when someone asks. "let us pick" / "stop picking", "play more X", "stop commenting" → huddle_dj_settings; "stop being the dj" → huddle_dj_mode off (you can never end the HuddleFM session). Reply briefly with what you did; if a command says the grant is gone, DJ mode is off: say so and offer to ask the host again. Never DM HuddleFM or paste its JSON.',
     ].join('\n');
   } catch (err) {
     log.warn({ err }, 'renderDjState failed');

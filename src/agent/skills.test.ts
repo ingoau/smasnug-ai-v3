@@ -86,3 +86,37 @@ describe('the repo skills', () => {
     expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/`sandbox: true` if answering means searching the code/);
   });
 });
+
+describe('requires', () => {
+  const dir = skillDir({
+    'dj/SKILL.md': '---\ndescription: DJ things.\nrequires: [huddlefm]\n---\nDJ body',
+    'plain/SKILL.md': '---\ndescription: Plain things.\n---\nPlain body',
+    'weird/SKILL.md': '---\ndescription: d\nrequires: [teleporter]\n---\nbody',
+  });
+  const all = loadSkills(dir);
+
+  it('skips skills that need an unknown feature', () => {
+    expect(all.map((s) => s.name)).toEqual(['dj', 'plain']);
+  });
+
+  it('lists and loads a skill only when its features are configured', () => {
+    expect(skillsPrompt('front', all, () => false)).not.toMatch(/- dj:/);
+    expect(skillsPrompt('front', all, () => false)).toMatch(/- plain:/);
+    expect(readSkill('front', 'dj', undefined, all, () => false)).toMatch(/No skill named "dj"/);
+    expect(skillsPrompt('front', all, (f) => f === 'huddlefm')).toMatch(/- dj: DJ things\./);
+    expect(readSkill('front', 'dj', undefined, all, (f) => f === 'huddlefm')).toBe('DJ body');
+  });
+
+  it('the repo skills for optional features declare them', () => {
+    const repo = loadSkills(defaultSkillsDir());
+    expect(repo.find((s) => s.name === 'huddle-dj')?.requires).toEqual(['huddlefm']);
+    expect(repo.find((s) => s.name === 'code-sandboxes')?.requires).toEqual(['sandbox']);
+    expect(readSkill('front', 'huddle-dj', undefined, repo, () => true)).toMatch(/huddle_dj_mode/);
+    expect(repo.find((s) => s.name === 'live-previews')?.requires).toEqual(['previews']);
+  });
+
+  it('a requires name must be an own feature, not an inherited property', () => {
+    const odd = loadSkills(skillDir({ 'x/SKILL.md': '---\ndescription: d\nrequires: [toString]\n---\nbody' }));
+    expect(odd).toEqual([]);
+  });
+});

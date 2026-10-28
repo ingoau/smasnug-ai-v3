@@ -4,6 +4,7 @@
  * other participants. Profile fields are written by the users themselves, so they are untrusted: one line each,
  * length-capped, no angle brackets (they can't fake a section tag or a mention).
  */
+import { personRef } from './format.js';
 import type { UserInfo } from './users.js';
 
 /** Max chars per user-written profile field. */
@@ -74,11 +75,10 @@ export function privilegesLine(u: Pick<UserInfo, 'isAdmin' | 'isOwner'> | null |
   return `Privileges: ${parts.length ? parts.join(', ') : 'none'}`;
 }
 
-/** One participant line: `<@U…> Name — pronouns, title` (missing fields omitted). */
+/** One participant line: `<@U…|Name> — pronouns, title` (missing fields omitted). */
 export function participantLine(u: UserInfo): string {
-  const name = profileText(u.name) ?? u.id;
   const extra = [profileText(u.pronouns), profileText(u.title)].filter(Boolean);
-  return `<@${u.id}> ${name}${extra.length ? ` — ${extra.join(', ')}` : ''}`;
+  return `${personRef(u.id, profileText(u.name))}${extra.length ? ` — ${extra.join(', ')}` : ''}`;
 }
 
 /** Unique ids in order (most recent first), without the excluded ones, at most `max`. */

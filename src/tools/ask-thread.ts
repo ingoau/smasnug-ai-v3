@@ -12,7 +12,7 @@ import { registerTool, type ToolContext } from '../core/tools.js';
 import { getBotIdentity, SlackBusyError } from '../core/slack.js';
 import { recordModelUsage } from '../features/guard.js';
 import { chatModel, MODELS, modelOptions } from '../models.js';
-import { annotateTsDates, formatMessage, userIdsIn, type FormatEnv, type RenderMsg } from '../context/format.js';
+import { annotateTsDates, formatMessage, personRef, userIdsIn, type FormatEnv, type RenderMsg } from '../context/format.js';
 import { fetchReplies } from '../context/slack-messages.js';
 import { getUserNames } from '../context/users.js';
 import { log } from '../log.js';
@@ -91,7 +91,7 @@ async function renderTranscript(
     if (m.deleted) continue;
     for (const f of m.files ?? []) {
       const cf = files.get(f.id);
-      const from = m.userId ? (names.get(m.userId) ?? m.username ?? m.userId) : m.username || 'unknown';
+      const from = m.userId ? personRef(m.userId, names.get(m.userId) ?? m.username) : m.username || 'unknown';
       if (cf && listed.length < MAX_LISTED_FILES) listed.push(`- ${contextFileLabel(cf, from)} (ts ${m.ts})`);
     }
   }

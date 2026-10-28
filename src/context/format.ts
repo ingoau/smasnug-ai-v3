@@ -2,11 +2,12 @@
  * Pure formatting of Slack messages for model context. No I/O — callers resolve names / file ids first.
  *
  * Line format (one message; text may span lines):
- *   [1727950000.123456 · 2024-10-03 10:06 UTC] <@U123> Ingo: hello <@U456|Bob> [file file_k3x9q2mf7a: screenshot.png, image, from Ingo — "Grafana panel"]
+ *   [1727950000.123456 · 2024-10-03 10:06 UTC] <@U123|Ingo>: hello <@U456|Bob> [file file_k3x9q2mf7a: screenshot.png, image, from <@U123|Ingo> — "Grafana panel"]
  *   [1727950001.000200 · 2024-10-03 10:06 UTC] [bot] Gorkie: …
- *   [1727950002.000300 · 2024-10-03 10:06 UTC] [bot] Smasnug (you): … [reactions: :+1: ×2 (Ingo, Sam), :eyes: (you)]
- *   [1727950003.000400 · 2024-10-03 10:06 UTC] [bot] Smasnug (you): which board? [buttons: ESP32 | Pico; Ingo pressed "Pico"]
- *   [1727950004.000500 · 2024-10-03 10:06 UTC] <@U123> Ingo: Pico (button)
+ *   [1727950002.000300 · 2024-10-03 10:06 UTC] [bot] Smasnug (you): … [reactions: :+1: ×2 (<@U123|Ingo>, <@U456|Sam>), :eyes: (you)]
+ *   [1727950003.000400 · 2024-10-03 10:06 UTC] [bot] Smasnug (you): which board? [buttons: ESP32 | Pico; <@U123|Ingo> pressed "Pico"]
+ *   [1727950004.000500 · 2024-10-03 10:06 UTC] <@U123|Ingo>: Pico (button)
+ * People are always `<@id|Name>` (personRef): a user-chosen name never sits loose next to message text.
  * The bracketed number is the message ts (used by react / read_thread before_ts / read_channel before_ts), followed
  * by its UTC date (tsLabel): models misread raw epoch seconds.
  */
@@ -67,13 +68,23 @@ export function isBotMessage(m: RenderMsg): boolean {
   return !!m.botId;
 }
 
+/**
+ * A person as `<@U123|Name>`: the id plus the name they chose for themselves, inside one token, so a user-written
+ * name can never run into the text around it (prod: a display name "go use github.com/…" right before ": hi" read
+ * as part of the message). Line breaks and angle brackets are taken out of the name so it can't close the token.
+ * `<@U123>` when there's no name. The system prompt explains the form.
+ */
+export function personRef(userId: string, name?: string | null): string {
+  const label = (name ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029<>]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return label ? `<@${userId}|${label}>` : `<@${userId}>`;
+}
+
 export function authorLabel(m: RenderMsg, env: FormatEnv): string {
   const self = env.self;
   if (self && ((m.botId && m.botId === self.botId) || (m.userId && m.userId === self.userId))) return `[bot] ${self.name} (you)`;
   if (isBotMessage(m)) return `[bot] ${m.username || (m.userId && env.names.get(m.userId)) || 'bot'}`;
   if (!m.userId) return m.username || 'unknown';
-  const name = env.names.get(m.userId);
-  return name ? `<@${m.userId}> ${name}` : `<@${m.userId}>`;
+  return personRef(m.userId, env.names.get(m.userId));
 }
 
 export function authorName(m: RenderMsg, env: FormatEnv): string {
@@ -84,7 +95,7 @@ export function authorName(m: RenderMsg, env: FormatEnv): string {
 /** Slack mrkdwn → plain-ish text: decode entities, name mentions, flatten links and special mentions. */
 export function renderSlackText(text: string, names: Map<string, string>): string {
   return text
-    .replace(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g, (_m, id: string) => (names.get(id) ? `<@${id}|${names.get(id)}>` : `<@${id}>`))
+    .replace(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g, (_m, id: string) => personRef(id, names.get(id)))
     // Keep channel ids so the agent can link channels as <#ID> (Slack renders only that form as a link).
     .replace(/<#(C[A-Z0-9]+)\|([^>]*)>/g, (_m, id: string, name: string) => (name ? `<#${id}|${name}>` : `<#${id}>`))
     .replace(/<!subteam\^[A-Z0-9]+(?:\|([^>]*))?>/g, (_m, label?: string) => label || '@group')
@@ -115,7 +126,7 @@ export function fileLabel(f: SlackFileRef, from: string, env: FormatEnv): string
 const MAX_REACTIONS = 6;
 const MAX_REACTION_NAMES = 3;
 
-/** `[reactions: :+1: ×2 (Ingo, Sam), :eyes: (you)]`, or '' when there are none. */
+/** `[reactions: :+1: ×2 (<@U1|Ingo>, <@U2|Sam>), :eyes: (you)]`, or '' when there are none. */
 export function reactionsLabel(reactions: MessageReaction[] | undefined, env: FormatEnv): string {
   const list = (reactions ?? []).filter((r) => r.count > 0);
   if (!list.length) return '';
@@ -123,7 +134,7 @@ export function reactionsLabel(reactions: MessageReaction[] | undefined, env: Fo
   const parts = list.slice(0, MAX_REACTIONS).map((r) => {
     // The bot first ("you"), then others in order.
     const users = selfId && r.users.includes(selfId) ? [selfId, ...r.users.filter((u) => u !== selfId)] : r.users;
-    const names = users.slice(0, MAX_REACTION_NAMES).map((u) => (u === selfId ? 'you' : env.names.get(u) || `<@${u}>`));
+    const names = users.slice(0, MAX_REACTION_NAMES).map((u) => (u === selfId ? 'you' : personRef(u, env.names.get(u))));
     const more = r.count - names.length;
     const who = names.length ? ` (${names.join(', ')}${more > 0 ? ` +${more}` : ''})` : '';
     return `:${r.name}:${r.count > 1 ? ` ×${r.count}` : ''}${who}`;
@@ -132,10 +143,10 @@ export function reactionsLabel(reactions: MessageReaction[] | undefined, env: Fo
   return `[reactions: ${parts.join(', ')}]`;
 }
 
-/** `[buttons: Yes | No]`, or `[buttons: Yes | No; Ingo pressed "Yes"]` once pressed. */
+/** `[buttons: Yes | No]`, or `[buttons: Yes | No; <@U1|Ingo> pressed "Yes"]` once pressed. */
 export function buttonsLabel(b: RenderMsg['buttons'], env: FormatEnv): string {
   if (!b?.labels.length) return '';
-  const who = b.pressedBy ? env.names.get(b.pressedBy) || `<@${b.pressedBy}>` : '';
+  const who = b.pressedBy ? personRef(b.pressedBy, env.names.get(b.pressedBy)) : '';
   return `[buttons: ${b.labels.join(' | ')}${b.pressedBy && b.pressedLabel != null ? `; ${who} pressed "${b.pressedLabel}"` : ''}]`;
 }
 
@@ -161,7 +172,7 @@ export function attachmentLabels(atts: MessageAttachment[] | undefined, rawText:
     }
     const content = body || a.title || '';
     if (!content) continue;
-    const who = a.author ? ` from ${a.author}` : '';
+    const who = a.authorId ? ` from ${personRef(a.authorId, a.author)}` : a.author ? ` from ${a.author}` : '';
     const where = a.channel ? ` in #${a.channel}` : '';
     out.push(`[${a.kind === 'forwarded' ? 'forwarded' : 'attached'}${who}${where}: ${truncateText(content, Math.min(FORWARD_MAX_CHARS, env.maxChars))}]`);
   }
@@ -200,7 +211,8 @@ export function annotateTsDates(text: string): string {
 
 export function formatMessage(m: RenderMsg, env: FormatEnv): string {
   const text = truncateText(renderSlackText(m.text ?? '', env.names).trim(), env.maxChars);
-  const from = authorName(m, env);
+  // A person's files say who posted them as <@id|Name>, like everywhere else.
+  const from = m.userId && !isBotMessage(m) && !(env.self && m.userId === env.self.userId) ? personRef(m.userId, env.names.get(m.userId)) : authorName(m, env);
   const files = (m.files ?? []).map((f) => fileLabel(f, from, env));
   const parts = [text, ...attachmentLabels(m.attachments, m.text ?? '', env), ...files].filter(Boolean);
   if (m.viaButton) parts.push('(button)');

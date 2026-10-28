@@ -58,26 +58,34 @@ describe('text helpers', () => {
 });
 
 describe('selectFacts', () => {
-  it('puts relevant facts first, then preferences, then about before project', () => {
+  it('injects relevant facts first, then preferences, and nothing else', () => {
     const facts = [
       fact(1, 'is building a weather station', 'project'),
       fact(2, 'prefers short answers', 'preference'),
       fact(3, 'lives in Sydney', 'about'),
       fact(4, 'is building a robot arm', 'project', 0.3),
     ];
-    expect(selectFacts(facts, 3).map((f) => f.id)).toEqual([4, 2, 3]);
+    expect(selectFacts(facts, 12).map((f) => f.id)).toEqual([4, 2]);
   });
 
-  it('does not let recently injected facts crowd out the rest (no last_used ordering)', () => {
+  it('with nothing relevant and no preferences, injects nothing', () => {
+    const facts = [fact(1, 'is building a weather station', 'project'), fact(3, 'lives in Sydney', 'about')];
+    expect(selectFacts(facts, 12)).toEqual([]);
+  });
+
+  it('finds an old relevant fact among many others (no recency or last_used ordering)', () => {
     const many = Array.from({ length: 30 }, (_, i) => fact(i + 1, `knows tool number ${i + 1}`, 'about', 0, 100 - i));
     const relevant = fact(99, 'is learning Haskell', 'about', 0.1, 400);
-    expect(selectFacts([...many, relevant], 20).map((f) => f.id)).toContain(99);
+    expect(selectFacts([...many, relevant], 12).map((f) => f.id)).toEqual([99]);
   });
 
-  it('respects the cap and the character budget', () => {
-    const facts = Array.from({ length: 30 }, (_, i) => fact(i + 1, 'x'.repeat(250)));
-    expect(selectFacts(facts, 20)).toHaveLength(14); // 3600 / 250
-    expect(selectFacts(facts, 5)).toHaveLength(5);
+  it('caps relevant facts and preferences, and respects the cap and the character budget', () => {
+    const relevant = Array.from({ length: 20 }, (_, i) => fact(i + 1, `relevant ${i + 1}`, 'about', 0.5));
+    const prefs = Array.from({ length: 10 }, (_, i) => fact(100 + i, `pref ${i + 1}`, 'preference', 0, i));
+    expect(selectFacts([...relevant, ...prefs], 50)).toHaveLength(8 + 5);
+    expect(selectFacts([...relevant, ...prefs], 5)).toHaveLength(5);
+    const long = Array.from({ length: 10 }, (_, i) => fact(i + 1, 'x'.repeat(1000), 'about', 0.5));
+    expect(selectFacts(long, 12)).toHaveLength(3); // 3600 / 1000
   });
 });
 
@@ -88,6 +96,11 @@ describe('formatSpeakerMemory', () => {
     expect(text).toContain('- [m_3] is building a robot arm (4 mo ago)');
     expect(text.indexOf('m_2')).toBeLessThan(text.indexOf('m_3'));
     expect(text).toContain('3 more not shown: search_memory');
+  });
+
+  it('says how many facts exist when none are relevant', () => {
+    expect(formatSpeakerMemory('UA', [], { total: 4 })).toBe('You have 4 saved facts about <@UA>, none relevant to this conversation: search_memory finds them.');
+    expect(formatSpeakerMemory('UA', [], { total: 0 })).toBe('');
   });
 
   it('formats ages', () => {

@@ -365,13 +365,13 @@ describe('runFrontTurn: turn context', () => {
     expect(msg).toContain('Slack language: de-DE');
     expect(msg).toContain('Privileges: Slack workspace admin');
     expect(msg).toContain('<participants');
-    expect(msg).toContain('<@U2> Sam — he/him');
+    expect(msg).toContain('<@U2|Sam> — he/him');
     expect(msg).not.toContain('<@U404>'); // failed lookup: left out
     expect(msg).not.toContain('<@UBOT>');
     const later = JSON.stringify(second.slice(1));
     expect(later).toContain('Wednesday 2031-01-01 00:00 UTC');
-    expect(later).toContain('<@U1> Tess');
-    expect(later).not.toContain('<@U2> Sam —'); // the speaker isn't a participant
+    expect(later).toContain('<@U1|Tess>');
+    expect(later).not.toContain('<@U2|Sam> —'); // the speaker isn't a participant
   });
 });
 

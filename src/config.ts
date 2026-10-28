@@ -227,7 +227,8 @@ export const limits = {
   /** Threads quiet for longer than this are never extracted (a backlog would spend the model budget on stale talk). */
   memoryExtractMaxAgeMs: 14 * 24 * 60 * 60 * 1000,
   memoryFactExpiryMs: 180 * 24 * 60 * 60 * 1000,
-  memoryInjectCap: 20,
+  /** Speaker facts per turn at most (only relevant ones and preferences are injected: memory/render.ts selectFacts). */
+  memoryInjectCap: 13,
   retentionMs: 30 * 24 * 60 * 60 * 1000,
   // per user
   userMessagesPerHour: 500,

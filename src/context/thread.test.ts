@@ -35,10 +35,10 @@ describe('renderThreadContext', () => {
     expect(t!.backfilled).toBe(true);
 
     const lines = ctx.history.split('\n');
-    expect(lines[0]).toContain('<@U0INGO> Ingo: Anyone know how to fix');
-    const shot = /\[file (file_[a-z0-9]{10}): screenshot\.png, image, from Ingo\]/.exec(lines[0]!)?.[1];
+    expect(lines[0]).toContain('<@U0INGO|Ingo>: Anyone know how to fix');
+    const shot = /\[file (file_[a-z0-9]{10}): screenshot\.png, image, from <@U0INGO\|Ingo>\]/.exec(lines[0]!)?.[1];
     expect(shot).toBeDefined();
-    expect(lines[0]).toMatch(/\[file file_[a-z0-9]{10}: budget\.csv, text, from Ingo\]/);
+    expect(lines[0]).toMatch(/\[file file_[a-z0-9]{10}: budget\.csv, text, from <@U0INGO\|Ingo>\]/);
     // 38 visible replies - 1 new = 37: all fit (limits.contextReplies = 40), so nothing is omitted, but they're past
     // the compaction point (0.8 × 40), so a background summary update was requested for all but the newest 20.
     expect(lines[1]).toContain('reply number 1');
@@ -48,18 +48,18 @@ describe('renderThreadContext', () => {
     expect(job?.data).toEqual({ threadId, targetTs: `${Number(FIX_THREAD_TS.split('.')[0]) + 19}.000100` });
     await job?.remove();
     expect(ctx.history).toContain('[bot] CI Bot: Build #42 failed');
-    const heic = /\[file (file_[a-z0-9]{10}): IMG_0042\.HEIC, image, from alice\]/.exec(ctx.history)?.[1];
+    const heic = /\[file (file_[a-z0-9]{10}): IMG_0042\.HEIC, image, from <@U0ALICE\|alice>\]/.exec(ctx.history)?.[1];
     expect(heic).toBeDefined();
     expect(ctx.history).not.toContain('deleted');
     expect(ctx.history).not.toContain('has joined');
     expect(ctx.history).not.toContain(newTs);
 
-    expect(ctx.newMessages).toMatch(/^\[\d+\.000100 · [\d-]+ [\d:]+ UTC\] <@U0BOB> Bob Builder: long message .* \[truncated\] \(edited\)$/);
+    expect(ctx.newMessages).toMatch(/^\[\d+\.000100 · [\d-]+ [\d:]+ UTC\] <@U0BOB|Bob Builder>: long message .* \[truncated\] \(edited\)$/);
 
     // A long thread and a self-contained new message: no channel background.
     expect(ctx.channelContext).toBe('');
     // Who started it, when, and the total reply count (38 visible replies, all shown).
-    expect(ctx.threadFacts).toBe(`Started by <@U0INGO> Ingo on ${tsToUtc(FIX_THREAD_TS)}; 38 replies so far. The new messages are replies in this thread.`);
+    expect(ctx.threadFacts).toBe(`Started by <@U0INGO|Ingo> on ${tsToUtc(FIX_THREAD_TS)}; 38 replies so far. The new messages are replies in this thread.`);
 
     // Second render: no new backfill, same ids.
     const again = await renderThreadContext(threadId, { newMessageTs: [] });
@@ -74,7 +74,7 @@ describe('renderThreadContext', () => {
       { name: '+1', users: ['U0BOB', 'U0ALICE'], count: 2 },
       { name: 'eyes', users: ['UBOT'], count: 1 },
     ]);
-    expect(again.history.split('\n')[0]).toMatch(/\[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
+    expect(again.history.split('\n')[0]).toMatch(/\[reactions: :\+1: ×2 \(<@U0BOB\|Bob Builder>, <@U0ALICE\|alice>\), :eyes: \(you\)\]$/);
   });
 
   it('channel background: in a short thread, or when the new message points at something', async () => {
@@ -83,10 +83,10 @@ describe('renderThreadContext', () => {
     try {
       const short = await renderThreadContext(threadIdOf(ch2, FIX_THREAD_TS), { newMessageTs: [] });
       expect(short.channelContext.split('\n')).toEqual([
-        expect.stringContaining('alice: morning all'),
-        expect.stringContaining('Bob Builder: deploy went out'),
-        expect.stringContaining('alice: lunch?'),
-        expect.stringContaining('Bob Builder: after the parent'),
+        expect.stringContaining('alice>: morning all'),
+        expect.stringContaining('Bob Builder>: deploy went out'),
+        expect.stringContaining('alice>: lunch?'),
+        expect.stringContaining('Bob Builder>: after the parent'),
       ]);
     } finally {
       rm();
@@ -97,7 +97,7 @@ describe('renderThreadContext', () => {
     const pointTs = `${Number(FIX_THREAD_TS.split('.')[0]) + 41}.000100`;
     await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${channel}, ${pointTs}, ${threadId}, 'U0BOB', '<@UBOT> ^ thoughts?')`;
     const pointing = await renderThreadContext(threadId, { newMessageTs: [pointTs] });
-    expect(pointing.channelContext).toContain('alice: morning all');
+    expect(pointing.channelContext).toContain('alice>: morning all');
     await sql`delete from messages where channel_id = ${channel} and ts = ${pointTs}`;
   });
 
@@ -105,7 +105,7 @@ describe('renderThreadContext', () => {
     const ts = `${Number(FIX_THREAD_TS.split('.')[0]) + 39}.000100`;
     const out = await renderMessages(threadId, [ts]);
     const [heic] = await sql<{ id: string }[]>`select id from files where thread_id = ${threadId} and slack_file_id = 'F0HEIC'`;
-    expect(out).toBe(`[${tsLabel(ts)}] <@U0ALICE> alice: here is the error log [file ${heic!.id}: IMG_0042.HEIC, image, from alice]`);
+    expect(out).toBe(`[${tsLabel(ts)}] <@U0ALICE|alice>: here is the error log [file ${heic!.id}: IMG_0042.HEIC, image, from <@U0ALICE|alice>]`);
   });
 
   it('uploads are registered with metadata only, stable, scoped per thread and race-safe', async () => {
@@ -145,8 +145,8 @@ describe('renderThreadFacts', () => {
   it('a fresh top-level message, or who started the thread and how much of it is shown', () => {
     expect(renderThreadFacts({ fresh: true, startedTs: '1790000000.000100', replies: 0, shownReplies: 0 })).toMatch(/new top-level message: it starts this thread/);
     expect(tsToUtc('1790000000.000100')).toBe('Monday 2026-09-21 14:13 UTC');
-    expect(renderThreadFacts({ fresh: false, inThread: true, starter: '<@U1> Ingo', startedTs: '1790000000.000100', replies: 120, shownReplies: 25 })).toBe(
-      'Started by <@U1> Ingo on Monday 2026-09-21 14:13 UTC; 120 replies so far (only the newest 25 are shown here). The new messages are replies in this thread.',
+    expect(renderThreadFacts({ fresh: false, inThread: true, starter: '<@U1|Ingo>', startedTs: '1790000000.000100', replies: 120, shownReplies: 25 })).toBe(
+      'Started by <@U1|Ingo> on Monday 2026-09-21 14:13 UTC; 120 replies so far (only the newest 25 are shown here). The new messages are replies in this thread.',
     );
     expect(renderThreadFacts({ fresh: false, startedTs: '1790000000.000100', replies: 1, shownReplies: 1 })).toBe('Started on Monday 2026-09-21 14:13 UTC; 1 reply so far.');
   });

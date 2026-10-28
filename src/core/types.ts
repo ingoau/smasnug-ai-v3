@@ -49,6 +49,8 @@ export interface StoredMessage {
 export interface MessageAttachment {
   kind: 'forwarded' | 'link' | 'attached';
   author?: string;
+  /** The author's Slack user id (forwarded messages), so the name renders as <@id|name>. */
+  authorId?: string;
   channel?: string;
   title?: string;
   text?: string;

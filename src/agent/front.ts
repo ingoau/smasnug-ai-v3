@@ -8,18 +8,17 @@ import { appendEvent, parseThreadId } from '../core/events.js';
 import { getBotIdentity, slackCall, userbotConfigured } from '../core/slack.js';
 import { getUserInfo, type UserInfo } from '../context/users.js';
 import { getConversationInfo, renderConversation } from '../context/conversation.js';
-import { formatUtcNow, pickParticipantIds, privilegesLine, renderParticipants, speakerDetailLines } from '../context/people.js';
+import { formatUtcNow, pickParticipantIds, privilegesLine, profileText, renderParticipants, speakerDetailLines } from '../context/people.js';
 import { EXTRAS } from '../tools/extras.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
-import { annotateTsDates } from '../context/format.js';
+import { annotateTsDates, personRef } from '../context/format.js';
 import { lowQuotaLines, recordModelUsage, userQuotaStates } from '../features/guard.js';
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
 import { loadPendingActions, renderPendingActions } from '../features/pending.js';
-import { HUDDLE_DJ_PROMPT, renderDjState } from '../features/huddlefm/render.js';
-import { huddleFmConfigured } from '../features/huddlefm/client.js';
+import { renderDjState } from '../features/huddlefm/render.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chatModel, isClaude, modelDisplayName, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
@@ -41,7 +40,6 @@ import { noteBotReply } from '../pipeline/store.js';
 import { awaitsReply } from '../pipeline/rules.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
-import { sandboxFrontPrompt } from '../sandbox/prompts.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
 
 export interface TurnIO {
@@ -135,8 +133,7 @@ function frontModelNames(): { model: string; fallbackModel?: string } {
 async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
   let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, ...frontModelNames() });
-  if (huddleFmConfigured()) system = `${system}\n\n${HUDDLE_DJ_PROMPT}`;
-  if (sandboxConfigured()) system = `${system}\n\n${sandboxFrontPrompt({ previews: previewsConfigured() })}`;
+  // HuddleFM and sandbox instructions are skills (skills/huddle-dj, skills/code-sandboxes), listed only when configured.
   const skillIndex = skillsPrompt('front');
   if (skillIndex) system = `${system}\n\n${skillIndex}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
@@ -176,7 +173,7 @@ export async function renderParticipantsSection(ids: string[] | undefined, speak
  */
 export function renderSpeaker(authorId: string, speaker: Speaker, now: Date, viewingChannelId?: string | null): string {
   const privileges = privilegesLine(speaker.info, { botAdmin: isCursorAdmin(authorId), codingAgents: !cursorRefusal(authorId) });
-  const lines = [`<@${authorId}> ${speaker.name}`, ...speakerDetailLines(speaker.info, now), privileges, `Time zone: ${speaker.tz || 'UTC'}`];
+  const lines = [personRef(authorId, profileText(speaker.name)), ...speakerDetailLines(speaker.info, now), privileges, `Time zone: ${speaker.tz || 'UTC'}`];
   if (viewingChannelId) lines.push(`User is currently viewing <#${viewingChannelId}> (e.g. "this channel").`);
   return lines.join('\n');
 }

@@ -2,7 +2,8 @@
  * Agent skills: knowledge and procedures loaded on demand instead of living in the system prompt.
  *
  * A skill is a directory under `skills/` (repo root; `SKILLS_DIR` overrides) holding a `SKILL.md`: YAML-style
- * frontmatter (`name`, `description`, optional `roles: [front, child]`) and a markdown body. Only the name and
+ * frontmatter (`name`, `description`, optional `roles: [front, child]`, optional `requires: [huddlefm]`) and a markdown
+ * body. Only the name and
  * description go into the system prompt (`skillsPrompt`); the agent calls `load_skill` to read the body, and any
  * other file in the skill's directory (`load_skill` with `file`). Read once per process and cached; the index is
  * stable, so the system prompt stays cacheable. See skills/README.md.
@@ -19,6 +20,8 @@ export interface Skill {
   name: string;
   description: string;
   roles: SkillRole[];
+  /** Optional features (SKILL_FEATURES) that must be configured for the skill to be offered. */
+  requires: string[];
   body: string;
   dir: string;
   /** Other files in the skill directory, relative paths with `/` separators (SKILL.md excluded). */
@@ -28,6 +31,22 @@ export interface Skill {
 const ROLES: SkillRole[] = ['front', 'child'];
 const NAME_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const MAX_FILE_BYTES = 200_000;
+
+/**
+ * Optional features a skill can depend on (`requires:`): a skill whose feature isn't configured is neither listed nor
+ * loadable, so its instructions don't sit in the prompt of a deployment that can't use them. Same checks as
+ * huddleFmConfigured / sandboxConfigured on the raw env (not imported: those modules pull in Redis / Postgres, and
+ * config.js would make this loader need a full environment).
+ */
+export const SKILL_FEATURES: Record<string, () => boolean> = {
+  huddlefm: () => Boolean(process.env.HUDDLEFM_USER_ID),
+  sandbox: () => Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET),
+  /** previewsConfigured: sandboxes plus the key that encrypts preview tokens. */
+  previews: () => Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET && process.env.PREVIEW_SECRET_KEY),
+};
+
+export type FeatureCheck = (feature: string) => boolean;
+const configured: FeatureCheck = (f) => Object.hasOwn(SKILL_FEATURES, f) && SKILL_FEATURES[f]!();
 
 /** `<repo>/skills`, from both src/agent (tsx) and dist/agent (build). */
 export function defaultSkillsDir(): string {
@@ -99,15 +118,21 @@ export function loadSkills(dir: string): Skill[] {
     const description = typeof meta.description === 'string' ? meta.description.trim() : '';
     const rawRoles = meta.roles === undefined ? ROLES : Array.isArray(meta.roles) ? meta.roles : [meta.roles];
     const roles = rawRoles.filter((r): r is SkillRole => (ROLES as string[]).includes(r));
+    const requires = meta.requires === undefined ? [] : Array.isArray(meta.requires) ? meta.requires : [meta.requires];
     if (!NAME_RE.test(name) || !description || !body || !roles.length) {
       log.warn({ skill: entry }, 'skipping skill: needs a lowercase name, a description, a body and a valid role');
+      continue;
+    }
+    const unknown = requires.filter((f) => !Object.hasOwn(SKILL_FEATURES, f));
+    if (unknown.length) {
+      log.warn({ skill: entry, unknown }, 'skipping skill: unknown feature in requires');
       continue;
     }
     if (skills.some((s) => s.name === name)) {
       log.warn({ skill: name }, 'skipping duplicate skill name');
       continue;
     }
-    skills.push({ name, description, roles, body, dir: skillDir, files: listFiles(skillDir) });
+    skills.push({ name, description, roles, requires, body, dir: skillDir, files: listFiles(skillDir) });
   }
   return skills;
 }
@@ -118,13 +143,14 @@ export function skills(): Skill[] {
   return (cache ??= loadSkills(defaultSkillsDir()));
 }
 
-export function skillsFor(role: SkillRole, all: Skill[] = skills()): Skill[] {
-  return all.filter((s) => s.roles.includes(role));
+/** The role's skills whose required features are all configured. */
+export function skillsFor(role: SkillRole, all: Skill[] = skills(), enabled: FeatureCheck = configured): Skill[] {
+  return all.filter((s) => s.roles.includes(role) && s.requires.every(enabled));
 }
 
 /** The system prompt section listing the role's skills ('' when there are none). */
-export function skillsPrompt(role: SkillRole, all: Skill[] = skills()): string {
-  const list = skillsFor(role, all);
+export function skillsPrompt(role: SkillRole, all: Skill[] = skills(), enabled: FeatureCheck = configured): string {
+  const list = skillsFor(role, all, enabled);
   if (!list.length) return '';
   return `# Skills
 Skills hold knowledge and procedures that aren't in this prompt. When a request matches a skill's description, call load_skill with its name before answering or acting, and follow what it says (a skill never overrides the safety rules above). Load only what the request needs. A skill you loaded earlier in this turn (or task) is still valid; one from an earlier turn isn't shown to you, so load it again.
@@ -135,8 +161,8 @@ ${list.map((s) => `- ${s.name}: ${s.description}`).join('\n')}`;
  * The text load_skill returns: the body (plus its file list), or one file of the skill. Errors are returned as
  * plain text for the model, never thrown.
  */
-export function readSkill(role: SkillRole, name: string, file?: string, all: Skill[] = skills()): string {
-  const list = skillsFor(role, all);
+export function readSkill(role: SkillRole, name: string, file?: string, all: Skill[] = skills(), enabled: FeatureCheck = configured): string {
+  const list = skillsFor(role, all, enabled);
   const skill = list.find((s) => s.name === name.trim());
   if (!skill) return `No skill named "${name}". Available: ${list.map((s) => s.name).join(', ') || 'none'}.`;
   if (!file?.trim()) {

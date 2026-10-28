@@ -1,5 +1,5 @@
 /**
- * Dumps the front / child system prompts and tool definitions (name + description + JSON schema, as the provider
+ * Dumps the front / child system prompts (and the front skill index; skill bodies load on demand) and tool definitions (name + description + JSON schema, as the provider
  * sees them) to a directory, for token counting. Usage: tsx scripts/measure-prompts.ts <outDir>
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -18,8 +18,8 @@ mkdirSync(out, { recursive: true });
 const { asSchema } = await import('ai');
 const { frontSystemPrompt, CODING_AGENTS_PROMPT } = await import('../src/agent/prompts/front.js');
 const { childSystemPrompt } = await import('../src/agent/prompts/child.js');
-const { sandboxFrontPrompt, sandboxChildPrompt } = await import('../src/sandbox/prompts.js');
-const { HUDDLE_DJ_PROMPT } = await import('../src/features/huddlefm/render.js');
+const { sandboxChildPrompt } = await import('../src/sandbox/prompts.js');
+const { skillsPrompt } = await import('../src/agent/skills.js');
 await import('../src/tools/index.js');
 await import('../src/agent/register.js');
 await import('../src/features/register.js');
@@ -28,8 +28,7 @@ await import('../src/sandbox/register.js');
 const { toolsFor } = await import('../src/core/tools.js');
 
 writeFileSync(`${out}/front.txt`, frontSystemPrompt('smasnug ai'));
-writeFileSync(`${out}/front_sandbox.txt`, sandboxFrontPrompt({ previews: true }));
-writeFileSync(`${out}/front_huddle.txt`, HUDDLE_DJ_PROMPT);
+writeFileSync(`${out}/front_skills.txt`, skillsPrompt('front'));
 writeFileSync(`${out}/front_coding.txt`, CODING_AGENTS_PROMPT);
 writeFileSync(`${out}/child.txt`, childSystemPrompt(new Date('2026-10-07T00:00:00Z')));
 writeFileSync(`${out}/child_sandbox.txt`, sandboxChildPrompt({ previews: true }));

@@ -118,7 +118,7 @@ describe('slimMatch', () => {
     const names = new Map([['U1', 'Sam']]);
     const files = new Map([['FL', { id: 'file_abcdefghij', name: 'logo.png', mime: 'image/png', description: null }]]);
     const out = formatSearchMatch(slim, 0, names, files);
-    expect(out).toContain('logo [file file_abcdefghij: logo.png, image, from Sam]');
+    expect(out).toContain('logo [file file_abcdefghij: logo.png, image, from <@U1|Sam>]');
     expect(out).toContain('nice [file: other.png]');
   });
 });

@@ -1,7 +1,7 @@
 /** Per-user memory storage. Every function takes the owning user explicitly and scopes every query to it. */
 import { sql } from '../../db/index.js';
 
-/** preference: how they want to be helped (always injected). about: who they are. project: what they're doing now. */
+/** preference: how they want to be helped (the newest few are always injected). about: who they are. project: what they're doing now. */
 export const FACT_KINDS = ['preference', 'about', 'project'] as const;
 export type FactKind = (typeof FACT_KINDS)[number];
 
@@ -202,6 +202,11 @@ export async function deleteAllFacts(userId: string): Promise<number> {
 export async function touchFacts(userId: string, ids: number[]) {
   if (ids.length === 0) return;
   await sql`update user_memory set last_used = now() where user_id = ${userId} and id = any(${ids}::bigint[])`;
+}
+
+/** Mark all of a user's facts used: they are still active, so their facts shouldn't expire just for not being shown. */
+export async function touchAllFacts(userId: string) {
+  await sql`update user_memory set last_used = now() where user_id = ${userId}`;
 }
 
 export type RankedFact = Pick<Fact, 'id' | 'text' | 'kind' | 'statedAt'> & { rank: number };
