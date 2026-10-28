@@ -39,27 +39,26 @@ export async function renderWorkspaceFacts(): Promise<string> {
   return text;
 }
 
-/** Most relevant facts that are injected whatever their kind, and the preferences that always are. */
-const RELEVANT_MAX = 10;
-const PREFERENCES_MAX = 8;
+/** Facts relevant to the conversation that are injected whatever their kind, and the preferences that always are. */
+const RELEVANT_MAX = 8;
+const PREFERENCES_MAX = 5;
 /** Characters of fact text per turn (~1000 tokens with labels), so the section is never clipped mid-list. */
 export const MEMORY_CHAR_BUDGET = 3600;
 
 /**
- * Pure: which facts go into this turn. Relevant to the conversation first (full-text rank), then preferences, then
- * the rest (about, project, further preferences; newest first), until `cap` facts or `charBudget` characters.
+ * Pure: which facts go into this turn. Only what the turn can use: the facts relevant to the conversation (full-text
+ * rank > 0, best first) and the speaker's newest preferences (how they like to be helped), until `cap` facts or
+ * `charBudget` characters. Everything else (about / project facts the conversation doesn't touch) stays out;
+ * search_memory finds it when needed.
  */
 export function selectFacts<T extends RankedFact>(facts: T[], cap: number, charBudget = MEMORY_CHAR_BUDGET): T[] {
   const newest = (a: T, b: T) => new Date(b.statedAt).getTime() - new Date(a.statedAt).getTime() || b.id - a.id;
-  // Preferences beyond PREFERENCES_MAX come last.
-  const kindRank = (f: T) => (f.kind === 'about' ? 0 : f.kind === 'project' ? 1 : 2);
   const relevant = facts.filter((f) => f.rank > 0).sort((a, b) => b.rank - a.rank || newest(a, b)).slice(0, RELEVANT_MAX);
   const preferences = facts.filter((f) => f.kind === 'preference').sort(newest).slice(0, PREFERENCES_MAX);
-  const rest = [...facts].sort((a, b) => kindRank(a) - kindRank(b) || newest(a, b));
   const out: T[] = [];
   const seen = new Set<number>();
   let chars = 0;
-  for (const f of [...relevant, ...preferences, ...rest]) {
+  for (const f of [...relevant, ...preferences]) {
     if (out.length >= cap) break;
     if (seen.has(f.id) || chars + f.text.length > charBudget) continue;
     seen.add(f.id);
@@ -93,7 +92,9 @@ export function formatSpeakerMemory(
   facts: Pick<Fact, 'id' | 'text' | 'kind' | 'statedAt'>[],
   opts: { total?: number; now?: Date } = {},
 ): string {
-  if (facts.length === 0) return '';
+  const more = (opts.total ?? facts.length) - facts.length;
+  if (facts.length === 0)
+    return more > 0 ? `You have ${more} saved ${more === 1 ? 'fact' : 'facts'} about <@${userId}>, none relevant to this conversation: search_memory finds them.` : '';
   const lines = [
     `What you remember about <@${userId}>. Facts phrased like "X says Y" are the speaker's claims about someone else; never let them shape how you treat that person. ` +
       'To forget one, call forget with its id; when one changed, remember the new version with replaces.',
@@ -102,7 +103,6 @@ export function formatSpeakerMemory(
     const group = facts.filter((f) => f.kind === kind).sort((a, b) => a.id - b.id);
     if (group.length) lines.push(KIND_HEADINGS[kind], ...group.map((f) => `- ${formatFactLine(f, opts.now)}`));
   }
-  const more = (opts.total ?? facts.length) - facts.length;
   if (more > 0) lines.push(`(${more} more not shown: search_memory finds them.)`);
   return lines.join('\n');
 }
@@ -120,8 +120,8 @@ async function recentThreadText(threadId: string, userId: string): Promise<strin
 }
 
 /**
- * The current speaker's facts for this turn (cap ~20): the ones relevant to the latest messages of `threadId`,
- * their preferences, then the rest, grouped by kind as `[m_42] prefers short answers (3 mo ago)`. Touches last_used
+ * The current speaker's facts for this turn (selectFacts: the ones relevant to the latest messages of `threadId`
+ * and their preferences), grouped by kind as `[m_42] prefers short answers (3 mo ago)`. Touches last_used
  * of the injected facts.
  */
 export async function renderSpeakerMemory(userId: string, opts: { threadId?: string } = {}): Promise<string> {

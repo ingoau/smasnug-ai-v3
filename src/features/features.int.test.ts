@@ -536,13 +536,12 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
   describe('memory and workspace facts', () => {
     it('remember/forget are scoped to the speaker', async () => {
       const a = uid(), b = uid();
-      const saved = await exec(tools.rememberTool(toolCtx(a)), { fact: 'prefers short answers' });
+      const saved = await exec(tools.rememberTool(toolCtx(a)), { fact: 'prefers short answers', kind: 'preference' });
       const id = /m_(\d+)/.exec(saved)![1]!;
-      expect(await exec(tools.rememberTool(toolCtx(a)), { fact: 'Prefers short answers' })).toMatch(/Already remembered/);
+      expect(await exec(tools.rememberTool(toolCtx(a)), { fact: 'Prefers short answers', kind: 'preference' })).toMatch(/Already remembered/);
       expect(await exec(tools.forgetTool(toolCtx(b)), { fact_id: `m_${id}` })).toMatch(/No fact/);
       const mem = await render.renderSpeakerMemory(a);
       expect(mem).toContain(`[m_${id}] prefers short answers`);
-      expect(mem).toMatch(/private/i);
       expect(await render.renderSpeakerMemory(b)).toBe('');
       expect(await exec(tools.forgetTool(toolCtx(a)), { fact_id: Number(id) })).toMatch(/Forgot/);
       expect(await render.renderSpeakerMemory(a)).toBe('');
