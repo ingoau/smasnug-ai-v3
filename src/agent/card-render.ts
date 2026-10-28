@@ -16,7 +16,7 @@ import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { sliceUnits } from '../tools/util.js';
 import { buttonsBlock, type ButtonsActionsBlock, type ButtonsState, type ContextBlock } from './reply-buttons.js';
 import { extrasFallback, replyBody, type ReplyExtras } from './rich-blocks.js';
-import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS, replyBlocks, type ReplyBlock } from './slack-markdown.js';
+import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS, type ReplyBlock } from './slack-markdown.js';
 
 // Shapes mirror @slack/types PlanBlock / TaskCardBlock (not a direct dependency).
 export interface RichTextBlock {
@@ -326,7 +326,7 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
     // leaving room for the card and the buttons.
     const room = MAX_MESSAGE_BLOCKS - Math.max(blocks.length, 1) - (card.buttons ? 1 : 0);
     const prefix = `card_${card.id}_`;
-    const parts = card.extras?.items.length ? replyBody(reply, card.extras, { maxBlocks: room, idPrefix: prefix }) : replyBlocks(reply, { maxBlocks: room });
+    const parts = replyBody(reply, card.extras, { maxBlocks: room, idPrefix: prefix });
     let n = 0;
     for (const b of parts) {
       const own = (b as { block_id?: string }).block_id;

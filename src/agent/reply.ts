@@ -34,7 +34,7 @@ import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guideline
 import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type ButtonsActionsBlock } from './reply-buttons.js';
 import { saveReplyExtras } from './charts-store.js';
-import { buildExtras, degradedFileIds, extrasFallback, imageExtras, replyBody, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
+import { buildExtras, degradedFileIds, extrasFallback, imageExtras, replyBody, withoutMarkers, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
@@ -181,6 +181,8 @@ function replyLayout(text: string, actions?: ButtonsActionsBlock, card?: CardBlo
   return { text: extrasFallback(text, extras), blocks: [...(card ? [card] : []), ...body, ...(actions ? [actions] : [])] };
 }
 
+/** Files one message may carry (Slack). */
+const MAX_MESSAGE_FILES = 10;
 /** Slack refused the blocks (e.g. an image it can't fetch, a block type it doesn't render here). */
 const BLOCKS_ERRORS = new Set(['invalid_blocks', 'invalid_blocks_format']);
 /** Wait before retrying a refused layout that has just-uploaded image files (Slack may still be processing them). */
@@ -214,6 +216,8 @@ export class ReplyManager {
   lastDelivered: { ts: string; text: string; streamed: boolean; extras?: ReplyExtras } | null = null;
   /** The last layout sent to each reply message (attaching files rewrites the message with it). */
   private layouts = new Map<string, { text: string; blocks: unknown[] }>();
+  /** Image files uploaded for image blocks, by Slack file id (re-shared if a degraded reply can't attach them). */
+  private imageFiles = new Map<string, OutgoingFile>();
   private readonly trail: ActivityTrail | null;
 
   constructor(private readonly t: ReplyTarget) {
@@ -500,15 +504,34 @@ export class ReplyManager {
       await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, stopped: true, streamed: e.streamed });
       return STOPPED_RESULT;
     }
+    // Marker lines alone show nothing (their extras may have been dropped).
+    const blank = !withoutMarkers(text).trim();
     if (!e.streamTs) {
       // Nothing visible yet: an empty reply has nothing to post (Slack rejects empty messages).
-      const reason = !text.trim() && !files?.length && !charts.length ? (chartNotes.length ? `Not posted: ${chartNotes.join(' ')}` : EMPTY_RESULT) : null;
+      const reason = blank && !files?.length && !charts.length ? (chartNotes.length ? `Not posted: ${chartNotes.join(' ')}` : EMPTY_RESULT) : null;
       if (reason) {
         e.dropped = reason;
         await appendEvent(this.t.threadId, 'reply_dropped', 'bot', { turnId: this.t.turnId, index: e.index, reason, text });
         return reason;
       }
+      if (blank && !charts.length && files?.length) {
+        // Just files: shared into the thread as a message of their own (there is no text to attach them to).
+        e.posting = true;
+        await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
+        await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files, idempotencyKey: this.key(e, ':files') });
+        this.delivered++;
+        await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, mode: 'posted', text: '', files: files.map((f) => (f.fileId ? `${f.fileId} (${f.filename})` : f.filename)) });
+        return `Replied (posted) with the files only.${chartSuffix()}`;
+      }
     }
+    // Files go up (privately) while the reply is delivered, so attaching them right after leaves no gap for another
+    // render of the message (plan card, button press) to be overwritten.
+    const filesUpload = files?.length
+      ? uploadPrivateFiles(files, this.key(e, ':files-private')).then(
+          (up) => ({ up }),
+          (err: unknown) => ({ err }),
+        )
+      : null;
     const mode = await e.mode;
     // Quick-reply buttons: the row id goes into the button values, so it exists before the message does.
     const labels = normalizeButtonLabels(buttons);
@@ -596,7 +619,8 @@ export class ReplyManager {
     if (files?.length || degradedFileIds(extras).length) {
       const layout = last.ts ? (this.layouts.get(last.ts) ?? replyLayout(last.text, buttonsTs === last.ts ? actions : undefined, null, extras)) : null;
       try {
-        await this.attachFiles(e, last.ts, layout, files ?? [], degradedFileIds(extras));
+        const dropped = await this.attachFiles(e, last.ts, layout, files ?? [], filesUpload, degradedFileIds(extras));
+        if (dropped) chartNotes.push(`${dropped} file(s) didn't fit (Slack allows 10 per message).`);
       } catch (err) {
         log.warn({ err }, 'reply file upload failed');
         await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, mode: delivered, text, filesError: String(err) });
@@ -700,30 +724,47 @@ export class ReplyManager {
       const base = { n: img.n, alt: img.alt, ...(img.title ? { title: img.title } : {}) };
       if (img.file) {
         const up = uploaded[k++];
-        if (up) out.push({ ...base, slackFileId: up.slackFileId });
+        if (up) {
+          out.push({ ...base, slackFileId: up.slackFileId });
+          this.imageFiles.set(up.slackFileId, img.file);
+        }
       } else if (img.url) out.push({ ...base, url: img.url });
     }
     return out;
   }
 
   /**
-   * Put files on the delivered reply message: uploaded privately, then attached with chat.update `file_ids` (with its
-   * current layout, which chat.update needs). `extraIds`: Slack files already uploaded (a degraded reply's images).
-   * If attaching fails, the files are shared below the reply instead (a message of their own). Throws if that fails.
+   * Put files on the delivered reply message: uploaded privately (`upload`, started before delivery), then attached
+   * with chat.update `file_ids` (with its current layout, which chat.update needs). `extraIds`: Slack files already
+   * uploaded (a degraded reply's images). At most 10 (Slack); returns how many didn't fit. If attaching fails, the
+   * files are shared below the reply instead (a message of their own). Throws if that fails.
    */
-  private async attachFiles(e: ReplyEntry, ts: string | null, layout: { text: string; blocks: unknown[] } | null, files: OutgoingFile[], extraIds: string[]): Promise<void> {
+  private async attachFiles(
+    e: ReplyEntry,
+    ts: string | null,
+    layout: { text: string; blocks: unknown[] } | null,
+    files: OutgoingFile[],
+    upload: Promise<{ up: Awaited<ReturnType<typeof uploadPrivateFiles>> } | { err: unknown }> | null,
+    extraIds: string[],
+  ): Promise<number> {
+    const total = files.length + extraIds.length;
+    const keepExtra = extraIds.slice(0, Math.max(0, MAX_MESSAGE_FILES - files.length));
     if (ts && layout) {
       try {
-        const up = files.length ? await uploadPrivateFiles(files, this.key(e, ':files-private')) : [];
-        await editMessage('chat.update', { channel: this.t.channelId, ts, ...layout, file_ids: [...up.map((u) => u.slackFileId), ...extraIds] });
-        const posts = up.flatMap((u) => (u.fileId ? [{ fileId: u.fileId, slackFileId: u.slackFileId, channelId: this.t.channelId, threadId: this.t.threadId }] : []));
+        const res = upload ? await upload : { up: [] };
+        if ('err' in res) throw res.err;
+        await editMessage('chat.update', { channel: this.t.channelId, ts, ...layout, file_ids: [...res.up.map((u) => u.slackFileId), ...keepExtra] });
+        const posts = res.up.flatMap((u) => (u.fileId ? [{ fileId: u.fileId, slackFileId: u.slackFileId, channelId: this.t.channelId, threadId: this.t.threadId }] : []));
         await recordFilePosts(posts).catch((err) => log.warn({ err }, 'recording attached reply files failed'));
-        return;
+        return total - files.length - keepExtra.length;
       } catch (err) {
         log.warn({ err, code: slackErrorCode(err), ts }, 'attaching files to the reply message failed; sharing them below it');
       }
     }
-    if (files.length) await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files, idempotencyKey: this.key(e, ':files') });
+    // A degraded reply's images go along too (re-uploaded: a private Slack file can't be shared any other way).
+    const share = [...files, ...keepExtra.flatMap((id) => (this.imageFiles.has(id) ? [this.imageFiles.get(id)!] : []))];
+    if (share.length) await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files: share, idempotencyKey: this.key(e, ':files') });
+    return total - share.length;
   }
 
   /** The turn's card for a reply about to go out (null: none). Never throws. */

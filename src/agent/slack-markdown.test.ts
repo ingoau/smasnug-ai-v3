@@ -304,6 +304,8 @@ describe('placement markers', () => {
     expect(units.map((u) => u.kind)).toEqual(['md', 'skip', 'md']);
     expect(streamUnits('Here:\n[[ima', false)).toEqual([{ kind: 'md', start: 0, end: 6 }]);
     expect(streamUnits('Here:\n[', false)).toEqual([{ kind: 'md', start: 0, end: 6 }]);
+    expect(streamUnits('a\n[[image:1]]\r', false)).toEqual([{ kind: 'md', start: 0, end: 2 }]);
+    expectPrefixStable('a\r\n[[image:1]]\r\nb');
     // An ordinary link at the start of a line is not held once it can't be a marker.
     expect(streamUnits('Here:\n[link', false)).toEqual([{ kind: 'md', start: 0, end: 11 }]);
   });

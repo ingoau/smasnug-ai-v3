@@ -267,6 +267,31 @@ describe('reply extras: images, tables, cards, files', () => {
     expect(vi.mocked(uploadFiles)).toHaveBeenCalledWith(expect.objectContaining({ channelId: 'C1', threadTs: '1.1', files: [file] }));
   });
 
+  it('marker lines alone are empty: dropped without files, files shared on their own with them', async () => {
+    const { uploadFiles } = await import('./files.js');
+    vi.mocked(uploadFiles).mockClear();
+    calls.length = 0;
+    expect(await new ReplyManager(target('user', 1)).finish('tc1', '[[image:1]]')).toMatch(/^Not posted/);
+    expect(calls.some((c) => c.method === 'chat.postMessage')).toBe(false);
+    const file = { fileId: 'file_cccccccccc', filename: 'pic.webp' };
+    expect(await new ReplyManager(target('user', 1)).finish('tc1', '[[image:1]]', [file])).toMatch(/^Replied \(posted\) with the files only/);
+    expect(calls.some((c) => c.method === 'chat.postMessage')).toBe(false);
+    expect(vi.mocked(uploadFiles)).toHaveBeenCalledWith(expect.objectContaining({ files: [file] }));
+  });
+
+  it('degraded images are shared below the reply when attaching fails', async () => {
+    const { uploadFiles } = await import('./files.js');
+    const { imageRetry } = await import('./reply.js');
+    imageRetry.delayMs = 1;
+    vi.mocked(uploadFiles).mockClear();
+    calls.length = 0;
+    failOn = (m, args) => (m === 'chat.postMessage' && args.blocks.some((b: any) => b.type === 'image') ? 'invalid_blocks' : m === 'chat.update' && args.file_ids ? 'unable_to_share_files' : null);
+    const res = await new ReplyManager(target('user', 1)).finish('tc1', 'A cat.', undefined, undefined, undefined, { images: [pngFile] });
+    failOn = null;
+    expect(res).toMatch(/^Replied \(posted\)/);
+    expect(vi.mocked(uploadFiles)).toHaveBeenCalledWith(expect.objectContaining({ files: [pngFile.file] }));
+  });
+
   it('streamed: the marker line is never streamed; the final layout puts the table there', async () => {
     calls.length = 0;
     const text = 'Here are the numbers for this week:\n[[table:1]]\nPro is the better deal overall.';

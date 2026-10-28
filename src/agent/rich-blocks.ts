@@ -70,6 +70,10 @@ const httpsUrl = (v: unknown): string | null => {
 };
 /** Markdown link text / table cell: no line breaks, no pipes or brackets that would break the syntax. */
 const mdSafe = (s: string) => s.replace(/\s+/g, ' ').replace(/\|/g, '\\|').replace(/[[\]]/g, '');
+/** A URL inside markdown `(…)`: parentheses escaped so they can't end the link early. */
+const mdUrl = (u: string) => u.replace(/\(/g, '%28').replace(/\)/g, '%29');
+/** Free text in a fallback: on one line, and never a placement marker (`[[…]]`). */
+const mdLine = (s: string) => s.replace(/\s+/g, ' ').replace(/\[\[|\]\]/g, '');
 
 // ---------- Schemas (what the model passes) ----------
 
@@ -145,7 +149,7 @@ export function imageExtras(images: readonly PreparedImage[]): ReplyExtra[] {
       ref: `image:${img.n ?? i + 1}`,
       block: { type: 'image', alt_text: alt, ...source, ...(title ? { title: { type: 'plain_text', text: title } } : {}) },
       // A file image is attached to the degraded message instead; a URL image becomes a link.
-      fallback: img.slackFileId ? '' : `[${mdSafe(title || alt)}](${img.url})`,
+      fallback: img.slackFileId ? '' : `[${mdSafe(title || alt)}](${mdUrl(img.url!)})`,
       summary: `[image: ${title || alt}]`,
       ...(img.slackFileId ? { slackFileId: img.slackFileId } : {}),
     };
@@ -262,7 +266,6 @@ export function cardExtras(raw: unknown): { items: ReplyExtra[]; notes: string[]
     const i = cards.length;
     cards.push({
       type: 'card',
-      block_id: `card_${i + 1}`,
       ...(title ? { title: { type: 'plain_text', text: title } } : {}),
       ...(subtitle ? { subtitle: { type: 'plain_text', text: subtitle } } : {}),
       ...(body ? { body: { type: 'mrkdwn', text: body } } : {}),
@@ -271,13 +274,13 @@ export function cardExtras(raw: unknown): { items: ReplyExtra[]; notes: string[]
         ? { actions: [{ type: 'button', text: { type: 'plain_text', text: clip(asText(o.button), MAX_BUTTON_LABEL) || 'Open' }, url, action_id: `link:card_${i + 1}` }] }
         : {}),
     });
-    const head = title ? (url ? `**[${mdSafe(title)}](${url})**` : `**${mdSafe(title)}**`) : url ? `<${url}>` : '';
-    md.push(`• ${[head, subtitle && `_${mdSafe(subtitle)}_`].filter(Boolean).join(' — ')}${body ? `\n  ${body.replace(/\n/g, ' ')}` : ''}`);
+    const head = title ? (url ? `**[${mdSafe(title)}](${mdUrl(url)})**` : `**${mdSafe(title)}**`) : url ? `<${url}>` : '';
+    md.push(`• ${[head, subtitle && `_${mdSafe(subtitle)}_`].filter(Boolean).join(' — ')}${body ? `\n  ${mdLine(body)}` : ''}`);
     titles.push(title || body.slice(0, 40));
   }
   if (!cards.length) return { items: [], notes };
   // One card stands alone; more scroll in a carousel.
-  const block = cards.length === 1 ? (({ block_id: _id, ...card }) => card)(cards[0]!) : { type: 'carousel', elements: cards };
+  const block = cards.length === 1 ? cards[0]! : { type: 'carousel', elements: cards };
   return { items: [{ ref: 'cards:1', block, fallback: md.join('\n'), summary: `[cards: ${titles.join(', ')}]` }], notes };
 }
 
@@ -296,7 +299,8 @@ export function chartExtras(raw: unknown): { items: ReplyExtra[]; notes: string[
 // ---------- Rendering ----------
 
 export const isMarkerLine = (line: string) => markerRef(line) !== null;
-const withoutMarkers = (text: string) =>
+/** The text without its placement marker lines (what a reader sees of it). */
+export const withoutMarkers = (text: string) =>
   text
     .split('\n')
     .filter((l) => !isMarkerLine(l))
@@ -331,19 +335,35 @@ export function replyBody(text: string, extras: ReplyExtras | null | undefined, 
       },
     });
   }
-  const blockOf = (it: ReplyExtra) => ({ ...it.block, block_id: `${opts.idPrefix}${it.ref.replace(':', '_')}` }) as unknown as ReplyBlock;
-  const body = withoutMarkers(text).trim()
-    ? replyBlocks(text, {
-        maxBlocks: Math.max(1, opts.maxBlocks - items.length),
-        resolve: (ref) => {
-          const it = byRef.get(ref);
-          if (!it || used.has(ref)) return null;
-          used.add(ref);
-          return { block: blockOf(it) };
-        },
-      })
-    : [];
-  const rest = items.filter((it) => !used.has(it.ref)).map(blockOf);
+  const idOf = (it: ReplyExtra) => `${opts.idPrefix}${it.ref.replace(':', '_')}`;
+  const blockOf = (it: ReplyExtra) => ({ ...it.block, block_id: idOf(it) }) as unknown as ReplyBlock;
+  // Room for the extras below the text; placed ones count inside the text's own budget.
+  const placed = placedRefs(text);
+  const render = (reserve: number) => {
+    used.clear();
+    return withoutMarkers(text).trim()
+      ? replyBlocks(text, {
+          maxBlocks: Math.max(1, opts.maxBlocks - reserve),
+          resolve: (ref) => {
+            const it = byRef.get(ref);
+            if (!it || used.has(ref)) return null;
+            used.add(ref);
+            return { block: blockOf(it) };
+          },
+        })
+      : [];
+  };
+  const shownIn = (blocks: ReplyBlock[]) => new Set(blocks.map((b) => (b as { block_id?: string }).block_id).filter(Boolean));
+  let body = render(items.filter((it) => !placed.has(it.ref)).length);
+  // A placed extra that didn't fit (the text was folded into one block past the limit) goes below instead, with
+  // room made for it.
+  let shown = shownIn(body);
+  const missing = items.filter((it) => !shown.has(idOf(it))).length;
+  if (missing + body.length > opts.maxBlocks) {
+    body = render(missing);
+    shown = shownIn(body);
+  }
+  const rest = items.filter((it) => !shown.has(idOf(it))).map(blockOf);
   return [...body, ...rest].slice(0, opts.maxBlocks);
 }
 
@@ -354,7 +374,7 @@ export function replyBody(text: string, extras: ReplyExtras | null | undefined, 
 export function extrasFallback(text: string, extras: ReplyExtras | null | undefined, max = MAX_FALLBACK_TEXT): string {
   const base = withoutMarkers(text).trim();
   const extra = (extras?.items ?? []).map((it) => it.summary).join('\n');
-  if (!extra) return base.slice(0, max) || text.slice(0, max);
+  if (!extra) return base.slice(0, max);
   if (!base) return extra.slice(0, max);
   const room = max - base.length - 1;
   if (room < 16) return base.slice(0, max);

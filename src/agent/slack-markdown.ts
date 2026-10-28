@@ -156,7 +156,7 @@ const proseMarkdown = (md: string) => escapeAffectedTags(boldSingleStars(md));
  */
 const MARKER_LINE = /^[ \t]*\[\[[ \t]*(chart|image|table|cards)s?(?:[ \t]*[: #][ \t]*(\d{1,2}))?[ \t]*\]\][ \t]*$/i;
 /** A partial last line that may still become a marker (held back while streaming). */
-const MARKER_PREFIX = /^[ \t]*\[(?:\[[ \t]*[a-z]*(?:[ \t]*[: #][ \t]*\d{0,2})?[ \t]*\]{0,2}[ \t]*)?$/i;
+const MARKER_PREFIX = /^[ \t]*\[(?:\[[ \t]*[a-z]*(?:[ \t]*[: #][ \t]*\d{0,2})?[ \t]*\]{0,2}[ \t]*)?\r?$/i;
 
 export function markerRef(line: string): string | null {
   const m = MARKER_LINE.exec(line);

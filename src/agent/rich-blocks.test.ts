@@ -64,6 +64,20 @@ describe('replyBody', () => {
     expect(blocks.map((b) => b.block_id ?? b.type)).toEqual(['markdown', 'card_7_table_1', 'markdown', 'card_7_chart_1', 'card_7_image_1']);
   });
 
+  it('a placed extra that does not fit in the folded text still goes below it', () => {
+    const text = [...Array.from({ length: 12 }, (_, i) => `p${i}\n\n\`\`\`\ncode ${i}\n\`\`\``), '[[table]]', 'end'].join('\n\n');
+    const blocks = replyBody(text, extras, { maxBlocks: 10, idPrefix: '' }) as any[];
+    expect(blocks.length).toBeLessThanOrEqual(10);
+    expect(blocks.map((b) => b.block_id).filter(Boolean)).toEqual(expect.arrayContaining(['table_1', 'chart_1', 'image_1']));
+  });
+
+  it('degraded fallbacks can never smuggle in a marker line', () => {
+    const { extras: x } = buildExtras({ tables: { caption: 'T', columns: ['a'], rows: [['1']] }, cards: [{ title: 'c', body: '[[table:1]]' }] });
+    const md = (replyBody('hi', { ...x, degraded: true }, { maxBlocks: 49, idPrefix: '' }) as any[]).map((b) => b.text).join('\n');
+    expect(md.match(/\| a \|/g)).toHaveLength(1);
+    expect(md).not.toContain('[[');
+  });
+
   it('extras only: no empty markdown block', () => {
     expect((replyBody('  ', extras, { maxBlocks: 49, idPrefix: '' }) as any[]).map((b) => b.type)).toEqual(['data_visualization', 'image', 'data_table']);
   });

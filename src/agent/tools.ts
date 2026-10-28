@@ -95,9 +95,12 @@ registerTool({
         // At most 10 files per message (Slack); access is checked per id (this thread, or the speaker's own files).
         const prepared = await prepareOutgoingFiles({ threadId: ctx.threadId, speakerId: ctx.speakerId, turnId: ctx.turnId }, files?.slice(0, 10));
         const imgs = await prepareImageArgs({ threadId: ctx.threadId, speakerId: ctx.speakerId }, images, MAX_IMAGES);
-        const attach = [...prepared.files, ...imgs.attach.filter((a) => !prepared.files.some((f) => f.fileId === a.fileId))].slice(0, 10);
+        // A file shown inline isn't attached as well; images the block can't show are attached instead.
+        const inline = new Set(imgs.images.flatMap((i) => (i.file?.fileId ? [i.file.fileId] : [])));
+        const all = [...prepared.files.filter((f) => !f.fileId || !inline.has(f.fileId)), ...imgs.attach.filter((a) => !prepared.files.some((f) => f.fileId === a.fileId))];
+        const attach = all.slice(0, 10);
         const res = await s.replies.finish(toolCallId, text, attach, buttons, charts, { images: imgs.images, tables, cards });
-        const notes = [...prepared.errors, ...imgs.errors, ...((files?.length ?? 0) > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
+        const notes = [...prepared.errors, ...imgs.errors, ...((files?.length ?? 0) > 10 || all.length > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
         const fileNote = notes.length ? ` File problems: ${notes.join(' ')}` : '';
         if (res.startsWith('Replied')) {
           s.visible.add('reply');
