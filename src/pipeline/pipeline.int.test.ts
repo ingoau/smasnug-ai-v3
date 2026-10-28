@@ -792,6 +792,13 @@ describe.skipIf(!infra)('pipeline integration', () => {
         expect(await debounce.takeBatch({ threadId: `${C}:${top}`, authorId: 'U1', seq: 1 })).toEqual([{ ts: top, reason: 'mention' }]);
         expect(await debounce.takeBatch({ threadId: `${C}:${parent}`, authorId: 'U1', seq: 1 })).toEqual([{ ts: reply, reason: 'mention' }]);
         expect((await sql`select id from threads where channel_id = ${C}`).map((r) => r.id).sort()).toEqual([`${C}:${parent}`, `${C}:${top}`]);
+        // Removed and re-invited: the mentions are already stored, so not answered again. A join without an inviter
+        // (the bot joining by itself) replays nothing.
+        await processSlackEvent(messageEnvelope({ subtype: 'channel_join', user: 'UBOT', inviter: 'U1', text: '<@UBOT> has joined the channel', ts: '1700001000.000200' }));
+        expect(await sql`select id from thread_events where thread_id = ${`${C}:${top}`} and type = 'message'`).toHaveLength(1);
+        await sql`delete from messages where channel_id = ${C}`;
+        await processSlackEvent(messageEnvelope({ subtype: 'channel_join', user: 'UBOT', text: '<@UBOT> has joined the channel', ts: '1700001000.000300' }));
+        expect(await sql`select ts from messages where channel_id = ${C}`).toHaveLength(0);
       } finally {
         remove();
       }

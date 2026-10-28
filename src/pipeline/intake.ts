@@ -74,16 +74,26 @@ export async function handleMessageEvent(ev: MessageEvent) {
  */
 async function handleJoin(ev: MessageEvent & { inviter?: string }) {
   const bot = await getBotIdentity();
-  if (ev.user !== bot.userId) return;
+  // No inviter: the bot joined by itself (send_message's conversations.join) or an admin added it; nothing to answer.
+  if (ev.user !== bot.userId || !ev.inviter) return;
   const oldest = (Number(ev.ts) - JOIN_REPLAY_WINDOW_S).toFixed(6);
   const top = await fetchHistoryBefore(ev.channel, { latest: ev.ts, limit: 20 });
   const recent = top.filter((m) => compareTs(m.ts, oldest) > 0);
   // Mentions in a thread: the parent's latest_reply moved within the window.
   for (const parent of top.filter((m) => m.latest_reply && compareTs(m.latest_reply, oldest) > 0)) {
-    recent.push(...(await fetchReplies(ev.channel, parent.ts, { latest: ev.ts })).filter((m) => m.ts !== parent.ts && compareTs(m.ts, oldest) > 0));
+    const replies = await fetchReplies(ev.channel, parent.ts, { latest: ev.ts }).catch((err) => {
+      log.warn({ err, channel: ev.channel, ts: parent.ts }, 'join replay: replies fetch failed');
+      return [];
+    });
+    recent.push(...replies.filter((m) => m.ts !== parent.ts && compareTs(m.ts, oldest) > 0));
   }
-  const mentions = recent.filter((m) => !m.subtype && m.user && (!ev.inviter || m.user === ev.inviter) && mentionFacts(mentionText(m), bot.userId).mentionsBot);
-  for (const m of mentions.sort((a, b) => compareTs(a.ts, b.ts))) {
+  const mentions = recent.filter(
+    (m) => NEW_MESSAGE_SUBTYPES.has(m.subtype) && m.subtype !== 'bot_message' && !m.bot_id && m.user === ev.inviter && mentionFacts(mentionText(m), bot.userId).mentionsBot,
+  );
+  if (!mentions.length) return;
+  // Already stored: seen before (the bot was removed and re-invited), so not answered again.
+  const seen = new Set((await sql<{ ts: string }[]>`select ts from messages where channel_id = ${ev.channel} and ts in ${sql(mentions.map((m) => m.ts))}`).map((r) => r.ts));
+  for (const m of mentions.filter((m) => !seen.has(m.ts)).sort((a, b) => compareTs(a.ts, b.ts))) {
     await handleMessageEvent({ ...m, type: 'message', channel: ev.channel, ...(ev.channel_type ? { channel_type: ev.channel_type } : {}) });
   }
 }
