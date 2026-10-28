@@ -108,6 +108,8 @@ describe.skipIf(!LIVE)('memory reading and tools (DB)', () => {
     await sql`update user_memory set stated_at = now() - interval '200 days', last_used = now() - interval '100 days' where id = ${old.id}`;
     await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${channel}, ${rootTs}, ${threadId}, ${user}, 'how do monads work in haskell again?')`;
 
+    const { redis } = await import('../../core/redis.js');
+    await redis.del(`features:memory:active:${user}`); // a rerun within a day must take the first-turn path too
     await sql`update user_memory set last_used = now() - interval '100 days' where user_id = ${user}`;
     const text = await render.renderSpeakerMemory(user, { threadId });
     expect(text).toContain(`[m_${old.id}] is learning Haskell for a compilers course (6 mo ago)`);
@@ -119,6 +121,11 @@ describe.skipIf(!LIVE)('memory reading and tools (DB)', () => {
     expect(text).not.toContain('knows tool number');
     const [stale] = await sql<{ n: number }[]>`select count(*)::int as n from user_memory where user_id = ${user} and last_used < now() - interval '1 minute'`;
     expect(stale!.n).toBe(0);
+    // Later turns that day only touch the facts they show.
+    await sql`update user_memory set last_used = now() - interval '100 days' where user_id = ${user}`;
+    await render.renderSpeakerMemory(user, { threadId });
+    const fresh = await sql<{ id: number }[]>`select id from user_memory where user_id = ${user} and last_used > now() - interval '1 minute' order by id`;
+    expect(fresh.map((r) => Number(r.id))).toEqual([old.id, pref.id].sort((a, b) => a - b));
   });
 
   it('remember refuses near-duplicates, replaces by id, and search_memory finds hidden facts', async () => {

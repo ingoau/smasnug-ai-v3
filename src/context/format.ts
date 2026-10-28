@@ -172,7 +172,7 @@ export function attachmentLabels(atts: MessageAttachment[] | undefined, rawText:
     }
     const content = body || a.title || '';
     if (!content) continue;
-    const who = a.author ? ` from ${a.author}` : '';
+    const who = a.authorId ? ` from ${personRef(a.authorId, a.author)}` : a.author ? ` from ${a.author}` : '';
     const where = a.channel ? ` in #${a.channel}` : '';
     out.push(`[${a.kind === 'forwarded' ? 'forwarded' : 'attached'}${who}${where}: ${truncateText(content, Math.min(FORWARD_MAX_CHARS, env.maxChars))}]`);
   }

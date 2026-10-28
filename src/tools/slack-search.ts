@@ -296,7 +296,7 @@ const MAX_FILE_LABELS = 3;
  */
 function fileLabels(x: any, names: Map<string, string>, files?: Map<string, ContextFile>): string {
   if (!files) return '';
-  const from = x?.user ? (names.get(x.user) ?? x.username ?? x.user) : x?.username || 'unknown';
+  const from = x?.user ? personRef(x.user, names.get(x.user) ?? x.username) : x?.username || 'unknown';
   const refs = slackFileRefs(x);
   const labels = refs.slice(0, MAX_FILE_LABELS).map((f) => {
     const cf = files.get(f.id);
