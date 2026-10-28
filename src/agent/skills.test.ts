@@ -112,5 +112,11 @@ describe('requires', () => {
     expect(repo.find((s) => s.name === 'huddle-dj')?.requires).toEqual(['huddlefm']);
     expect(repo.find((s) => s.name === 'code-sandboxes')?.requires).toEqual(['sandbox']);
     expect(readSkill('front', 'huddle-dj', undefined, repo, () => true)).toMatch(/huddle_dj_mode/);
+    expect(repo.find((s) => s.name === 'live-previews')?.requires).toEqual(['previews']);
+  });
+
+  it('a requires name must be an own feature, not an inherited property', () => {
+    const odd = loadSkills(skillDir({ 'x/SKILL.md': '---\ndescription: d\nrequires: [toString]\n---\nbody' }));
+    expect(odd).toEqual([]);
   });
 });

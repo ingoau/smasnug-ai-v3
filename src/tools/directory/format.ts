@@ -5,6 +5,7 @@
  */
 import { neutralizeBroadcasts } from '../../pipeline/guidelines.js';
 import type { DirectoryChannel, DirectoryPerson } from './fields.js';
+import { personRef } from '../../context/format.js';
 
 /** User-written text as one safe line: no control chars / newlines / angle brackets, group pings neutralised, capped. */
 export function safeLine(s: unknown, max = 80): string {
@@ -18,12 +19,12 @@ export function safeLine(s: unknown, max = 80): string {
   return t.length > max ? `${t.slice(0, max - 1).trimEnd()}…` : t;
 }
 
-/** `<@U…> display name (handle) · real name · title · pronouns · bot/person · deactivated` (missing parts omitted). */
+/** `<@U…|display name> (handle) · real name · title · pronouns · bot/person · deactivated` (missing parts omitted). */
 export function formatPerson(p: DirectoryPerson): string {
   const display = safeLine(p.displayName) || safeLine(p.realName) || safeLine(p.handle) || p.id;
   const handle = safeLine(p.handle, 40);
   const real = safeLine(p.realName);
-  const parts = [`<@${p.id}> ${display}${handle && handle !== display ? ` (${handle})` : ''}`];
+  const parts = [`${personRef(p.id, display)}${handle && handle !== display ? ` (${handle})` : ''}`];
   if (real && real !== display) parts.push(real);
   const title = safeLine(p.title, 100);
   if (title) parts.push(title);

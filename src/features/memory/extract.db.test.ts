@@ -108,12 +108,17 @@ describe.skipIf(!LIVE)('memory reading and tools (DB)', () => {
     await sql`update user_memory set stated_at = now() - interval '200 days', last_used = now() - interval '100 days' where id = ${old.id}`;
     await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${channel}, ${rootTs}, ${threadId}, ${user}, 'how do monads work in haskell again?')`;
 
+    await sql`update user_memory set last_used = now() - interval '100 days' where user_id = ${user}`;
     const text = await render.renderSpeakerMemory(user, { threadId });
     expect(text).toContain(`[m_${old.id}] is learning Haskell for a compilers course (6 mo ago)`);
     expect(text).toContain(`[m_${pref.id}] prefers short answers`);
     expect(text).toMatch(/more not shown: search_memory/);
     const [row] = await sql<{ lastUsed: Date }[]>`select last_used from user_memory where id = ${old.id}`;
     expect(Date.now() - new Date(row!.lastUsed).getTime()).toBeLessThan(60_000);
+    // Not injected, but the speaker's first turn of the day keeps all their facts from expiring.
+    expect(text).not.toContain('knows tool number');
+    const [stale] = await sql<{ n: number }[]>`select count(*)::int as n from user_memory where user_id = ${user} and last_used < now() - interval '1 minute'`;
+    expect(stale!.n).toBe(0);
   });
 
   it('remember refuses near-duplicates, replaces by id, and search_memory finds hidden facts', async () => {

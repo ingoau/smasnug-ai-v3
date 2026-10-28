@@ -137,7 +137,7 @@ describe('read_thread / read_channel', () => {
     expect(out).toMatch(/\[replies 5–9 of \d+ replies; older: read_thread before_ts=1790000007\.000100; newer: read_thread after_ts=1790000011\.000100\]/);
     const all: string = await exec(toolsFor('front', baseCtx()).read_thread, { before_ts: '1790000004.000100', limit: 10 });
     expect(all).toContain('Anyone know how to fix'); // parent included when the window reaches it
-    expect(all).toMatch(/\[file file_[a-z0-9]{10}: screenshot\.png, image, from Ingo\]/);
+    expect(all).toMatch(/\[file file_[a-z0-9]{10}: screenshot\.png, image, from <@U0INGO\|Ingo>\]/);
     expect(all).toContain('start of thread');
     // Forwards from the start: the parent first, then the oldest replies.
     const fwd: string = await exec(toolsFor('front', baseCtx()).read_thread, { after_ts: FIX_THREAD_TS, limit: 3 });

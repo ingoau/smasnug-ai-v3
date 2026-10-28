@@ -29,7 +29,8 @@ export async function renderDjState(opts: { channelId: string; threadId: string;
     if (!sessions.length) return '';
     return [
       ...sessions.map((s) => renderSession(s, opts, s.channelId === opts.channelId || (opts.channelId.startsWith('D') && s.requestedBy === opts.speakerId))),
-      'Messages about the music in these huddles (skip this, turn it up, play X) are aimed at you. Load the huddle-dj skill before using the huddle_dj tools.',
+      // Inline while a session exists, so a "skip this" doesn't need a load_skill step first; setup is the huddle-dj skill.
+      'Messages about the music in these huddles (skip this, turn it up, play X) are aimed at you. Music requests go through huddle_dj: pick real songs with good taste (at most 5 per ask unless told otherwise), empty the queue only when someone asks. "let us pick" / "stop picking", "play more X", "stop commenting" → huddle_dj_settings; "stop being the dj" → huddle_dj_mode off (you can never end the HuddleFM session). Reply briefly with what you did; if a command says the grant is gone, DJ mode is off: say so and offer to ask the host again. Never DM HuddleFM or paste its JSON.',
     ].join('\n');
   } catch (err) {
     log.warn({ err }, 'renderDjState failed');

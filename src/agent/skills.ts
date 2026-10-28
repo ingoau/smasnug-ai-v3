@@ -41,10 +41,12 @@ const MAX_FILE_BYTES = 200_000;
 export const SKILL_FEATURES: Record<string, () => boolean> = {
   huddlefm: () => Boolean(process.env.HUDDLEFM_USER_ID),
   sandbox: () => Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET),
+  /** previewsConfigured: sandboxes plus the key that encrypts preview tokens. */
+  previews: () => Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET && process.env.PREVIEW_SECRET_KEY),
 };
 
 export type FeatureCheck = (feature: string) => boolean;
-const configured: FeatureCheck = (f) => SKILL_FEATURES[f]?.() ?? false;
+const configured: FeatureCheck = (f) => Object.hasOwn(SKILL_FEATURES, f) && SKILL_FEATURES[f]!();
 
 /** `<repo>/skills`, from both src/agent (tsx) and dist/agent (build). */
 export function defaultSkillsDir(): string {
@@ -121,7 +123,7 @@ export function loadSkills(dir: string): Skill[] {
       log.warn({ skill: entry }, 'skipping skill: needs a lowercase name, a description, a body and a valid role');
       continue;
     }
-    const unknown = requires.filter((f) => !(f in SKILL_FEATURES));
+    const unknown = requires.filter((f) => !Object.hasOwn(SKILL_FEATURES, f));
     if (unknown.length) {
       log.warn({ skill: entry, unknown }, 'skipping skill: unknown feature in requires');
       continue;

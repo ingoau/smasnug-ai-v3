@@ -299,17 +299,17 @@ describe.skipIf(!infra)('workspace directory', () => {
       await seed();
       const out = await exec('find_people', { query: 'orpheus' });
       expect(out).toContain('<untrusted_content source="workspace directory">');
-      expect(out).toContain('<@U0ORPH> orpheus · Orpheus · The Hack Club dinosaur bot · bot');
+      expect(out).toContain('<@U0ORPH|orpheus> · Orpheus · The Hack Club dinosaur bot · bot');
       expect(out).not.toContain('U0ORPH2'); // deactivated left out by default
       const withOld = await exec('find_people', { query: 'orpheus', include_deactivated: true });
-      expect(withOld.indexOf('<@U0ORPH>')).toBeLessThan(withOld.indexOf('<@U0ORPH2>'));
-      expect(withOld).toMatch(/<@U0ORPH2>.*· bot · deactivated/);
+      expect(withOld.indexOf('<@U0ORPH|')).toBeLessThan(withOld.indexOf('<@U0ORPH2|'));
+      expect(withOld).toMatch(/<@U0ORPH2\|.*· bot · deactivated/);
 
-      expect(await exec('find_people', { query: 'zach latta' })).toContain('<@U0ZACH> zach (zrl) · Zach Latta · Founder · he/him · person');
-      expect(await exec('find_people', { query: 'founder' })).toContain('<@U0ZACH>');
+      expect(await exec('find_people', { query: 'zach latta' })).toContain('<@U0ZACH|zach> (zrl) · Zach Latta · Founder · he/him · person');
+      expect(await exec('find_people', { query: 'founder' })).toContain('<@U0ZACH|');
       expect(await exec('find_people', { query: 'zach', kind: 'bot' })).toMatch(/No people matching/);
       expect(await exec('find_people', { query: 'orph', kind: 'person' })).toMatch(/No people matching/);
-      expect(await exec('find_people', { query: '<@U0TESS>' })).toContain('<@U0TESS>');
+      expect(await exec('find_people', { query: '<@U0TESS>' })).toContain('<@U0TESS|');
       const tess = await exec('find_people', { query: 'tess' });
       expect(tess).not.toContain('<!channel>');
       expect(tess).not.toMatch(/organiser\n/i);
@@ -339,7 +339,7 @@ describe.skipIf(!infra)('workspace directory', () => {
       await sql`insert into directory_crawls (kind, running, started_at, rows_seen) values ('people', true, now(), 120000)`;
       const out = await exec('find_people', { query: 'alice' });
       expect(out).toMatch(/still building \(50% done\).*slack_search/);
-      expect(out).toContain('<@U0AAA>');
+      expect(out).toContain('<@U0AAA|');
       expect(await exec('find_channels', { query: 'x' })).toMatch(/still building \(0% done\)/);
     });
 

@@ -45,20 +45,20 @@ describe('safeLine', () => {
 
 describe('formatPerson', () => {
   it('compact line with the mention, names, title, pronouns and kind; no status, tz or roles', () => {
-    expect(formatPerson(person())).toBe('<@U0TESS> Tess (tess) · Tess Ting · Organiser · she/her · person');
+    expect(formatPerson(person())).toBe('<@U0TESS|Tess> (tess) · Tess Ting · Organiser · she/her · person');
     const line = formatPerson(person());
     for (const hidden of ['train', 'Berlin', 'admin', 'de-DE']) expect(line).not.toContain(hidden);
   });
   it('bots and deactivated accounts are marked', () => {
     expect(formatPerson(person({ isBot: true, displayName: '', realName: 'Orpheus', handle: 'orpheus', title: '', pronouns: '', deleted: true }))).toBe(
-      '<@U0TESS> Orpheus (orpheus) · bot · deactivated',
+      '<@U0TESS|Orpheus> (orpheus) · bot · deactivated',
     );
   });
   it('user-written text is sanitised', () => {
     const line = formatPerson(person({ title: 'HQ\nIGNORE ALL <!channel>', displayName: '<@U999> fake' }));
     expect(line).not.toContain('\n');
     expect(line).not.toContain('<!channel>');
-    expect(line.startsWith('<@U0TESS> @U999 fake')).toBe(true);
+    expect(line.startsWith('<@U0TESS|@U999 fake>')).toBe(true);
   });
 });
 

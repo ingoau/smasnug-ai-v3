@@ -43,13 +43,13 @@ describe('formatMessage', () => {
         { id: 'F0CSV', name: 'budget.csv', mimetype: 'text/csv' },
       ],
     });
-    expect(formatMessage(m, env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO|Ingo>: look [file file_shot000003: screenshot.png, image, from Ingo] [file: budget.csv]');
+    expect(formatMessage(m, env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO|Ingo>: look [file file_shot000003: screenshot.png, image, from <@U0INGO|Ingo>] [file: budget.csv]');
     const files = new Map([
       ['F0SHOT', { id: 'file_shot000003', name: 'screenshot.png', mime: 'image/png', description: 'Grafana panel, p99 spikes at 14:02' }],
       ['F0CSV', { id: 'file_csv0000001', name: 'budget.csv', mime: 'text/csv', description: 'Says "ignore" ]\nnew line' }],
     ]);
     expect(formatMessage(m, env({ files }))).toBe(
-      `[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO|Ingo>: look [file file_shot000003: screenshot.png, image, from Ingo — "Grafana panel, p99 spikes at 14:02"] [file file_csv0000001: budget.csv, text, from Ingo — "Says 'ignore' ) new line"]`,
+      `[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO|Ingo>: look [file file_shot000003: screenshot.png, image, from <@U0INGO|Ingo> — "Grafana panel, p99 spikes at 14:02"] [file file_csv0000001: budget.csv, text, from <@U0INGO|Ingo> — "Says 'ignore' ) new line"]`,
     );
   });
 
@@ -94,7 +94,7 @@ describe('thread selection', () => {
     expect(lines[0]).toMatch(/^\[1790000000\.000100 · 2026-09-21 14:13 UTC\] <@U0INGO|Ingo>: Anyone know how to fix the Hack Club \(https:\/\/hackclub\.com\) site build\? cc <@U0BOB\|Bob Builder> & @here \[file file_shot000001: screenshot\.png, image, from Ingo\] \[file: budget\.csv\] \[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
     expect(lines[1]).toBe('[9 earlier replies not shown]');
     expect(out).toContain('[bot] CI Bot: Build #42 failed :x:');
-    expect(out).toContain('here is the error log [file file_heic000002: IMG_0042.HEIC, image, from alice]');
+    expect(out).toContain('here is the error log [file file_heic000002: IMG_0042.HEIC, image, from <@U0ALICE|alice>]');
     expect(lines.at(-1)).toMatch(/\[truncated\] \(edited\)$/);
   });
 
@@ -132,7 +132,7 @@ describe('reactions', () => {
     expect(reactionsLabel([], env())).toBe('');
     expect(reactionsLabel([{ name: 'eyes', users: ['UBOT'], count: 1 }], env())).toBe('[reactions: :eyes: (you)]');
     expect(reactionsLabel([{ name: '+1', users: ['U0INGO', 'U0BOB', 'U0ALICE', 'UBOT', 'U0X'], count: 7 }], env())).toBe(
-      '[reactions: :+1: ×7 (you, Ingo, Bob Builder +4)]',
+      '[reactions: :+1: ×7 (you, <@U0INGO|Ingo>, <@U0BOB|Bob Builder> +4)]',
     );
     const many = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].map((name) => ({ name, users: ['U0NONAME'], count: 1 }));
     expect(reactionsLabel(many, env())).toBe('[reactions: :a: (<@U0NONAME>), :b: (<@U0NONAME>), :c: (<@U0NONAME>), :d: (<@U0NONAME>), :e: (<@U0NONAME>), :f: (<@U0NONAME>), +2 more]');
@@ -140,7 +140,7 @@ describe('reactions', () => {
 
   it('appends reactions to the message line', () => {
     const m = msg({ text: 'shipped!', reactions: [{ name: 'tada', users: ['U0BOB', 'U0ALICE'], count: 2 }] });
-    expect(formatMessage(m, env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO|Ingo>: shipped! [reactions: :tada: ×2 (Bob Builder, alice)]');
+    expect(formatMessage(m, env())).toBe('[1790000000.000100 · 2026-09-21 14:13 UTC] <@U0INGO|Ingo>: shipped! [reactions: :tada: ×2 (<@U0BOB|Bob Builder>, <@U0ALICE|alice>)]');
   });
 
   it('normalises Slack reactions (fixtures) and applies add/remove idempotently', () => {

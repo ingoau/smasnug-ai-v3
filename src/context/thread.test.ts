@@ -36,9 +36,9 @@ describe('renderThreadContext', () => {
 
     const lines = ctx.history.split('\n');
     expect(lines[0]).toContain('<@U0INGO|Ingo>: Anyone know how to fix');
-    const shot = /\[file (file_[a-z0-9]{10}): screenshot\.png, image, from Ingo\]/.exec(lines[0]!)?.[1];
+    const shot = /\[file (file_[a-z0-9]{10}): screenshot\.png, image, from <@U0INGO\|Ingo>\]/.exec(lines[0]!)?.[1];
     expect(shot).toBeDefined();
-    expect(lines[0]).toMatch(/\[file file_[a-z0-9]{10}: budget\.csv, text, from Ingo\]/);
+    expect(lines[0]).toMatch(/\[file file_[a-z0-9]{10}: budget\.csv, text, from <@U0INGO\|Ingo>\]/);
     // 38 visible replies - 1 new = 37: all fit (limits.contextReplies = 40), so nothing is omitted, but they're past
     // the compaction point (0.8 × 40), so a background summary update was requested for all but the newest 20.
     expect(lines[1]).toContain('reply number 1');
@@ -48,7 +48,7 @@ describe('renderThreadContext', () => {
     expect(job?.data).toEqual({ threadId, targetTs: `${Number(FIX_THREAD_TS.split('.')[0]) + 19}.000100` });
     await job?.remove();
     expect(ctx.history).toContain('[bot] CI Bot: Build #42 failed');
-    const heic = /\[file (file_[a-z0-9]{10}): IMG_0042\.HEIC, image, from alice\]/.exec(ctx.history)?.[1];
+    const heic = /\[file (file_[a-z0-9]{10}): IMG_0042\.HEIC, image, from <@U0ALICE\|alice>\]/.exec(ctx.history)?.[1];
     expect(heic).toBeDefined();
     expect(ctx.history).not.toContain('deleted');
     expect(ctx.history).not.toContain('has joined');
@@ -74,7 +74,7 @@ describe('renderThreadContext', () => {
       { name: '+1', users: ['U0BOB', 'U0ALICE'], count: 2 },
       { name: 'eyes', users: ['UBOT'], count: 1 },
     ]);
-    expect(again.history.split('\n')[0]).toMatch(/\[reactions: :\+1: ×2 \(Bob Builder, alice\), :eyes: \(you\)\]$/);
+    expect(again.history.split('\n')[0]).toMatch(/\[reactions: :\+1: ×2 \(<@U0BOB\|Bob Builder>, <@U0ALICE\|alice>\), :eyes: \(you\)\]$/);
   });
 
   it('channel background: in a short thread, or when the new message points at something', async () => {
@@ -105,7 +105,7 @@ describe('renderThreadContext', () => {
     const ts = `${Number(FIX_THREAD_TS.split('.')[0]) + 39}.000100`;
     const out = await renderMessages(threadId, [ts]);
     const [heic] = await sql<{ id: string }[]>`select id from files where thread_id = ${threadId} and slack_file_id = 'F0HEIC'`;
-    expect(out).toBe(`[${tsLabel(ts)}] <@U0ALICE|alice>: here is the error log [file ${heic!.id}: IMG_0042.HEIC, image, from alice]`);
+    expect(out).toBe(`[${tsLabel(ts)}] <@U0ALICE|alice>: here is the error log [file ${heic!.id}: IMG_0042.HEIC, image, from <@U0ALICE|alice>]`);
   });
 
   it('uploads are registered with metadata only, stable, scoped per thread and race-safe', async () => {

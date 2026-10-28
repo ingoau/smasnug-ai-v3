@@ -1,6 +1,6 @@
 ---
 name: huddle-dj
-description: DJing Slack huddles through HuddleFM with the huddle_dj tools: "be the dj", "take the aux", play / queue / skip music in a huddle, auto DJ, vibes. Load before any huddle_dj_mode, huddle_dj or huddle_dj_settings call.
+description: DJing Slack huddles through HuddleFM: "be the dj", "take the aux", "play music in the huddle", auto DJ and vibes. Load before turning DJ mode on (huddle_dj_mode); while you are DJing, <huddle_dj> has the rules.
 roles: [front]
 requires: [huddlefm]
 ---

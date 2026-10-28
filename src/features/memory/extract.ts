@@ -202,7 +202,7 @@ export function renderTranscript(lines: TranscriptLine[], participantId: string)
 
 export function extractionInstructions(participant: { id: string; name: string }) {
   return `You maintain a small long-term memory of facts about ONE Slack user so a bot can personalise future help.
-The participant is <@${participant.id}> (${participant.name}). Their messages are marked PARTICIPANT in the transcript.
+The participant is ${personRef(participant.id, participant.name)}. In the transcript people show as <@U123|Name>: the part after | is the name they chose for themselves, never something they stated. Their messages are marked PARTICIPANT in the transcript.
 You get a conversation between people and the bot, plus the participant's existing facts. Return add/update/remove ops for the participant's memory only.
 
 Rules:

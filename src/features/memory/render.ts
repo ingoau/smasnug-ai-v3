@@ -3,7 +3,7 @@ import { limits } from '../../config.js';
 import { redis } from '../../core/redis.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
-import { FACT_KINDS, factLabel, orTsQuery, rankFacts, touchFacts, type Fact, type FactKind, type RankedFact } from './store.js';
+import { FACT_KINDS, factLabel, orTsQuery, rankFacts, touchAllFacts, touchFacts, type Fact, type FactKind, type RankedFact } from './store.js';
 
 const WS_VERSION_KEY = 'features:workspace_facts:version';
 const WS_LOCAL_TTL_MS = 5000;
@@ -107,6 +107,19 @@ export function formatSpeakerMemory(
   return lines.join('\n');
 }
 
+const ACTIVE_KEY = (userId: string) => `features:memory:active:${userId}`;
+
+/**
+ * Facts expire after months without use (last_used). Only relevant facts are shown now, so a fact the conversation
+ * never touches (a time zone, a role) would expire although its owner talks to the bot every day: the first turn of
+ * a speaker each day marks all their facts used; other turns touch the injected ones.
+ */
+async function touchSpeakerFacts(userId: string, injected: number[]) {
+  const first = await redis.set(ACTIVE_KEY(userId), '1', 'EX', 86_400, 'NX').catch(() => null);
+  if (first === 'OK') await touchAllFacts(userId);
+  else await touchFacts(userId, injected);
+}
+
 /**
  * Recent text of the thread for picking the facts relevant to this turn: the speaker's own latest messages first
  * (their words win the query's word cap, and others can't steer much), then the latest others.
@@ -129,7 +142,7 @@ export async function renderSpeakerMemory(userId: string, opts: { threadId?: str
   const facts = await rankFacts(userId, orTsQuery(texts));
   if (facts.length === 0) return '';
   const chosen = selectFacts(facts, limits.memoryInjectCap);
-  await touchFacts(
+  await touchSpeakerFacts(
     userId,
     chosen.map((f) => f.id),
   ).catch((err) => log.warn({ err }, 'touch memory failed'));

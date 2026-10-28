@@ -125,7 +125,10 @@ describe('access texts', () => {
     expect(p).toMatch(/`sandbox: true` only when it needs code run/);
     expect(p).toMatch(/A single file you can write yourself \(a page, script, CSV, text\) is create_file with no sandbox/);
     expect(p).toMatch(/do the task without one where you can \(e\.g\. create_file\), without asking first/);
-    expect(p).toMatch(/Live previews/);
+    expect(p).not.toMatch(/preview/i);
+    // Preview instructions are their own skill, only with PREVIEW_SECRET_KEY as well (previewsConfigured).
+    expect(readSkill('front', 'live-previews', undefined, all, (f) => f !== 'previews')).toMatch(/No skill named/);
+    expect(readSkill('front', 'live-previews', undefined, all, () => true)).toMatch(/claim button/);
     // Without Modal credentials the skill is neither listed nor loadable.
     expect(skillsPrompt('front', all, () => false)).not.toMatch(/code-sandboxes/);
     expect(readSkill('front', 'code-sandboxes', undefined, all, () => false)).toMatch(/No skill named/);

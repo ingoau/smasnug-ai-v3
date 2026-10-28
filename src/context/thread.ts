@@ -1,7 +1,7 @@
 // OWNER: tools/context module.
 /**
  * Thread context for front-agent turns. Format (see format.ts): one message per line, prefixed with its ts:
- *   [1727950000.123456] <@U123> Ingo: text [file file_k3x9q2mf7a: screenshot.png, image, from Ingo — "Grafana panel"]
+ *   [1727950000.123456] <@U123|Ingo>: text [file file_k3x9q2mf7a: screenshot.png, image, from <@U123|Ingo> — "Grafana panel"]
  *   [42 earlier replies not shown]
  *   [1727950100.000200] [bot] Smasnug (you): …
  * Tell the model in the system prompt that the bracketed number is the message ts (for react / read_thread).

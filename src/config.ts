@@ -228,7 +228,7 @@ export const limits = {
   memoryExtractMaxAgeMs: 14 * 24 * 60 * 60 * 1000,
   memoryFactExpiryMs: 180 * 24 * 60 * 60 * 1000,
   /** Speaker facts per turn at most (only relevant ones and preferences are injected: memory/render.ts selectFacts). */
-  memoryInjectCap: 12,
+  memoryInjectCap: 13,
   retentionMs: 30 * 24 * 60 * 60 * 1000,
   // per user
   userMessagesPerHour: 500,
