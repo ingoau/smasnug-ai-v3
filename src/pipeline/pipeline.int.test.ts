@@ -768,6 +768,42 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(await debounce.takeBatch({ threadId: `${C}:${ts}`, authorId: 'U1', seq: 1 })).toEqual([{ ts, reason: 'mention' }]);
     });
 
+    it("the bot's own channel_join replays the inviter's recent mention (top-level or in a thread) it never received", async () => {
+      const { addFakeHandler } = await import('../core/slack-fake.js');
+      const join = '1700001000.000100';
+      const top = '1700000900.000100'; // within the window
+      const parent = '1700000100.000100'; // old parent, recent reply
+      const reply = '1700000950.000100';
+      const remove = addFakeHandler((method, args) => {
+        if (method === 'conversations.history' && args.channel === C)
+          return { ok: true, messages: [
+            { type: 'message', user: 'U1', text: '<@UBOT> help', ts: top },
+            { type: 'message', user: 'U2', text: '<@UBOT> not the inviter', ts: '1700000910.000100' },
+            { type: 'message', user: 'U1', text: '<@UBOT> long ago', ts: '1700000000.000900' },
+            { type: 'message', user: 'U1', text: 'thread', ts: parent, thread_ts: parent, latest_reply: reply },
+          ] };
+        if (method === 'conversations.replies' && args.ts === parent)
+          return { ok: true, messages: [{ type: 'message', user: 'U1', text: 'thread', ts: parent, thread_ts: parent }, { type: 'message', user: 'U1', text: '<@UBOT> in here', ts: reply, thread_ts: parent }] };
+      });
+      try {
+        await processSlackEvent(messageEnvelope({ subtype: 'channel_join', user: 'UOTHER', inviter: 'U1', text: '<@UOTHER> joined', ts: '1700000999.000100' }));
+        expect(await sql`select id from threads where channel_id = ${C}`).toHaveLength(0);
+        await processSlackEvent(messageEnvelope({ subtype: 'channel_join', user: 'UBOT', inviter: 'U1', text: '<@UBOT> has joined the channel', ts: join }));
+        expect(await debounce.takeBatch({ threadId: `${C}:${top}`, authorId: 'U1', seq: 1 })).toEqual([{ ts: top, reason: 'mention' }]);
+        expect(await debounce.takeBatch({ threadId: `${C}:${parent}`, authorId: 'U1', seq: 1 })).toEqual([{ ts: reply, reason: 'mention' }]);
+        expect((await sql`select id from threads where channel_id = ${C}`).map((r) => r.id).sort()).toEqual([`${C}:${parent}`, `${C}:${top}`]);
+        // Removed and re-invited: the mentions are already stored, so not answered again. A join without an inviter
+        // (the bot joining by itself) replays nothing.
+        await processSlackEvent(messageEnvelope({ subtype: 'channel_join', user: 'UBOT', inviter: 'U1', text: '<@UBOT> has joined the channel', ts: '1700001000.000200' }));
+        expect(await sql`select id from thread_events where thread_id = ${`${C}:${top}`} and type = 'message'`).toHaveLength(1);
+        await sql`delete from messages where channel_id = ${C}`;
+        await processSlackEvent(messageEnvelope({ subtype: 'channel_join', user: 'UBOT', text: '<@UBOT> has joined the channel', ts: '1700001000.000300' }));
+        expect(await sql`select ts from messages where channel_id = ${C}`).toHaveLength(0);
+      } finally {
+        remove();
+      }
+    });
+
     it('follow-ups: two-party → partner (gated, low threshold); third person → gate; mentioning someone else → skipped; bots → stored only', async () => {
       const root = nextTs();
       const tid = `${C}:${root}`;
