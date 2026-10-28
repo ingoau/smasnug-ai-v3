@@ -130,7 +130,7 @@ describe('read_thread / read_channel', () => {
   it('reads earlier replies before a ts in context format', async () => {
     const before = `${Number(FIX_THREAD_TS.split('.')[0]) + 12}.000100`;
     const out: string = await exec(toolsFor('front', baseCtx()).read_thread, { before_ts: before, limit: 5 });
-    expect(out).toContain('[1790000011.000100 · 2026-09-21 14:13 UTC] <@U0BOB> Bob Builder: reply number 11');
+    expect(out).toContain('[1790000011.000100 · 2026-09-21 14:13 UTC] <@U0BOB|Bob Builder>: reply number 11');
     expect(out).toContain('reply number 7');
     expect(out).not.toContain('reply number 12');
     // Replies 1-4 visible before it (5, 6 hidden); position, older and newer cursors in the header.
@@ -151,8 +151,8 @@ describe('read_thread / read_channel', () => {
 
   it('reads channel history', async () => {
     const out: string = await exec(toolsFor('child', baseCtx()).read_channel, { limit: 2 });
-    expect(out).toContain('alice: lunch?');
-    expect(out).toContain('Bob Builder: after the parent');
+    expect(out).toContain('alice>: lunch?');
+    expect(out).toContain('Bob Builder>: after the parent');
     expect(out).not.toContain('morning all');
     expect(out).toContain('[2 top-level messages, oldest first, 1789999900.000100 to 1790000050.000200; older: read_channel before_ts=1789999900.000100; newest message]');
     const bad: string = await exec(toolsFor('child', baseCtx()).read_channel, { before_ts: 'yesterday' });
@@ -162,13 +162,13 @@ describe('read_thread / read_channel', () => {
 
   it('pages channel history forwards (after_ts) and says where the start is', async () => {
     const fwd: string = await exec(toolsFor('front', baseCtx()).read_channel, { after_ts: '1789999700.000100', limit: 2 });
-    expect(fwd).toContain('Bob Builder: deploy went out');
-    expect(fwd).toContain('alice: lunch?');
+    expect(fwd).toContain('Bob Builder>: deploy went out');
+    expect(fwd).toContain('alice>: lunch?');
     expect(fwd).not.toContain('morning all');
     expect(fwd).not.toContain('has joined');
     expect(fwd).toContain('[2 top-level messages, oldest first, 1789999800.000100 to 1789999900.000100; older: read_channel before_ts=1789999800.000100; newer: read_channel after_ts=1789999900.000100]');
     const start: string = await exec(toolsFor('front', baseCtx()).read_channel, { before_ts: '1789999800.000100' });
-    expect(start).toContain('alice: morning all');
+    expect(start).toContain('alice>: morning all');
     expect(start).toContain('start of channel; newer: read_channel after_ts=1789999700.000100]');
     expect(await exec(toolsFor('front', baseCtx()).read_channel, { after_ts: '1790000060.000000' })).toBe('No channel messages after 1790000060.000000.');
   });

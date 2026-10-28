@@ -8,12 +8,12 @@ import { appendEvent, parseThreadId } from '../core/events.js';
 import { getBotIdentity, slackCall, userbotConfigured } from '../core/slack.js';
 import { getUserInfo, type UserInfo } from '../context/users.js';
 import { getConversationInfo, renderConversation } from '../context/conversation.js';
-import { formatUtcNow, pickParticipantIds, privilegesLine, renderParticipants, speakerDetailLines } from '../context/people.js';
+import { formatUtcNow, pickParticipantIds, privilegesLine, profileText, renderParticipants, speakerDetailLines } from '../context/people.js';
 import { EXTRAS } from '../tools/extras.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
-import { annotateTsDates } from '../context/format.js';
+import { annotateTsDates, personRef } from '../context/format.js';
 import { lowQuotaLines, recordModelUsage, userQuotaStates } from '../features/guard.js';
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
@@ -173,7 +173,7 @@ export async function renderParticipantsSection(ids: string[] | undefined, speak
  */
 export function renderSpeaker(authorId: string, speaker: Speaker, now: Date, viewingChannelId?: string | null): string {
   const privileges = privilegesLine(speaker.info, { botAdmin: isCursorAdmin(authorId), codingAgents: !cursorRefusal(authorId) });
-  const lines = [`<@${authorId}> ${speaker.name}`, ...speakerDetailLines(speaker.info, now), privileges, `Time zone: ${speaker.tz || 'UTC'}`];
+  const lines = [personRef(authorId, profileText(speaker.name)), ...speakerDetailLines(speaker.info, now), privileges, `Time zone: ${speaker.tz || 'UTC'}`];
   if (viewingChannelId) lines.push(`User is currently viewing <#${viewingChannelId}> (e.g. "this channel").`);
   return lines.join('\n');
 }

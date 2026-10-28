@@ -6,7 +6,7 @@ import { registerTool, STOPPED_TOOL_RESULT, type ToolContext } from '../core/too
 import { SlackBusyError, slackCall, slackErrorCode, untilAborted, type SlackPriority, type SlackWaitEvent } from '../core/slack.js';
 import { redis } from '../core/redis.js';
 import { takeLimit } from '../features/guard.js';
-import { renderSlackText, tsLabel, type RenderMsg } from '../context/format.js';
+import { personRef, renderSlackText, tsLabel, type RenderMsg } from '../context/format.js';
 import { slackFileRefs } from '../context/normalize.js';
 import { registerExternalFiles } from '../files/store.js';
 import { contextFileLabel, sanitizeFileName, type ContextFile } from '../files/format.js';
@@ -241,7 +241,7 @@ const oneLine = (raw: any, names: Map<string, string>, max: number) =>
   truncateChars(renderSlackText(textWithAttachments(raw), names).replace(/\s+/g, ' ').trim(), max);
 
 const whoOf = (m: any, names: Map<string, string>) =>
-  m?.user ? `<@${m.user}> ${names.get(m.user) ?? m.username ?? ''}`.trim() : m?.username || 'unknown';
+  m?.user ? personRef(m.user, names.get(m.user) ?? m.username) : m?.username || 'unknown';
 
 /** User ids a match's rendering needs names for (authors + mentions, incl. context messages). */
 export function searchUserIds(matches: any[]): string[] {

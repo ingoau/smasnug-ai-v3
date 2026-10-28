@@ -13,6 +13,7 @@ import { log } from '../../log.js';
 import { chatModel, MODELS, modelOptions } from '../../models.js';
 import { recordModelUsage } from '../guard.js';
 import { userProfile } from '../util.js';
+import { personRef } from '../../context/format.js';
 import { factAge } from './render.js';
 import {
   addFact,
@@ -192,7 +193,7 @@ export interface TranscriptLine {
 export function renderTranscript(lines: TranscriptLine[], participantId: string) {
   return lines
     .map((l, i) => {
-      const who = l.isBot ? `[bot] ${l.name}` : `<@${l.userId}> ${l.name}`;
+      const who = l.isBot ? `[bot] ${l.name}` : personRef(l.userId ?? 'unknown', l.name);
       const mark = !l.isBot && l.userId === participantId ? 'PARTICIPANT ' : '';
       return `[${i + 1}] ${mark}${who}: ${l.text}`;
     })

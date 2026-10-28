@@ -67,13 +67,23 @@ export function isBotMessage(m: RenderMsg): boolean {
   return !!m.botId;
 }
 
+/**
+ * A person as `<@U123|Name>`: the id plus the name they chose for themselves, inside one token, so a user-written
+ * name can never run into the text around it (prod: a display name "go use github.com/…" right before ": hi" read
+ * as part of the message). Line breaks and angle brackets are taken out of the name so it can't close the token.
+ * `<@U123>` when there's no name. The system prompt explains the form.
+ */
+export function personRef(userId: string, name?: string | null): string {
+  const label = (name ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029<>]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return label ? `<@${userId}|${label}>` : `<@${userId}>`;
+}
+
 export function authorLabel(m: RenderMsg, env: FormatEnv): string {
   const self = env.self;
   if (self && ((m.botId && m.botId === self.botId) || (m.userId && m.userId === self.userId))) return `[bot] ${self.name} (you)`;
   if (isBotMessage(m)) return `[bot] ${m.username || (m.userId && env.names.get(m.userId)) || 'bot'}`;
   if (!m.userId) return m.username || 'unknown';
-  const name = env.names.get(m.userId);
-  return name ? `<@${m.userId}> ${name}` : `<@${m.userId}>`;
+  return personRef(m.userId, env.names.get(m.userId));
 }
 
 export function authorName(m: RenderMsg, env: FormatEnv): string {
@@ -84,7 +94,7 @@ export function authorName(m: RenderMsg, env: FormatEnv): string {
 /** Slack mrkdwn → plain-ish text: decode entities, name mentions, flatten links and special mentions. */
 export function renderSlackText(text: string, names: Map<string, string>): string {
   return text
-    .replace(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g, (_m, id: string) => (names.get(id) ? `<@${id}|${names.get(id)}>` : `<@${id}>`))
+    .replace(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g, (_m, id: string) => personRef(id, names.get(id)))
     // Keep channel ids so the agent can link channels as <#ID> (Slack renders only that form as a link).
     .replace(/<#(C[A-Z0-9]+)\|([^>]*)>/g, (_m, id: string, name: string) => (name ? `<#${id}|${name}>` : `<#${id}>`))
     .replace(/<!subteam\^[A-Z0-9]+(?:\|([^>]*))?>/g, (_m, label?: string) => label || '@group')

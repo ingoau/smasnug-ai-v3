@@ -76,9 +76,9 @@ describe('speaker details', () => {
 
 describe('participants', () => {
   it('formats one line each, omitting missing fields', () => {
-    expect(participantLine(user({ id: 'U2', name: 'Sam', pronouns: 'he/him', title: 'Mentor' }))).toBe('<@U2> Sam — he/him, Mentor');
-    expect(participantLine(user({ id: 'U3', name: 'Kai', title: 'Dev' }))).toBe('<@U3> Kai — Dev');
-    expect(participantLine(user({ id: 'U4', name: 'Lee' }))).toBe('<@U4> Lee');
+    expect(participantLine(user({ id: 'U2', name: 'Sam', pronouns: 'he/him', title: 'Mentor' }))).toBe('<@U2|Sam> — he/him, Mentor');
+    expect(participantLine(user({ id: 'U3', name: 'Kai', title: 'Dev' }))).toBe('<@U3|Kai> — Dev');
+    expect(participantLine(user({ id: 'U4', name: 'Lee' }))).toBe('<@U4|Lee>');
   });
 
   it('picks unique ids, most recent first, excluding speaker and bot, capped', () => {
@@ -89,7 +89,7 @@ describe('participants', () => {
 
   it('leaves out bots, deleted users and failed lookups', () => {
     const out = renderParticipants([user({ id: 'U2', name: 'Sam' }), null, user({ id: 'U5', name: 'bot', isBot: true }), user({ id: 'U6', name: 'gone', deleted: true })]);
-    expect(out).toBe('<@U2> Sam');
+    expect(out).toBe('<@U2|Sam>');
   });
 
   it('orders thread authors by their latest message, humans only', () => {

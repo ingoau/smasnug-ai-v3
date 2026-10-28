@@ -160,6 +160,6 @@ describe('reply buttons: context rendering', () => {
     expect(formatMessage({ ...base, ts: '1.2', text: 'which board?', buttons: { labels: ['ESP32', 'Pico'], pressedBy: 'U1', pressedLabel: 'Pico' } }, env)).toBe(
       '[1.2] [bot] Smasnug (you): which board? [buttons: ESP32 | Pico; Ingo pressed "Pico"]',
     );
-    expect(formatMessage({ ts: '1.3', userId: 'U1', botId: null, username: null, files: [], text: 'Pico', viaButton: true }, env)).toBe('[1.3] <@U1> Ingo: Pico (button)');
+    expect(formatMessage({ ts: '1.3', userId: 'U1', botId: null, username: null, files: [], text: 'Pico', viaButton: true }, env)).toBe('[1.3] <@U1|Ingo>: Pico (button)');
   });
 });
