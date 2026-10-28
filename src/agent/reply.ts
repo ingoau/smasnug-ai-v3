@@ -335,6 +335,12 @@ export class ReplyManager {
         st.rawSent = u.end;
         continue;
       }
+      if (u.kind === 'skip') {
+        // A placement marker: its block goes in with the final layout.
+        st.unitIdx = i + 1;
+        st.rawSent = u.end;
+        continue;
+      }
       if (st.blockCount >= MAX_STREAM_BLOCKS) {
         st.overflow = true;
         break;
