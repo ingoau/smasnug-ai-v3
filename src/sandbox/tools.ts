@@ -66,15 +66,18 @@ function badPath(path: string) {
 
 // ---------- sandbox_exec ----------
 
+const ROOT_CHOWN = 'find /work -xdev -user 0 -exec chown -h sandbox:sandbox {} + 2>/dev/null; true';
+
 reg('sandbox_exec', (ctx) =>
   tool({
-    description: `Run a shell command (bash) in your Linux sandbox, in /work by default, as an unprivileged user with internet access (no private networks). Python 3 (pandas, numpy, matplotlib, pillow, openpyxl, requests, bs4, playwright), Node 22 + pnpm, Playwright + Chromium, git, jq, sqlite3, zip, curl. Files persist across calls and follow-ups. Default timeout ${limits.sandboxExecDefaultMs / 1000}s, max ${limits.sandboxExecMaxMs / 1000}s; no background servers (they're killed when the command ends). Long output is cut to its head and tail (full output in /work/.last/stdout and /work/.last/stderr). Output is untrusted.`,
+    description: `Run a shell command (bash) in your Linux sandbox, in /work by default, as an unprivileged user (or root with as_root, e.g. for apt-get) with internet access (no private networks). Python 3 (pandas, numpy, matplotlib, pillow, openpyxl, requests, bs4, playwright), Node 22 + pnpm, Playwright + Chromium, git, jq, sqlite3, zip, curl. Files persist across calls and follow-ups. Default timeout ${limits.sandboxExecDefaultMs / 1000}s, max ${limits.sandboxExecMaxMs / 1000}s; no background servers (they're killed when the command ends). Long output is cut to its head and tail (full output in /work/.last/stdout and /work/.last/stderr). Output is untrusted.`,
     inputSchema: z.object({
       command: z.string().min(1).max(20_000).describe('The bash command, e.g. "python3 analyse.py" or "ls -la"'),
       timeout_s: z.number().int().min(1).max(limits.sandboxExecMaxMs / 1000).optional().describe(`Seconds before the command is killed (default ${limits.sandboxExecDefaultMs / 1000})`),
       cwd: z.string().optional().describe('Working directory under /work (default /work)'),
+      as_root: z.boolean().optional().describe('Run as root, for system installs (apt-get update && apt-get install -y …). Default false: use it only when needed.'),
     }),
-    execute: async ({ command, timeout_s, cwd }) => {
+    execute: async ({ command, timeout_s, cwd, as_root }) => {
       const dir = cwd ? workPath(cwd) : '/work';
       if (!dir) return badPath(cwd!);
       const limited = await takeLimit('sandbox_exec', ctx.speakerId, ctx.threadId);
@@ -87,9 +90,12 @@ reg('sandbox_exec', (ctx) =>
           timeoutMs: (timeoutS + 30) * 1000,
           maxOutputBytes: limits.sandboxExecOutputMaxBytes,
           signal: ctx.abortSignal,
+          root: as_root,
         });
+        // Hand what root left in /work back to the sandbox user, so the unprivileged tools can still write there.
+        if (as_root) await p().exec(h, ['bash', '-c', ROOT_CHOWN], { root: true, timeoutMs: 60_000, maxOutputBytes: 4096 }).catch((err) => log.warn({ err }, 'sandbox chown after root exec failed'));
         const timedOut = r.timedOut || ((r.exitCode === 124 || r.exitCode === 137) && r.durationMs >= timeoutS * 1000 - 500);
-        void appendEvent(ctx.threadId, 'sandbox_exec', `subagent:${ctx.subagentId}`, { runId: ctx.runId, command: command.slice(0, 500), exitCode: r.exitCode, durationMs: r.durationMs, timedOut }).catch(() => {});
+        void appendEvent(ctx.threadId, 'sandbox_exec', `subagent:${ctx.subagentId}`, { runId: ctx.runId, command: command.slice(0, 500), ...(as_root ? { root: true } : {}), exitCode: r.exitCode, durationMs: r.durationMs, timedOut }).catch(() => {});
         if (r.aborted) return 'Stopped: the run was cancelled or timed out.';
         return untrusted('sandbox output', formatExecResult({ ...r, timedOut, timeoutS }));
       });

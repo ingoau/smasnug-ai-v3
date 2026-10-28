@@ -44,7 +44,7 @@ export interface ExecOptions {
   maxOutputBytes: number;
   stdin?: Buffer;
   signal?: AbortSignal;
-  /** Run as root (setup steps only); default: the unprivileged `sandbox` user. */
+  /** Run as root (setup steps, sandbox_exec's as_root); default: the unprivileged `sandbox` user. */
   root?: boolean;
 }
 

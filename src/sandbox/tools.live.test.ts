@@ -87,6 +87,13 @@ describe.skipIf(!RUN || !process.env.MODAL_TOKEN_ID)('sandbox tools on Modal (li
     expect(again).toContain('chart.png');
     expect(again).toContain('sandbox');
 
+    // as_root: root can write system paths; what it leaves in /work goes back to the sandbox user.
+    const asRoot = await call('sandbox_exec', { command: 'whoami && touch /etc/x && echo root-write && touch byroot', as_root: true });
+    expect(asRoot).toContain('root-write');
+    const owner = await call('sandbox_exec', { command: 'stat -c %U byroot && echo hi >> byroot && echo ok' });
+    expect(owner).toContain('sandbox');
+    expect(owner).toContain('ok');
+
     await L.destroySandbox(row.id);
     const [end] = await sql<any[]>`select state, provider_id, paused_ref from sandboxes where id = ${row.id}`;
     expect(end).toMatchObject({ state: 'destroyed', providerId: null, pausedRef: null });
