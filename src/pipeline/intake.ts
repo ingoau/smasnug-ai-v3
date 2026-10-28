@@ -22,6 +22,8 @@ import { isBotPeerDm } from './dm-peer.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { handleHuddleFmMessage, isFromHuddleFm } from '../features/huddlefm/inbound.js';
 import { showIntakeStatus } from './session-status.js';
+import { fetchHistoryBefore, fetchReplies } from '../context/slack-messages.js';
+import { compareTs } from '../context/format.js';
 import {
   applyDelete,
   applyEdit,
@@ -36,6 +38,9 @@ import {
   type SlackMessage,
   type ThreadRow,
 } from './store.js';
+
+/** How far back a join looks for the mention that prompted the invite. */
+const JOIN_REPLAY_WINDOW_S = 10 * 60;
 
 export const RATE_LIMITED_TEXT = "You're sending me a lot of messages — give me a bit and try again.";
 
@@ -57,9 +62,30 @@ export async function handleMessageEvent(ev: MessageEvent) {
   if (isSlackbotUser(ev.user) || isSlackbotUser(ev.message?.user)) return;
   if (ev.subtype === 'message_changed') return handleEdit(ev);
   if (ev.subtype === 'message_deleted') return handleDelete(ev.channel, ev.deleted_ts, ev.previous_message);
+  if (ev.subtype === 'channel_join' || ev.subtype === 'group_join') return handleJoin(ev);
   if (ev.hidden || !NEW_MESSAGE_SUBTYPES.has(ev.subtype)) return;
   if (isHiddenMessage(ev.text)) return; // `##` (guidelines): not stored, no events, never triggers anything
   return handleNewMessage(ev);
+}
+
+/**
+ * The bot was just added to a channel, usually from Slack's "invite them?" prompt after someone mentioned it there:
+ * that mention was never delivered (the bot wasn't a member), so replay the recent ones now.
+ */
+async function handleJoin(ev: MessageEvent & { inviter?: string }) {
+  const bot = await getBotIdentity();
+  if (ev.user !== bot.userId) return;
+  const oldest = (Number(ev.ts) - JOIN_REPLAY_WINDOW_S).toFixed(6);
+  const top = await fetchHistoryBefore(ev.channel, { latest: ev.ts, limit: 20 });
+  const recent = top.filter((m) => compareTs(m.ts, oldest) > 0);
+  // Mentions in a thread: the parent's latest_reply moved within the window.
+  for (const parent of top.filter((m) => m.latest_reply && compareTs(m.latest_reply, oldest) > 0)) {
+    recent.push(...(await fetchReplies(ev.channel, parent.ts, { latest: ev.ts })).filter((m) => m.ts !== parent.ts && compareTs(m.ts, oldest) > 0));
+  }
+  const mentions = recent.filter((m) => !m.subtype && m.user && (!ev.inviter || m.user === ev.inviter) && mentionFacts(mentionText(m), bot.userId).mentionsBot);
+  for (const m of mentions.sort((a, b) => compareTs(a.ts, b.ts))) {
+    await handleMessageEvent({ ...m, type: 'message', channel: ev.channel, ...(ev.channel_type ? { channel_type: ev.channel_type } : {}) });
+  }
 }
 
 /** Mark the bot as addressed in a thread: engaged, counters reset. */
