@@ -8,12 +8,14 @@ const Env = z.object({
   SLACK_BOT_TOKEN: z.string().optional(),
   SLACK_USER_TOKEN: z.string().optional(),
   /**
-   * Userbot session for upload_emoji (emoji.add, which no app token can call): a browser session's `xoxc-` token and
-   * the value of its `d` cookie (`xoxd-…`, as shown in the browser). Optional API base, e.g.
-   * https://hackclub.slack.com/api/ (default: the session's workspace URL from auth.test).
+   * Userbot session for upload_emoji (emoji.add, which no app token can call), named as `hc-slack-auth` writes them:
+   * a browser session's `xoxc-` token (the workspace one, else the org-wide enterprise one) and the value of its `d`
+   * cookie (`xoxd-…`). Optional API base, e.g. https://hackclub.slack.com/api/ (default: the session's workspace URL
+   * from auth.test).
    */
-  SLACK_USERBOT_TOKEN: z.string().optional(),
-  SLACK_USERBOT_COOKIE: z.string().optional(),
+  SLACK_TEAM_XOXC: z.string().optional(),
+  SLACK_ENTERPRISE_XOXC: z.string().optional(),
+  SLACK_XOXD: z.string().optional(),
   SLACK_USERBOT_API_URL: z.string().optional(),
   MOD_CHANNEL_ID: z.string().optional(),
   ADMIN_USER_ID: z.string().optional(),

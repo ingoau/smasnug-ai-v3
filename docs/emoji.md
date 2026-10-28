@@ -14,9 +14,13 @@ logged-in user (the "userbot"). It only exists when these are set:
 
 | Variable | Value |
 |---|---|
-| `SLACK_USERBOT_TOKEN` | The session's `xoxc-…` token. |
-| `SLACK_USERBOT_COOKIE` | The value of that session's `d` cookie (`xoxd-…`), URL-encoded or not. |
+| `SLACK_TEAM_XOXC` | The session's workspace (`T…`) `xoxc-…` token. |
+| `SLACK_ENTERPRISE_XOXC` | Or the org-wide (`E…`) `xoxc-…` token on Enterprise Grid. Used only when `SLACK_TEAM_XOXC` is unset. |
+| `SLACK_XOXD` | The value of that session's `d` cookie (`xoxd-…`), URL-encoded or not. |
 | `SLACK_USERBOT_API_URL` | Optional. API base, e.g. `https://hackclub.slack.com/api/`. Default: the session's workspace URL from `auth.test`. |
+
+These are the names [`hc-slack-auth`](https://github.com/ingoau/hc-slack-auth) saves: run `npx hc-slack-auth`, sign
+in, and press `E` to write all three into `.env`.
 
 Which session to use:
 
