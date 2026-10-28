@@ -200,7 +200,9 @@ and nothing else.
 Exec conventions:
 - Commands run as `["bash", "-lc", cmd]` with `timeout --kill-after=5 <n>` inside, plus the provider timeout as a
   backstop.
-- They run as the non-root `sandbox` user, in `/work`, with a minimal env (`PATH`, `HOME=/work`, `LANG`, `TZ=UTC`).
+- They run as the non-root `sandbox` user, unless `sandbox_exec` is called with `as_root` (system installs such as
+  `apt-get`); after a root exec, anything root-owned under `/work` is chowned back to `sandbox`. They run in `/work`, with a minimal env (`PATH`, `HOME=/work`, `LANG`,
+  `TZ=UTC`).
   Nothing from the worker's env is passed through.
 
 ### 3.3 Images
@@ -234,7 +236,7 @@ Every tool:
 
 | Tool | Input | Behaviour |
 |---|---|---|
-| `sandbox_exec` | `command`, `timeout_s?` (default 60, max `limits.sandboxExecMaxMs` = 300 s), `cwd?` | Runs the command. Returns the exit code, duration and stdout/stderr. Each stream is capped at 64 KB from the provider, then shown as head 2k + tail 10k chars with a `[… N bytes cut; full output in /work/.last/stdout]` note. Counts against `takeLimit('sandbox_exec')`. Aborts with `ctx.abortSignal` (cancel/timeout) by killing the process; the provider timeout is the backstop. |
+| `sandbox_exec` | `command`, `timeout_s?` (default 60, max `limits.sandboxExecMaxMs` = 300 s), `cwd?`, `as_root?` | Runs the command (as root with `as_root`). Returns the exit code, duration and stdout/stderr. Each stream is capped at 64 KB from the provider, then shown as head 2k + tail 10k chars with a `[… N bytes cut; full output in /work/.last/stdout]` note. Counts against `takeLimit('sandbox_exec')`. Aborts with `ctx.abortSignal` (cancel/timeout) by killing the process; the provider timeout is the backstop. |
 | `sandbox_read_file` | `path`, `offset?` | Text: 24k chars per call with paging. Images (png/jpg/gif/webp): resized like `read_image` and returned as an image, so the child can look at its own chart or Playwright screenshot. Other binaries: size + type only, plus "export it instead". |
 | `sandbox_write_file` | `path`, `content` | Text only, ≤ 200 KB per call; anything larger is made with `sandbox_exec`. Paths must stay under `/work`, normalized, no `..`. |
 | `sandbox_import` | `file_id`, `path?` | Copies a thread file from the file store to `/work/in/<safe name>`. Uses the file store's access rule (`resolveFile`: this thread's files, or the owner's own). ≤ `limits.sandboxImportMaxBytes` (50 MB). |
@@ -512,7 +514,9 @@ App Home admin additions:
 ### 5.1 Isolation
 - Modal sandboxes are gVisor-isolated containers on Modal's infrastructure, never on our hosts. The bot's own
   machines are never reachable through private ranges (D3).
-- Non-root user, a fresh sandbox per subagent, and nothing shared between subagents or users.
+- Non-root user by default (root on request via `as_root`: the sandbox holds no secrets and egress is enforced by
+  Modal outside the container, so root inside it gains nothing beyond installs), a fresh sandbox per subagent, and nothing shared between subagents or
+  users.
 - Previews deploy from a separate fresh sandbox.
 
 ### 5.2 Egress
