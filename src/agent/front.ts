@@ -18,8 +18,7 @@ import { lowQuotaLines, recordModelUsage, userQuotaStates } from '../features/gu
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
 import { loadPendingActions, renderPendingActions } from '../features/pending.js';
-import { HUDDLE_DJ_PROMPT, renderDjState } from '../features/huddlefm/render.js';
-import { huddleFmConfigured } from '../features/huddlefm/client.js';
+import { renderDjState } from '../features/huddlefm/render.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chatModel, isClaude, modelDisplayName, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
@@ -41,7 +40,6 @@ import { noteBotReply } from '../pipeline/store.js';
 import { awaitsReply } from '../pipeline/rules.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
-import { sandboxFrontPrompt } from '../sandbox/prompts.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
 
 export interface TurnIO {
@@ -135,8 +133,7 @@ function frontModelNames(): { model: string; fallbackModel?: string } {
 async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
   let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, ...frontModelNames() });
-  if (huddleFmConfigured()) system = `${system}\n\n${HUDDLE_DJ_PROMPT}`;
-  if (sandboxConfigured()) system = `${system}\n\n${sandboxFrontPrompt({ previews: previewsConfigured() })}`;
+  // HuddleFM and sandbox instructions are skills (skills/huddle-dj, skills/code-sandboxes), listed only when configured.
   const skillIndex = skillsPrompt('front');
   if (skillIndex) system = `${system}\n\n${skillIndex}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
