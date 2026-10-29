@@ -23,6 +23,7 @@ const LABELS: Record<string, string> = {
   spawn_subagent: 'Digging in…',
   message_subagent: 'Updating the task…',
   cancel_subagent: 'Stopping the task…',
+  read_subagent_result: 'Checking the results…',
   remember: 'Saving a note…',
   forget: 'Forgetting a note…',
   search_memory: 'Checking my notes…',

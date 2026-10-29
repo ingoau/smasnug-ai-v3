@@ -6,8 +6,8 @@
  * - after `limits.frontLookupNudgeSteps` lookup-only steps, a short note asks it to delegate (or answer) now;
  * - after `limits.frontLookupRestrictSteps` more, the research tools are switched off for the rest of the turn
  *   (prepareStep `activeTools`), leaving reply, spawn_subagent and the other non-research tools.
- * A normal answer with one or two lookups never reaches either. Subagents (child.ts) don't use this. Pure, unit-tested
- * (lookup-guard.test.ts).
+ * A normal answer with one lookup never reaches either (after a second, the note also offers answering with what it
+ * has). Subagents (child.ts) don't use this. Pure, unit-tested (lookup-guard.test.ts).
  */
 import { RESPONSE_TOOLS } from './turn-end.js';
 

@@ -521,20 +521,66 @@ describe('runFrontTurn: required tool calls and the plain-text nudge', () => {
     for (const c of calls()) expect(c.toolChoice).toEqual({ type: 'required' });
   });
 
-  it('a text-only step gets one more step with a note; a reply then goes out and no fallback', async () => {
-    h.model = mockModel([textStep('The answer is 42.'), toolStep(['reply', { text: 'The answer is 42.' }])]);
+  it('a message-shaped text-only step is posted as the reply in code: no nudge, no extra step, no fallback', async () => {
+    h.model = mockModel([textStep('The answer is 42.'), toolStep(['reply', { text: 'never' }])]);
     const a = io();
     await runFrontTurn(turn({ id: 141 }), a.io);
-    expect(calls()).toHaveLength(2);
-    const second = JSON.stringify(calls()[1].prompt);
-    expect(second).toContain('The answer is 42.'); // the discarded text stays in the conversation
-    expect(second).toContain("Your text wasn't shown to anyone");
-    expect(calls()[1].toolChoice).toEqual({ type: 'required' });
+    expect(calls()).toHaveLength(1);
     expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['The answer is 42.']);
     expect(fallbacks()).toHaveLength(0);
-    expect(h.events.filter((e) => e.type === 'discarded_text').map((e) => e.payload.text)).toEqual(['The answer is 42.']);
+    expect(h.events.some((e) => e.type === 'plain_text_nudge')).toBe(false);
+    expect(h.events.find((e) => e.type === 'plain_text_reply')?.payload).toMatchObject({ turnId: 141, posted: true });
+    expect(a.phases).toEqual(['final']);
+  });
+
+  it('an unmentioned turn posts its plain-text answer too', async () => {
+    h.model = mockModel([textStep('Here is what I found: it ships on Friday.')]);
+    await runFrontTurn(turn({ id: 147, isMention: false }), io(false).io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['Here is what I found: it ships on Friday.']);
+  });
+
+  it('text that reads as reasoning gets one more step with the note; a reply then goes out and no fallback', async () => {
+    h.model = mockModel([textStep('The user wants the answer, so 42.'), toolStep(['reply', { text: 'The answer is 42.' }])]);
+    const a = io();
+    await runFrontTurn(turn({ id: 148 }), a.io);
+    expect(calls()).toHaveLength(2);
+    const second = JSON.stringify(calls()[1].prompt);
+    expect(second).toContain('The user wants the answer'); // the discarded text stays in the conversation
+    expect(second).toContain('Nobody saw your last text');
+    expect(second).toContain("don't mention, apologise for");
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['The answer is 42.']);
+    expect(fallbacks()).toHaveLength(0);
+    expect(h.events.filter((e) => e.type === 'discarded_text').map((e) => e.payload.text)).toEqual(['The user wants the answer, so 42.']);
     expect(h.events.some((e) => e.type === 'plain_text_nudge')).toBe(true);
     expect(a.phases).toEqual(['final']);
+  });
+
+  it('a postable text after the nudge is posted instead of the fallback', async () => {
+    h.model = mockModel([textStep('Let me check that.'), textStep('It opens at 9am on weekdays.')]);
+    await runFrontTurn(turn({ id: 149 }), io().io);
+    expect(calls()).toHaveLength(2);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['It opens at 9am on weekdays.']);
+    expect(fallbacks()).toHaveLength(0);
+  });
+
+  it('after a lone reaction, a substantial text is posted; a short one is not', async () => {
+    const long = 'Done. The deploy finished and all three services are healthy again, the queue is draining.';
+    h.model = mockModel([toolStep(['react', { emoji: 'white_check_mark', continue_turn: true }]), textStep(long)]);
+    await runFrontTurn(turn({ id: 150 }), io().io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual([long]);
+
+    h.slack = [];
+    h.model = mockModel([toolStep(['react', { emoji: 'white_check_mark', continue_turn: true }]), textStep('All done here.')]);
+    await runFrontTurn(turn({ id: 151 }), io().io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+  });
+
+  it('text written next to end_turn replaces the generic fallback on a mention', async () => {
+    const step = [...textStep('It is 42, per the docs.').slice(0, -1), ...toolStep(['end_turn', {}]).slice(1)];
+    h.model = mockModel([step]);
+    await runFrontTurn(turn({ id: 152 }), io().io);
+    expect(fallbacks()).toHaveLength(0);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['It is 42, per the docs.']);
   });
 
   it('end_turn after the nudge stays silent', async () => {
@@ -584,13 +630,13 @@ describe('runFrontTurn: lookup guard', () => {
   const promptText = (i: number) => JSON.stringify(calls()[i].prompt);
   const search = (q: string) => toolStep(['web_search', { query: q }]);
 
-  it('a quick answer with one or two lookups is untouched', async () => {
+  it('a quick answer with one lookup is untouched', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ results: [] }), { status: 200 }));
     try {
-      h.model = mockModel([search('a'), search('b'), toolStep(['reply', { text: 'here you go' }])]);
+      h.model = mockModel([search('a'), toolStep(['reply', { text: 'here you go' }])]);
       await runFrontTurn(turn({ id: 130 }), io().io);
-      expect(calls()).toHaveLength(3);
-      for (let i = 0; i < 3; i++) {
+      expect(calls()).toHaveLength(2);
+      for (let i = 0; i < 2; i++) {
         expect(toolNames(i)).toContain('web_search');
         expect(promptText(i)).not.toContain('system_note');
       }
@@ -600,7 +646,7 @@ describe('runFrontTurn: lookup guard', () => {
     }
   });
 
-  it('nudges towards spawn_subagent after 3 lookup steps, then switches research tools off after 2 more', async () => {
+  it('nudges towards spawn_subagent after 2 lookup steps, then switches research tools off after 2 more', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ results: [] }), { status: 200 }));
     try {
       h.model = mockModel([
@@ -608,24 +654,35 @@ describe('runFrontTurn: lookup guard', () => {
         toolStep(['reply', { text: 'looking', continue_turn: true }], ['web_search', { query: '2' }]),
         search('3'),
         search('4'),
-        search('5'),
         toolStep(['reply', { text: 'handing this to subagents' }], ['spawn_subagent', { tasks: [{ title: 'Dig', instructions: 'dig in' }] }]),
       ]);
       await runFrontTurn(turn({ id: 131 }), io().io);
-      expect(calls()).toHaveLength(6);
-      // Steps 0-2: no note, research available.
-      for (let i = 0; i < 3; i++) expect(promptText(i)).not.toContain('system_note');
-      // Step 3 (after 3 lookup steps): the nudge, tools unchanged.
-      expect(promptText(3)).toContain("You've done 3 rounds of lookups");
-      expect(promptText(3)).toContain('spawn_subagent');
-      expect(toolNames(3)).toContain('web_search');
-      // Step 5 (after 5): research off, reply and spawn_subagent still there; the nudge is not repeated.
-      expect(promptText(5)).toContain('Research tools are now off');
-      expect(promptText(5).split("You've done").length - 1).toBe(1);
-      expect(toolNames(5)).not.toContain('web_search');
-      expect(toolNames(5)).toEqual(expect.arrayContaining(['reply', 'spawn_subagent', 'end_turn']));
+      expect(calls()).toHaveLength(5);
+      // Steps 0-1: no note, research available.
+      for (let i = 0; i < 2; i++) expect(promptText(i)).not.toContain('system_note');
+      // Step 2 (after 2 lookup steps): the nudge, tools unchanged.
+      expect(promptText(2)).toContain("You've done 2 rounds of lookups");
+      expect(promptText(2)).toContain('spawn_subagent');
+      expect(toolNames(2)).toContain('web_search');
+      // Step 4 (after 4): research off, reply and spawn_subagent still there; the nudge is not repeated.
+      expect(promptText(4)).toContain('Research tools are now off');
+      expect(promptText(4).split("You've done").length - 1).toBe(1);
+      expect(toolNames(4)).not.toContain('web_search');
+      expect(toolNames(4)).toEqual(expect.arrayContaining(['reply', 'spawn_subagent', 'end_turn']));
       expect(h.spawns).toHaveLength(1);
       expect(h.events.filter((e) => e.type === 'lookup_guard').map((e) => e.payload.guard)).toEqual(['nudge', 'restrict']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a final reply sharing its step with a lookup keeps the turn going, with a note to use the results', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ results: [] }), { status: 200 }));
+    try {
+      h.model = mockModel([toolStep(['reply', { text: 'probably 42' }], ['web_search', { query: 'x' }]), toolStep(['end_turn', {}])]);
+      await runFrontTurn(turn({ id: 132 }), io().io);
+      expect(calls()).toHaveLength(2);
+      expect(promptText(1)).toContain('Your reply went out in the same step as lookups');
     } finally {
       vi.unstubAllGlobals();
     }

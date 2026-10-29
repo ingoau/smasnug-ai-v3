@@ -1,6 +1,6 @@
 /**
- * Agent-module tools: reply, spawn_subagent, message_subagent, cancel_subagent (front agent only; card titles: src/agent/titles.ts,
- * in the background) and load_skill (front and children, src/agent/skills.ts).
+ * Agent-module tools: reply, spawn_subagent, message_subagent, cancel_subagent, read_subagent_result (front agent only;
+ * card titles: src/agent/titles.ts, in the background) and load_skill (front and children, src/agent/skills.ts).
  * Registered at import time; src/agent/register.ts imports this file.
  */
 import { tool } from 'ai';
@@ -18,6 +18,7 @@ import { cardsSchema, imagesSchema, MAX_IMAGES, tablesSchema } from './rich-bloc
 import { accessModelText, canUseSandbox, notifyAccess } from '../sandbox/access.js';
 import { sandboxConfigured } from '../sandbox/settings.js';
 import { readSkill } from './skills.js';
+import { readSubagentResult } from './subagent-result.js';
 
 /**
  * `reply(files)`: file ids (uploads, subagent results, create_file), or an inline text file that is stored first.
@@ -45,10 +46,25 @@ export const replyFilesSchema = z
  * documented MAX_BUTTONS (normalizeButtonLabels).
  */
 export const buttonsSchema = z
-  .array(z.string())
+  .array(
+    z.union([
+      z.string(),
+      z.object({
+        label: z.string(),
+        no_turn: z
+          .boolean()
+          .optional()
+          .describe('true = a press only marks it pressed and does NOT start a turn for you (for "No thanks" / "All good" / "Never mind").'),
+        fixed_reply: z
+          .string()
+          .optional()
+          .describe('Optional short text posted as your reply when pressed, without a turn (implies no_turn), e.g. "all good 👍".'),
+      }),
+    ]),
+  )
   .optional()
   .describe(
-    `Optional quick-reply buttons under the message. Use them whenever the message asks a question with a few clear answers (options like "price, size or wireless?", a "which one?", a yes/no). And when there's a logical next step the user would likely want (dig deeper, draft or write it, run it, set a reminder, send it), end with one short offer plus buttons, e.g. "want me to draft it?" → ["Yes, draft it", "No thanks"]. At most one offer per message, only when genuinely useful: never on bare greetings or thanks, or while the user is mid-task giving you instructions. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars), each exactly what the user would type back; a press posts that label as their message. Omit for open questions and when there's no clear next step.`,
+    `Optional quick-reply buttons under the message. Use them whenever the message asks a question with a few clear answers (options like "price, size or wireless?", a "which one?", a yes/no). And when there's a logical next step the user would likely want (dig deeper, draft or write it, run it, set a reminder, send it), end with one short offer plus buttons, e.g. "want me to draft it?" → ["Yes, draft it", { "label": "No thanks", "no_turn": true }]. At most one offer per message, only when genuinely useful: never on bare greetings or thanks, or while the user is mid-task giving you instructions. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars), each exactly what the user would type back; a press posts that label as their message and starts your turn. Decline / dismiss buttons that need nothing from you ("No thanks", "Never mind", "All good") go as { label, no_turn: true } (or with fixed_reply for a short code-posted answer) so a press costs no turn. Omit for open questions and when there's no clear next step.`,
   );
 
 registerTool({
@@ -120,7 +136,7 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        `Start background subagents for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels). Each task in \`tasks\` becomes its own subagent and they all run in parallel, so split whatever can be researched independently (when in doubt, split: one task bundling several parts is slower and shallower): one task per part in this ONE call (up to ${MAX_SPAWN_TASKS}): each named item (products, libraries, frameworks, people, channels, options, cities), each separate question or numbered part of the request, each side of "A vs B vs C" or "compare A, B and C" (you compare when the results are back). One task only for a single question, trivially small parts, or a step whose finding the rest needs ("find the top 3 X" first; one task per item in the next round). A subagent cannot see this conversation: give each complete, self-contained instructions that quote its part of the request word for word, plus the requirements that apply to every part (format, citations, length, deadline). Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer.`,
+        `Start background subagents for work longer than one or two quick lookups (research, comparing sources, reading many pages/channels). Each task in \`tasks\` becomes its own subagent and they all run in parallel, so split whatever can be researched independently (when in doubt, split: one task bundling several parts is slower and shallower): one task per part in this ONE call (up to ${MAX_SPAWN_TASKS}): each named item (products, libraries, frameworks, people, channels, options, cities), each separate question or numbered part of the request, each side of "A vs B vs C" or "compare A, B and C" (you compare when the results are back). One task only for a single question, trivially small parts, or a step whose finding the rest needs ("find the top 3 X" first; one task per item in the next round). A subagent cannot see this conversation: give each complete, self-contained instructions that quote its part of the request word for word, plus the requirements that apply to every part (format, citations, length, deadline). Don't add constraints or concerns the speaker didn't ask for, and don't state your own unverified figures or assumptions (versions, OS, limits, prices) as facts in the instructions: leave them for the subagent to find out. Progress shows on a plan card; when all subagents of this turn finish you get their results to write the answer.`,
       inputSchema: z.object({
         tasks: z
           .array(
@@ -129,7 +145,7 @@ registerTool({
               instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, file ids file_… of uploads it should use), and what a good result looks like'),
               seed_from: z.string().optional().describe('Id of an expired subagent whose summary should seed this one'),
               ...(sandboxConfigured()
-                ? { sandbox: z.boolean().optional().describe('Give this subagent a code sandbox (Linux, Python, Node, headless Chromium) to run code: installs, data processing, analysing files, a headless browser, multi-file builds, live previews. Not for a single file you can write yourself (use create_file).') }
+                ? { sandbox: z.boolean().optional().describe('Give this subagent a code sandbox (Linux, Python, Node, headless Chromium) to run code: installs, data processing, analysing files, a headless browser, multi-file builds, live previews. Not for a single file you can write yourself (use create_file). Also needed to read or grep any public git repo or package ("how does X work in repo Y", its scopes, limits, config, defaults): tell it to `git clone --filter=blob:none` and grep the code; a fetched README is not an answer.') }
                 : {}),
             }),
           )
@@ -235,6 +251,17 @@ registerTool({
         }
         return msg;
       },
+    }),
+});
+registerTool({
+  name: 'read_subagent_result',
+  roles: ['front'],
+  build: (ctx) =>
+    tool({
+      description:
+        "Read a subagent's full result (from this thread): its status, the latest run's complete output, the files it created (ids to post with reply(files)) and earlier runs. Use it when someone asks about a subagent's output after the results turn, instead of re-running it with message_subagent or asking ask_thread. Read-only; nothing is shown to anyone.",
+      inputSchema: z.object({ id: z.string().describe('Subagent id, e.g. "sa_ab12cd"') }),
+      execute: async ({ id }) => readSubagentResult(ctx.threadId, id),
     }),
 });
 

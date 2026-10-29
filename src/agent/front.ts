@@ -33,8 +33,8 @@ import { activeRunsInThread, maybeSynthesize } from './subagents.js';
 import { loadSinceRound, renderSinceRound } from './round-since.js';
 import { cursorInstructRefusal, cursorRefusal, isCursorAdmin } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
-import { endsTurnAfterStep, PLAIN_TEXT_NUDGE_NOTE, shouldNudgePlainText, type StepCall, type StepResultPart } from './turn-end.js';
-import { countLookupSteps, LOOKUP_RESTRICT_NOTE, lookupGuard, lookupNudgeNote, nonLookupTools, type LookupGuard } from './lookup-guard.js';
+import { decidePlainText, endsTurnAfterStep, PLAIN_TEXT_NUDGE_NOTE, postablePlainText, replyEndsWithLookups, REPLY_WITH_LOOKUPS_NOTE, TERMINAL_SAFE_TOOLS, type StepCall, type StepResultPart } from './turn-end.js';
+import { countLookupSteps, LOOKUP_RESTRICT_NOTE, LOOKUP_TOOLS, lookupGuard, lookupNudgeNote, nonLookupTools, type LookupGuard } from './lookup-guard.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
 import { noteBotReply } from '../pipeline/store.js';
 import { awaitsReply } from '../pipeline/rules.js';
@@ -735,17 +735,28 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const convo: ModelMessage[] = [...messages];
   /** Tool names per finished step of this turn (all model calls), for the step limit and the lookup guard. */
   const doneSteps: string[][] = [];
-  /** Whether this turn already got the one plain-text nudge (turn-end.ts shouldNudgePlainText). */
+  /** Whether this turn already got the one plain-text nudge (turn-end.ts decidePlainText). */
   let nudged = false;
+  /** Whether the reply-with-lookups note went in already (once per turn). */
+  let lookupReplyNoted = false;
+  /**
+   * The latest postable plain text of a step that didn't go on to lookups (no calls, or only terminal-safe ones):
+   * posted instead of the generic fallback when the turn ends with nothing visible.
+   */
+  let fallbackText: string | null = null;
   const anyVisible = () => state.visible.size > 0 || replies.anyVisible;
+  /** A message (reply or send_message) went out: plain text is never posted on top of it. */
+  const messaged = () => state.visible.has('reply') || state.visible.has('send') || replies.anyVisible;
+  const plainTextAction = (text: string, toolCalls: number, stopping: boolean) =>
+    decidePlainText({ text, toolCalls, nudged, messaged: messaged(), visible: anyVisible(), stopping, stepsUsed: doneSteps.length, maxSteps: MAX_STEPS });
   try {
     if (await checkStop()) throw new TurnStopped();
     timing.mark('model_request');
     turnCalls.length = 0;
-    // One model call normally. A step that ends with plain text and no tool call ends the SDK's loop; when nothing
-    // visible went out, the turn gets exactly one more call with a note asking it to send the text with reply (or
-    // end_turn). `toolChoice: 'required'` should make that rare: this is the backup for a provider that ignores it, and
-    // for Claude, which runs with 'auto' so it can think before a tool call (models.ts adaptCall).
+    // One model call normally. A step that ends with plain text and no tool call ends the SDK's loop. Claude runs
+    // with toolChoice 'auto' (models.ts adaptCall), so it often answers in plain text: a message-shaped text is then
+    // posted as the reply in code and the turn ends (turn-end.ts decidePlainText); other text with nothing visible
+    // yet gets exactly one more call with a note asking it to send it with reply (or end_turn).
     for (;;) {
       const earlierSteps = doneSteps.length;
       const result = streamText({
@@ -780,6 +791,13 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
           const guard = lookupGuard(lookupSteps, { nudgeAfter: limits.frontLookupNudgeSteps, restrictAfter: limits.frontLookupRestrictSteps });
           if (guard !== 'none' && guardStage === 'none') extra.push({ role: 'user', content: lookupNudgeNote(lookupSteps) });
           if (guard === 'restrict' && guardStage !== 'restrict') extra.push({ role: 'user', content: LOOKUP_RESTRICT_NOTE });
+          // A final reply that shared its step with lookups didn't end the turn (turn-end.ts endsTurnAfterStep): say
+          // so, so the model uses their results (a follow-up reply with what's new) instead of dropping them.
+          const prev = steps.at(-1);
+          if (!lookupReplyNoted && prev && replyEndsWithLookups(prev.toolCalls as StepCall[], LOOKUP_TOOLS)) {
+            lookupReplyNoted = true;
+            extra.push({ role: 'user', content: REPLY_WITH_LOOKUPS_NOTE });
+          }
           if (guard !== guardStage && guard !== 'none') {
             log.info({ turnId, lookupSteps, guard }, 'front lookup guard');
             await appendEvent(turn.threadId, 'lookup_guard', 'system', { turnId, lookupSteps, guard }).catch(() => {});
@@ -858,10 +876,11 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             doneSteps.push([...stepTools]);
             lastText = stepText;
             lastCalls = stepCalls.length;
+            if (stepCalls.every((c) => TERMINAL_SAFE_TOOLS.has(c.toolName)) && postablePlainText(stepText)) fallbackText = stepText.trim();
             // Final step detection: a step whose reply/reaction went out ends the loop (endsTurnAfterStep, same rule
             // as stopWhen), and so does a step without tool calls unless it gets the nudge: new messages then start a
             // fresh turn instead.
-            const nudgeNext = shouldNudgePlainText({ text: stepText, toolCalls: stepCalls.length, nudged, visible: anyVisible(), stopping: stopped, stepsUsed: doneSteps.length, maxSteps: MAX_STEPS });
+            const nudgeNext = plainTextAction(stepText, stepCalls.length, stopped) === 'nudge';
             if ((part.finishReason !== 'tool-calls' && !nudgeNext) || endsTurnAfterStep(stepCalls, stepResults)) await setPhase('final');
             stepText = '';
             stepTools = [];
@@ -883,8 +902,17 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             break;
         }
       }
-      const nudge = shouldNudgePlainText({ text: lastText, toolCalls: lastCalls, nudged, visible: anyVisible(), stopping: await checkStop(), stepsUsed: doneSteps.length, maxSteps: MAX_STEPS });
-      if (!nudge) break;
+      const action = plainTextAction(lastText, lastCalls, await checkStop());
+      if (action === 'post') {
+        // It meant to say this: post it as the reply (same path as the reply tool) instead of nudging.
+        const res = await replies.finishText(lastText.trim());
+        const posted = res.startsWith('Replied');
+        if (posted || replies.anyVisible) state.visible.add('reply');
+        log.info({ turnId, steps: doneSteps.length, posted }, 'front plain-text step: posted as the reply');
+        await appendEvent(turn.threadId, 'plain_text_reply', 'bot', { turnId, step: doneSteps.length, posted, result: res }).catch(() => {});
+        break;
+      }
+      if (action !== 'nudge') break;
       nudged = true;
       log.info({ turnId, steps: doneSteps.length }, 'front plain-text step: nudging once');
       await appendEvent(turn.threadId, 'plain_text_nudge', 'system', { turnId, step: doneSteps.length }).catch(() => {});
@@ -981,9 +1009,12 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 
   if (state.visible.size === 0 && outcome) await postOutcomeFallback();
   else if (state.visible.size === 0 && needsFallback(turn, io, built.anyCancelled)) {
-    const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(FALLBACK_TEXT) }, { idempotencyKey: `fallback:${turnId}` });
+    // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
+    // never a group ping.
+    const text = fallbackText ? neutralizeBroadcasts(fallbackText) : FALLBACK_TEXT;
+    const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `fallback:${turnId}` });
     await noteCodeReply(res?.ts);
-    await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, text: FALLBACK_TEXT });
+    await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, ...(fallbackText ? { fromText: true } : {}), text });
   }
 }
 

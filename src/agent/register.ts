@@ -10,6 +10,8 @@ import { processSubagentRun, shutdownRuns } from './child.js';
 import { expireIdleSubagents, sweepStaleRuns } from './maintenance.js';
 import { cancelCardRuns } from './subagents.js';
 import { processTitleJob, type TitleJob } from './titles.js';
+import { REPLY_QUIET_ACTION } from './reply-buttons.js';
+import { handleQuietChoice } from './reply-quiet.js';
 import './leave-thread.js';
 import './tools.js';
 import './cursor/tools.js';
@@ -77,6 +79,9 @@ export async function onShutdown(): Promise<void> {
 /** Coding agents: the admin's Launch / Cancel on a proposed coding agent (only ADMIN_USER_ID; checked in the handlers). */
 registerAction('coding:launch', handleCodingLaunch);
 registerAction('coding:cancel', handleCodingCancel);
+
+/** Quick-reply buttons marked no_turn (reply-quiet.ts): the press is recorded (plus an optional fixed reply), no turn. */
+registerAction(REPLY_QUIET_ACTION, handleQuietChoice);
 
 /** Link buttons on reply cards (rich-blocks.ts): Slack opens the URL itself and still sends the click; nothing to do. */
 registerAction('link:', async () => {});

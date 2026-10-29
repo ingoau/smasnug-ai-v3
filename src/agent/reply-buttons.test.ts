@@ -24,7 +24,7 @@ vi.mock('./reply-buttons-store.js', () => ({
 }));
 
 const { ReplyManager } = await import('./reply.js');
-const { MAX_BUTTONS, MAX_LABEL_CHARS, SLACK_BUTTON_TEXT_MAX, REPLY_CHOICE_ACTION, buttonsActions, buttonsBlock, normalizeButtonLabels } = await import('./reply-buttons.js');
+const { MAX_BUTTONS, MAX_FIXED_REPLY_CHARS, MAX_LABEL_CHARS, SLACK_BUTTON_TEXT_MAX, REPLY_CHOICE_ACTION, REPLY_QUIET_ACTION, buttonsActions, buttonsBlock, normalizeButtonLabels, normalizeButtons, parseButtonResponse } = await import('./reply-buttons.js');
 const { renderCard } = await import('./card-render.js');
 const { buttonsSchema } = await import('./tools.js');
 const { formatMessage } = await import('../context/format.js');
@@ -75,6 +75,37 @@ describe('reply buttons: labels and schema', () => {
     expect(block.elements.map((e) => e.text.text)).toEqual(['ESP32', 'Pico', 'Arduino']);
     const pressed = buttonsBlock({ id: 9, labels: ['ESP32', 'Pico'], pressedBy: 'U7', pressedLabel: 'Pi*co <x>' });
     expect(pressed).toEqual({ type: 'context', block_id: 'reply_9_pressed', elements: [{ type: 'mrkdwn', text: '<@U7> pressed *Pico &lt;x&gt;*' }] });
+  });
+});
+
+describe('reply buttons: no-turn buttons', () => {
+  it('objects carry what a press does: fixed_reply (no turn, posted), no_turn (just the note), or a turn', () => {
+    const { labels, responses } = normalizeButtons(['Yes', { label: 'No thanks', fixed_reply: '  all good <!here> ' }, { label: 'Later', no_turn: true }, { label: 'Plain' }, { label: '' }, { no_turn: true }]);
+    expect(labels).toEqual(['Yes', 'No thanks', 'Later', 'Plain']);
+    expect(responses[0]).toBeNull();
+    expect(responses[1]).toMatchObject({ kind: 'text' });
+    expect((responses[1] as any).text).not.toContain('<!here>');
+    expect(responses.slice(2)).toEqual([{ kind: 'none' }, null]);
+    expect((normalizeButtons([{ label: 'x', fixed_reply: 'y'.repeat(MAX_FIXED_REPLY_CHARS + 50) }]).responses[0] as any).text).toHaveLength(MAX_FIXED_REPLY_CHARS);
+    expect(normalizeButtonLabels(['a', { label: 'b', no_turn: true }])).toEqual(['a', 'b']);
+  });
+
+  it('no-turn buttons get the reply:quiet action id; rows without responses render as before', () => {
+    const block = buttonsActions({ id: 3, labels: ['Yes', 'No thanks'], responses: [null, { kind: 'none' }] });
+    expect(block.elements.map((e) => e.action_id)).toEqual([`${REPLY_CHOICE_ACTION}:0`, `${REPLY_QUIET_ACTION}:1`]);
+    expect(buttonsActions({ id: 3, labels: ['Yes', 'No'], responses: null }).elements.map((e) => e.action_id)).toEqual([`${REPLY_CHOICE_ACTION}:0`, `${REPLY_CHOICE_ACTION}:1`]);
+    expect(REPLY_CHOICE_ACTION.startsWith(REPLY_QUIET_ACTION) || REPLY_QUIET_ACTION.startsWith(REPLY_CHOICE_ACTION)).toBe(false);
+  });
+
+  it('stored responses parse leniently (unknown = a turn)', () => {
+    expect(parseButtonResponse({ kind: 'none' })).toEqual({ kind: 'none' });
+    expect(parseButtonResponse({ kind: 'text', text: 'ok' })).toEqual({ kind: 'text', text: 'ok' });
+    for (const v of [null, undefined, 'none', { kind: 'text', text: ' ' }, { kind: 'other' }]) expect(parseButtonResponse(v)).toBeNull();
+  });
+
+  it('the tool schema accepts labels and button objects and tells the model about no_turn', () => {
+    expect(buttonsSchema.parse(['Yes', { label: 'No thanks', no_turn: true }, { label: 'Nope', fixed_reply: 'all good' }])).toHaveLength(3);
+    expect(JSON.stringify(z.toJSONSchema(buttonsSchema))).toContain('no_turn');
   });
 });
 

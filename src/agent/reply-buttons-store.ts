@@ -1,6 +1,6 @@
-/** Persistence for quick-reply buttons (table reply_buttons, migration 090). */
+/** Persistence for quick-reply buttons (table reply_buttons, migrations 090 and 330). */
 import { sql } from '../db/index.js';
-import type { ButtonsState } from './reply-buttons.js';
+import { parseButtonResponse, type ButtonResponse, type ButtonsState } from './reply-buttons.js';
 
 export interface ReplyButtonsRow {
   id: number;
@@ -11,22 +11,34 @@ export interface ReplyButtonsRow {
   /** Markdown of the message carrying the buttons; null = a buttons-only message. */
   replyText: string | null;
   labels: string[];
+  /** Per button: what a press does instead of a turn (null = a turn). Null for rows from before migration 330. */
+  responses: (ButtonResponse | null)[] | null;
   pressedBy: string | null;
   pressedLabel: string | null;
   pressedMessageTs: string | null;
   pressedAt: Date | null;
 }
 
-const norm = (r: any): ReplyButtonsRow => ({ ...r, id: Number(r.id), turnId: r.turnId == null ? null : Number(r.turnId), labels: Array.isArray(r.labels) ? r.labels : [] });
+const norm = (r: any): ReplyButtonsRow => ({
+  ...r,
+  id: Number(r.id),
+  turnId: r.turnId == null ? null : Number(r.turnId),
+  labels: Array.isArray(r.labels) ? r.labels : [],
+  responses: Array.isArray(r.responses) ? r.responses.map(parseButtonResponse) : null,
+});
 
-export const toButtonsState = (r: ReplyButtonsRow): ButtonsState => ({ id: r.id, labels: r.labels, pressedBy: r.pressedBy, pressedLabel: r.pressedLabel });
+export const toButtonsState = (r: ReplyButtonsRow): ButtonsState => ({ id: r.id, labels: r.labels, pressedBy: r.pressedBy, pressedLabel: r.pressedLabel, responses: r.responses });
 
 /** Create (or, for a retried turn, reuse) the row for one reply's buttons. Its id goes into the button values. */
-export async function createReplyButtons(o: { threadId: string; channelId: string; turnId: number; key: string; labels: string[] }): Promise<ReplyButtonsRow> {
+export async function createReplyButtons(o: { threadId: string; channelId: string; turnId: number; key: string; labels: string[]; responses?: (ButtonResponse | null)[] }): Promise<ReplyButtonsRow> {
+  // Only rows with a no-turn button store responses (single-word keys: the camelCase transform leaves them alone).
+  const responses = o.responses?.some(Boolean) ? sql.json(o.responses as never) : null;
   const [row] = await sql`
-    insert into reply_buttons (thread_id, channel_id, turn_id, idempotency_key, labels)
-    values (${o.threadId}, ${o.channelId}, ${o.turnId}, ${o.key}, ${sql.json(o.labels)})
-    on conflict (idempotency_key) do update set labels = case when reply_buttons.pressed_at is null then excluded.labels else reply_buttons.labels end
+    insert into reply_buttons (thread_id, channel_id, turn_id, idempotency_key, labels, responses)
+    values (${o.threadId}, ${o.channelId}, ${o.turnId}, ${o.key}, ${sql.json(o.labels)}, ${responses})
+    on conflict (idempotency_key) do update set
+      labels = case when reply_buttons.pressed_at is null then excluded.labels else reply_buttons.labels end,
+      responses = case when reply_buttons.pressed_at is null then excluded.responses else reply_buttons.responses end
     returning *`;
   return norm(row);
 }
