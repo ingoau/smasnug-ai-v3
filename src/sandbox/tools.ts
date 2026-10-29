@@ -18,9 +18,9 @@ import { log } from '../log.js';
 import { processImage } from '../tools/image-process.js';
 import { errMsg, untrusted } from '../tools/util.js';
 import { accessModelText, canUseSandbox, firstUseNotice, notifyAccess } from './access.js';
-import { EXEC_SCRIPT, formatExecResult, isImagePath, safeBaseName } from './format.js';
+import { EXEC_SCRIPT, formatExecResult, importFailedText, isImagePath, safeBaseName } from './format.js';
 import { SandboxRefused, withSandbox } from './lifecycle.js';
-import { shq, workPath, type Handle } from './provider.js';
+import { SandboxGoneError, shq, workPath, type Handle } from './provider.js';
 import { sandboxProvider } from './providers.js';
 import { previewsConfigured, sandboxSettings } from './settings.js';
 import { previewCountsToday, upsertRequestedPreview } from './preview/store.js';
@@ -180,7 +180,7 @@ reg('sandbox_write_file', (ctx) =>
 
 reg('sandbox_import', (ctx) =>
   tool({
-    description: `Copy a file from the conversation (a file_… id: an upload, or a file made earlier) into your sandbox, by default to /work/in/<name> (≤ ${limits.sandboxImportMaxBytes / 1048576} MB).`,
+    description: `Copy a file from the conversation (a file_… id: an upload, or a file made earlier; or a Slack file id F…) into your sandbox, by default to /work/in/<name> (≤ ${limits.sandboxImportMaxBytes / 1048576} MB).`,
     inputSchema: z.object({
       file_id: z.string().describe('File id, e.g. file_k3x9q2mf7a'),
       path: z.string().optional().describe('Target path under /work (default /work/in/<file name>)'),
@@ -200,7 +200,14 @@ reg('sandbox_import', (ctx) =>
         return `Could not load ${f.id}: ${errMsg(err)}`;
       }
       return run(ctx, 'sandbox_import', async (h) => {
-        await p().writeFile(h, abs, bytes);
+        try {
+          await p().writeFile(h, abs, bytes);
+        } catch (err) {
+          // A gone sandbox is handled by withSandbox (fresh one, retried); anything else is a failed copy.
+          if (err instanceof SandboxGoneError) throw err;
+          log.warn({ err, fileId: f.id, bytes: bytes.byteLength, subagentId: ctx.subagentId }, 'sandbox_import write failed');
+          return importFailedText(err);
+        }
         return `Imported ${f.id} (${fileListingLine(f)}) to ${abs}.`;
       });
     },

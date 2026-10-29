@@ -40,6 +40,10 @@ export interface CanvasFileInfo {
   ims?: string[];
   shares?: { public?: Record<string, unknown>; private?: Record<string, unknown> };
   linked_channel_id?: string;
+  /** `quip` for canvases; anything else is an ordinary file (read_file). */
+  filetype?: string;
+  mode?: string;
+  pretty_type?: string;
 }
 
 /** Every conversation the canvas is shared in or linked to (channels, private groups, DMs, shares, channel tab). */

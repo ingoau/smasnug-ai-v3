@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 vi.hoisted(() => {
   process.env.OPENROUTER_KEY ||= 'test';
 });
-import { formatExecResult, safeBaseName, showStream, splitWrapped } from './format.js';
+import { formatExecResult, importFailedText, safeBaseName, showStream, splitWrapped } from './format.js';
 import { shq, workPath } from './provider.js';
 
 describe('workPath', () => {
@@ -62,5 +62,17 @@ describe('exec output', () => {
     expect(safeBaseName('a b(1).csv')).toBe('a b(1).csv');
     expect(safeBaseName('weird\u0001name$.txt')).toBe('weirdname_.txt');
     expect(safeBaseName('')).toBe('file');
+  });
+});
+
+describe('importFailedText', () => {
+  it('calls an RPC error a transport error, not a size limit', () => {
+    const t = importFailedText(new Error('/modal.client.ModalClient/TaskExecStdinWrite OUT_OF_RANGE: Error, decoded message length too large'), 50 * 1048576);
+    expect(t).toMatch(/transport error: .*OUT_OF_RANGE/);
+    expect(t).toMatch(/isn't a size limit/);
+    expect(t).toContain('50 MB');
+  });
+  it('passes a failed write inside the sandbox on as it is', () => {
+    expect(importFailedText(new Error('write failed: No space left on device'))).toBe('sandbox_import failed: write failed: No space left on device');
   });
 });

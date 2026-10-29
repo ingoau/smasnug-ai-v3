@@ -16,6 +16,13 @@ const field = (v: unknown, max = ATTACHMENT_FIELD_MAX) => {
   return t ? t.slice(0, max) : undefined;
 };
 
+/** A forward without `from_url`: a permalink built from the share's channel and ts (read tools take any host). */
+function sharePermalink(a: any): string | undefined {
+  const ch = typeof a.channel_id === 'string' && /^[CG][A-Z0-9]+$/.test(a.channel_id) ? a.channel_id : undefined;
+  const ts = typeof a.ts === 'string' && /^\d{10}\.\d{6}$/.test(a.ts) ? a.ts : undefined;
+  return ch && ts ? `https://slack.com/archives/${ch}/p${ts.replace('.', '')}` : undefined;
+}
+
 /**
  * Slack `attachments` → MessageAttachment[] (pure): forwarded messages and Slack message unfurls ('forwarded'),
  * link unfurls ('link', with the page's title and description), other app attachments ('attached'). Ones without
@@ -33,7 +40,7 @@ export function attachmentsFromSlack(raw: unknown): MessageAttachment[] {
     const title = field(a.title);
     const text = body ? body.slice(0, ATTACHMENT_TEXT_MAX) : undefined;
     if (!text && !title) continue;
-    const url = field(a.from_url || a.original_url || a.title_link, 500);
+    const url = field(a.from_url || a.original_url || a.title_link, 500) || (message ? sharePermalink(a) : undefined);
     out.push({
       kind: message ? 'forwarded' : link ? 'link' : 'attached',
       ...(field(a.author_name || a.author_subname) ? { author: field(a.author_name || a.author_subname) } : {}),

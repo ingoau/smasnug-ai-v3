@@ -78,3 +78,15 @@ export function safeBaseName(raw: string, fallback = 'file'): string {
 export function isImagePath(path: string): boolean {
   return /\.(png|jpe?g|gif|webp)$/i.test(path);
 }
+
+/**
+ * What the model gets when copying a file into the sandbox failed. A transport/RPC error (e.g. the provider refusing
+ * one oversized stdin message) is said to be one, with the real limit next to it: prod saw a subagent turn
+ * "OUT_OF_RANGE: decoded message length too large" into a made-up "20MB import limit". A failed write inside the
+ * sandbox (`write failed: …`, e.g. a full disk) is passed on as it is.
+ */
+export function importFailedText(err: unknown, maxBytes: number = limits.sandboxImportMaxBytes): string {
+  const msg = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim().slice(0, 300);
+  if (/^write failed:/.test(msg)) return `sandbox_import failed: ${msg}`;
+  return `sandbox_import failed (transport error: ${msg}). This isn't a size limit (files up to ${Math.round(maxBytes / 1048576)} MB can be imported): try once more, and if it fails again report this error as it is. Don't tell anyone there is a smaller size cap.`;
+}
