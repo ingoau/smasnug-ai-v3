@@ -8,8 +8,11 @@ const { isSlackbotUser } = await import('./rules.js');
 describe('DM peers', () => {
   it('Slackbot, bot users and app users are not people', () => {
     expect(isSlackbotUser('USLACKBOT')).toBe(true);
+    expect(isSlackbotUser('USLACK')).toBe(true); // how this workspace shows it
+    expect(isSlackbotUser(null)).toBe(false);
     expect(isSlackbotUser('U123')).toBe(false);
     expect(isNonHumanPeer('USLACKBOT', null)).toBe(true);
+    expect(isNonHumanPeer('USLACK', null)).toBe(true);
     expect(isNonHumanPeer('U1', { isBot: true })).toBe(true);
     expect(isNonHumanPeer('U1', { isBot: false, isAppUser: true })).toBe(true);
     expect(isNonHumanPeer('U1', { isBot: false })).toBe(false);

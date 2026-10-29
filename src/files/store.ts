@@ -9,7 +9,8 @@
  *   only; the content is downloaded on first use (`loadFileBytes`) and kept when ≤ the size cap. Files on messages
  *   from elsewhere (public reads, search) are registered in the thread that saw them, with their source channel.
  *   Files on `##` messages never get here (those messages are never stored or rendered).
- * - Everything a model can name goes through `resolveFile`, which applies the access rule.
+ * - Everything a model can name goes through `resolveFile`, which applies the access rule. A pasted Slack file id
+ *   (`F…`) resolves to its stored file, or is registered from Slack when it is visible here (slack-ref.ts).
  */
 import { createHash } from 'node:crypto';
 import { limits } from '../config.js';
@@ -323,12 +324,17 @@ export interface ResolvedFile extends FileMeta {
 
 /** Same answer for "doesn't exist" and "not yours": ids can't be probed. */
 export const notAvailable = (ref: string) =>
-  `No file "${ref.slice(0, 60)}" is available here. Use a file id shown in this conversation (file_…), or one of the speaker's own files.`;
+  `No file "${ref.slice(0, 60)}" is available here. Use a file id shown in this conversation (file_…, or a Slack file id F…), or one of the speaker's own files.`;
 
-/** Resolve a model-given file id (or a migrated `img_N`) under the access rule. */
+/** Resolve a model-given file id (or a migrated `img_N`, or a Slack `F…` id / file link) under the access rule. */
 export async function resolveFile(ref: string, ctx: FileAccessContext): Promise<ResolvedFile | { error: string }> {
   const parsed = parseFileRef(ref);
-  if (!parsed) return { error: notAvailable(ref) };
+  if (!parsed) {
+    // A pasted Slack file id / file link (slack-ref.ts; loaded lazily, it pulls in Slack tool helpers).
+    const slack = await import('./slack-ref.js');
+    const slackId = slack.parseSlackFileRef(ref);
+    return slackId ? slack.resolveSlackFile(slackId, ctx) : { error: notAvailable(ref) };
+  }
   const [row] =
     parsed.kind === 'id'
       ? await sql<ResolvedFile[]>`

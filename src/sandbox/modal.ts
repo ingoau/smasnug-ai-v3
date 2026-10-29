@@ -21,10 +21,28 @@ import { SandboxGoneError, shq, type ExecOptions, type ExecResult, type Handle, 
 const SNAPSHOT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const BASE_ENV = { PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/work', LANG: 'C.UTF-8', TZ: 'UTC', NODE_PATH: '/usr/lib/node_modules', PLAYWRIGHT_BROWSERS_PATH: '/ms-playwright' };
 const AS_USER = ['setpriv', '--reuid=1000', '--regid=1000', '--init-groups', '--reset-env'];
+/**
+ * Stdin goes in pieces of this size: the SDK sends each write() as one stdin RPC, and one big message fails
+ * ("TaskExecStdinWrite OUT_OF_RANGE: decoded message length too large", seen for a 34 MB import).
+ */
+export const STDIN_CHUNK_BYTES = 4 * 1024 * 1024;
 
 function isGone(err: unknown): boolean {
   const m = String((err as any)?.message ?? err);
   return /NOT_FOUND|already shut down|has finished|terminated|not running/i.test(m) || (err as any)?.constructor?.name === 'NotFoundError';
+}
+
+/**
+ * Write `bytes` to a stdin stream in STDIN_CHUNK_BYTES pieces, awaiting each, then close it. The SDK's stdin is a
+ * WritableStream whose sink sends one RPC per write with a running byte offset (the stream calls the sink one write
+ * at a time, in order), so sequential writes on one writer arrive in order.
+ */
+export async function writeStdinChunked(stdin: WritableStream<Uint8Array>, bytes: Uint8Array, chunkBytes = STDIN_CHUNK_BYTES): Promise<void> {
+  const w = stdin.getWriter();
+  for (let at = 0; at < bytes.byteLength; at += chunkBytes) {
+    await w.write(bytes.subarray(at, Math.min(at + chunkBytes, bytes.byteLength)));
+  }
+  await w.close();
 }
 
 /** Read a byte stream, keeping at most `max` bytes (the rest is drained and dropped). */
@@ -164,9 +182,7 @@ export class ModalProvider implements SandboxProvider {
     o.signal?.addEventListener('abort', kill, { once: true });
     try {
       if (o.stdin?.byteLength) {
-        const w = proc.stdin.getWriter();
-        await w.write(new Uint8Array(o.stdin));
-        await w.close();
+        await writeStdinChunked(proc.stdin, new Uint8Array(o.stdin.buffer, o.stdin.byteOffset, o.stdin.byteLength));
       } else {
         await proc.stdin.close().catch(() => {});
       }
@@ -183,6 +199,7 @@ export class ModalProvider implements SandboxProvider {
         kill();
         return { exitCode: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), stdoutTruncated: false, stderrTruncated: false, timedOut: !aborted, aborted, durationMs };
       }
+      kill(); // e.g. a failed stdin write: don't leave the command waiting for input until its timeout
       throw err;
     } finally {
       o.signal?.removeEventListener('abort', kill);

@@ -17,7 +17,7 @@ import { dropHeldMessage, holdForConsent, updateHeldMessage } from './consent.js
 import { hasAgreed } from '../features/privacy.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
-import { answersOtherOffer, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
+import { answersOtherOffer, awaitedReplyFresh, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
 import { isBotPeerDm } from './dm-peer.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { handleHuddleFmMessage, isFromHuddleFm } from '../features/huddlefm/inbound.js';
@@ -31,6 +31,7 @@ import {
   getThread,
   insertTombstone,
   isBotMessage,
+  isRunRequester,
   isTwoPartyThread,
   othersSpokeBetween,
   storeMessage,
@@ -41,6 +42,10 @@ import {
 
 /** How far back a join looks for the mention that prompted the invite. */
 const JOIN_REPLAY_WINDOW_S = 10 * 60;
+/** The bot's question / offer (threads.awaits_reply_from) counts as awaiting an answer for this long after its reply. */
+export const AWAITED_REPLY_MAX_AGE_MS = 20 * 60 * 1000;
+/** A subagent run's requester stays a partner-level author for this long after the run finished (isRunRequester). */
+export const RUN_REQUESTER_WINDOW_MS = 15 * 60 * 1000;
 
 export const RATE_LIMITED_TEXT = "You're sending me a lot of messages — give me a bit and try again.";
 
@@ -154,31 +159,38 @@ async function handleNewMessage(ev: MessageEvent) {
   }
   const quietPrefix = hasQuietPrefix(text);
   const followUp = !isDm && !mentionsBot && !mentionsOthers && !quietPrefix;
-  // The bot's latest message asked this author something (or offered): their next message needs no gate, whatever
-  // the idle time or engagement (taken atomically, so only the first message after the question counts).
-  const awaitedReply = followUp && thread.awaitsReplyFrom === authorId ? await consumeAwaitedReply(threadId, authorId) : false;
-  const twoParty = followUp && thread.engaged && !awaitedReply ? await isTwoPartyThread(thread, authorId) : false;
-  // The bot's latest reply was for this author and nobody else has written since: still their conversation.
+  // The bot's latest message asked this author something (or offered) at most AWAITED_REPLY_MAX_AGE_MS ago: their
+  // next message needs no gate, even in a disengaged thread (taken atomically, so only the first message after the
+  // question counts; a stale flag is cleared instead).
+  const now = new Date();
+  const awaitsReplyFrom = awaitedReplyFresh(thread.lastBotReplyAt, now, AWAITED_REPLY_MAX_AGE_MS) ? thread.awaitsReplyFrom : null;
+  const awaitedReply = followUp && thread.awaitsReplyFrom === authorId ? await consumeAwaitedReply(threadId, authorId, AWAITED_REPLY_MAX_AGE_MS) : false;
+  const twoParty = followUp && thread.engaged && !awaitedReply ? await isTwoPartyThread(thread, authorId, bot) : false;
+  // The bot's latest reply was for this author and nobody else (person or other bot) has written since: still their
+  // conversation.
   const lastReplyTs = followUp && thread.engaged && !awaitedReply && !twoParty && thread.lastBotPartner === authorId ? thread.lastBotReplyTs : null;
-  const othersSinceReply = lastReplyTs ? await othersSpokeBetween(threadId, authorId, lastReplyTs, ev.ts) : false;
+  const othersSinceReply = lastReplyTs ? await othersSpokeBetween(threadId, authorId, lastReplyTs, ev.ts, bot) : false;
   const partner = Boolean(lastReplyTs) && !othersSinceReply;
   // The bot's latest reply asked someone else (or offered) and this is the first human message since: probably
   // answering the bot too, but less certain, so it goes through the gate at the partner threshold.
   const answersOther =
     followUp && thread.engaged && !awaitedReply && !twoParty && !partner && thread.lastBotReplyTs
       ? answersOtherOffer({
-          awaitsReplyFrom: thread.awaitsReplyFrom,
+          awaitsReplyFrom,
           authorId,
-          humansSinceReply: thread.awaitsReplyFrom && thread.awaitsReplyFrom !== authorId ? await othersSpokeBetween(threadId, null, thread.lastBotReplyTs, ev.ts) : true,
+          humansSinceReply: awaitsReplyFrom && awaitsReplyFrom !== authorId ? await othersSpokeBetween(threadId, null, thread.lastBotReplyTs, ev.ts, bot) : true,
         })
       : false;
+  // They asked for a subagent run here that is still going or just reported back: probably following up on it.
+  const runRequester =
+    followUp && thread.engaged && !awaitedReply && !twoParty && !partner && !answersOther ? await isRunRequester(threadId, authorId, RUN_REQUESTER_WINDOW_MS) : false;
   // Their conversation a few minutes ago, but someone else wrote since: gated at the intermediate threshold.
   const recentPartner =
     lastReplyTs && !partner && !answersOther
-      ? isRecentPartner({ authorId, lastBotPartner: thread.lastBotPartner, lastBotReplyAt: thread.lastBotReplyAt, othersSpoke: othersSinceReply }, new Date(), limits.recentPartnerMs)
+      ? isRecentPartner({ authorId, lastBotPartner: thread.lastBotPartner, lastBotReplyAt: thread.lastBotReplyAt, othersSpoke: othersSinceReply }, now, limits.recentPartnerMs)
       : false;
 
-  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, partner, awaitedReply, answersOther, recentPartner, quietPrefix });
+  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, partner, awaitedReply, answersOther, runRequester, recentPartner, quietPrefix });
   log.debug({ threadId, ts: ev.ts, decision }, 'message decision');
   if (decision.action === 'ignore') {
     if (decision.reason === 'disengaged') await disengage(threadId, 'idle', null);
@@ -294,7 +306,9 @@ async function handleDelete(channelId: string, ts: string | undefined, prev?: Sl
   await appendEvent(threadId, 'message_deleted', row?.userId ?? prev?.user ?? null, { ts });
   const authorId = row?.userId ?? prev?.user;
   if (authorId) await removeFromBatch(threadId, authorId, ts);
-  await removeMessageFromTurns(threadId, ts);
+  // The deleted message was all the running turn was answering: stop it (the same flag `!stop` sets), silently.
+  const orphaned = await removeMessageFromTurns(threadId, ts, () => requestThreadStop(threadId));
+  if (orphaned != null) await appendEvent(threadId, 'turn_trigger_deleted', 'system', { turnId: orphaned, ts });
   if (ts === parseThreadId(threadId).threadTs) await handleRootDeleted(threadId);
 }
 

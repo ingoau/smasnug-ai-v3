@@ -32,7 +32,7 @@ import { recordFilePosts } from '../files/store.js';
 import { extractPartialString } from './partial-json.js';
 import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chooseDelivery, type DeliveryMode } from './util.js';
-import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, type ButtonsActionsBlock } from './reply-buttons.js';
+import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, normalizeButtons, type ButtonsActionsBlock } from './reply-buttons.js';
 import { saveReplyExtras } from './charts-store.js';
 import { buildExtras, degradedFileIds, extrasFallback, imageExtras, replyBody, withoutMarkers, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
@@ -95,6 +95,8 @@ const STOPPED_RESULT = 'Not delivered: the user pressed stop. Do not retry; call
 
 interface ReplyEntry {
   index: number;
+  /** Idempotency key base instead of `reply:<turn>:<index>` (finishText). */
+  keyBase?: string;
   mode: Promise<DeliveryMode>;
   buf: string;
   /** Stream progress over the (neutralised) reply text, see slack-markdown streamUnits. */
@@ -325,7 +327,7 @@ export class ReplyManager {
   }
 
   private key(e: ReplyEntry, suffix = '') {
-    return `reply:${this.t.turnId}:${e.index}${suffix}`;
+    return `${e.keyBase ?? `reply:${this.t.turnId}:${e.index}`}${suffix}`;
   }
 
   /**
@@ -476,8 +478,18 @@ export class ReplyManager {
     return this.t.stopRequested ? this.t.stopRequested().catch(() => false) : false;
   }
 
+  /**
+   * Post text the model wrote outside a reply call (front.ts: a plain-text answer) exactly like a reply (same
+   * sanitising, delivery, card and events), under its own idempotency key `textreply:<turn>`.
+   */
+  async finishText(text: string): Promise<string> {
+    const id = `textreply:${this.t.turnId}`;
+    this.start(id).keyBase = id;
+    return this.finish(id, text);
+  }
+
   /** Called from the tool's execute with the complete, validated input. */
-  async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly string[], chartsRaw?: unknown, rich: ReplyRich = {}): Promise<string> {
+  async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly unknown[], chartsRaw?: unknown, rich: ReplyRich = {}): Promise<string> {
     const e = this.start(toolCallId);
     e.finished = true;
     const text = neutralizeBroadcasts(rawText);
@@ -545,10 +557,10 @@ export class ReplyManager {
       : null;
     const mode = await e.mode;
     // Quick-reply buttons: the row id goes into the button values, so it exists before the message does.
-    const labels = normalizeButtonLabels(buttons);
+    const { labels, responses } = normalizeButtons(buttons);
     let btnRow: ReplyButtonsRow | null = null;
     if (labels.length) {
-      btnRow = await createReplyButtons({ threadId: this.t.threadId, channelId: this.t.channelId, turnId: this.t.turnId, key: this.key(e), labels }).catch((err) => {
+      btnRow = await createReplyButtons({ threadId: this.t.threadId, channelId: this.t.channelId, turnId: this.t.turnId, key: this.key(e), labels, responses }).catch((err) => {
         log.warn({ err }, 'creating reply buttons failed; replying without them');
         return null;
       });

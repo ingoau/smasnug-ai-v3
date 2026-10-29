@@ -84,18 +84,91 @@ export function endsTurnAfterStep(calls: StepCall[], results: StepResultPart[]):
   return responded;
 }
 
-/**
- * The note added before the one extra step a front turn gets when a step ended with plain text and no tool call.
- * The front runs with `toolChoice: 'required'`, so this is the backup for a provider that ignores it.
- */
-export const PLAIN_TEXT_NUDGE_NOTE =
-  "<system_note>Your text wasn't shown to anyone: only tool calls reach the thread. Send it with reply, or call end_turn if no reply is needed.</system_note>";
+/** Lookup tools (lookup-guard.ts LOOKUP_TOOLS; passed in to keep this file free of that import cycle). */
+type NameSet = ReadonlySet<string>;
 
 /**
- * Nudge once after a step that ended with plain text and no tool calls? Only when the text is non-empty, nothing
- * visible went out yet, this turn wasn't nudged already, it isn't being stopped, and a step is left under the limit.
- * Otherwise the turn ends as before (silent, or the fallback reply for a mention).
+ * A final `reply` (no continue_turn) in the same step as lookups. The turn doesn't end there (lookups aren't
+ * terminal-safe, so endsTurnAfterStep is false): the reply is treated as if `continue_turn` were set, and front.ts
+ * adds REPLY_WITH_LOOKUPS_NOTE so the model uses the results instead of taking its reply as the end.
  */
-export function shouldNudgePlainText(o: { text: string; toolCalls: number; nudged: boolean; visible: boolean; stopping: boolean; stepsUsed: number; maxSteps: number }): boolean {
-  return Boolean(o.text.trim()) && o.toolCalls === 0 && !o.nudged && !o.visible && !o.stopping && o.stepsUsed < o.maxSteps;
+export function replyEndsWithLookups(calls: StepCall[], lookupTools: NameSet): boolean {
+  return calls.some((c) => c.toolName === 'reply' && !continues(c.input)) && calls.some((c) => lookupTools.has(c.toolName));
+}
+
+/** The note before the step after such a reply (front.ts, once per turn). */
+export const REPLY_WITH_LOOKUPS_NOTE =
+  "<system_note>Your reply went out in the same step as lookups, so your turn goes on: their results are above. If they change or add to what you said, send one short follow-up reply with only what's new; otherwise call end_turn.</system_note>";
+
+/**
+ * The note added before the one extra step a front turn gets when a step ended with plain text that couldn't be
+ * posted as it is (decidePlainText → 'nudge'). Worded so the model sends the text as a first message, not as an
+ * apology for a "lost" one.
+ */
+export const PLAIN_TEXT_NUDGE_NOTE =
+  '<system_note>Nobody saw your last text: only tool calls reach the thread. If it was meant for the speaker, send it now with reply, as your first message to them: don\'t mention, apologise for or refer to an earlier message or draft ("above"). If no reply is needed, call end_turn.</system_note>';
+
+/** Plain text shorter than this (or fewer than two words) is never posted as a reply. */
+export const PLAIN_TEXT_MIN_CHARS = 12;
+/** When something else already went out (a reaction, a spawn), plain text is only posted from this length on. */
+export const PLAIN_TEXT_SUBSTANTIAL_CHARS = 60;
+
+/** Meta text about not replying: "No reply needed.", "(no response)", "Staying silent", "end_turn". */
+const META_RE =
+  /^\W*(no (reply|response|answer|action|message)|nothing (to (add|say|reply|do|respond)|needed|further)|not (replying|responding|needed)|staying (silent|quiet)|silen(t|ce)|skip(ping)?\b|end(ing)? (my |the )?turn|end_turn|n\/a\b|none\b)/i;
+/** Reasoning or planning rather than a message: "The user is asking…", "I should…", "Let me check…". */
+const REASONING_START_RE =
+  /^\W*(the (user|speaker|person)\b|the (message|thread|request|question) (is|was|seems|looks|asks|wants)\b|user (is|wants|asked|says|just)\b|they('re| are) (asking|saying|just)\b|this (message|request) (is|seems|looks)\b|i( should| need to| must| don't need| think i)\b|i('ll| will|'m going to| am going to) (call|use|spawn|reply|react|end|check|search|look|send|delegate|start|ask|respond|answer)\b|let me\b|now (i|let)\b|ok(ay)?,? (so|let me|now)\b|first,? (i|let)\b|looking at\b|based on (the|this) (context|thread|conversation)|since (the|this|they)\b|wait\b|hmm\b)/i;
+/** Prompt vocabulary or a third-person "the user is/wants…": text for the bot itself, not for the thread. */
+const TOOLISH_RE = /\b(end_turn|continue_turn|system_note|system note|reply tool)\b|<\/?system|\bthe (user|speaker) (is|wants|asked|says|just|seems|might|probably)\b|\b(for|to|tell) the (user|speaker)\b/i;
+/** Wholly wrapped in brackets / emphasis, like "(no response)" or "*silently ends turn*". */
+const WRAPPED_RE = /^\s*(\(.*\)|\[.*\]|\*[^*].*\*|_.*_)\s*$/s;
+
+/**
+ * Is plain text the model wrote (instead of calling reply) fit to post as its reply? Conservative: a message-shaped
+ * text of at least two words and PLAIN_TEXT_MIN_CHARS (PLAIN_TEXT_SUBSTANTIAL_CHARS when `substantial`), and not
+ * meta ("No reply needed."), reasoning ("The user wants…", "Let me check…"), tool talk or a bracketed aside.
+ */
+export function postablePlainText(text: string, opts: { substantial?: boolean } = {}): boolean {
+  const t = text.trim();
+  if (t.length < (opts.substantial ? PLAIN_TEXT_SUBSTANTIAL_CHARS : PLAIN_TEXT_MIN_CHARS)) return false;
+  if (t.split(/\s+/).length < 2) return false;
+  if (META_RE.test(t) || REASONING_START_RE.test(t) || TOOLISH_RE.test(t)) return false;
+  if (t.length <= 200 && WRAPPED_RE.test(t)) return false;
+  return true;
+}
+
+export type PlainTextAction = 'post' | 'nudge' | 'none';
+
+/**
+ * A step ended with plain text and no tool call (Claude runs with toolChoice 'auto', models.ts). What now?
+ * - 'post': post the text as the reply in code and end the turn (it meant to say it). Only when no message (reply /
+ *   send_message) went out this turn, the turn isn't being stopped, and the text is postable (postablePlainText;
+ *   substantial when another visible effect, e.g. a reaction or a spawn, already went out).
+ * - 'nudge': one more model step with PLAIN_TEXT_NUDGE_NOTE: text that isn't postable as it is, nothing visible
+ *   yet, not nudged already, a step left under the limit.
+ * - 'none': the turn ends (silent, or the fallback reply for a mention).
+ */
+export function decidePlainText(o: {
+  text: string;
+  toolCalls: number;
+  nudged: boolean;
+  /** A message (reply or send_message) is already visible this turn. */
+  messaged: boolean;
+  /** Any visible effect at all (reactions, spawns, steers, and messages). */
+  visible: boolean;
+  stopping: boolean;
+  stepsUsed: number;
+  maxSteps: number;
+  /**
+   * A reply is expected (a mention, DM, addressed follow-up or results turn). Text in an unaddressed relevance-check
+   * turn is never posted ("looks like they're just chatting" would land in a conversation nobody asked the bot into):
+   * it gets the nudge, which usually ends in end_turn.
+   */
+  expectsReply: boolean;
+}): PlainTextAction {
+  if (!o.text.trim() || o.toolCalls > 0 || o.stopping || o.messaged) return 'none';
+  if (o.expectsReply && postablePlainText(o.text, { substantial: o.visible })) return 'post';
+  if (o.visible || o.nudged || o.stepsUsed >= o.maxSteps) return 'none';
+  return 'nudge';
 }

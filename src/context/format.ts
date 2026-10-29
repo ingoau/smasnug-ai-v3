@@ -13,6 +13,7 @@
  */
 import type { MessageAttachment, MessageReaction, SlackFileRef } from '../core/types.js';
 import { contextFileLabel, type ContextFile } from '../files/format.js';
+import { parseSlackPermalink } from '../tools/util.js';
 
 export interface RenderMsg {
   ts: string;
@@ -155,6 +156,19 @@ const FORWARD_MAX_CHARS = 1500;
 const LINK_MAX_CHARS = 400;
 
 /**
+ * A forwarded message cut to `max` chars. With a link to the original (a Slack permalink: normalize.ts keeps the
+ * share's `from_url`, or builds one from its channel and ts) the marker says how to read all of it, so the model
+ * doesn't answer from the first part only (prod: "it cuts off at 2(a)"). A permalink to a `##` message never gets
+ * here: those forwards are dropped in normalize.ts, and the read tools filter `##` messages too.
+ */
+export function truncateForward(content: string, max: number, url?: string): string {
+  if (content.length <= max) return content;
+  const cut = truncateText(content, max);
+  if (!url || !parseSlackPermalink(url)) return cut;
+  return `${cut.replace(/ \[truncated\]$/, '')} [truncated; read the full message with read_public_thread permalink=${url}]`;
+}
+
+/**
  * `[forwarded from Sam in #ship: …]`, `[link preview: Title — description (url)]`, `[attached: …]`. Attachments whose
  * text the message already contains (an app message whose text is its attachment's fallback, or a public read that
  * inlined it) are skipped.
@@ -174,7 +188,8 @@ export function attachmentLabels(atts: MessageAttachment[] | undefined, rawText:
     if (!content) continue;
     const who = a.authorId ? ` from ${personRef(a.authorId, a.author)}` : a.author ? ` from ${a.author}` : '';
     const where = a.channel ? ` in #${a.channel}` : '';
-    out.push(`[${a.kind === 'forwarded' ? 'forwarded' : 'attached'}${who}${where}: ${truncateText(content, Math.min(FORWARD_MAX_CHARS, env.maxChars))}]`);
+    const max = Math.min(FORWARD_MAX_CHARS, env.maxChars);
+    out.push(`[${a.kind === 'forwarded' ? 'forwarded' : 'attached'}${who}${where}: ${truncateForward(content, max, a.url)}]`);
   }
   return out;
 }

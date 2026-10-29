@@ -285,7 +285,7 @@ export const limits = {
    * Front-turn lookup guard (src/agent/lookup-guard.ts): after this many lookup-only steps in one front turn, a note
    * tells the agent to delegate with spawn_subagent (or answer). 0 turns the guard off.
    */
-  frontLookupNudgeSteps: 3,
+  frontLookupNudgeSteps: 2,
   /** ...and after this many more lookup-only steps, the research tools are switched off for the rest of the turn. */
   frontLookupRestrictSteps: 2,
   autoSuspendReporters: 3,

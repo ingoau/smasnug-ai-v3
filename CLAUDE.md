@@ -68,7 +68,7 @@ Queue processors: export `processors: Partial<Record<QueueName, (job) => Promise
 - Workspace AI-bot guidelines (design doc, "When the bot responds"; `src/pipeline/guidelines.ts`): `##` messages are
   invisible (never stored/processed, filtered from every Slack read incl. backfill, read tools, search); `@bot !stop`
   = stop the current response (anyone; there is no native stop button); a top-level group/@channel ping that triggers the bot is answered in a new top-level message;
-  `<>` messages never trigger unless the bot is mentioned. The bot never pings groups (neutralised in code). Any new
+  `<>` (or `# `, hash + space) messages never trigger unless the bot is mentioned. The bot never pings groups (neutralised in code). Any new
   path that reads Slack messages must drop `##` messages (`fromSlack` does it); slack_search must stay fail-closed
   public-only (verified via the workspace directory or `conversations.info`; unknown → dropped).
 - Privacy policy (`PRIVACY.md`; `src/features/privacy.ts`, `src/pipeline/consent.ts`): a user must agree before a DM/mention

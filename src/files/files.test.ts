@@ -1,6 +1,8 @@
 /** Pure parts of the file store: ids, the access rule, names/MIME/kinds, descriptions, placeholders, paging. */
 import { describe, expect, it } from 'vitest';
 import { canUseFile } from './access.js';
+import { isCanvasFile, messageCarriesFile, parseSlackFileRef, pickSlackFileShare, shareCandidates } from './slack-ref.js';
+import { sandboxHint } from './tools.js';
 import {
   contextFileLabel,
   decideMime,
@@ -236,5 +238,54 @@ describe('files from elsewhere and save_url', () => {
     expect(isSlackUrl('https://a.slack-edge.com/x.png')).toBe(true);
     expect(isSlackUrl('https://notslack.com/x')).toBe(false);
     expect(isSlackUrl('not a url')).toBe(false);
+  });
+});
+
+describe('Slack file ids', () => {
+  it('parses bare ids and file links, nothing else', () => {
+    expect(parseSlackFileRef('F0ABC123')).toBe('F0ABC123');
+    expect(parseSlackFileRef('<https://hackclub.slack.com/files/U012AB/F0ABC123/clip.mp4|clip.mp4>')).toBe('F0ABC123');
+    expect(parseSlackFileRef('file_k3x9q2mf7a')).toBeUndefined();
+    expect(parseSlackFileRef('https://evil.example/files/U1/F0ABC123/x')).toBeUndefined();
+  });
+
+  it('picks a share in this conversation first, else a verified public channel, never a DM or an unverified one', () => {
+    const file = { shares: { public: { CPUB: [{ ts: '1790000002.000100' }], CHERE: [{ ts: '1790000001.000100', thread_ts: '1790000000.000100' }] }, private: { D1: [{ ts: '1790000003.000100' }], CPRIV: [{ ts: '1790000004.000100' }] } } };
+    expect(pickSlackFileShare(file, 'CHERE', new Set(['CPUB']))).toEqual({ channelId: 'CHERE', ts: '1790000001.000100', threadTs: '1790000000.000100', public: false });
+    expect(pickSlackFileShare(file, 'COTHER', new Set(['CPUB']))).toEqual({ channelId: 'CPUB', ts: '1790000002.000100', public: true });
+    expect(pickSlackFileShare(file, 'COTHER', new Set(['D1']))).toBeNull();
+    expect(pickSlackFileShare(file, 'COTHER', new Set())).toBeNull();
+    // A share without a message ts can't be checked: refused.
+    expect(pickSlackFileShare({ shares: { public: { CHERE: [{}] } } }, 'CHERE', new Set())).toBeNull();
+    expect(shareCandidates(file, 'CHERE').sort()).toEqual(['CPRIV', 'CPUB']);
+  });
+
+  it('accepts the share message only when it carries the file and is not a ## message', () => {
+    expect(messageCarriesFile({ text: 'clip', files: [{ id: 'F1' }] }, 'F1')).toBe(true);
+    expect(messageCarriesFile({ text: '## private', files: [{ id: 'F1' }] }, 'F1')).toBe(false);
+    expect(messageCarriesFile({ text: 'clip', files: [{ id: 'F2' }] }, 'F1')).toBe(false);
+    expect(messageCarriesFile(undefined, 'F1')).toBe(false);
+  });
+
+  it('tells canvases apart', () => {
+    expect(isCanvasFile({ filetype: 'quip' })).toBe(true);
+    expect(isCanvasFile({ filetype: 'mp4' })).toBe(false);
+  });
+});
+
+describe('sandboxHint', () => {
+  const base = { fileId: 'file_k3x9q2mf7a', kind: 'video' as const, sandboxChild: false, canSandbox: true };
+  it('front: spawn a sandbox subagent with the file id', () => {
+    const h = sandboxHint({ ...base, role: 'front' });
+    expect(h).toMatch(/spawn a subagent with sandbox: true/);
+    expect(h).toContain('file_k3x9q2mf7a');
+    expect(h).toMatch(/ffmpeg/);
+  });
+  it('a sandbox child imports it; another child reports it', () => {
+    expect(sandboxHint({ ...base, role: 'child', sandboxChild: true })).toMatch(/sandbox_import file_k3x9q2mf7a/);
+    expect(sandboxHint({ ...base, role: 'child', kind: 'pdf' })).toMatch(/say so in your result/);
+  });
+  it('nothing without sandbox access', () => {
+    expect(sandboxHint({ ...base, role: 'front', canSandbox: false })).toBe('');
   });
 });

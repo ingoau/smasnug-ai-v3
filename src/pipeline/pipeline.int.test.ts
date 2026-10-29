@@ -129,6 +129,19 @@ describe.skipIf(!infra)('pipeline integration', () => {
       await scheduler.removeMessageFromTurns(THREAD, '1.2');
       expect((await turns())[0]).toMatchObject({ status: 'cancelled' });
     });
+
+    it("deleting a running turn's only trigger reports it (to be stopped); with other triggers it just loses the ts", async () => {
+      await makeThread();
+      const [a] = await sql`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${THREAD}, 'U1', true, ${['1.1', '1.2']}, 'running') returning id::int as id`;
+      expect(await scheduler.removeMessageFromTurns(THREAD, '1.1')).toBeNull(); // '1.2' still asks
+      // Something still waits in its inbox: not orphaned either.
+      await sql`update turns set message_ts = ${['1.2']} where id = ${a!.id}`;
+      await sql`insert into thread_inbox (turn_id, message_ts) values (${a!.id}, '1.3')`;
+      expect(await scheduler.removeMessageFromTurns(THREAD, '1.2')).toBeNull();
+      await scheduler.removeMessageFromTurns(THREAD, '1.3');
+      expect(await scheduler.removeMessageFromTurns(THREAD, '1.2')).toBe(a!.id);
+      expect(await scheduler.removeMessageFromTurns(THREAD, '9.9')).toBeNull();
+    });
   });
 
   describe('thread-run', () => {
@@ -509,6 +522,18 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect((await sql`select addressed, gated from turns`)[0]).toEqual({ addressed: false, gated: true });
       const decisions = await sql`select payload from thread_events where thread_id = ${THREAD} and type = 'gate_decision' order by id`;
       expect(decisions.map((d) => d.payload.decision)).toEqual(['no', 'yes']);
+      expect(decisions.map((d) => d.payload.reason)).toEqual(['test answered "no"', 'test answered "yes"']);
+      // A decisions-model failure records its cause.
+      gate.mockResolvedValueOnce({ respond: false, raw: 'no', latencyMs: 1600, model: 'haiku', fallback: 'timed out after 1500ms', fallbackKind: 'timeout', fallbackAfterMs: 1500 });
+      await debounce.addToBatch(THREAD, 'U2', '1.5', 'gate');
+      await processDebounce(job({ threadId: THREAD, authorId: 'U2', seq: 3 }));
+      const [, , d3] = await sql`select payload from thread_events where thread_id = ${THREAD} and type = 'gate_decision' order by id`;
+      expect(d3!.payload).toMatchObject({
+        fallback: 'timed out after 1500ms',
+        fallbackKind: 'timeout',
+        fallbackAfterMs: 1500,
+        reason: 'decisions model failed (timeout): timed out after 1500ms; haiku answered "no"',
+      });
       gate.mockRestore();
     });
   });
@@ -825,6 +850,41 @@ describe.skipIf(!infra)('pipeline integration', () => {
       expect(row!.count).toBe(5);
     });
 
+    it("another bot's reply ends two-party and partner status (it's someone else talking); a bot's root post doesn't", async () => {
+      const { noteBotReply } = await import('./store.js');
+      const root = nextTs();
+      const tid = `${C}:${root}`;
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> question', ts: root }));
+      await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 1 });
+      await processSlackEvent(messageEnvelope({ bot_id: 'BOTHER', user: 'UOTHERBOT', text: 'I can help with that too', ts: nextTs(), thread_ts: root }));
+      const a = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'which one of you is faster', ts: a, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 2 })).toEqual([{ ts: a, reason: 'gate' }]);
+      // The bot replies to U1: partner again, until the other bot (here one without a user id) writes.
+      const botTs = nextTs();
+      await processSlackEvent(messageEnvelope({ bot_id: 'BBOT', user: 'UBOT', text: 'answer', ts: botTs, thread_ts: root }));
+      await noteBotReply(tid, { ts: botTs, partnerId: 'U1', awaitsReply: false });
+      const b = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'and the docs', ts: b, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 3 })).toEqual([{ ts: b, reason: 'partner' }]);
+      await processSlackEvent(messageEnvelope({ subtype: 'bot_message', bot_id: 'BOTHER', username: 'alerts', text: 'build failed', ts: nextTs(), thread_ts: root }));
+      const c = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'anyway', ts: c, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 4 })).toEqual([{ ts: c, reason: 'recent_partner' }]);
+
+      // A thread rooted in another bot's post (an alert) is still two-party for the first person who asks.
+      const root2 = nextTs();
+      const tid2 = `${C}:${root2}`;
+      await processSlackEvent(messageEnvelope({ subtype: 'bot_message', bot_id: 'BOTHER', username: 'alerts', text: 'deploy failed', ts: root2 }));
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> why?', ts: nextTs(), thread_ts: root2 }));
+      await debounce.takeBatch({ threadId: tid2, authorId: 'U1', seq: 1 });
+      // The root arrived before the bot was in the thread (not stored), so store it as backfill would.
+      await sql`insert into messages (channel_id, ts, thread_id, bot_id, username, text) values (${C}, ${root2}, ${tid2}, 'BOTHER', 'alerts', 'deploy failed') on conflict do nothing`;
+      const d = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'and how do I fix it', ts: d, thread_ts: root2 }));
+      expect(await debounce.takeBatch({ threadId: tid2, authorId: 'U1', seq: 2 })).toEqual([{ ts: d, reason: 'partner' }]);
+    });
+
     it('a follow-up whose only other mention is a "Sent using @…" context footer is not skipped as mentioning someone else', async () => {
       const root = nextTs();
       const tid = `${C}:${root}`;
@@ -881,6 +941,13 @@ describe.skipIf(!infra)('pipeline integration', () => {
       await noteBotReply(tid, { ts: nextTs(), partnerId: 'U1', awaitsReply: true });
       await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@U2> what do you think?', ts: nextTs(), thread_ts: root }));
       expect((await sql`select awaits_reply_from from threads where id = ${tid}`)[0]!.awaitsReplyFrom).toBe('U1');
+      // The question expires (AWAITED_REPLY_MAX_AGE_MS): a message hours later is no answer (still the bot's partner,
+      // so gated at the partner threshold, not 'direct'), and the stale flag is cleared.
+      await sql`update threads set last_bot_reply_at = now() - interval '3 hours' where id = ${tid}`;
+      const late = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'yes', ts: late, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 6 })).toEqual([{ ts: late, reason: 'partner' }]);
+      expect((await sql`select awaits_reply_from from threads where id = ${tid}`)[0]!.awaitsReplyFrom).toBeNull();
     });
 
     it("someone else's first message after the bot's question to another person is a likely answer (gated, not direct)", async () => {
@@ -906,6 +973,50 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const c = nextTs();
       await processSlackEvent(messageEnvelope({ user: 'U1', text: 'yes', ts: c, thread_ts: root }));
       expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 2 })).toEqual([{ ts: c, reason: 'direct' }]);
+    });
+
+    it("the requester of a running or just-reported subagent run is a partner-level author (gated at the partner threshold, own note)", async () => {
+      const root = nextTs();
+      const tid = `${C}:${root}`;
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> research this', ts: root }));
+      await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 1 });
+      await processSlackEvent(messageEnvelope({ user: 'U2', text: 'ooh nice', ts: nextTs(), thread_ts: root })); // not two-party
+      await debounce.takeBatch({ threadId: tid, authorId: 'U2', seq: 1 });
+      const [t] = await sql`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${tid}, 'U1', true, ${[root]}, 'done') returning id`;
+      await sql`insert into subagents (id, thread_id, owner_id, title) values ('sa_req1', ${tid}, 'U1', 'research')`;
+      const [r] = await sql`insert into runs (subagent_id, thread_id, turn_id, instructions, status) values ('sa_req1', ${tid}, ${t!.id}, 'research', 'running') returning id`;
+      const a = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'hows subagent going?', ts: a, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 2 })).toEqual([{ ts: a, reason: 'run_requester' }]);
+      // Not for someone else in the thread.
+      const b = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U2', text: 'is it done?', ts: b, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U2', seq: 2 })).toEqual([{ ts: b, reason: 'gate' }]);
+      // Reported 10 minutes ago: still; 20 minutes ago: back to the normal gate.
+      await sql`update runs set status = 'complete', reported = true, finished_at = now() - interval '10 minutes' where id = ${r!.id}`;
+      const c = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'heres the full thing is this good', ts: c, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 3 })).toEqual([{ ts: c, reason: 'run_requester' }]);
+      await sql`update runs set finished_at = now() - interval '20 minutes' where id = ${r!.id}`;
+      const d = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'ok', ts: d, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 4 })).toEqual([{ ts: d, reason: 'gate' }]);
+      // A run they cancelled a minute ago doesn't count.
+      await sql`update runs set status = 'cancelled', finished_at = now() - interval '1 minute' where id = ${r!.id}`;
+      const e2 = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'ok cool', ts: e2, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 5 })).toEqual([{ ts: e2, reason: 'gate' }]);
+
+      // At the gate: partner threshold, its own note, recorded on the event, an addressed turn.
+      const gate = vi.spyOn(gateImpl, 'run').mockResolvedValue({ respond: true, raw: '0.700', probability: 0.7, latencyMs: 5, model: 'test' });
+      await debounce.addToBatch(tid, 'U1', c, 'run_requester');
+      await processDebounce(job({ threadId: tid, authorId: 'U1', seq: 6 }));
+      expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.65 });
+      expect(gate.mock.calls[0]![0].note).toMatch(/asked .* for background work/);
+      const [e] = await sql`select payload from thread_events where thread_id = ${tid} and type = 'gate_decision'`;
+      expect(e!.payload).toMatchObject({ partner: true, runRequester: true, threshold: 0.65, reason: 'p=0.700 >= threshold 0.65', batchReasons: ['run_requester'] });
+      expect((await sql`select addressed, gated from turns where thread_id = ${tid} and status = 'pending'`)[0]).toEqual({ addressed: true, gated: true });
+      gate.mockRestore();
     });
 
     it('idle for hours only cools a thread (stricter gate); it disengages after a week, or after 25 messages', async () => {
@@ -1007,6 +1118,24 @@ describe.skipIf(!infra)('pipeline integration', () => {
       // Other threads and non-posting calls are unaffected.
       await expect(slackCall('chat.postMessage', { channel: C, thread_ts: nextTs(), text: 'hi' })).resolves.toMatchObject({ ok: true });
       await expect(slackCall('chat.update', { channel: C, ts: root, text: 'x' })).resolves.toMatchObject({ ok: true });
+    });
+
+    it("deleting the only message a running turn answers stops it (silently); the thread stays engaged", async () => {
+      const { stopRequestedSince } = await import('./stop.js');
+      const root = nextTs();
+      const tid = `${C}:${root}`;
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> help me', ts: root }));
+      const q = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> and this?', ts: q, thread_ts: root }));
+      await sql`insert into turns (thread_id, author_id, is_mention, message_ts, status, started_at) values (${tid}, 'U1', true, ${[q]}, 'running', now())`;
+      const before = Date.now() - 1;
+      const calls = (await fakeCalls()).length;
+      await processSlackEvent(messageEnvelope({ subtype: 'message_deleted', deleted_ts: q, previous_message: { user: 'U1', ts: q, thread_ts: root } }));
+      expect(await stopRequestedSince(tid, before)).toBe(true);
+      expect((await fakeCalls()).slice(calls).filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+      expect((await sql`select engaged from threads where id = ${tid}`)[0]!.engaged).toBe(true);
+      const [e] = await sql`select payload from thread_events where thread_id = ${tid} and type = 'turn_trigger_deleted'`;
+      expect(e!.payload).toMatchObject({ ts: q });
     });
 
     it('out-of-order processing: edit or delete before the original message', async () => {

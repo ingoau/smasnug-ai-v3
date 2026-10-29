@@ -147,19 +147,29 @@ export async function applyDelete(channelId: string, ts: string): Promise<{ thre
   return row;
 }
 
-/** True when only the thread's original poster (= authorId) and bots have spoken, as far as we have stored. */
-export async function isTwoPartyThread(thread: ThreadRow, authorId: string): Promise<boolean> {
+/** The bot's own Slack identity (core/slack.ts getBotIdentity): its stored messages carry either id. */
+export interface BotIds {
+  userId: string;
+  botId: string;
+}
+
+/**
+ * True when only the thread's original poster (= authorId) and this bot have spoken, as far as we have stored. A
+ * reply from another bot (an integration, another AI bot) counts as someone else; a bot's root post doesn't.
+ */
+export async function isTwoPartyThread(thread: ThreadRow, authorId: string, bot: BotIds): Promise<boolean> {
   const all = await sql<{ userId: string | null; ts: string; botId: string | null }[]>`
     select user_id, ts, bot_id from messages
-    where (thread_id = ${thread.id} or (channel_id = ${thread.channelId} and ts = ${thread.threadTs})) and user_id is not null
+    where (thread_id = ${thread.id} or (channel_id = ${thread.channelId} and ts = ${thread.threadTs})) and (user_id is not null or bot_id is not null)
     order by ts::numeric`;
   const root = all.find((r) => r.ts === thread.threadTs);
-  const rows = all.filter((r) => !r.botId);
+  const own = (r: { userId: string | null; botId: string | null }) => r.userId === bot.userId || r.botId === bot.botId;
   // Without the root we don't know who started the thread (mid-thread mention, not backfilled yet). A bot-rooted
-  // thread (e.g. the bot's own message after a group-ping redirect) was started by its first human message.
-  const opener = root?.botId ? rows[0] : root;
+  // thread (e.g. the bot's own message after a group-ping redirect, or an integration's alert) was started by its
+  // first human message.
+  const opener = root?.botId ? all.find((r) => !r.botId && !own(r)) : root;
   if (!opener || opener.userId !== authorId) return false;
-  return rows.every((r) => r.userId === authorId);
+  return all.every((r) => own(r) || (r === root && r.botId) || (!r.botId && r.userId === authorId));
 }
 
 export async function loadMessages(channelId: string, ts: string[], tx: Sql = sql): Promise<StoredMessage[]> {
@@ -191,21 +201,43 @@ export async function noteBotReply(threadId: string, o: { ts: string | null; par
     where id = ${threadId}`;
 }
 
-/** Atomically take the "bot awaits your answer" flag for this author. True for the first message that takes it. */
-export async function consumeAwaitedReply(threadId: string, authorId: string): Promise<boolean> {
-  const rows = await sql`update threads set awaits_reply_from = null where id = ${threadId} and awaits_reply_from = ${authorId} returning id`;
-  return rows.length > 0;
+/**
+ * Atomically take the "bot awaits your answer" flag for this author. True for the first message that takes it, while
+ * the bot's reply is at most `maxAgeMs` old (a stale flag is cleared, not taken: hours later it's no answer).
+ */
+export async function consumeAwaitedReply(threadId: string, authorId: string, maxAgeMs: number): Promise<boolean> {
+  const [row] = await sql<{ fresh: boolean }[]>`
+    update threads set awaits_reply_from = null where id = ${threadId} and awaits_reply_from = ${authorId}
+    returning coalesce(last_bot_reply_at > now() - ${maxAgeMs} * interval '1 millisecond', false) as fresh`;
+  return Boolean(row?.fresh);
 }
 
 /**
- * True if a human other than `authorId` (any human when null) wrote in the thread after `afterTs` and before
- * `beforeTs` (stored copies).
+ * True if someone other than `authorId` (anyone when null) and this bot wrote in the thread after `afterTs` and
+ * before `beforeTs` (stored copies): another person, or another bot.
  */
-export async function othersSpokeBetween(threadId: string, authorId: string | null, afterTs: string, beforeTs: string): Promise<boolean> {
+export async function othersSpokeBetween(threadId: string, authorId: string | null, afterTs: string, beforeTs: string, bot: BotIds): Promise<boolean> {
   const [row] = await sql<{ spoke: boolean }[]>`
     select exists (
-      select 1 from messages where thread_id = ${threadId} and not deleted and bot_id is null and user_id is not null
-        and (${authorId}::text is null or user_id <> ${authorId}) and ts::numeric > ${afterTs}::numeric and ts::numeric < ${beforeTs}::numeric
+      select 1 from messages where thread_id = ${threadId} and not deleted and (user_id is not null or bot_id is not null)
+        and user_id is distinct from ${bot.userId} and bot_id is distinct from ${bot.botId}
+        and (${authorId}::text is null or user_id is distinct from ${authorId}) and ts::numeric > ${afterTs}::numeric and ts::numeric < ${beforeTs}::numeric
     ) as spoke`;
   return Boolean(row?.spoke);
+}
+
+/**
+ * True if `authorId` asked for background work in this thread that is still going or just came back: a subagent run
+ * started by them (its turn's author, else the subagent's owner) that is queued / running, or finished at most
+ * `withinMs` ago. Their follow-ups ("how's it going?", "is this good?") are most likely for the bot.
+ */
+export async function isRunRequester(threadId: string, authorId: string, withinMs: number): Promise<boolean> {
+  const [row] = await sql<{ yes: boolean }[]>`
+    select exists (
+      select 1 from runs r join subagents s on s.id = r.subagent_id
+      left join turns t on t.id = r.turn_id and t.kind = 'user'
+      where r.thread_id = ${threadId} and coalesce(t.author_id, s.owner_id) = ${authorId}
+        and (r.status in ('queued', 'running') or (r.status = 'complete' and r.finished_at > now() - ${withinMs} * interval '1 millisecond'))
+    ) as yes`;
+  return Boolean(row?.yes);
 }

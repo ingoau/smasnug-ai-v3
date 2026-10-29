@@ -306,9 +306,15 @@ export async function finishTurn(turnId: number, status: 'done' | 'error' | 'can
   return out.followUp;
 }
 
-/** A deleted message leaves pending turns and unconsumed inbox rows; turns left empty are cancelled. */
-export async function removeMessageFromTurns(threadId: string, ts: string) {
-  await sql.begin(async (tx) => {
+/**
+ * A deleted message leaves pending turns and unconsumed inbox rows; turns left empty are cancelled. When it was the
+ * only trigger of the running user turn (nothing else drained or waiting in its inbox), returns that turn's id: the
+ * caller stops it (stop.ts requestThreadStop, passed as `onOrphan` so it runs under the thread lock), since what it
+ * answers is gone. A turn with other trigger messages just
+ * loses this one.
+ */
+export async function removeMessageFromTurns(threadId: string, ts: string, onOrphan?: (turnId: number) => Promise<void>): Promise<number | null> {
+  return sql.begin(async (tx) => {
     await lockThread(tx, threadId);
     await tx`
       delete from thread_inbox where message_ts = ${ts} and consumed_at is null
@@ -319,6 +325,13 @@ export async function removeMessageFromTurns(threadId: string, ts: string) {
     await tx`
       update turns set status = 'cancelled', finished_at = now()
       where thread_id = ${threadId} and status = 'pending' and kind = 'user' and cardinality(message_ts) = 0`;
+    const [orphan] = await tx<{ id: number }[]>`
+      select id::int as id from turns t
+      where thread_id = ${threadId} and status = 'running' and kind = 'user' and message_ts = array[${ts}]::text[]
+        and not exists (select 1 from thread_inbox i where i.turn_id = t.id and i.consumed_at is null)`;
+    // Under the thread lock, so no next turn can start before the caller's stop flag exists (it's thread-wide).
+    if (orphan && onOrphan) await onOrphan(orphan.id);
+    return orphan?.id ?? null;
   });
 }
 

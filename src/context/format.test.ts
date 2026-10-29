@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { annotateTsDates, compareTs, formatMessage, personRef, formatMessages, formatThread, isImageFile, reactionsLabel, renderSlackText, selectThread, tsDate, tsLabel, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
+import { annotateTsDates, compareTs, formatMessage, truncateForward, personRef, formatMessages, formatThread, isImageFile, reactionsLabel, renderSlackText, selectThread, tsDate, tsLabel, userIdsIn, type FormatEnv, type RenderMsg } from './format.js';
 import { applyReaction, reactionsFromSlack } from './reactions.js';
 import { fixtureReplies, FIX_THREAD_TS } from './fixtures.js';
 import { attachmentsFromSlack, fromSlack, slackFileRefs } from './normalize.js';
@@ -197,6 +197,25 @@ describe('forwards and link unfurls (attachments)', () => {
     expect(formatMessage(bot, env())).toBe('[1790000000.000200 · 2026-09-21 14:13 UTC] [bot] CI Bot: Build #42 failed');
     const long = fromSlack({ ts: '1790000000.000300', user: 'U0INGO', text: 'fwd', attachments: [{ is_share: true, text: 'word '.repeat(1000) }] })!;
     expect(formatMessage(long, env()).length).toBeLessThan(1300);
+  });
+
+  it('a cut forward with a permalink says how to read the whole original', () => {
+    const url = 'https://x.slack.com/archives/C1/p1790000000000100';
+    const m = fromSlack({ ts: '1790000000.000300', user: 'U0INGO', text: 'fwd', attachments: [{ ...forward, text: 'word '.repeat(1000) }] })!;
+    const out = formatMessage(m, env({ maxChars: 4000 }));
+    expect(out).toContain(`[truncated; read the full message with read_public_thread permalink=${url}]]`);
+    expect(out).not.toContain('word [truncated]');
+    // Short forwards and forwards without a usable link keep the plain marker.
+    expect(truncateForward('short', 100, url)).toBe('short');
+    expect(truncateForward('a b c d e f', 5)).toBe('a b c [truncated]');
+    expect(truncateForward('a b c d e f', 5, 'https://example.com/x')).toBe('a b c [truncated]');
+  });
+
+  it('a forward without from_url gets a permalink from its channel and ts (not for DMs)', () => {
+    const [a] = attachmentsFromSlack([{ is_share: true, text: 'hi', channel_id: 'C0SHIP', ts: '1790000000.000100' }]);
+    expect(a!.url).toBe('https://slack.com/archives/C0SHIP/p1790000000000100');
+    expect(attachmentsFromSlack([{ is_share: true, text: 'hi', channel_id: 'D0DM', ts: '1790000000.000100' }])[0]!.url).toBeUndefined();
+    expect(attachmentsFromSlack([{ is_share: true, text: '## hidden', channel_id: 'C0SHIP', ts: '1790000000.000100' }])).toEqual([]);
   });
 });
 

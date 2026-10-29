@@ -12,8 +12,8 @@ import { log } from '../log.js';
 import { markMessage } from '../core/timing.js';
 import { isLatestSeq, releaseInflight, takeBatch, type DebounceJob } from './debounce.js';
 import { clearIntakeStatus } from './session-status.js';
-import { runGate, type GateResult } from './gate.js';
-import { type BatchReason, batchIsAddressed, batchIsMention, batchIsPartnerLike, batchIsRecentPartner, batchNeedsGate, gateThreshold, isCooling } from './rules.js';
+import { gateDecisionReason, runGate, type GateResult } from './gate.js';
+import { type BatchReason, batchIsAddressed, batchIsMention, batchIsRecentPartner, batchNeedsGate, batchPartnerKind, gateThreshold, isCooling } from './rules.js';
 import { pushToRunningTurn, scheduleMessages, wakeHeldTurn } from './scheduler.js';
 import { getThread, loadMessages, recentMessages } from './store.js';
 import { djGateNote } from '../features/huddlefm/render.js';
@@ -34,6 +34,14 @@ export function recentPartnerGateNote(botName: string): string {
 /** The gate's note for someone else's first message after the bot's question / offer (rules.ts 'answer_other'). */
 export function answerGateNote(botName: string): string {
   return `${botName}'s latest message in this thread ended with a question or an offer for another person, and the newest message is the first anyone has written since: it may well be answering ${botName}'s question or taking up its offer.`;
+}
+
+/**
+ * The gate's note for someone whose subagent run in this thread is still going or just reported back (rules.ts
+ * 'run_requester'): their follow-up is probably about that work.
+ */
+export function runRequesterGateNote(botName: string): string {
+  return `The newest message comes from the person who asked ${botName} for background work in this thread that is still running or just reported back: a question about its progress, or a follow-up on its result or on what ${botName} delivered, is most likely meant for ${botName}, unless it is clearly aimed at someone else or just an acknowledgement.`;
 }
 
 /** Swappable for tests. */
@@ -84,9 +92,12 @@ async function fireBatch(job: Job<DebounceJob>, batch: { ts: string; reason: Bat
   }
 
   const needsGate = batchNeedsGate(reasons);
-  // Partner threshold: the bot's conversation partner ('partner'), or someone else answering it ('answer_other').
-  const partner = batchIsPartnerLike(reasons);
-  const answersOther = partner && !reasons.includes('partner');
+  // Partner threshold: the bot's conversation partner ('partner'), someone else answering it ('answer_other'), or the
+  // requester of a running / just-reported subagent run ('run_requester'). The strongest picks the gate's note.
+  const partnerKind = batchPartnerKind(reasons);
+  const partner = partnerKind != null;
+  const answersOther = partnerKind === 'answer_other';
+  const runRequester = partnerKind === 'run_requester';
   // Intermediate threshold: the bot's recent partner, but someone else wrote since its reply ('recent_partner').
   const recentPartner = batchIsRecentPartner(reasons);
   if (needsGate) {
@@ -102,33 +113,38 @@ async function fireBatch(job: Job<DebounceJob>, batch: { ts: string; reason: Bat
     // Code-written situation for the gate (never thread content).
     const roleNote = answersOther
       ? answerGateNote(env.BOT_DISPLAY_NAME)
-      : partner
-        ? partnerGateNote(env.BOT_DISPLAY_NAME)
-        : recentPartner
-          ? recentPartnerGateNote(env.BOT_DISPLAY_NAME)
-          : '';
+      : runRequester
+        ? runRequesterGateNote(env.BOT_DISPLAY_NAME)
+        : partner
+          ? partnerGateNote(env.BOT_DISPLAY_NAME)
+          : recentPartner
+            ? recentPartnerGateNote(env.BOT_DISPLAY_NAME)
+            : '';
     const note = [roleNote, djNote ?? ''].filter(Boolean).join(' ');
     const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId, threshold, ...(note ? { note } : {}) });
     await appendEvent(threadId, 'gate_decision', 'system', {
       messageTs: ts,
       authorId,
       decision: result.respond ? 'yes' : 'no',
+      reason: gateDecisionReason(result, threshold),
+      batchReasons: [...new Set(reasons)],
       raw: result.raw,
       latencyMs: result.latencyMs,
       model: result.model,
       threshold,
       ...(partner ? { partner: true } : {}),
       ...(answersOther ? { answersOther: true } : {}),
+      ...(runRequester ? { runRequester: true } : {}),
       ...(recentPartner ? { recentPartner: true } : {}),
       ...(cooling ? { cooling: true } : {}),
       ...(result.probability !== undefined ? { probability: result.probability } : {}),
-      ...(result.fallback ? { fallback: result.fallback } : {}),
+      ...(result.fallback ? { fallback: result.fallback, fallbackKind: result.fallbackKind, fallbackAfterMs: result.fallbackAfterMs } : {}),
       ...(result.error ? { error: result.error.slice(0, 300) } : {}),
     });
     await recordModelUsage({ userId: authorId, threadId, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens }).catch((err) =>
       log.warn({ err }, 'recordModelUsage failed'),
     );
-    log.info({ threadId, authorId, respond: result.respond, model: result.model, probability: result.probability, threshold, partner, recentPartner, cooling, fallback: result.fallback, latencyMs: result.latencyMs }, 'gate decision');
+    log.info({ threadId, authorId, respond: result.respond, model: result.model, probability: result.probability, threshold, partner, runRequester, recentPartner, cooling, fallback: result.fallback, fallbackKind: result.fallbackKind, latencyMs: result.latencyMs }, 'gate decision');
     if (!result.respond) return;
     // Addressed: reset the disengagement counters.
     await sql`update threads set last_addressed_at = now(), messages_since_addressed = 0 where id = ${threadId}`;

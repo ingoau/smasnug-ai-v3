@@ -27,6 +27,7 @@ import { sql } from '../db/index.js';
 import { takeLimit } from '../features/guard.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { joinFiles, MAX_JOIN_FILES } from '../files/tools.js';
+import { isCanvasFile } from '../files/slack-ref.js';
 import { log } from '../log.js';
 import {
   canEditCanvas,
@@ -46,6 +47,8 @@ import { errMsg, untrusted } from './util.js';
 const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 20);
 
 export const NOT_A_CANVAS = 'Not a canvas link or id. Pass a canvas link (https://<workspace>.slack.com/docs/T…/F…) or its id (F…).';
+export const notACanvasFile = (id: string) =>
+  `${id} is a Slack file, not a canvas: open it with read_file (file_id "${id}"), or ask_file for one question about it.`;
 export const READ_REFUSED =
   "Can't read that canvas: I can only read canvases shared in this conversation or in a public channel (or ones I made for this conversation). Tell the speaker briefly; they can share it here or paste the part they need.";
 const MISSING_SCOPE = "Canvases aren't enabled for the bot yet (the Slack app needs the canvases:read/canvases:write scopes; an admin has to reinstall it). Tell the speaker briefly.";
@@ -121,7 +124,10 @@ registerTool({
         if (over) return over;
         try {
           const { access, row, file } = await checkReadAccess(ctx, canvasId);
+          // Access first: the redirect would otherwise tell whether a file the speaker can't see exists.
           if (!access.ok) return READ_REFUSED;
+          // A Slack file id that isn't a canvas (users paste F… ids of uploads): read_file opens those.
+          if (!row && file?.filetype && !isCanvasFile(file)) return notACanvasFile(canvasId);
           const raw = await getCanvasMarkdown(canvasId);
           if (row) await touch(canvasId);
           const text = fromCanvasMarkdown(raw);
