@@ -33,7 +33,7 @@ import { activeRunsInThread, maybeSynthesize } from './subagents.js';
 import { loadSinceRound, renderSinceRound } from './round-since.js';
 import { cursorInstructRefusal, cursorRefusal, isCursorAdmin } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
-import { decidePlainText, endsTurnAfterStep, PLAIN_TEXT_NUDGE_NOTE, postablePlainText, replyEndsWithLookups, REPLY_WITH_LOOKUPS_NOTE, TERMINAL_SAFE_TOOLS, type StepCall, type StepResultPart } from './turn-end.js';
+import { decidePlainText, endsTurnAfterStep, PLAIN_TEXT_NUDGE_NOTE, postablePlainText, replyEndsWithLookups, REPLY_WITH_LOOKUPS_NOTE, type StepCall, type StepResultPart } from './turn-end.js';
 import { countLookupSteps, LOOKUP_RESTRICT_NOTE, LOOKUP_TOOLS, lookupGuard, lookupNudgeNote, nonLookupTools, type LookupGuard } from './lookup-guard.js';
 import { loadSessionInfo, type SessionInfo } from '../pipeline/agent-session.js';
 import { noteBotReply } from '../pipeline/store.js';
@@ -747,8 +747,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const anyVisible = () => state.visible.size > 0 || replies.anyVisible;
   /** A message (reply or send_message) went out: plain text is never posted on top of it. */
   const messaged = () => state.visible.has('reply') || state.visible.has('send') || replies.anyVisible;
+  const expectsReply = io.isMention || Boolean(turn.addressed) || turn.kind === 'synthesis' || Boolean(session?.isDm);
   const plainTextAction = (text: string, toolCalls: number, stopping: boolean) =>
-    decidePlainText({ text, toolCalls, nudged, messaged: messaged(), visible: anyVisible(), stopping, stepsUsed: doneSteps.length, maxSteps: MAX_STEPS });
+    decidePlainText({ text, toolCalls, nudged, messaged: messaged(), visible: anyVisible(), stopping, stepsUsed: doneSteps.length, maxSteps: MAX_STEPS, expectsReply });
   try {
     if (await checkStop()) throw new TurnStopped();
     timing.mark('model_request');
@@ -876,7 +877,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             doneSteps.push([...stepTools]);
             lastText = stepText;
             lastCalls = stepCalls.length;
-            if (stepCalls.every((c) => TERMINAL_SAFE_TOOLS.has(c.toolName)) && postablePlainText(stepText)) fallbackText = stepText.trim();
+            // Only text written alone (or next to end_turn): text beside report_user, leave_thread, remember… can be a
+            // private aside ("flagging this quietly"), never something to post.
+            if (stepCalls.every((c) => c.toolName === 'end_turn') && postablePlainText(stepText)) fallbackText = stepText.trim();
             // Final step detection: a step whose reply/reaction went out ends the loop (endsTurnAfterStep, same rule
             // as stopWhen), and so does a step without tool calls unless it gets the nudge: new messages then start a
             // fresh turn instead.

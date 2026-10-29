@@ -160,9 +160,15 @@ export function decidePlainText(o: {
   stopping: boolean;
   stepsUsed: number;
   maxSteps: number;
+  /**
+   * A reply is expected (a mention, DM, addressed follow-up or results turn). Text in an unaddressed relevance-check
+   * turn is never posted ("looks like they're just chatting" would land in a conversation nobody asked the bot into):
+   * it gets the nudge, which usually ends in end_turn.
+   */
+  expectsReply: boolean;
 }): PlainTextAction {
   if (!o.text.trim() || o.toolCalls > 0 || o.stopping || o.messaged) return 'none';
-  if (postablePlainText(o.text, { substantial: o.visible })) return 'post';
+  if (o.expectsReply && postablePlainText(o.text, { substantial: o.visible })) return 'post';
   if (o.visible || o.nudged || o.stepsUsed >= o.maxSteps) return 'none';
   return 'nudge';
 }

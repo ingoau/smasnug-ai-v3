@@ -115,7 +115,11 @@ describe('postablePlainText', () => {
 });
 
 describe('decidePlainText', () => {
-  const base = { text: 'The answer is 42.', toolCalls: 0, nudged: false, messaged: false, visible: false, stopping: false, stepsUsed: 1, maxSteps: 12 };
+  const base = { text: 'The answer is 42.', toolCalls: 0, nudged: false, messaged: false, visible: false, stopping: false, stepsUsed: 1, maxSteps: 12, expectsReply: true };
+  it('never posts in an unaddressed turn: nudges instead (or nothing once nudged)', () => {
+    expect(decidePlainText({ ...base, expectsReply: false, text: "Looks like they're just chatting, nothing for me here." })).toBe('nudge');
+    expect(decidePlainText({ ...base, expectsReply: false, nudged: true })).toBe('none');
+  });
   it('posts a postable text when nothing went out, also after a nudge or at the step limit', () => {
     expect(decidePlainText(base)).toBe('post');
     expect(decidePlainText({ ...base, nudged: true })).toBe('post');

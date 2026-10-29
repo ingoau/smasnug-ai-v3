@@ -533,10 +533,16 @@ describe('runFrontTurn: required tool calls and the plain-text nudge', () => {
     expect(a.phases).toEqual(['final']);
   });
 
-  it('an unmentioned turn posts its plain-text answer too', async () => {
+  it('an addressed unmentioned turn posts its plain-text answer too; an unaddressed one never does', async () => {
     h.model = mockModel([textStep('Here is what I found: it ships on Friday.')]);
-    await runFrontTurn(turn({ id: 147, isMention: false }), io(false).io);
+    await runFrontTurn(turn({ id: 147, isMention: false, addressed: true }), io(false).io);
     expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['Here is what I found: it ships on Friday.']);
+
+    h.slack = [];
+    h.model = mockModel([textStep("Looks like they're just chatting, nothing for me here."), textStep('Still just chatting between them.')]);
+    await runFrontTurn(turn({ id: 153, isMention: false }), io(false).io);
+    expect(calls()).toHaveLength(2); // nudged once, never posted
+    expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
   });
 
   it('text that reads as reasoning gets one more step with the note; a reply then goes out and no fallback', async () => {
@@ -581,6 +587,13 @@ describe('runFrontTurn: required tool calls and the plain-text nudge', () => {
     await runFrontTurn(turn({ id: 152 }), io().io);
     expect(fallbacks()).toHaveLength(0);
     expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['It is 42, per the docs.']);
+  });
+
+  it('text next to report_user is a private aside: never posted, the generic fallback goes out', async () => {
+    const step = [...textStep('Harassing people again, flagging this quietly.').slice(0, -1), ...toolStep(['report_user', { reason: 'harassment' }], ['end_turn', {}]).slice(1)];
+    h.model = mockModel([step]);
+    await runFrontTurn(turn({ id: 154 }), io().io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text).join(' ')).not.toContain('flagging');
   });
 
   it('end_turn after the nudge stays silent', async () => {
