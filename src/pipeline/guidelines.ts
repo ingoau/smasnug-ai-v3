@@ -6,7 +6,8 @@
  * 2. `@bot !stop`: stop the current response (stop.ts; there is no native stop button).
  * 3. A top-level channel message that pings a group (user group, @channel/@here/@everyone) and triggers the bot: the
  *    bot answers in a new top-level message instead of replying under the group ping.
- * 4. `<>` prefix: never triggers a turn or the gate unless the bot is @mentioned (still stored and visible).
+ * 4. `<>` prefix, or a single `#` (an alias; `##` is rule 1): never triggers a turn or the gate unless the bot is
+ *    @mentioned (still stored and visible).
  */
 
 const lead = (text: string | null | undefined) => (text ?? '').trimStart();
@@ -18,7 +19,8 @@ export function isHiddenMessage(text: string | null | undefined): boolean {
 
 /** Rule 4: text (trimmed) starts with a literal `<>` (raw or entity-escaped, e.g. `&lt;&gt;`). */
 export function hasQuietPrefix(text: string | null | undefined): boolean {
-  return /^(?:<|&lt;)(?:>|&gt;)/.test(lead(text));
+  // A single `#` is an alias (`##` is rule 1). A Slack channel link arrives as `<#C…>`, so it never matches.
+  return /^(?:(?:<|&lt;)(?:>|&gt;)|#(?!#))/.test(lead(text));
 }
 
 const GROUP_PING = /<!(?:subteam\^[A-Z0-9]+|channel|here|everyone)(?:\|[^>]*)?>/i;

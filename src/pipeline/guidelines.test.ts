@@ -38,6 +38,13 @@ describe('<> prefix (quiet)', () => {
     expect(hasQuietPrefix('<&gt;hi')).toBe(true);
     expect(hasQuietPrefix(`<> <@${BOT}> hi`)).toBe(true);
   });
+  it('a single # is an alias; ## is the hidden prefix instead', () => {
+    expect(hasQuietPrefix('# just chatting')).toBe(true);
+    expect(hasQuietPrefix('  #note to self')).toBe(true);
+    expect(hasQuietPrefix('## hidden')).toBe(false);
+    expect(hasQuietPrefix('<#C123|general> hi')).toBe(false);
+    expect(hasQuietPrefix('see #general')).toBe(false);
+  });
   it('does not confuse Slack mention / link / channel markup with the prefix', () => {
     expect(hasQuietPrefix(`<@${BOT}> <> hi`)).toBe(false);
     expect(hasQuietPrefix('<#C123|general> hi')).toBe(false);

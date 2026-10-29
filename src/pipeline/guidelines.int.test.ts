@@ -269,6 +269,20 @@ describe.skipIf(!infra)('workspace AI-bot guidelines (intake)', () => {
       expect(await debounce.takeBatch({ threadId: THREAD, authorId: 'U1', seq: await batchSeq(THREAD, 'U1') })).toEqual([{ ts: loud, reason: 'mention' }]);
     });
 
+    it('a single # works like <>: stored, no turn; with a bot mention it is a normal mention', async () => {
+      await makeThread();
+      await storeMsg('U1', T, '<@UBOT> question');
+      await storeMsg('UBOT', '1700000000.000150', 'answer', { botId: 'BBOT' });
+      const quiet = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '# side note', ts: quiet, thread_ts: T }));
+      expect(await batchSeq(THREAD, 'U1')).toBe(0);
+      expect(await debounceJobs()).toEqual([]);
+      expect((await sql`select text from messages where ts = ${quiet}`)[0]!.text).toBe('# side note');
+      const loud = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '# <@UBOT> hi', ts: loud, thread_ts: T }));
+      expect(await debounce.takeBatch({ threadId: THREAD, authorId: 'U1', seq: await batchSeq(THREAD, 'U1') })).toEqual([{ ts: loud, reason: 'mention' }]);
+    });
+
     it('a DM starting with <> gets no reply', async () => {
       const ts = nextTs();
       await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'message', channel: 'D0GUIDE', channel_type: 'im', user: 'U1', text: '<> note', ts } } }));
