@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { formatNameMatches, looksLikeNameQuery, matchEmojiNames, namePatterns, semojiSearchRetry, type EmojiHit } from './emoji.js';
+import { formatNameMatches, globMatch, looksLikeNameQuery, matchEmojiNames, namePatterns, semojiSearchRetry, type EmojiHit } from './emoji.js';
 
 const list = {
   'yay-1': 'https://emoji.slack-edge.com/T/yay-1/a.png',
@@ -52,5 +52,23 @@ describe('semojiSearchRetry', () => {
     const bad = vi.fn().mockRejectedValue(new Error('semoji HTTP 401'));
     await expect(semojiSearchRetry('party', opts, bad)).rejects.toThrow('401');
     expect(bad).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('globMatch', () => {
+  it('matches * globs like the shell (prefix, suffix, middle parts, exact names)', () => {
+    expect(globMatch('yay-*', 'yay-party')).toBe(true);
+    expect(globMatch('yay-*', 'yay')).toBe(false);
+    expect(globMatch('*parrot*', 'fastparrot2')).toBe(true);
+    expect(globMatch('a*b*c', 'aXbYc')).toBe(true);
+    expect(globMatch('a*b*c', 'acb')).toBe(false);
+    expect(globMatch('ab*ba', 'aba')).toBe(false); // prefix and suffix may not overlap
+    expect(globMatch('blob.cat', 'blob.cat')).toBe(true);
+    expect(globMatch('blob.cat', 'blobxcat')).toBe(false);
+  });
+  it('stays fast on patterns that make a .* regex backtrack exponentially', () => {
+    const started = Date.now();
+    expect(globMatch(`${'*a'.repeat(15)}*z`, 'a'.repeat(5000))).toBe(false);
+    expect(Date.now() - started).toBeLessThan(100);
   });
 });

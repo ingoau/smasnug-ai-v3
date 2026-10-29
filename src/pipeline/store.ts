@@ -237,7 +237,7 @@ export async function isRunRequester(threadId: string, authorId: string, withinM
       select 1 from runs r join subagents s on s.id = r.subagent_id
       left join turns t on t.id = r.turn_id and t.kind = 'user'
       where r.thread_id = ${threadId} and coalesce(t.author_id, s.owner_id) = ${authorId}
-        and (r.status in ('queued', 'running') or r.finished_at > now() - ${withinMs} * interval '1 millisecond')
+        and (r.status in ('queued', 'running') or (r.status = 'complete' and r.finished_at > now() - ${withinMs} * interval '1 millisecond'))
     ) as yes`;
   return Boolean(row?.yes);
 }

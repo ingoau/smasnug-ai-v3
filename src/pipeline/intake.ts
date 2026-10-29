@@ -307,11 +307,8 @@ async function handleDelete(channelId: string, ts: string | undefined, prev?: Sl
   const authorId = row?.userId ?? prev?.user;
   if (authorId) await removeFromBatch(threadId, authorId, ts);
   // The deleted message was all the running turn was answering: stop it (the same flag `!stop` sets), silently.
-  const orphaned = await removeMessageFromTurns(threadId, ts);
-  if (orphaned != null) {
-    await requestThreadStop(threadId);
-    await appendEvent(threadId, 'turn_trigger_deleted', 'system', { turnId: orphaned, ts });
-  }
+  const orphaned = await removeMessageFromTurns(threadId, ts, () => requestThreadStop(threadId));
+  if (orphaned != null) await appendEvent(threadId, 'turn_trigger_deleted', 'system', { turnId: orphaned, ts });
   if (ts === parseThreadId(threadId).threadTs) await handleRootDeleted(threadId);
 }
 

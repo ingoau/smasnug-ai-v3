@@ -1001,11 +1001,16 @@ describe.skipIf(!infra)('pipeline integration', () => {
       const d = nextTs();
       await processSlackEvent(messageEnvelope({ user: 'U1', text: 'ok', ts: d, thread_ts: root }));
       expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 4 })).toEqual([{ ts: d, reason: 'gate' }]);
+      // A run they cancelled a minute ago doesn't count.
+      await sql`update runs set status = 'cancelled', finished_at = now() - interval '1 minute' where id = ${r!.id}`;
+      const e2 = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: 'ok cool', ts: e2, thread_ts: root }));
+      expect(await debounce.takeBatch({ threadId: tid, authorId: 'U1', seq: 5 })).toEqual([{ ts: e2, reason: 'gate' }]);
 
       // At the gate: partner threshold, its own note, recorded on the event, an addressed turn.
       const gate = vi.spyOn(gateImpl, 'run').mockResolvedValue({ respond: true, raw: '0.700', probability: 0.7, latencyMs: 5, model: 'test' });
       await debounce.addToBatch(tid, 'U1', c, 'run_requester');
-      await processDebounce(job({ threadId: tid, authorId: 'U1', seq: 5 }));
+      await processDebounce(job({ threadId: tid, authorId: 'U1', seq: 6 }));
       expect(gate.mock.calls[0]![0]).toMatchObject({ threshold: 0.65 });
       expect(gate.mock.calls[0]![0].note).toMatch(/asked .* for background work/);
       const [e] = await sql`select payload from thread_events where thread_id = ${tid} and type = 'gate_decision'`;

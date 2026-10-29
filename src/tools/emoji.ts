@@ -76,9 +76,25 @@ export function looksLikeNameQuery(query: string): boolean {
   return /\*/.test(query) || /(^|\s):[a-z0-9_+\-']+:(\s|,|$)/i.test(query.trim());
 }
 
-function globRegex(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.+?^$()|[\]{}\\]/g, '\\$&');
-  return new RegExp(`^${escaped.replace(/\*/g, '.*')}$`);
+/**
+ * Does `name` match a glob whose only wildcard is `*`? Linear (prefix, suffix, then each middle part at its leftmost
+ * spot), unlike a `.*` regex, which backtracks exponentially on patterns like `*a*a*a…*z` (user-controlled input).
+ */
+export function globMatch(pattern: string, name: string): boolean {
+  const parts = pattern.split('*');
+  if (parts.length === 1) return name === pattern;
+  const first = parts[0]!;
+  const last = parts.at(-1)!;
+  if (name.length < first.length + last.length || !name.startsWith(first) || !name.endsWith(last)) return false;
+  const end = name.length - last.length;
+  let pos = first.length;
+  for (const mid of parts.slice(1, -1)) {
+    if (!mid) continue;
+    const i = name.indexOf(mid, pos);
+    if (i < 0 || i + mid.length > end) return false;
+    pos = i + mid.length;
+  }
+  return true;
 }
 
 /**
@@ -86,10 +102,9 @@ function globRegex(pattern: string): RegExp {
  * first, then the rest alphabetically, at most `limit`. `total` counts every match.
  */
 export function matchEmojiNames(list: Record<string, string>, patterns: string[], limit = NAME_RESULTS): { names: { name: string; aliasOf?: string }[]; total: number } {
-  const res = patterns.map(globRegex);
   const exact = new Set(patterns.filter((p) => !p.includes('*')));
   const hits = Object.keys(list)
-    .filter((n) => Object.hasOwn(list, n) && typeof list[n] === 'string' && res.some((r) => r.test(n)))
+    .filter((n) => Object.hasOwn(list, n) && typeof list[n] === 'string' && patterns.some((p) => globMatch(p, n)))
     .sort((a, b) => Number(exact.has(b)) - Number(exact.has(a)) || a.localeCompare(b));
   return {
     names: hits.slice(0, limit).map((name) => (list[name]!.startsWith('alias:') ? { name, aliasOf: list[name]!.slice('alias:'.length) } : { name })),

@@ -124,9 +124,10 @@ registerTool({
         if (over) return over;
         try {
           const { access, row, file } = await checkReadAccess(ctx, canvasId);
+          // Access first: the redirect would otherwise tell whether a file the speaker can't see exists.
+          if (!access.ok) return READ_REFUSED;
           // A Slack file id that isn't a canvas (users paste F… ids of uploads): read_file opens those.
           if (!row && file?.filetype && !isCanvasFile(file)) return notACanvasFile(canvasId);
-          if (!access.ok) return READ_REFUSED;
           const raw = await getCanvasMarkdown(canvasId);
           if (row) await touch(canvasId);
           const text = fromCanvasMarkdown(raw);

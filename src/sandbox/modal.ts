@@ -199,6 +199,7 @@ export class ModalProvider implements SandboxProvider {
         kill();
         return { exitCode: null, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), stdoutTruncated: false, stderrTruncated: false, timedOut: !aborted, aborted, durationMs };
       }
+      kill(); // e.g. a failed stdin write: don't leave the command waiting for input until its timeout
       throw err;
     } finally {
       o.signal?.removeEventListener('abort', kill);
