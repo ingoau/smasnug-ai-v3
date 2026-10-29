@@ -59,7 +59,7 @@ describe('CODING_AGENTS_PROMPT', () => {
 
   it('proposes a coding agent only for an actual request, not for musings', async () => {
     const { CODING_AGENTS_PROMPT } = await import('./front.js');
-    expect(CODING_AGENTS_PROMPT).toMatch(/only when the admin asks for a change or investigation/);
+    expect(CODING_AGENTS_PROMPT).toMatch(/only when the admin asks for a change;/);
     expect(CODING_AGENTS_PROMPT).toMatch(/musings and feedback/);
   });
 });
@@ -101,8 +101,8 @@ describe('frontSystemPrompt delegation and scope rules', () => {
 
   it('does not ping people who are not already in the thread unless asked to contact them', () => {
     expect(p).toMatch(/Don't ping people who aren't already in this thread unless the speaker explicitly asks you to contact them/);
-    expect(p).toMatch(/Mention people already in this thread as <@U123>/);
-    expect(p).toMatch(/Name anyone else without <@U…> unless the speaker asked you to ping or contact them/);
+    expect(p).toMatch(/People: write their plain name by default/);
+    expect(p).toMatch(/People from search results, the directory, profiles or other threads are always plain names/);
     expect(p).toMatch(/send_message only when the speaker clearly asks/);
     expect(p).toMatch(/never @channel\/@here\/@everyone or group pings/);
   });
@@ -119,5 +119,33 @@ describe('frontSystemPrompt self-knowledge', () => {
     expect(p).toMatch(/<@U0ADMIN> \(Ingo\)/);
     expect(p).toMatch(/load the about-yourself skill; don't guess/);
     expect(frontSystemPrompt('smasnug ai')).not.toMatch(/<@undefined>/);
+  });
+});
+
+describe('frontSystemPrompt rules from the prod trace review', () => {
+  const p = frontSystemPrompt('smasnug ai');
+
+  it('never claims it cannot open a file or run something when sandboxes are configured', () => {
+    expect(frontSystemPrompt('smasnug ai', { sandbox: true })).toMatch(/Never say you can't open a file type, watch a video/);
+    expect(p).not.toMatch(/Never say you can't open a file type/);
+  });
+
+  it('finishes the request instead of offering to, and delegates instead of searching on', () => {
+    expect(p).toMatch(/Offers are only for a next step beyond what was asked/);
+    expect(p).toMatch(/the next call is spawn_subagent, not another search/);
+    expect(p).toMatch(/A final reply never goes in the same step as lookups/);
+  });
+
+  it('checks workspace claims and named projects, reads back on vague messages, keeps answers out of plain text', () => {
+    expect(p).toMatch(/Agreeing or disagreeing with a claim about this workspace .* needs a slack_search first/);
+    expect(p).toMatch(/check what it is \(the channel, one slack_search\); don't infer it from the name/);
+    expect(p).toMatch(/A vague message .* read further back/);
+    expect(p).toMatch(/Write what you want to say only inside reply's text/);
+  });
+
+  it("doesn't over-refuse, lecture or add constraints to subagents", () => {
+    expect(p).toMatch(/Don't over-refuse or lecture/);
+    expect(p).toMatch(/Never write restrictions or concerns the speaker didn't ask for into a subagent's instructions/);
+    expect(p).toMatch(/\/j, \/hj, \/s, \/srs are tone tags/);
   });
 });
