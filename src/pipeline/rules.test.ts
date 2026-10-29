@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   answersOtherOffer,
+  awaitedReplyFresh,
   awaitsReply,
   batchIsAddressed,
   batchIsPartnerLike,
   batchIsRecentPartner,
   batchIsMention,
   batchNeedsGate,
+  batchPartnerKind,
   debounceWindowMs,
   decide,
   gateThreshold,
@@ -80,6 +82,38 @@ describe("someone else answering the bot's question / offer", () => {
     expect(batchIsPartnerLike(['partner'])).toBe(true);
     expect(batchIsPartnerLike(['gate'])).toBe(false);
     expect(debounceWindowMs(false, { idleMs: 1000, busyMs: 3000, directMs: 300 }, 'answer_other')).toBe(300);
+  });
+});
+
+describe("the bot's question / offer expires", () => {
+  it('counts as awaiting an answer only while the reply is recent', () => {
+    const now = new Date('2026-10-07T12:00:00Z');
+    const twentyMin = 20 * 60_000;
+    expect(awaitedReplyFresh(new Date(now.getTime() - 5 * 60_000), now, twentyMin)).toBe(true);
+    expect(awaitedReplyFresh(new Date(now.getTime() - twentyMin), now, twentyMin)).toBe(true);
+    expect(awaitedReplyFresh(new Date(now.getTime() - twentyMin - 1), now, twentyMin)).toBe(false);
+    expect(awaitedReplyFresh(null, now, twentyMin)).toBe(false);
+  });
+});
+
+describe('the requester of a running / just-reported subagent run', () => {
+  it('goes through the gate at the partner threshold, below partner and answer_other', () => {
+    expect(decide({ ...base, runRequester: true })).toEqual({ action: 'batch', reason: 'run_requester' });
+    expect(decide({ ...base, runRequester: true, partner: true })).toEqual({ action: 'batch', reason: 'partner' });
+    expect(decide({ ...base, runRequester: true, answersOther: true })).toEqual({ action: 'batch', reason: 'answer_other' });
+    expect(decide({ ...base, runRequester: true, recentPartner: true })).toEqual({ action: 'batch', reason: 'run_requester' });
+    expect(decide({ ...base, runRequester: true, mentionsOthers: true })).toEqual({ action: 'ignore', reason: 'mentions_other' });
+    expect(decide({ ...base, runRequester: true, engaged: false })).toEqual({ action: 'ignore', reason: 'not_engaged' });
+    expect(batchNeedsGate(['run_requester', 'gate'])).toBe(true);
+    expect(batchIsAddressed(['run_requester'])).toBe(true);
+    expect(batchIsPartnerLike(['run_requester'])).toBe(true);
+    expect(batchIsRecentPartner(['recent_partner', 'run_requester'])).toBe(false);
+  });
+  it('the strongest partner-level reason picks the gate note', () => {
+    expect(batchPartnerKind(['run_requester', 'gate'])).toBe('run_requester');
+    expect(batchPartnerKind(['run_requester', 'answer_other'])).toBe('answer_other');
+    expect(batchPartnerKind(['answer_other', 'partner'])).toBe('partner');
+    expect(batchPartnerKind(['recent_partner', 'gate'])).toBeNull();
   });
 });
 
