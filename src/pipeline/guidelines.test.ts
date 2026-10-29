@@ -38,9 +38,12 @@ describe('<> prefix (quiet)', () => {
     expect(hasQuietPrefix('<&gt;hi')).toBe(true);
     expect(hasQuietPrefix(`<> <@${BOT}> hi`)).toBe(true);
   });
-  it('a single # is an alias; ## is the hidden prefix instead', () => {
+  it('# followed by a space is an alias; #word, a lone # and ## are not', () => {
     expect(hasQuietPrefix('# just chatting')).toBe(true);
-    expect(hasQuietPrefix('  #note to self')).toBe(true);
+    expect(hasQuietPrefix('  # note to self')).toBe(true);
+    expect(hasQuietPrefix('#note to self')).toBe(false);
+    expect(hasQuietPrefix('#1 priority')).toBe(false);
+    expect(hasQuietPrefix('#')).toBe(false);
     expect(hasQuietPrefix('## hidden')).toBe(false);
     expect(hasQuietPrefix('<#C123|general> hi')).toBe(false);
     expect(hasQuietPrefix('see #general')).toBe(false);
