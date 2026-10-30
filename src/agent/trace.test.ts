@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { asText, clip, promptHash, sanitize, TraceRecorder, traceInput } from './trace.js';
+import { asText, clip, promptHash, safeStr, sanitize, TraceRecorder, traceInput } from './trace.js';
 
 describe('TraceRecorder', () => {
   it('records steps with text, reasoning, calls, results, notes and usage', () => {
@@ -14,7 +14,7 @@ describe('TraceRecorder', () => {
     r.ingest({ type: 'tool-call', toolCallId: 'b', toolName: 'fetch_url', input: { url: 'https://e.com' } });
     r.ingest({ type: 'tool-result', toolCallId: 'a', toolName: 'web_search', output: { results: [1] } });
     r.ingest({ type: 'tool-error', toolCallId: 'b', toolName: 'fetch_url', error: new Error('404') });
-    r.ingest({ type: 'finish-step', finishReason: 'tool-calls', usage: { inputTokens: 100, outputTokens: 5, inputTokenDetails: { cacheReadTokens: 80 } } });
+    r.ingest({ type: 'finish-step', finishReason: 'tool-calls', usage: { inputTokens: 100, outputTokens: 5, inputTokenDetails: { cacheReadTokens: 80 } }, response: { modelId: 'openai/gpt-6-luna' } });
     r.ingest({ type: 'start-step' });
     r.ingest({ type: 'tool-call', toolCallId: 'c', toolName: 'reply', input: { text: 'done' } });
     const steps = r.finish();
@@ -24,6 +24,7 @@ describe('TraceRecorder', () => {
       text: 'hi',
       reasoning: 'think more',
       finishReason: 'tool-calls',
+      model: 'openai/gpt-6-luna',
       usage: { input: 100, output: 5, cached: 80 },
       calls: [
         { name: 'web_search', input: { query: 'x' }, output: '{"results":[1]}' },
@@ -38,6 +39,20 @@ describe('TraceRecorder', () => {
     const r = new TraceRecorder();
     r.note({ role: 'user', content: 'x' });
     expect(r.finish()).toEqual([{ notes: ['{"role":"user","content":"x"}'], calls: [] }]);
+  });
+
+  it('keeps the whole trace within its size budget', () => {
+    const r = new TraceRecorder(Date.now, 10_000);
+    for (let i = 0; i < 10; i++) {
+      r.ingest({ type: 'start-step' });
+      r.ingest({ type: 'tool-call', toolCallId: `c${i}`, toolName: 'fetch_url', input: { url: 'x' } });
+      r.ingest({ type: 'tool-result', toolCallId: `c${i}`, toolName: 'fetch_url', output: 'y '.repeat(2500) });
+      r.ingest({ type: 'finish-step', finishReason: 'tool-calls', usage: {} });
+    }
+    const steps = r.finish();
+    expect(steps).toHaveLength(10);
+    expect(JSON.stringify(steps).length).toBeLessThan(14_000);
+    expect(steps.at(-1)!.calls[0]!.output).toBe('[dropped: trace size budget]');
   });
 
   it('never throws on odd parts', () => {
@@ -56,6 +71,16 @@ describe('sanitize / clip', () => {
     expect(sanitize(new Uint8Array(3))).toBe('[binary]');
     expect(clip('abcdef', 3)).toBe('abc… [3 more chars]');
     expect(asText({ a: 'x'.repeat(50) }, 20)).toMatch(/^\{"a":"x+… \[\d+ more chars\]$/);
+  });
+
+  it('makes strings safe for jsonb', () => {
+    expect(safeStr('a\u0000b')).toBe('ab');
+    expect(safeStr('a\ud83d')).toBe('a\ufffd');
+    // A cut right after a high surrogate never leaves half a pair.
+    expect(clip('ab😀cd', 3)).toBe('ab… [4 more chars]');
+    expect(sanitize({ when: new Date(0), err: new Error('boom'), ['k\u0000']: 1 })).toEqual({ when: '1970-01-01T00:00:00.000Z', err: 'boom', k: 1 });
+    const many = Object.fromEntries(Array.from({ length: 150 }, (_, i) => [`k${i}`, i]));
+    expect(Object.keys(sanitize(many) as object)).toHaveLength(101);
   });
 
   it('keeps the turn input within budget', () => {

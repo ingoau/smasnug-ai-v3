@@ -61,13 +61,16 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
             and m.ts::numeric <= s.covered_ts::numeric)
         returning s.thread_id`,
   );
-  // Model traces (src/agent/trace.ts) hold copies of thread content: same window, and any trace that may include a
-  // message later deleted in Slack goes (applyDelete does it at deletion time; this catches stragglers).
+  // Model traces (src/agent/trace.ts) hold copies of thread and channel content: same window, and a trace in the
+  // channel of a message deleted in Slack goes if it ran after the message was posted and started before the deletion
+  // (applyDelete / saveTrace do it at once; this catches stragglers). Copies in tool results from other channels
+  // (searches, reads) only go with the window.
   await run('traces', sql`delete from traces where created_at < ${older(long)} returning id`);
   await run(
     'traces_deleted',
     sql`delete from traces t where exists (
-          select 1 from messages m where m.thread_id = t.thread_id and m.deleted and to_timestamp(m.ts::numeric) <= t.created_at)
+          select 1 from messages m where m.channel_id = t.channel_id and m.deleted and m.deleted_at is not null
+            and m.deleted_at >= t.created_at and to_timestamp(m.ts::numeric) <= coalesce(t.finished_at, now()))
         returning t.id`,
   );
   await run(

@@ -13,7 +13,7 @@ smasnug ai is a Slack bot run by Ingo Wolf (@inw) as a personal project. This po
 
 ## How it's used
 
-Only to run the bot: answer you, do the tasks you ask for, keep it safe (rate limits, reports, suspensions), fix problems and improve how it answers. To improve it, Ingo reviews past conversations and their records (with the help of AI tools such as Claude) to find where the bot went wrong or wasted effort, and changes its instructions. Conversation content is never copied into the bot's code or instructions, and never published. Your data is never sold, and never used for advertising.
+Only to run the bot: answer you, do the tasks you ask for, keep it safe (rate limits, reports, suspensions), fix problems and improve how it answers. To improve it, Ingo reviews past conversations and their records, including DMs with the bot (with the help of AI tools such as Claude), to find where the bot went wrong or wasted effort, and changes its instructions. Conversation content is never copied into the bot's code or instructions, and never published. Your data is never sold, and never used for advertising.
 
 ## Who it's shared with
 
@@ -28,7 +28,9 @@ These services handle the data under their own privacy policies.
 
 ## How long it's kept
 
-- Conversations, files you uploaded, the bot's working data and its records of how it answered: deleted about **30 days** after the conversation goes quiet (records of how it answered: 30 days after the answer), and right away when you delete the message in Slack. Copies made for a review are deleted once the review is done.
+- Conversations, files you uploaded, and the bot's working data: deleted about **30 days** after the conversation goes quiet, and right away when you delete the message in Slack.
+- Records of how it answered: deleted **30 days** after the answer. Deleting a message in Slack also deletes the records from that channel that may contain it, right away. A copy that ended up in a record somewhere else (for example in search results the bot read for someone in another channel) is deleted after the 30 days.
+- Copies made for a review (including the review tools' own session logs) are deleted once the review is done.
 - Memory facts: until you delete them, or after about **6 months** without being used.
 - Directory data: kept up to date from Slack and removed when the profile or channel is removed.
 - Messages sent on your behalf and reports: kept so reports stay accurate.

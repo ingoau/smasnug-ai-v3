@@ -138,11 +138,14 @@ export async function applyEdit(channelId: string, m: SlackMessage): Promise<{ t
 export async function applyDelete(channelId: string, ts: string): Promise<{ threadId: string | null; userId: string | null } | undefined> {
   const [before] = await sql<{ files: SlackFileRef[] }[]>`select files from messages where channel_id = ${channelId} and ts = ${ts}`;
   const [row] = await sql<{ threadId: string | null; userId: string | null }[]>`
-    update messages set text = '', files = '[]'::jsonb, attachments = '[]'::jsonb, deleted = true
+    update messages set text = '', files = '[]'::jsonb, attachments = '[]'::jsonb, deleted = true, deleted_at = coalesce(deleted_at, now())
     where channel_id = ${channelId} and ts = ${ts}
     returning thread_id, user_id`;
-  // Model traces taken since the message was posted may hold a copy (src/agent/trace.ts).
-  if (row?.threadId) await sql`delete from traces where thread_id = ${row.threadId} and created_at >= to_timestamp(${ts}::numeric)`.catch((err) => log.warn({ err }, 'dropping traces of a deleted message failed'));
+  // Model traces in this channel that ran after the message was posted may hold a copy (thread or channel context;
+  // src/agent/trace.ts). Ones still in flight are dropped when saved (saveTrace checks deleted_at).
+  await sql`delete from traces where channel_id = ${channelId} and coalesce(finished_at, now()) >= to_timestamp(${ts}::numeric)`.catch((err) =>
+    log.warn({ err }, 'dropping traces of a deleted message failed'),
+  );
   const slackIds = (Array.isArray(before?.files) ? before.files : []).map((f) => f?.id).filter((id): id is string => !!id);
   await removeMessageFiles(channelId, ts).catch((err) => log.warn({ err }, 'removing deleted message files failed'));
   if (slackIds.length) await removeMessageFiles(channelId, ts, slackIds).catch((err) => log.warn({ err }, 'removing deleted message posts failed'));

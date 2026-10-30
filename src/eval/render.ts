@@ -19,11 +19,11 @@ function renderSteps(steps: TraceStep[], opts: { output: number }): string {
       const head = [`#### Step ${i + 1}`, [s.finishReason, s.ms != null ? `${s.ms} ms` : null, s.usage ? `in ${s.usage.input ?? '?'} (cached ${s.usage.cached ?? 0}) / out ${s.usage.output ?? '?'}${s.usage.reasoning ? ` (reasoning ${s.usage.reasoning})` : ''}` : null].filter(Boolean).join(' · ')];
       const body: string[] = [];
       for (const n of s.notes ?? []) body.push(`**Injected note:**\n${fence(short(n, 3000))}`);
-      if (s.reasoning) body.push(`**Reasoning:**\n${fence(short(s.reasoning, 4000))}`);
-      if (s.text) body.push(`**Text (never shown):**\n${fence(short(s.text, 3000))}`);
+      if (s.reasoning) body.push(`**Reasoning:**\n${fence(short(s.reasoning, 1500))}`);
+      if (s.text) body.push(`**Text (never shown):**\n${fence(short(s.text, 2000))}`);
       for (const c of s.calls) {
         const result = c.error != null ? `ERROR: ${c.error}` : (c.output ?? '(no result)');
-        body.push(`- \`${c.name}\`${c.ms != null ? ` (${c.ms} ms)` : ''} ${short(json(c.input), 1500)}\n${fence(short(result, opts.output))}`);
+        body.push(`- \`${c.name}\`${c.ms != null ? ` (${c.ms} ms)` : ''}\n${fence(short(json(c.input), 1000))}\n${fence(short(result, opts.output))}`);
       }
       return [head.join('\n'), ...body].join('\n\n');
     })
@@ -31,7 +31,8 @@ function renderSteps(steps: TraceStep[], opts: { output: number }): string {
 }
 
 function renderTrace(t: EvalTrace, opts: { input: number; output: number }): string {
-  const meta = `model \`${t.model}\` · prompt \`${t.promptHash}\` · commit \`${t.gitSha?.slice(0, 10) ?? '?'}\` · outcome **${t.outcome}**${t.error ? ` (${t.error})` : ''}`;
+  const answered = [...new Set(t.steps.map((s) => s.model).filter((m): m is string => !!m && m !== t.model))];
+  const meta = `model \`${t.model}\`${answered.length ? ` (answered by ${answered.map((m) => `\`${m}\``).join(', ')})` : ''} · prompt \`${t.promptHash}\` · commit \`${t.gitSha?.slice(0, 10) ?? '?'}\` · outcome **${t.outcome}**${t.error ? ` (${t.error})` : ''}`;
   const input = t.input.map((m) => `**${m.role}:**\n${fence(short(m.content, opts.input))}`).join('\n\n');
   return `${meta}\n\n<details><summary>Input</summary>\n\n${input}\n\n</details>\n\n${renderSteps(t.steps, opts)}`;
 }
@@ -48,13 +49,14 @@ export function renderTurn(t: ScoredTurn): string {
     `steps ${s.steps ?? '?'} · input tokens ${s.inputTokens ?? '?'} (cached ${s.cachedTokens ?? '?'}) · output ${s.outputTokens ?? '?'} · first text ${s.firstTextMs ?? '?'} ms · end ${s.turnEndMs ?? '?'} ms · runs ${s.runs} (${s.runTokens} tokens)`,
   );
   lines.push('', '## Flags', t.flags.length ? t.flags.map((f) => `- **${f.code}** (${f.weight}): ${f.detail}`).join('\n') : '- none (baseline sample)');
-  lines.push('', '## Request', t.request.length ? t.request.map((m) => `<@${m.userId}>: ${short(m.text, 2000)}`).join('\n\n') : '(trigger messages not stored)');
+  // Slack text always goes in fences: raw markdown / cut code blocks would break the file's structure.
+  lines.push('', '## Request', t.request.length ? t.request.map((m) => `<@${m.userId}>:\n${fence(short(m.text, 2000))}`).join('\n\n') : '(trigger messages not stored)');
   const replies = t.events.filter((e) => e.type === 'reply' && e.payload.text);
-  if (replies.length) lines.push('', '## Bot replies', replies.map((e) => short(String(e.payload.text), 3000)).join('\n\n---\n\n'));
-  if (t.followUps.length) lines.push('', '## What came next', t.followUps.map((f) => `- +${f.minutesAfter} min <@${f.userId}>${f.userId === u.authorId ? ' (author)' : ''}: ${short(f.text, 500)}`).join('\n'));
+  if (replies.length) lines.push('', '## Bot replies', replies.map((e) => fence(short(String(e.payload.text), 3000))).join('\n\n'));
+  if (t.followUps.length) lines.push('', '## What came next', t.followUps.map((f) => `- +${f.minutesAfter} min <@${f.userId}>${f.userId === u.authorId ? ' (author)' : ''}:\n${fence(short(f.text, 500))}`).join('\n'));
   if (t.reactions.length) lines.push('', `Reactions on the reply: ${t.reactions.map((r) => `:${r.name}: ×${r.count}`).join(' ')}`);
   lines.push('', '## Front agent');
-  if (t.trace) lines.push(renderTrace(t.trace, { input: 30_000, output: 2500 }));
+  if (t.trace) lines.push(renderTrace(t.trace, { input: 12_000, output: 2000 }));
   else {
     const calls = t.events.filter((e) => e.type === 'turn_tools').flatMap((e) => e.payload.calls ?? []);
     lines.push('(no trace: recorded before tracing, or saving it failed)', calls.map((c: any) => `- \`${c.tool}\` ${c.args}`).join('\n'));
@@ -62,7 +64,7 @@ export function renderTurn(t: ScoredTurn): string {
   for (const r of t.runs) {
     lines.push('', `## Subagent run ${r.id} (${r.status}, ${r.tokens} tokens${r.ms != null ? `, ${Math.round(r.ms / 1000)}s` : ''})`);
     lines.push(`**Instructions:**\n${fence(short(r.instructions, 3000))}`);
-    if (r.trace) lines.push(renderSteps(r.trace.steps, { output: 1500 }));
+    if (r.trace) lines.push(renderSteps(r.trace.steps, { output: 1000 }));
     else if (r.steps.length) lines.push(r.steps.map((st) => `- step ${st.step}: ${(st.tools ?? []).join(', ') || '(text)'} · ${st.ms} ms · in ${st.inputTokens ?? '?'}`).join('\n'));
     if (r.result) lines.push(`**Result:**\n${fence(short(r.result, 2500))}`);
     if (r.error) lines.push(`**Error:** ${r.error}`);

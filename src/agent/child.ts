@@ -285,7 +285,7 @@ async function runClaimed(run: RunRow): Promise<void> {
   /** The run, step by step, for evals (trace.ts): saved in the finally below. */
   const trace = new TraceRecorder();
   const traceStart = new Date();
-  let traceOutcome: 'done' | 'cancelled' | 'timeout' | 'error' | null = null;
+  let traceOutcome: 'done' | 'cancelled' | 'timeout' | 'error' | 'interrupted' | null = null;
   let traceError: string | null = null;
   let lastDetails = '';
   const sources: RunSource[] = Array.isArray(run.sources) ? [...run.sources] : [];
@@ -399,8 +399,8 @@ async function runClaimed(run: RunRow): Promise<void> {
 
       const overBudget = tokens >= limits.runMaxTokens || step >= MAX_STEPS || Date.now() >= wrapUpAt;
       if (overBudget) {
-        trace.note('[Orchestrator update] out of time or budget: report now');
         messages.push({ role: 'user', content: '[Orchestrator update] You are out of time or budget for this task. Stop using tools and report what you have now (including the leads you didn\'t get to), ending with the SUMMARY line.' });
+        trace.note(messages.at(-1)!.content);
       }
       if (step === 0) await setDetails(FIRST_STEP_DETAILS);
       else if (!lastDetails || lastDetails === FIRST_STEP_DETAILS) await setDetails(THINKING_DETAILS);
@@ -485,11 +485,11 @@ async function runClaimed(run: RunRow): Promise<void> {
         const late = deferred.take();
         void appendEvent(run.threadId, 'run_bg_wait', `subagent:${run.subagentId}`, { runId: run.id, step, ms: Date.now() - waitStart, delivered: !!late }).catch(() => {});
         if (late) {
-          trace.note(`${BACKGROUND_RESULTS_HEADER}\n\n${late}`);
           messages.push({
             role: 'user',
             content: `${BACKGROUND_RESULTS_HEADER}\n\n${late}\n\n[Orchestrator update] These arrived after you wrote the report above, so it isn't final yet: take them into account (follow strong new leads if needed), then write the complete final report again, ending with the SUMMARY line.`,
           });
+          trace.note(messages.at(-1)!.content);
           continue;
         }
       }
@@ -507,12 +507,12 @@ async function runClaimed(run: RunRow): Promise<void> {
         { tokens, history: compactHistory(messages) },
       );
       if (done === 'inbox') continue; // steer arrived just as it finished: take it into account
-      traceOutcome = 'done';
+      traceOutcome = done === 'ok' ? 'done' : 'interrupted';
       return;
     }
   } catch (err) {
     const reason = controller.signal.aborted ? controller.signal.reason : err;
-    traceOutcome = reason instanceof RunAbort ? (reason.kind === 'timeout' ? 'timeout' : reason.kind === 'cancel' ? 'cancelled' : 'error') : 'error';
+    traceOutcome = reason instanceof RunAbort ? (reason.kind === 'timeout' ? 'timeout' : reason.kind === 'cancel' ? 'cancelled' : 'interrupted') : 'error';
     traceError = reason instanceof RunAbort ? reason.kind : shortError(err);
     if (reason instanceof RunAbort) {
       if (reason.kind === 'timeout') {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TraceStep } from '../agent/trace.js';
-import { detect, score, selectTurns, summarize, turnStats } from './detectors.js';
+import { detect, isCorrection, isNegativeReaction, looksLikeError, score, selectTurns, summarize, turnStats } from './detectors.js';
 import type { EvalTurn } from './types.js';
 
 function turn(over: Partial<EvalTurn> = {}): EvalTurn {
@@ -81,6 +81,43 @@ describe('detect', () => {
   it('flags failed and heavy subagent runs', () => {
     const t = turn({ runs: [{ id: 9, status: 'error', tokens: 300_000, error: 'Timed out', instructions: 'x', result: null, ms: 1, steps: [], trace: null }] });
     expect(codes(t)).toEqual(expect.arrayContaining(['run_failed', 'run_heavy']));
+  });
+});
+
+describe('signals', () => {
+  it('tells corrections from polite closers', () => {
+    for (const t of ['no, I meant the other one', 'nope', 'that\'s wrong', 'actually I asked about March', 'you forgot the link', '<@U1> no that is not it'])
+      expect(isCorrection(t), t).toBe(true);
+    for (const t of ['no worries, thanks!', 'no problem', 'nope that\'s all', 'nah all good', 'actually that\'s perfect', 'thanks!'])
+      expect(isCorrection(t), t).toBe(false);
+  });
+
+  it('reads negative reactions, skin tones included', () => {
+    expect(isNegativeReaction('-1')).toBe(true);
+    expect(isNegativeReaction('-1::skin-tone-3')).toBe(true);
+    expect(isNegativeReaction('skull')).toBe(false);
+    expect(isNegativeReaction('+1')).toBe(false);
+  });
+
+  it('spots failed tool results in strings and JSON', () => {
+    expect(looksLikeError('Error: 404')).toBe(true);
+    expect(looksLikeError('{"error":"not_in_channel"}')).toBe(true);
+    expect(looksLikeError('{"ok":false,"reason":"x"}')).toBe(true);
+    expect(looksLikeError('{"channel":"C1","ok":false}')).toBe(true);
+    expect(looksLikeError('{"error":null,"results":[]}')).toBe(false);
+    expect(looksLikeError('{"ok":true}')).toBe(false);
+    expect(looksLikeError('Found 3 errors in the log')).toBe(false);
+  });
+
+  it('flags a turn that ended in error without an error event', () => {
+    const t = turn({ turn: { ...turn().turn, status: 'error' }, events: [{ type: 'turn_finished', actor: 'system', payload: { turnId: 1, status: 'error', reason: 'stale' }, at: '' }] });
+    expect(detect(t)).toContainEqual(expect.objectContaining({ code: 'turn_error', detail: 'stale' }));
+  });
+
+  it('does not count a skill file load as a reload', () => {
+    const t = turn({ trace: trace([step([['load_skill', { name: 'web-dev' }]]), step([['load_skill', { name: 'web-dev', file: 'deploy.md' }]])]) });
+    expect(codes(t)).not.toContain('skill_reloaded');
+    expect(turnStats(t).skills).toEqual(['web-dev', 'web-dev/deploy.md']);
   });
 });
 

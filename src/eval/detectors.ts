@@ -15,12 +15,17 @@ export const THRESHOLDS = {
   correctionWindowMin: 15,
 } as const;
 
-/** Reactions on a bot reply that mean it missed. */
-export const NEGATIVE_REACTIONS = new Set(['-1', 'thumbsdown', 'x', 'no_entry', 'no_entry_sign', 'disappointed', 'confused', 'face_with_raised_eyebrow', 'skull']);
+/** Reactions on a bot reply that mean it missed (Slack names; skin tones are stripped first). */
+export const NEGATIVE_REACTIONS = new Set(['-1', 'x', 'no_entry', 'no_entry_sign', 'disappointed', 'confused', 'face_with_raised_eyebrow']);
+export const isNegativeReaction = (name: string) => NEGATIVE_REACTIONS.has(name.replace(/::skin-tone-\d$/, ''));
 
 /** A follow-up that corrects or re-asks ("no, I meant…", "that's wrong", "you forgot…"). */
 const CORRECTION =
   /^\s*(?:<@\w+>\s*)?(?:no\b|nope\b|nah\b|wrong\b|incorrect\b|that'?s (?:not|wrong|incorrect)|not (?:what|quite)|i meant\b|i said\b|i asked\b|actually\b|you (?:didn'?t|forgot|missed|ignored)|why (?:did|would) you|try again|still (?:wrong|not)|that'?s not it)/i;
+/** …but not a polite closer ("no worries", "nope that's all", "actually that's perfect"). */
+const NOT_CORRECTION =
+  /^\s*(?:<@\w+>\s*)?(?:(?:no|nope|nah)[\s,!.]*(?:worries|problem|prob|thanks|thank you|ty|need|that'?s (?:all|it|fine|good|perfect)|all good|i'?m good|good|fine|that'?s all|it'?s fine|it'?s ok)|actually[\s,]*(?:that'?s |this is |it'?s )?(?:perfect|great|good|nice|awesome|helpful|works|right|correct)|not quite (?:what i expected but|but) (?:good|fine))/i;
+export const isCorrection = (text: string) => CORRECTION.test(text) && !NOT_CORRECTION.test(text);
 
 const callsOf = (steps: TraceStep[] | undefined) => (steps ?? []).flatMap((s) => s.calls);
 const sum = (xs: (number | undefined | null)[]) => xs.reduce<number>((a, x) => a + (x ?? 0), 0);
@@ -43,7 +48,11 @@ export function turnStats(t: EvalTurn): TurnStats {
   const tm = timing(t);
   const steps = t.trace?.steps.filter((s) => s.usage) ?? null;
   const calls = frontCalls(t);
-  const skills = t.trace ? callsOf(t.trace.steps).filter((c) => c.name === 'load_skill').map((c) => String((c.input as any)?.name ?? '?')) : [];
+  const skills = t.trace
+    ? callsOf(t.trace.steps)
+        .filter((c) => c.name === 'load_skill')
+        .map((c) => `${(c.input as any)?.name ?? '?'}${(c.input as any)?.file ? `/${(c.input as any).file}` : ''}`)
+    : [];
   return {
     steps: steps ? steps.length : (tm?.counters?.model_steps ?? null),
     inputTokens: steps ? sum(steps.map((s) => s.usage?.input)) : (tm?.counters?.input_tokens ?? null),
@@ -64,7 +73,9 @@ function duplicates(keys: string[]): string[] {
   return [...seen].filter(([, n]) => n > 1).map(([k, n]) => `${n}× ${k.length > 160 ? `${k.slice(0, 159)}…` : k}`);
 }
 
-const looksLikeError = (output: string | undefined) => !!output && /^"?(?:error|failed|could not|couldn't|unable to)\b/i.test(output);
+/** Tool results that report a failure: an "Error…" string, or a JSON object with `error` / `ok: false`. */
+export const looksLikeError = (output: string | undefined) =>
+  !!output && (/^"?(?:error|failed|could not|couldn't|unable to)\b/i.test(output) || /^\{"(?:error"\s*:\s*(?!null|false)|ok"\s*:\s*false)/.test(output) || /^\{.{0,200}"ok"\s*:\s*false/.test(output));
 
 export function detect(t: EvalTurn): Flag[] {
   const flags: Flag[] = [];
@@ -72,7 +83,11 @@ export function detect(t: EvalTurn): Flag[] {
   const s = turnStats(t);
 
   // Outcome
-  for (const e of eventsOf(t, 'error')) add('turn_error', 5, String(e.payload.error ?? '').slice(0, 200));
+  const errors = eventsOf(t, 'error');
+  for (const e of errors) add('turn_error', 5, String(e.payload.error ?? '').slice(0, 200));
+  // Failures outside the model loop (context build, stale turn, shutdown) only show in the status.
+  const finished = eventsOf(t, 'turn_finished').at(-1)?.payload;
+  if (!errors.length && t.turn.status === 'error') add('turn_error', 5, String(finished?.error ?? finished?.reason ?? 'turn ended with status error').slice(0, 200));
   if (eventsOf(t, 'turn_stopped').length) add('stopped', 4, 'someone stopped the turn (!stop)');
   const fallback = eventsOf(t, 'reply').filter((e) => e.payload.fallback && !e.payload.outcome && !e.payload.canvasLink);
   if (fallback.length) add('fallback_reply', 4, fallback[0]!.payload.fromText ? 'posted unsent plain text as the reply' : 'generic fallback reply');
@@ -80,9 +95,9 @@ export function detect(t: EvalTurn): Flag[] {
 
   // User reaction
   const author = t.followUps.filter((f) => f.userId === t.turn.authorId && f.minutesAfter <= THRESHOLDS.correctionWindowMin);
-  const correction = author.find((f) => CORRECTION.test(f.text));
+  const correction = author.find((f) => isCorrection(f.text));
   if (correction) add('user_correction', 5, correction.text.slice(0, 200));
-  const neg = t.reactions.filter((r) => NEGATIVE_REACTIONS.has(r.name));
+  const neg = t.reactions.filter((r) => isNegativeReaction(r.name));
   if (neg.length) add('negative_reaction', 5, neg.map((r) => `:${r.name}: ×${r.count}`).join(' '));
 
   // Model behaviour

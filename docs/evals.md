@@ -25,9 +25,15 @@ orchestrator updates, background search results). At the end they `saveTrace`:
 Values are clipped (`TRACE_CLIP`) and binary data (images in tool results) is dropped. Saving is best-effort and never
 blocks or fails a turn.
 
-Retention (`src/features/retention.ts`): traces cascade with their thread, go after the retention window (30 days),
-and any trace that may hold a message deleted in Slack goes at deletion time (`applyDelete`) and in the daily pass.
-Unreferenced prompt versions go after the window too. `PRIVACY.md` describes all this to users.
+Each trace has a size budget (`TRACE_CLIP.total`), and strings are made safe for jsonb (no NUL, no lone surrogates).
+`steps[].model` is the model that actually answered (`chatModel` may fall back to another provider).
+
+Retention (`src/features/retention.ts`): traces cascade with their thread and go after the retention window (30
+days). When a message is deleted in Slack, every trace in its channel that ran after the message was posted goes at
+once (`applyDelete`; the turn input holds channel context, not just the thread). A trace still in flight is checked
+when saved (`messages.deleted_at`), and the daily pass catches stragglers. A copy inside a tool result from another
+channel (search, read_channel) only goes with the window. Unreferenced prompt versions go after the window too.
+`PRIVACY.md` describes all this to users.
 
 ## Detectors
 
@@ -68,13 +74,17 @@ It writes:
 - `prompts/<hash>.md`: the exact system prompts used.
 - `ANALYZE.md`: instructions for the analysis pass.
 
-The export holds real conversation content: keep it local and delete it once analysed (the privacy policy promises
-that).
+Scoring uses a light projection of each trace (no input, results clipped), so a week of turns fits in memory; only
+the exported turns load their full traces.
+
+The export holds real conversation content, DMs included unless `--no-dms`: keep it local and delete it (and the
+analysis session's transcripts) once analysed. The privacy policy promises that.
 
 ## Analysis
 
-Open a Claude Code session in the repo and say: "Follow `evals/out/<dir>/ANALYZE.md`." It reads the turns next to the
-code, groups findings into patterns (only ones backed by at least two turns, or one severe failure), and writes
+Open a Claude Code session in the repo and say: "Follow `evals/out/<dir>/ANALYZE.md`." The turn files are too big for
+one context, so it fans out to subagents that return a short note per turn, then reads those next to the code, groups
+findings into patterns (only ones backed by at least two turns, or one severe failure), and writes
 `FINDINGS.md` with the root cause, a proposed diff, and the metric that should move. Then make the edits on a branch,
 deploy, and after a few days run another export and compare `SUMMARY.md`.
 

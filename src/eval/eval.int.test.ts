@@ -28,9 +28,8 @@ describe.skipIf(!INTEGRATION)('eval traces integration', () => {
   });
 
   /** A finished turn: trigger message, a bot reply with a 👎, the author's correction, a front trace and one run. */
-  async function seed() {
-    const channel = `CEV${rand()}`;
-    const base = Math.floor(Date.now() / 1000) - 600;
+  async function seed(channel = `CEV${rand()}`) {
+    const base = Math.floor(Date.now() / 1000) - 600 - Math.floor(Math.random() * 100);
     const threadTs = `${base}.000100`;
     const threadId = `${channel}:${threadTs}`;
     const user = `UEV${rand()}`;
@@ -47,7 +46,7 @@ describe.skipIf(!INTEGRATION)('eval traces integration', () => {
     const r = new trace.TraceRecorder();
     r.ingest({ type: 'start-step' });
     r.ingest({ type: 'tool-call', toolCallId: 'a', toolName: 'slack_search', input: { query: 'plan' } });
-    r.ingest({ type: 'tool-result', toolCallId: 'a', toolName: 'slack_search', output: 'nothing' });
+    r.ingest({ type: 'tool-result', toolCallId: 'a', toolName: 'slack_search', output: `nothing${'.'.repeat(1000)}` });
     r.ingest({ type: 'finish-step', finishReason: 'tool-calls', usage: { inputTokens: 500, outputTokens: 20 } });
     await trace.saveTrace({ threadId, kind: 'front', turnId, model: 'test-model', system: 'SYSTEM PROMPT v1', input: [{ role: 'user', content: 'ctx' }], steps: r.finish(), outcome: 'done', startedAt: new Date() });
     const saId = `sa_${rand()}`;
@@ -65,24 +64,63 @@ describe.skipIf(!INTEGRATION)('eval traces integration', () => {
     const t = turns.find((x) => x.turn.id === s.turnId)!;
     expect(t).toBeDefined();
     expect(t.request).toEqual([{ userId: expect.any(String), text: 'what is the plan' }]);
-    expect(t.trace).toMatchObject({ model: 'test-model', promptHash: trace.promptHash('SYSTEM PROMPT v1'), steps: [{ calls: [{ name: 'slack_search', output: 'nothing' }] }] });
+    // Scoring loads light traces: no input, results clipped.
+    expect(t.trace).toMatchObject({ model: 'test-model', promptHash: trace.promptHash('SYSTEM PROMPT v1'), input: [], steps: [{ calls: [{ name: 'slack_search' }] }] });
+    expect(t.trace!.steps[0]!.calls[0]!.output!.length).toBe(300);
     expect(t.runs).toMatchObject([{ id: s.runId, tokens: 1234, trace: { model: 'child-model' } }]);
     expect(t.reactions).toEqual([{ name: '-1', count: 1 }]);
     expect(t.followUps[0]).toMatchObject({ text: 'no, I meant the launch plan' });
     const scored = detectors.score(t);
     expect(scored.flags.map((f) => f.code)).toEqual(expect.arrayContaining(['user_correction', 'negative_reaction']));
+    const [full] = await load.loadFullTraces([t]);
+    expect(full!.trace!.input).toEqual([{ role: 'user', content: 'ctx' }]);
+    expect(full!.trace!.steps[0]!.calls[0]!.output!.length).toBe(1007);
+    expect(full!.runs[0]!.trace).toMatchObject({ model: 'child-model' });
     const prompts = await load.loadPrompts([t.trace!.promptHash!]);
     expect(prompts.get(t.trace!.promptHash!)).toBe('SYSTEM PROMPT v1');
   });
 
   it('drops traces when a message they may hold is deleted, and after the retention window', async () => {
     const a = await seed();
+    // Another thread in the same channel (its input can hold channel context) and one in another channel.
+    const sibling = await seed(a.channel);
+    const other = await seed();
+    // A message posted after both traces finished can't be in them.
+    const lateTs = `${Math.floor(Date.now() / 1000) + 5}.000100`;
+    await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${a.channel}, ${lateTs}, ${a.threadId}, 'ULATE', 'later')`;
+    await store.applyDelete(a.channel, lateTs);
+    expect(await sql`select id from traces where channel_id = ${a.channel}`).toHaveLength(4);
+    // A message older than the traces is deleted: every trace in its channel goes, the other channel's stay.
     await store.applyDelete(a.channel, a.threadTs);
-    expect(await sql`select id from traces where thread_id = ${a.threadId}`).toHaveLength(0);
+    expect(await sql`select id from traces where channel_id = ${a.channel}`).toHaveLength(0);
+    expect(await sql`select id from traces where thread_id = ${other.threadId}`).toHaveLength(2);
+    // The daily pass doesn't keep deleting newer traces in that channel.
+    await trace.saveTrace({ threadId: sibling.threadId, kind: 'front', turnId: sibling.turnId, model: 'm', system: 's', input: [], steps: [], outcome: 'done', startedAt: new Date(Date.now() + 2000) });
+    await retention.runRetention();
+    expect(await sql`select id from traces where thread_id = ${sibling.threadId}`).toHaveLength(1);
 
     const b = await seed();
     await sql`update traces set created_at = now() - interval '40 days' where thread_id = ${b.threadId}`;
     await retention.runRetention();
     expect(await sql`select id from traces where thread_id = ${b.threadId}`).toHaveLength(0);
+  });
+
+  it('drops a trace saved after a message it may hold was deleted mid-turn', async () => {
+    const s = await seed();
+    const startedAt = new Date(Date.now() - 1000);
+    await store.applyDelete(s.channel, s.threadTs);
+    await trace.saveTrace({ threadId: s.threadId, kind: 'front', turnId: s.turnId, model: 'm', system: 's', input: [], steps: [], outcome: 'done', startedAt });
+    expect(await sql`select id from traces where thread_id = ${s.threadId}`).toHaveLength(0);
+  });
+
+  it('saves traces with strings jsonb would reject', async () => {
+    const s = await seed();
+    const r = new trace.TraceRecorder();
+    r.ingest({ type: 'start-step' });
+    r.ingest({ type: 'tool-call', toolCallId: 'a', toolName: 'fetch_url', input: { url: 'x\u0000' } });
+    r.ingest({ type: 'tool-result', toolCallId: 'a', toolName: 'fetch_url', output: `${'é'.repeat(5999)}😀😀` });
+    r.ingest({ type: 'finish-step', finishReason: 'stop', usage: {} });
+    await trace.saveTrace({ threadId: s.threadId, kind: 'front', turnId: s.turnId, model: 'm', system: 'nul\u0000', input: [{ role: 'user', content: 'a\ud83d' }], steps: r.finish(), outcome: 'done', startedAt: new Date() });
+    expect(await sql`select id from traces where thread_id = ${s.threadId} and model = 'm'`).toHaveLength(1);
   });
 });
