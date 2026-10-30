@@ -28,6 +28,7 @@ import { resolveFile } from '../files/store.js';
 import type { FileAccessContext } from '../files/access.js';
 import { sandboxChildPrompt } from '../sandbox/prompts.js';
 import { previewsConfigured, SANDBOX_TOOL_NAMES, sandboxConfigured } from '../sandbox/settings.js';
+import { saveTrace, TraceRecorder } from './trace.js';
 
 /** Step cap per run (the token cap applies too). */
 const MAX_STEPS = 50;
@@ -281,6 +282,11 @@ async function runClaimed(run: RunRow): Promise<void> {
     { role: 'user', content: run.isResume ? `[Follow-up from orchestrator]\n${run.instructions}` : run.instructions },
   ];
   let tokens = 0;
+  /** The run, step by step, for evals (trace.ts): saved in the finally below. */
+  const trace = new TraceRecorder();
+  const traceStart = new Date();
+  let traceOutcome: 'done' | 'cancelled' | 'timeout' | 'error' | 'interrupted' | null = null;
+  let traceError: string | null = null;
   let lastDetails = '';
   const sources: RunSource[] = Array.isArray(run.sources) ? [...run.sources] : [];
   let sourcesDirty = false;
@@ -380,17 +386,21 @@ async function runClaimed(run: RunRow): Promise<void> {
     let finalText = '';
     for (let step = 0; ; step++) {
       if (await checkCancel()) {
+        traceOutcome = 'cancelled';
         await finishSafely(run, { status: 'cancelled' }, { tokens, history: compactHistory(messages) });
         return;
       }
       const inbox = await drainSubagentInbox(sa.id);
       for (const text of inbox) messages.push({ role: 'user', content: `[Orchestrator update] ${text}` });
+      for (const text of inbox) trace.note(`[Orchestrator update] ${text}`);
       const background = deferred.take();
       if (background) messages.push({ role: 'user', content: `${BACKGROUND_RESULTS_HEADER}\n\n${background}` });
+      if (background) trace.note(`${BACKGROUND_RESULTS_HEADER}\n\n${background}`);
 
       const overBudget = tokens >= limits.runMaxTokens || step >= MAX_STEPS || Date.now() >= wrapUpAt;
       if (overBudget) {
         messages.push({ role: 'user', content: '[Orchestrator update] You are out of time or budget for this task. Stop using tools and report what you have now (including the leads you didn\'t get to), ending with the SUMMARY line.' });
+        trace.note(messages.at(-1)!.content);
       }
       if (step === 0) await setDetails(FIRST_STEP_DETAILS);
       else if (!lastDetails || lastDetails === FIRST_STEP_DETAILS) await setDetails(THINKING_DETAILS);
@@ -418,6 +428,7 @@ async function runClaimed(run: RunRow): Promise<void> {
       let stepText = '';
       let finishReason = '';
       for await (const part of result.fullStream) {
+        trace.ingest(part);
         if (!firstChunkAt && part.type !== 'start' && part.type !== 'start-step') firstChunkAt = Date.now();
         if (part.type === 'text-delta') {
           stepText += part.text;
@@ -478,6 +489,7 @@ async function runClaimed(run: RunRow): Promise<void> {
             role: 'user',
             content: `${BACKGROUND_RESULTS_HEADER}\n\n${late}\n\n[Orchestrator update] These arrived after you wrote the report above, so it isn't final yet: take them into account (follow strong new leads if needed), then write the complete final report again, ending with the SUMMARY line.`,
           });
+          trace.note(messages.at(-1)!.content);
           continue;
         }
       }
@@ -495,10 +507,13 @@ async function runClaimed(run: RunRow): Promise<void> {
         { tokens, history: compactHistory(messages) },
       );
       if (done === 'inbox') continue; // steer arrived just as it finished: take it into account
+      traceOutcome = done === 'ok' ? 'done' : 'interrupted';
       return;
     }
   } catch (err) {
     const reason = controller.signal.aborted ? controller.signal.reason : err;
+    traceOutcome = reason instanceof RunAbort ? (reason.kind === 'timeout' ? 'timeout' : reason.kind === 'cancel' ? 'cancelled' : 'interrupted') : 'error';
+    traceError = reason instanceof RunAbort ? reason.kind : shortError(err);
     if (reason instanceof RunAbort) {
       if (reason.kind === 'timeout') {
         await finishSafely(run, { status: 'error', error: `Timed out after ${Math.round(maxDurationMs / 60000)} min` }, { tokens, history: compactHistory(messages) });
@@ -517,6 +532,20 @@ async function runClaimed(run: RunRow): Promise<void> {
     stopWaitTicker();
     deferred.close();
     active.delete(run.id);
+    void saveTrace({
+      threadId: run.threadId,
+      kind: 'run',
+      turnId: run.turnId != null ? Number(run.turnId) : null,
+      runId: Number(run.id),
+      model: modelId,
+      system: instructions,
+      // The subagent's earlier history is in subagents.history: only this run's own instructions here.
+      input: [...(history.length ? [{ role: 'user' as const, content: `[${history.length} earlier messages of this subagent]` }] : []), messages[history.length]!],
+      steps: trace.finish(),
+      outcome: traceOutcome ?? 'error',
+      error: traceError,
+      startedAt: traceStart,
+    });
     if (sandbox) void onSandboxRunFinished(run.id).catch((err) => log.warn({ err, runId: run.id }, 'sandbox run-finished hook failed'));
   }
 }

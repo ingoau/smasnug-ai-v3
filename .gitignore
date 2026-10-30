@@ -8,3 +8,4 @@ dist/
 .cache/
 .claude/worktrees/
 .logs/
+evals/out/

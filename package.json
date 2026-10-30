@@ -14,6 +14,7 @@
     "start:worker": "node dist/worker/main.js",
     "migrate": "tsx --env-file=.env src/db/migrate.ts",
     "bench": "tsx scripts/bench.ts",
+    "eval:export": "tsx --env-file=.env scripts/eval-export.ts",
     "simulate": "SLACK_FAKE=1 tsx --env-file=.env scripts/simulate.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
