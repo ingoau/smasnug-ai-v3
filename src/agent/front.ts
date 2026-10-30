@@ -40,6 +40,7 @@ import { noteBotReply } from '../pipeline/store.js';
 import { awaitsReply } from '../pipeline/rules.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
+import { saveTrace, TraceRecorder } from './trace.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
 
 export interface TurnIO {
@@ -617,6 +618,7 @@ function latestTs(ts: string[]): string | undefined {
 export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const { channelId, threadTs } = parseThreadId(turn.threadId);
   const turnId = Number(turn.id);
+  const startedAt = new Date();
   let stopped = false;
   // `!stop` aborts the model call and the tools in flight at once (not only at the next step boundary): the signal
   // goes to streamText and every tool (core/tools.ts refuses calls once it is aborted). Polled while the turn runs.
@@ -731,6 +733,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   let guardStage: LookupGuard = 'none';
   /** Every tool call of this turn, for the next turn's <previous_turn_tools>. */
   const turnCalls: { tool: string; args: unknown }[] = [];
+  /** The whole turn, step by step, for evals (trace.ts). */
+  const trace = new TraceRecorder();
   /** The next model call's messages: the turn message, plus the earlier call's steps and the note after a nudge. */
   const convo: ModelMessage[] = [...messages];
   /** Tool names per finished step of this turn (all model calls), for the step limit and the lookup guard. */
@@ -814,6 +818,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
             await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
           }
+          for (const m of extra) trace.note(m.content);
           return { ...(extra.length ? { messages: [...current, ...extra] } : {}), ...(activeTools ? { activeTools } : {}) };
         },
       });
@@ -826,6 +831,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       let lastText = '';
       let lastCalls = 0;
       for await (const part of result.fullStream) {
+        trace.ingest(part);
         if (part.type !== 'start' && part.type !== 'start-step') timing.mark('first_chunk');
         switch (part.type) {
           case 'text-delta':
@@ -920,6 +926,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       log.info({ turnId, steps: doneSteps.length }, 'front plain-text step: nudging once');
       await appendEvent(turn.threadId, 'plain_text_nudge', 'system', { turnId, step: doneSteps.length }).catch(() => {});
       convo.push(...(await result.responseMessages), { role: 'user', content: PLAIN_TEXT_NUDGE_NOTE });
+      trace.note(PLAIN_TEXT_NUDGE_NOTE);
     }
     timing.mark('loop_done');
   } catch (err) {
@@ -929,6 +936,18 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (stopPoll) clearInterval(stopPoll);
     const reported = summarizeToolCalls(turnCalls);
     if (reported.length) await appendEvent(turn.threadId, 'turn_tools', 'bot', { turnId, calls: reported }).catch((err) => log.warn({ err }, 'turn_tools event failed'));
+    void saveTrace({
+      threadId: turn.threadId,
+      kind: 'front',
+      turnId,
+      model: MODELS.front,
+      system,
+      input: messages,
+      steps: trace.finish(),
+      outcome: stopAbort.signal.aborted || stopped ? 'stopped' : failed ? 'error' : 'done',
+      error: failed ? String((failed as any)?.message ?? failed) : null,
+      startedAt,
+    });
     // An activity message no reply took over (silent turn, error, stop) leaves nothing behind.
     await replies.closeActivity();
     // The turn's card (its steps and runs) in its reply message, re-rendered with the final state; runs without a

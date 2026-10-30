@@ -134,13 +134,15 @@ export async function applyEdit(channelId: string, m: SlackMessage): Promise<{ t
   return same ? { ...same, changed: false } : undefined;
 }
 
-/** Retention: a deleted Slack message clears our stored copy, and its uploads leave the file store. */
+/** Retention: a deleted Slack message clears our stored copy (and traces that may hold one), and its uploads leave the file store. */
 export async function applyDelete(channelId: string, ts: string): Promise<{ threadId: string | null; userId: string | null } | undefined> {
   const [before] = await sql<{ files: SlackFileRef[] }[]>`select files from messages where channel_id = ${channelId} and ts = ${ts}`;
   const [row] = await sql<{ threadId: string | null; userId: string | null }[]>`
     update messages set text = '', files = '[]'::jsonb, attachments = '[]'::jsonb, deleted = true
     where channel_id = ${channelId} and ts = ${ts}
     returning thread_id, user_id`;
+  // Model traces taken since the message was posted may hold a copy (src/agent/trace.ts).
+  if (row?.threadId) await sql`delete from traces where thread_id = ${row.threadId} and created_at >= to_timestamp(${ts}::numeric)`.catch((err) => log.warn({ err }, 'dropping traces of a deleted message failed'));
   const slackIds = (Array.isArray(before?.files) ? before.files : []).map((f) => f?.id).filter((id): id is string => !!id);
   await removeMessageFiles(channelId, ts).catch((err) => log.warn({ err }, 'removing deleted message files failed'));
   if (slackIds.length) await removeMessageFiles(channelId, ts, slackIds).catch((err) => log.warn({ err }, 'removing deleted message posts failed'));

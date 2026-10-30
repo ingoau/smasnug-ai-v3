@@ -1,5 +1,5 @@
 /**
- * Daily retention. Keep only what's needed: thread data, runs, subagent histories and usage go after ~30 days;
+ * Daily retention. Keep only what's needed: thread data, runs, subagent histories, traces and usage go after ~30 days;
  * short-lived coordination rows after ~2 days. Per-user memory is the exception (expires by last_used).
  * sent_messages / reports are kept so reports keep their original sender. Files the bot made go 30 days after
  * creation, uploads with the messages they came on. Bot reports (report_user) go 30 days
@@ -60,6 +60,19 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
           select 1 from messages m where m.thread_id = s.thread_id and m.deleted and (m.text <> '' or m.files <> '[]')
             and m.ts::numeric <= s.covered_ts::numeric)
         returning s.thread_id`,
+  );
+  // Model traces (src/agent/trace.ts) hold copies of thread content: same window, and any trace that may include a
+  // message later deleted in Slack goes (applyDelete does it at deletion time; this catches stragglers).
+  await run('traces', sql`delete from traces where created_at < ${older(long)} returning id`);
+  await run(
+    'traces_deleted',
+    sql`delete from traces t where exists (
+          select 1 from messages m where m.thread_id = t.thread_id and m.deleted and to_timestamp(m.ts::numeric) <= t.created_at)
+        returning t.id`,
+  );
+  await run(
+    'prompt_versions',
+    sql`delete from prompt_versions p where p.created_at < ${older(long)} and not exists (select 1 from traces t where t.prompt_hash = p.hash) returning hash`,
   );
   // Copies of messages deleted in Slack: drop the content right away.
   await run('messages_deleted_content', sql`update messages set text = '', files = '[]', attachments = '[]' where deleted and (text <> '' or files <> '[]' or attachments <> '[]') returning ts`);
