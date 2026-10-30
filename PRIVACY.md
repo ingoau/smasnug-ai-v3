@@ -8,17 +8,18 @@ smasnug ai is a Slack bot run by Ingo Wolf (@inw) as a personal project. This po
 - **Things it looks up for you.** When you ask, it may read public channels and threads, search public Slack messages, open web pages and files, and run web searches. Messages starting with `##` are always ignored.
 - **Memory about you.** It remembers short facts you share about yourself (your projects, preferences, role, time zone and similar) to personalise answers. It never stores sensitive facts on purpose. You can see and delete every fact in the bot's **App Home**, or say "forget …" in a conversation.
 - **Public directory data.** To find people and channels, it keeps a copy of public Slack profile fields (names, handle, title, pronouns, status, time zone) and public channel details (name, topic, purpose). It does not store emails, phone numbers or avatars.
+- **Records of how it answered.** For each answer, the steps it took: the conversation context it was given, its working notes, the tools it used and what they returned, and how long and how much it cost. These exist to find mistakes and make the bot better.
 - **Usage and moderation records.** Rate-limit counters, model usage, messages it sends on your behalf (with who asked), and reports.
 
 ## How it's used
 
-Only to run the bot: answer you, do the tasks you ask for, keep it safe (rate limits, reports, suspensions) and fix problems. Your data is never sold, and never used for advertising.
+Only to run the bot: answer you, do the tasks you ask for, keep it safe (rate limits, reports, suspensions), fix problems and improve how it answers. To improve it, Ingo reviews past conversations and their records (with the help of AI tools such as Claude) to find where the bot went wrong or wasted effort, and changes its instructions. Conversation content is never copied into the bot's code or instructions, and never published. Your data is never sold, and never used for advertising.
 
 ## Who it's shared with
 
 Answering means sending parts of the conversation to these services:
 
-- **AI model providers.** [Hack Club AI](https://ai.hackclub.com) (which relays to [OpenRouter](https://openrouter.ai) and model providers), the [Anthropic API](https://www.anthropic.com), and OpenRouter directly as a fallback.
+- **AI model providers.** [Hack Club AI](https://ai.hackclub.com) (which relays to [OpenRouter](https://openrouter.ai) and model providers), the [Anthropic API](https://www.anthropic.com), and OpenRouter directly as a fallback. Reviews of past conversations use [Anthropic](https://www.anthropic.com)'s Claude.
 - **Search.** [Exa](https://exa.ai) (through Hack Club's proxy or directly) and Anthropic's web search.
 - **Code sandboxes**, only if you ask for code to run: files and code run on [Modal](https://modal.com) in the US. Live previews are published on Cloudflare, and only after you accept Cloudflare's own terms.
 - **Slack**, where everything the bot posts lives.
@@ -27,7 +28,7 @@ These services handle the data under their own privacy policies.
 
 ## How long it's kept
 
-- Conversations, files you uploaded, and the bot's working data: deleted about **30 days** after the conversation goes quiet, and right away when you delete the message in Slack.
+- Conversations, files you uploaded, the bot's working data and its records of how it answered: deleted about **30 days** after the conversation goes quiet (records of how it answered: 30 days after the answer), and right away when you delete the message in Slack. Copies made for a review are deleted once the review is done.
 - Memory facts: until you delete them, or after about **6 months** without being used.
 - Directory data: kept up to date from Slack and removed when the profile or channel is removed.
 - Messages sent on your behalf and reports: kept so reports stay accurate.

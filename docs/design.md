@@ -503,7 +503,7 @@ A global pause flag, per-channel disable for channel owners, and a per-user bloc
 **Model or API outages.** Post a short "Something broke, try again" rather than going silent.
 ### Observability and testing
 - 
-Trace every turn and run: prompts, tool calls, gate decisions, tokens, latency, cost. PostHog LLM analytics, Langfuse or similar.
+Trace every turn and run: prompts, tool calls, gate decisions, tokens, latency, cost. Implemented in-house: `traces` table + `pnpm eval:export` (see `docs/evals.md`).
 - 
 Build evals from saved threads (with permission), especially steer versus new task, silence, and ambiguous follow-ups. Replay them after prompt changes.
 - 

@@ -1,7 +1,7 @@
 # smasnug-ai
 
 Workspace Slack agent. Full spec: `docs/design.md` (read the sections relevant to your work).
-Observability (tracing/evals) is **out of scope for now**. Code sandboxes: `docs/sandbox.md`.
+Traces + evals: `docs/evals.md`. Code sandboxes: `docs/sandbox.md`.
 
 ## Stack
 TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK v7 (`ai`, docs in
@@ -20,6 +20,9 @@ Relevance gate: `typesafe/jev-1.13` (a decisions model, OpenRouter's alpha Decis
 Local infra: `docker compose up -d` (Postgres on 5433, Redis on 6380), `pnpm migrate`.
 Checks: `pnpm typecheck`, `pnpm test`. Full suite: `LIVE=1 INTEGRATION=1 pnpm vitest run --no-file-parallelism`.
 Latency: every turn logs a `turn_timing` event; `pnpm bench` measures the real pipeline (see `docs/perf.md`).
+Traces: every front turn and subagent run saves a full trace (`traces`, `src/agent/trace.ts`); `pnpm eval:export` scores
+recent turns with cheap detectors and writes the worst as markdown for an analysis pass (`docs/evals.md`). A new model
+loop must feed its stream parts to a `TraceRecorder` and `saveTrace` at the end.
 
 Tests never touch the dev database/Redis: vitest (`vitest.config.ts` → `src/testing/`) swaps DATABASE_URL/REDIS_URL
 for `TEST_DATABASE_URL` / `TEST_REDIS_URL` (default: database `smasnug_test`, Redis db 9 on the `.env` servers),
@@ -50,6 +53,7 @@ TEST_REDIS_URL are set, `<test db>_<name>` + the test Redis db plus an offset (s
 | tools | `src/tools/**`, `src/context/**`, `src/files/**` | fetch_url, web search, slack search, read_thread/read_channel, read_file/ask_file, search_emojis, react, download_emoji / upload_emoji (`docs/emoji.md`), thread context rendering, images, file store (create_file/read_file/ask_file), workspace directory + profile store (`src/tools/directory/`: crawl, events, find_people/find_channels; `getUserInfo` reads it) |
 | agent | `src/agent/**`, `skills/**` | front agent loop, reply tool + streaming, subagents/runs/inbox, plan cards (turn steps + runs), skills (`load_skill`), background card / DM session titles (`titles.ts`), lookup guard, sweeper, expiry, compaction, synthesis |
 | features | `src/features/**`, `slack-manifest.yml` | memory + extraction + memory tools, workspace facts, App Home, send_message + confirmation + attribution, reports/suspension/moderation, report_user (bot reports, `bot-reports.ts`), limits/guard, kill switches, retention, HuddleFM DJ mode (`huddlefm/`) |
+| evals | `src/eval/**`, `scripts/eval-export.ts`, `src/agent/trace.ts` | traces (recording, retention), detectors, eval export (docs/evals.md) |
 | sandbox | `src/sandbox/**` | code sandboxes (docs/sandbox.md): provider (Modal) + lifecycle, sandbox tools (children with `sandbox: true`), HCA access + allowlist, budget/quotas, live previews (Cloudflare) |
 
 Cross-module contracts are stub files with final signatures — implement yours, call others', don't change a
