@@ -5,13 +5,15 @@
  * frontmatter (`name`, `description`, optional `roles: [front, child]`, optional `requires: [huddlefm]`) and a markdown
  * body. Only the name and
  * description go into the system prompt (`skillsPrompt`); the agent calls `load_skill` to read the body, and any
- * other file in the skill's directory (`load_skill` with `file`). Read once per process and cached; the index is
- * stable, so the system prompt stays cacheable. See skills/README.md.
+ * other file in the skill's directory (`load_skill` with `file`), plus the files LINKED_FILES adds from elsewhere in
+ * the repo. Read once per process and cached; the index is stable, so the system prompt stays cacheable. See
+ * skills/README.md.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Role } from '../core/tools.js';
+import { privacyPolicyPath } from '../features/privacy-path.js';
 import { log } from '../log.js';
 
 export type SkillRole = Extract<Role, 'front' | 'child'>;
@@ -24,8 +26,10 @@ export interface Skill {
   requires: string[];
   body: string;
   dir: string;
-  /** Other files in the skill directory, relative paths with `/` separators (SKILL.md excluded). */
+  /** Other files in the skill directory, relative paths with `/` separators (SKILL.md excluded), plus `linked`'s. */
   files: string[];
+  /** Files listed under a name in this skill but read from elsewhere (LINKED_FILES): name → absolute path. */
+  linked: Record<string, string>;
 }
 
 const ROLES: SkillRole[] = ['front', 'child'];
@@ -43,6 +47,15 @@ export const SKILL_FEATURES: Record<string, () => boolean> = {
   sandbox: () => Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET),
   /** previewsConfigured: sandboxes plus the key that encrypts preview tokens. */
   previews: () => Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET && process.env.PREVIEW_SECRET_KEY),
+};
+
+/**
+ * Files a skill offers that live outside its directory: skill name → file name → path (resolved when the skills
+ * load; the file is read on each load_skill, and a linked name wins over a same-named file in the directory). The
+ * privacy policy is served from the file consent uses (PRIVACY_POLICY_PATH included), never a copy that could drift.
+ */
+export const LINKED_FILES: Record<string, Record<string, () => string>> = {
+  'about-yourself': { 'privacy-policy.md': privacyPolicyPath },
 };
 
 export type FeatureCheck = (feature: string) => boolean;
@@ -132,7 +145,9 @@ export function loadSkills(dir: string): Skill[] {
       log.warn({ skill: name }, 'skipping duplicate skill name');
       continue;
     }
-    skills.push({ name, description, roles, requires, body, dir: skillDir, files: listFiles(skillDir) });
+    const linked = Object.fromEntries(Object.entries(LINKED_FILES[name] ?? {}).map(([rel, at]) => [rel, at()]));
+    const files = [...new Set([...listFiles(skillDir), ...Object.keys(linked)])].sort();
+    skills.push({ name, description, roles, requires, body, dir: skillDir, files, linked });
   }
   return skills;
 }
@@ -171,10 +186,11 @@ export function readSkill(role: SkillRole, name: string, file?: string, all: Ski
   }
   const rel = file.trim().replace(/^\.?\//, '');
   if (!skill.files.includes(rel)) return `Skill "${skill.name}" has no file "${rel}". Files: ${skill.files.join(', ') || 'none'}.`;
-  // `rel` is one of the listed files (no symlinks), so it can't escape the skill directory.
+  // `rel` is one of the listed files (no symlinks), so it can't escape the skill directory; a linked file's path is
+  // fixed in code (LINKED_FILES).
   let buf: Buffer;
   try {
-    buf = readFileSync(path.join(skill.dir, rel));
+    buf = readFileSync(Object.hasOwn(skill.linked, rel) ? skill.linked[rel]! : path.join(skill.dir, rel));
   } catch {
     return `Couldn't read "${rel}" from skill "${skill.name}".`;
   }

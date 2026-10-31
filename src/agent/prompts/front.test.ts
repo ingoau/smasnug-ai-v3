@@ -120,6 +120,13 @@ describe('frontSystemPrompt self-knowledge', () => {
     expect(p).toMatch(/load the about-yourself skill; don't guess/);
     expect(frontSystemPrompt('smasnug ai')).not.toMatch(/<@undefined>/);
   });
+
+  it('knows about the privacy policy gate unless consent is off', () => {
+    const line = (o: { privacyConsent?: boolean }) => frontSystemPrompt('smasnug ai', o).split('\n').find((l) => l.includes('privacy policy'));
+    expect(line({})).toMatch(/^- People must agree to your privacy policy .* never say there's nothing to agree to\. .*about-yourself skill\.$/);
+    expect(line({ privacyConsent: false })).toBeUndefined();
+    expect(frontSystemPrompt('smasnug ai')).toMatch(/about-yourself skill\.\n- How you behave/);
+  });
 });
 
 describe('frontSystemPrompt rules from the prod trace review', () => {
