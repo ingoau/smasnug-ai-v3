@@ -133,7 +133,7 @@ function frontModelNames(): { model: string; fallbackModel?: string } {
 
 async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
-  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, ...frontModelNames() });
+  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, privacyConsent: env.PRIVACY_CONSENT === 'on', ...frontModelNames() });
   // HuddleFM and sandbox instructions are skills (skills/huddle-dj, skills/code-sandboxes), listed only when configured.
   const skillIndex = skillsPrompt('front');
   if (skillIndex) system = `${system}\n\n${skillIndex}`;

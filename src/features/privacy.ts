@@ -9,12 +9,12 @@
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { env } from '../config.js';
 import type { ActionContext } from '../core/actions.js';
 import { slackCall } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
+import { privacyPolicyPath } from './privacy-path.js';
 import { respond } from './util.js';
 
 export const PRIVACY_READ_ACTION = 'privacy:read';
@@ -23,16 +23,12 @@ export const PRIVACY_AGREE_ACTION = 'privacy:agree';
 /** Swappable for tests (vitest turns consent off, see src/testing/test-db.ts). */
 export const privacySettings = { required: env.PRIVACY_CONSENT === 'on' };
 
-function policyPath(): string {
-  return process.env.PRIVACY_POLICY_PATH || fileURLToPath(new URL('../../PRIVACY.md', import.meta.url));
-}
-
 let cached: { text: string; version: string } | undefined;
 
 /** The policy text and its version (sha256 prefix of the text). Read once per process. */
 export function privacyPolicy(): { text: string; version: string } {
   if (!cached) {
-    const text = readFileSync(policyPath(), 'utf8');
+    const text = readFileSync(privacyPolicyPath(), 'utf8');
     cached = { text, version: createHash('sha256').update(text).digest('hex').slice(0, 16) };
   }
   return cached;

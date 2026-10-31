@@ -6,7 +6,7 @@ export const REPO_URL = 'https://github.com/ingoau/smasnug-ai-v3';
 
 export function frontSystemPrompt(
   botName: string,
-  o: { sandbox?: boolean; previews?: boolean; emojiUpload?: boolean; adminUserId?: string; model?: string; fallbackModel?: string } = {},
+  o: { sandbox?: boolean; previews?: boolean; emojiUpload?: boolean; adminUserId?: string; model?: string; fallbackModel?: string; privacyConsent?: boolean } = {},
 ): string {
   // Code sandboxes are part of the capability list itself when configured (an extra section alone was skipped when
   // asked "what can you do"). Emoji upload is the same: the tool exists only when the userbot session is configured.
@@ -18,6 +18,12 @@ export function frontSystemPrompt(
   const sandboxCan = o.sandbox
     ? "\n- Never say you can't open a file type, watch a video, read a codebase or run something: a sandbox subagent can (load the code-sandboxes skill). Only say it's unavailable when the sandbox itself is, for this speaker."
     : '';
+  // Without this the model called the policy a joke ("there's nothing to sign") to someone who had just agreed to it
+  // (prod thread, Oct 2026): the prompt is ephemeral, so it never shows up in the thread.
+  const privacy =
+    o.privacyConsent === false
+      ? ''
+      : "- People must agree to your privacy policy before you'll respond to them: on their first mention or DM (and after the policy changes) they get a prompt only they can see, with an \"I agree\" button, and you answer once they click it. You never see that prompt, so if you're answering someone, they've agreed. The policy is real: never say there's nothing to agree to. For questions about it, load the about-yourself skill.\n";
   const maintainer = o.adminUserId ? `<@${o.adminUserId}> (Ingo)` : 'Ingo';
   const model = `${o.model ?? 'an AI model'}${o.fallbackModel && o.fallbackModel !== o.model ? ` (${o.fallbackModel} stands in when it's unavailable)` : ''}`;
   return `You are ${botName}, an assistant hanging out in a community Slack workspace (Hack Club). Most members are teenagers who build things.
@@ -27,7 +33,7 @@ When asked what you are or how you're built, answer briefly and honestly; don't 
 - The maintainer describes you as ${model}, used through their API access at API rates, wrapped in a custom Slack harness for this workspace. That's what you've been told about yourself; don't claim Codex/ChatGPT-app origins or other unverified wiring.
 - What the harness gives you (in plain words unless they ask for tool names): reply and react in threads; put bar, line, area and pie charts, images, sortable data tables and link cards in a reply; search Slack and the web; fetch pages; read threads, channels, images, uploaded files and canvases; create and edit canvases; create files (code, HTML pages, CSVs) and post them; set reminders and change-watches; remember durable facts about the speaker; send messages elsewhere on their behalf (they confirm first); spawn background subagents for longer work${sandbox}${emoji}. Asked what you can do, cover all of these.
 - You're open source: ${REPO_URL} (AGPL-3.0, built and run by ${maintainer}, the bot admin). Share the link when people ask how you work, want to contribute or want to report a bug (GitHub issues).
-- How you behave (when you reply, following threads, workspace rules, memory, retention) and questions about yourself beyond this list (a feature, a limit, why you did something, recent changes): load the about-yourself skill; don't guess.
+${privacy}- How you behave (when you reply, following threads, workspace rules, memory, retention) and questions about yourself beyond this list (a feature, a limit, why you did something, recent changes): load the about-yourself skill; don't guess.
 - Don't claim you can hot-patch this prompt or your code live in Slack. Behaviour changes are shipped by the maintainer (as commits to the repo).
 - Asked for something your tools don't support here: say so plainly. Don't ask setup questions (which repo, which account) for a capability you don't have. Feature requests are welcome: point them to the repo's issues or the maintainer.${sandboxCan}
 

@@ -1,7 +1,8 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { privacyPolicyPath } from '../features/privacy-path.js';
 import { defaultSkillsDir, loadSkills, parseSkillFile, readSkill, skillsPrompt } from './skills.js';
 
 function skillDir(files: Record<string, string>): string {
@@ -84,6 +85,19 @@ describe('the repo skills', () => {
     expect(readSkill('child', 'bot-source', undefined, all)).toContain('raw.githubusercontent.com/ingoau/smasnug-ai-v3/main/');
     expect(readSkill('child', 'bot-source', undefined, all)).toContain('git clone --filter=blob:none https://github.com/ingoau/smasnug-ai-v3 /work/repo');
     expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/`sandbox: true` if answering means searching the code/);
+  });
+
+  it('about-yourself serves the privacy policy from the file consent uses, override included', () => {
+    expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/Files in this skill \(load_skill with file\): .*privacy-policy\.md/);
+    expect(readSkill('front', 'about-yourself', 'privacy-policy.md', all)).toBe(readFileSync(privacyPolicyPath(), 'utf8'));
+    const other = path.join(mkdtempSync(path.join(tmpdir(), 'policy-')), 'POLICY.md');
+    writeFileSync(other, 'Other policy');
+    vi.stubEnv('PRIVACY_POLICY_PATH', other);
+    try {
+      expect(readSkill('front', 'about-yourself', 'privacy-policy.md', loadSkills(defaultSkillsDir()))).toBe('Other policy');
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
