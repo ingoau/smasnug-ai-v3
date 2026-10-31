@@ -50,7 +50,8 @@ export const SKILL_FEATURES: Record<string, () => boolean> = {
 };
 
 /**
- * Files a skill offers that live outside its directory, resolved when read: skill name → file name → path. The
+ * Files a skill offers that live outside its directory: skill name → file name → path (resolved when the skills
+ * load; the file is read on each load_skill, and a linked name wins over a same-named file in the directory). The
  * privacy policy is served from the file consent uses (PRIVACY_POLICY_PATH included), never a copy that could drift.
  */
 export const LINKED_FILES: Record<string, Record<string, () => string>> = {

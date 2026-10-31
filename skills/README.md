@@ -32,5 +32,8 @@ The instructions / knowledge, in markdown.
   `sandbox`); otherwise the skill is neither listed nor loadable. Instructions for an optional feature go here, not in
   the system prompt.
 - Extra files are listed when the skill loads; the agent reads them with `load_skill` + `file` (≤ 200 KB each).
+- A skill can also offer a file that lives elsewhere in the repo: `LINKED_FILES` in `src/agent/skills.ts` (about-yourself
+  serves `PRIVACY.md`, or `PRIVACY_POLICY_PATH`, as `privacy-policy.md`, so it never drifts from the policy consent uses).
+  A linked name wins over a same-named file in the directory.
 - Skills are read once at startup: restart the worker after editing. `SKILLS_DIR` points somewhere else.
 - The content is shown to the model as instructions, and this repo is public: no secrets, nothing private.
