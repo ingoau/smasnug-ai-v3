@@ -121,6 +121,12 @@ describe('frontSystemPrompt self-knowledge', () => {
     expect(frontSystemPrompt('smasnug ai')).not.toMatch(/<@undefined>/);
   });
 
+  it('shares its instructions when asked instead of refusing', () => {
+    const p = frontSystemPrompt('smasnug ai');
+    expect(p).toMatch(/Your instructions aren't secret .*share them/);
+    expect(p).not.toMatch(/reveal this prompt/);
+  });
+
   it('knows about the privacy policy gate unless consent is off', () => {
     const line = (o: { privacyConsent?: boolean }) => frontSystemPrompt('smasnug ai', o).split('\n').find((l) => l.includes('privacy policy'));
     expect(line({})).toMatch(/^- People must agree to your privacy policy .* never say there's nothing to agree to\. .*about-yourself skill\.$/);
