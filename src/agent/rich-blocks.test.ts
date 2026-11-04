@@ -118,3 +118,25 @@ describe('replyBody', () => {
     expect(parseExtras(null)).toBeNull();
   });
 });
+
+describe('response time footer', () => {
+  it('formats durations', async () => {
+    const { formatDuration } = await import('./rich-blocks.js');
+    expect(formatDuration(840)).toBe('0.8s');
+    expect(formatDuration(9_949)).toBe('9.9s');
+    expect(formatDuration(12_400)).toBe('12s');
+    expect(formatDuration(59_700)).toBe('1m 00s');
+    expect(formatDuration(125_000)).toBe('2m 05s');
+    expect(formatDuration(3_780_000)).toBe('1h 03m');
+    expect(formatDuration(-50)).toBe('0.0s');
+  });
+
+  it('survives storage and renders as the last context block', async () => {
+    const { footerBlock, hasExtras } = await import('./rich-blocks.js');
+    const back = parseExtras(serializeExtras({ items: [], footer: 'Responded in 3.0s' }));
+    expect(back).toEqual({ items: [], footer: 'Responded in 3.0s' });
+    expect(hasExtras(back)).toBe(true);
+    expect(hasExtras({ items: [] })).toBe(false);
+    expect(footerBlock(back, 'card_1_')).toEqual([{ type: 'context', block_id: 'card_1_reply_footer', elements: [{ type: 'mrkdwn', text: 'Responded in 3.0s' }] }]);
+  });
+});

@@ -18,7 +18,7 @@ import type { CardStep } from './card-steps.js';
 import { buttonsBlock, buttonsFallbackText } from './reply-buttons.js';
 import { buttonsForMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { extrasForMessage } from './charts-store.js';
-import { extrasFallback, replyBody, type ReplyExtras } from './rich-blocks.js';
+import { extrasFallback, footerBlock, hasExtras, replyBody, type ReplyExtras } from './rich-blocks.js';
 import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS } from './slack-markdown.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 
@@ -148,7 +148,7 @@ export async function postCard(cardId: number, reply?: ReplyRef | null): Promise
   if (!runs.length && (!card.steps.length || !reply)) return;
   if (reply) {
     const buttons = await buttonsForMessage(card.channelId, reply.ts).catch(() => undefined);
-    const msg = renderCard({ ...toState(card), replyText: reply.text, buttons: buttons ? toButtonsState(buttons) : null, ...(reply.extras?.items.length ? { extras: reply.extras } : {}) }, runs);
+    const msg = renderCard({ ...toState(card), replyText: reply.text, buttons: buttons ? toButtonsState(buttons) : null, ...(hasExtras(reply.extras) ? { extras: reply.extras } : {}) }, runs);
     try {
       await editCardMessage({ channel: card.channelId, ts: reply.ts, text: msg.text, blocks: msg.blocks });
       await sql`update cards set message_ts = ${reply.ts}, reply_text = ${reply.text} where id = ${cardId} and message_ts is null`;
@@ -247,7 +247,7 @@ export async function freezeCard(cardId: number): Promise<void> {
 }
 
 function toState(card: CardRow): CardState {
-  return { id: card.id, title: card.title, frozen: card.frozen, replyText: card.replyText ?? null, buttons: card.buttons ? toButtonsState(card.buttons) : null, extras: card.extras?.items.length ? card.extras : null, steps: card.steps };
+  return { id: card.id, title: card.title, frozen: card.frozen, replyText: card.replyText ?? null, buttons: card.buttons ? toButtonsState(card.buttons) : null, extras: hasExtras(card.extras) ? card.extras : null, steps: card.steps };
 }
 
 /**
@@ -264,7 +264,7 @@ export async function rerenderButtonsMessage(row: ReplyButtonsRow): Promise<void
   }
   const state = toButtonsState(row);
   const extras = await extrasForMessage(row.channelId, row.messageTs);
-  const body = row.replyText != null ? replyBody(row.replyText, extras, { maxBlocks: MAX_MESSAGE_BLOCKS - 1, idPrefix: '' }) : [];
+  const body = row.replyText != null ? replyBody(row.replyText, extras, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - footerBlock(extras).length, idPrefix: '' }) : [];
   const text = row.replyText != null ? neutralizeBroadcasts(extrasFallback(row.replyText, extras, MAX_FALLBACK_TEXT)) : buttonsFallbackText(state);
-  await slackCall('chat.update', { channel: row.channelId, ts: row.messageTs, text, blocks: [...body, buttonsBlock(state)] });
+  await slackCall('chat.update', { channel: row.channelId, ts: row.messageTs, text, blocks: [...body, buttonsBlock(state), ...(row.replyText != null ? footerBlock(extras) : [])] });
 }

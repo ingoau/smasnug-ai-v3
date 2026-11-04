@@ -393,3 +393,14 @@ describe('no empty text elements (Slack rejects the card: invalid_blocks, "must 
     expect(tasks[4].sources).toEqual([{ type: 'url', url: 'https://example.com/', text: 'example.com' }]);
   });
 });
+
+describe('response time footer on a card message', () => {
+  it('stays the last block, below the buttons', () => {
+    const { blocks } = renderCard(
+      { id: 3, title: null, frozen: true, replyText: 'Answer.', buttons: { id: 1, labels: ['Ok'], pressedBy: null, pressedLabel: null }, extras: { items: [], footer: 'Responded in 1m 02s' } } as any,
+      [run(1, { status: 'complete' })],
+    );
+    expect(blocks.map((b) => b.type)).toEqual(['plan', 'markdown', 'actions', 'context']);
+    expect(blocks.at(-1)).toMatchObject({ block_id: 'card_3_reply_footer', elements: [{ text: 'Responded in 1m 02s' }] });
+  });
+});

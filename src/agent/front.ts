@@ -645,6 +645,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     activeRuns: () => activeRunsInThread(turn.threadId),
     stopRequested: checkStop,
     timing: io.timing,
+    // Replies to a user's message say how long they took from it (a context block at the bottom).
+    triggerTs: turn.kind === 'user' ? latestTs(turn.messageTs ?? []) : undefined,
     activityCards,
     card: { block: () => turnCard.block(), attached: (ts, text) => turnCard.attached(ts, text) },
     // A reply only streams into the activity message if nothing was posted below it meanwhile.

@@ -1,13 +1,13 @@
 /**
- * Extra blocks posted on a reply (table reply_charts: charts, images, tables, cards). Card and button re-renders
+ * Extra blocks posted on a reply (table reply_charts: charts, images, tables, cards, the response-time footer). Card and button re-renders
  * rebuild the message from DB state.
  */
 import { sql } from '../db/index.js';
 import { storedCharts } from './charts.js';
-import { chartExtra, parseExtras, serializeExtras, type ReplyExtras } from './rich-blocks.js';
+import { chartExtra, hasExtras, parseExtras, serializeExtras, type ReplyExtras } from './rich-blocks.js';
 
 export async function saveReplyExtras(channelId: string, messageTs: string, extras: ReplyExtras | null | undefined): Promise<void> {
-  if (!extras?.items.length) return;
+  if (!hasExtras(extras)) return;
   const charts = extras.items.filter((it) => it.block.type === 'data_visualization').map((it) => it.block);
   await sql`
     insert into reply_charts (channel_id, message_ts, charts, extras)
