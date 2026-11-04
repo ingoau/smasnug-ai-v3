@@ -215,8 +215,8 @@ const OUTPUT_CONTENT = new Set(['text', 'tool-call', 'reasoning', 'file']);
  * to `content-filter`). Not a provider failure, so no cooldown: the next tier (another provider, or another model
  * family) gets a try.
  */
-function noteRefusal(modelId: string, provider: string): void {
-  log.warn({ modelId, provider }, 'model refused (content filter) before any output, trying the next provider');
+function noteRefusal(modelId: string, provider: string, usage?: unknown): void {
+  log.warn({ modelId, provider, usage }, 'model refused (content filter) before any output, trying the next provider');
 }
 
 /**
@@ -242,7 +242,7 @@ export function withFallback(primary: LanguageModelV4, fallback: LanguageModelV4
         return fallback.doGenerate(options);
       }
       if (result.finishReason?.unified === 'content-filter' && !result.content.some((c) => OUTPUT_CONTENT.has(c.type)) && !aborted(options)) {
-        noteRefusal(primary.modelId, primary.provider);
+        noteRefusal(primary.modelId, primary.provider, result.usage);
         return fallback.doGenerate(options);
       }
       return result;
@@ -278,7 +278,7 @@ export function withFallback(primary: LanguageModelV4, fallback: LanguageModelV4
         }
         if (part.type === 'finish' && part.finishReason?.unified === 'content-filter' && !aborted(options)) {
           reader.cancel().catch(() => {});
-          noteRefusal(primary.modelId, primary.provider);
+          noteRefusal(primary.modelId, primary.provider, part.usage);
           return fallback.doStream(options);
         }
         held.push(part);
