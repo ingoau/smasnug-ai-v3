@@ -201,8 +201,23 @@ function aborted(options: CallOptions): boolean {
   return options.abortSignal?.aborted === true;
 }
 
-/** Stream parts that come before any model output; an error before the first other part can still fall back. */
-const PREAMBLE = new Set(['stream-start', 'response-metadata', 'raw', 'text-start', 'reasoning-start']);
+/**
+ * Stream parts that come before any model output; an error (or a content-filter finish) before the first other part
+ * can still fall back. `custom` covers provider markers such as Anthropic's `message_start`.
+ */
+const PREAMBLE = new Set(['stream-start', 'response-metadata', 'raw', 'text-start', 'reasoning-start', 'custom']);
+
+/** Content that counts as model output (a refusal with only these missing is still "nothing said"). */
+const OUTPUT_CONTENT = new Set(['text', 'tool-call', 'reasoning', 'file']);
+
+/**
+ * The provider's safety filter refused the call before it said anything (Anthropic's `refusal` stop reason, mapped
+ * to `content-filter`). Not a provider failure, so no cooldown: the next tier (another provider, or another model
+ * family) gets a try.
+ */
+function noteRefusal(modelId: string, provider: string, usage?: unknown): void {
+  log.warn({ modelId, provider, usage }, 'model refused (content filter) before any output, trying the next provider');
+}
 
 /**
  * `primary` first, `fallback` on failure (and while `cooldown` is active). A stream falls back only if it fails
@@ -218,13 +233,19 @@ export function withFallback(primary: LanguageModelV4, fallback: LanguageModelV4
     supportedUrls: primary.supportedUrls,
     async doGenerate(options) {
       if (!usePrimary()) return fallback.doGenerate(options);
+      let result: Awaited<ReturnType<LanguageModelV4['doGenerate']>>;
       try {
-        return await primary.doGenerate(options);
+        result = await primary.doGenerate(options);
       } catch (err) {
         if (aborted(options)) throw err;
         fail(err);
         return fallback.doGenerate(options);
       }
+      if (result.finishReason?.unified === 'content-filter' && !result.content.some((c) => OUTPUT_CONTENT.has(c.type)) && !aborted(options)) {
+        noteRefusal(primary.modelId, primary.provider, result.usage);
+        return fallback.doGenerate(options);
+      }
+      return result;
     },
     async doStream(options) {
       if (!usePrimary()) return fallback.doStream(options);
@@ -253,6 +274,11 @@ export function withFallback(primary: LanguageModelV4, fallback: LanguageModelV4
         if (part.type === 'error' && !aborted(options)) {
           reader.cancel().catch(() => {});
           fail(part.error);
+          return fallback.doStream(options);
+        }
+        if (part.type === 'finish' && part.finishReason?.unified === 'content-filter' && !aborted(options)) {
+          reader.cancel().catch(() => {});
+          noteRefusal(primary.modelId, primary.provider, part.usage);
           return fallback.doStream(options);
         }
         held.push(part);

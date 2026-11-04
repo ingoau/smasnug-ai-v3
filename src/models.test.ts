@@ -136,6 +136,36 @@ describe('withFallback', () => {
     expect((await gen.doGenerate(opts)).content).toEqual([{ type: 'text', text: 'or' }]);
   });
 
+  it('falls back without a cooldown when the primary refuses (content filter) before any output', async () => {
+    const refusal = { unified: 'content-filter', raw: 'refusal' };
+    const fb = fake('or', { doStream: async () => ok('or') as any, doGenerate: async () => ({ content: [{ type: 'text', text: 'or' }] }) as any });
+    const primaryStream = vi.fn(async () => ({
+      stream: stream([{ type: 'stream-start', warnings: [] }, { type: 'custom', kind: 'anthropic.message_start' }, { type: 'finish', finishReason: refusal }]),
+    }));
+    const m = withFallback(fake('hc', { doStream: primaryStream as any }), fb);
+    expect(await read((await m.doStream(opts)).stream)).toContain('text-delta:or');
+    await m.doStream(opts);
+    expect(primaryStream).toHaveBeenCalledTimes(2); // no cooldown: the next call tries the primary again
+    const gen = withFallback(fake('hc', { doGenerate: async () => ({ content: [], finishReason: refusal }) as any }), fb);
+    expect((await gen.doGenerate(opts)).content).toEqual([{ type: 'text', text: 'or' }]);
+  });
+
+  it('keeps a content-filter finish that comes after output', async () => {
+    const fb = vi.fn();
+    const m = withFallback(
+      fake('hc', {
+        doStream: async () => ({
+          stream: stream([{ type: 'text-start', id: '1' }, { type: 'text-delta', id: '1', delta: 'a' }, { type: 'finish', finishReason: { unified: 'content-filter', raw: 'refusal' } }]),
+        }) as any,
+        doGenerate: async () => ({ content: [{ type: 'text', text: 'a' }], finishReason: { unified: 'content-filter', raw: 'refusal' } }) as any,
+      }),
+      fake('or', { doStream: fb, doGenerate: fb }),
+    );
+    expect(await read((await m.doStream(opts)).stream)).toEqual(['text-start', 'text-delta:a', 'finish']);
+    expect((await m.doGenerate(opts)).content).toEqual([{ type: 'text', text: 'a' }]);
+    expect(fb).not.toHaveBeenCalled();
+  });
+
   it('does not fall back once output has streamed', async () => {
     const fb = vi.fn();
     const m = withFallback(
