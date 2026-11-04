@@ -321,3 +321,37 @@ describe('HALTED_STREAM', () => {
     expect(HALTED_STREAM.test('ratelimited')).toBe(false);
   });
 });
+
+describe('reply: response time footer', () => {
+  const timed = (runs = 0) => ({ ...target('user', runs), triggerTs: '1700000000.000000', now: () => 1700000000000 + 4200 });
+  const footer = { type: 'context', block_id: 'reply_footer', elements: [{ type: 'mrkdwn', text: 'Responded in 4.2s' }] };
+
+  it('posted: a context block with the time since the triggering message is the last block, after the buttons', async () => {
+    calls.length = 0;
+    failOn = null;
+    await new ReplyManager(timed(1)).finish('tc1', 'Done.', undefined, ['Yes', 'No']);
+    const post = calls.find((c) => c.method === 'chat.postMessage')!;
+    expect(post.args.blocks.map((b: any) => b.type)).toEqual(['markdown', 'actions', 'context']);
+    expect(post.args.blocks.at(-1)).toEqual(footer);
+    expect(post.args.text).toBe('Done.');
+  });
+
+  it('streamed: the footer goes out with chat.stopStream', async () => {
+    calls.length = 0;
+    failOn = null;
+    const text = 'A streamed answer that is long enough to open a stream.';
+    const rm = new ReplyManager(timed());
+    await streamIn(rm, text);
+    await rm.finish('tc1', text);
+    const stop = calls.find((c) => c.method === 'chat.stopStream')!;
+    expect(stop.args.blocks).toEqual([footer]);
+  });
+
+  it('no trigger ts (synthesis / scheduled turns): no footer', async () => {
+    calls.length = 0;
+    failOn = null;
+    await new ReplyManager(target('synthesis')).finish('tc1', 'Write-up.');
+    const post = calls.find((c) => c.method === 'chat.postMessage')!;
+    expect(post.args.blocks.some((b: any) => b.type === 'context')).toBe(false);
+  });
+});

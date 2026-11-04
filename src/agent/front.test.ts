@@ -226,7 +226,7 @@ describe('runFrontTurn (mock model)', () => {
     const chat = h.slack.filter((c) => c.method.startsWith('chat.'));
     expect(chat).toHaveLength(1);
     expect(chat[0]!.method).toBe('chat.postMessage');
-    expect(chat[0]!.args).toMatchObject({ text: 'Noted, adding that.', thread_ts: '100.000001', blocks: [{ type: 'markdown', text: 'Noted, adding that.' }] });
+    expect(chat[0]!.args).toMatchObject({ text: 'Noted, adding that.', thread_ts: '100.000001', blocks: [{ type: 'markdown', text: 'Noted, adding that.' }, expect.objectContaining({ type: 'context', block_id: 'reply_footer' })] });
   });
 
   it('posts a fallback for a mention with nothing visible, but not for an unmentioned follow-up', async () => {
@@ -1182,7 +1182,7 @@ describe('runFrontTurn: status activity', () => {
         expect(cards(chat[0]!)).toEqual(['Searching the web…:in_progress']);
         expect(cards(chat[1]!)).toEqual(['Searching the web…:complete']);
         expect(chat[1]!.args.chunks.at(-1)).toMatchObject({ type: 'markdown_text' });
-        expect(chat.at(-1)!.args.blocks).toEqual([{ type: 'markdown', text: 'About $7 at most shops.' }]);
+        expect(chat.at(-1)!.args.blocks).toEqual([{ type: 'markdown', text: 'About $7 at most shops.' }, expect.objectContaining({ type: 'context', block_id: 'reply_footer' })]); // the response time last
         expect(released).toEqual([1]); // the reply's stopStream set the session active
       } finally {
         vi.unstubAllGlobals();
@@ -1274,7 +1274,7 @@ describe('runFrontTurn: status activity', () => {
       expect(chat.flatMap(cards).some((c) => c.endsWith(':error'))).toBe(false);
       // the message is rewritten as [card, reply]; the card lives there
       expect(chat[2]!.args.ts).toBe(chat[1]!.args.ts);
-      expect(chat[2]!.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown']);
+      expect(chat[2]!.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown', 'context']);
       expect(h.cardAttached).toEqual([chat[1]!.args.ts]);
       expect(h.postedCards).toEqual([5]); // re-rendered with the final state at the end of the turn
     });
@@ -1287,7 +1287,7 @@ describe('runFrontTurn: status activity', () => {
       const ts = chat.find((c) => c.method === 'chat.stopStream')!.args.ts;
       expect(statusesAtStop(ts)).toEqual({ 'Digging in…': 'complete' });
       expect(chat.flatMap(cards).some((c) => c.endsWith(':error'))).toBe(false);
-      expect(chat.at(-1)).toMatchObject({ method: 'chat.update', args: { blocks: [{ type: 'markdown', text: 'On it, I started a subagent.' }] } });
+      expect(chat.at(-1)).toMatchObject({ method: 'chat.update', args: { blocks: [{ type: 'markdown', text: 'On it, I started a subagent.' }, expect.objectContaining({ type: 'context', block_id: 'reply_footer' })] } });
     });
 
     it('a lookup is a step on the turn card: saved, rendered above the streamed reply, attached', async () => {
@@ -1298,7 +1298,7 @@ describe('runFrontTurn: status activity', () => {
         await runFrontTurn(turn({ id: 74 }), ioWithActivity(true).io);
         expect(h.cardSteps).toEqual([{ tool: 'web_search', status: 'complete' }]);
         const update = h.slack.filter((c) => c.method === 'chat.update').at(-1)!;
-        expect(update.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown']);
+        expect(update.args.blocks.map((b: any) => b.type)).toEqual(['plan', 'markdown', 'context']);
         expect(h.cardAttached).toEqual([update.args.ts]);
         expect(h.postedCards).toEqual([5]);
       } finally {

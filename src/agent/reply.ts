@@ -34,7 +34,7 @@ import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guideline
 import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, normalizeButtons, type ButtonsActionsBlock } from './reply-buttons.js';
 import { saveReplyExtras } from './charts-store.js';
-import { buildExtras, degradedFileIds, extrasFallback, imageExtras, replyBody, withoutMarkers, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
+import { buildExtras, degradedFileIds, extrasFallback, footerBlock, hasExtras, imageExtras, replyBody, responseTimeFooter, slackTsMs, withoutMarkers, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { createReplyButtons, setButtonsMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
@@ -66,6 +66,13 @@ export interface ReplyTarget {
   stopRequested?: () => Promise<boolean>;
   /** Latency instrumentation: first reply delta, stream start/stop, post. */
   timing?: TurnTiming;
+  /**
+   * Slack ts of the user message that triggered the turn: every reply then ends with a context block saying how long
+   * it took from that message to the reply (`responseTimeFooter`). Unset: no footer.
+   */
+  triggerTs?: string;
+  /** Clock for the response time (tests). */
+  now?: () => number;
   /** Show tool activity as transient task cards in the reply message (STATUS_ACTIVITY_MODE=tasks). */
   activityCards?: boolean;
   /** chat.stopStream set the session `active` (its default): the pipeline re-sets `processing` on the next activity. */
@@ -175,12 +182,13 @@ export function markdownMessage(text: string) {
   return replyMessage(text, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 });
 }
 
-/** A reply message's final layout: [plan card, reply with its extras, buttons] (card, extras, and buttons when given). */
+/** A reply message's final layout: [plan card, reply with its extras, buttons, footer] (each part when given). */
 function replyLayout(text: string, actions?: ButtonsActionsBlock, card?: CardBlock | null, extras?: ReplyExtras | null): { text: string; blocks: unknown[] } {
-  const maxBlocks = MAX_MESSAGE_BLOCKS - 1 - (card ? 1 : 0);
+  const footer = footerBlock(extras);
+  const maxBlocks = MAX_MESSAGE_BLOCKS - 1 - (card ? 1 : 0) - footer.length;
   // An empty markdown block is invalid: an extras-only reply is their blocks plus a text fallback.
   const body = replyBody(text, extras, { maxBlocks, idPrefix: '' });
-  return { text: extrasFallback(text, extras), blocks: [...(card ? [card] : []), ...body, ...(actions ? [actions] : [])] };
+  return { text: extrasFallback(text, extras), blocks: [...(card ? [card] : []), ...body, ...(actions ? [actions] : []), ...footer] };
 }
 
 /** Files one message may carry (Slack). */
@@ -496,6 +504,9 @@ export class ReplyManager {
     const built = buildExtras({ charts: chartsRaw ?? rich.charts, tables: rich.tables, cards: rich.cards });
     const extras = built.extras;
     const chartNotes = built.notes;
+    // The response time: from the triggering message to this reply being complete.
+    const triggerMs = this.t.triggerTs ? slackTsMs(this.t.triggerTs) : null;
+    if (triggerMs != null) extras.footer = responseTimeFooter((this.t.now ?? Date.now)() - triggerMs);
     if (rich.images?.length) {
       const { images: imgs, failed } = await this.prepareImages(e, rich.images, chartNotes);
       // Image files that couldn't be uploaded for the blocks are attached as files instead (another try).
@@ -589,16 +600,17 @@ export class ReplyManager {
             if (rest.trim()) {
               last = { ts: await this.post(e, rest, ':rest', actions, null, extras), text: rest };
               buttonsTs = last.ts;
-            } else if (charts.length && e.streamTs && (await this.finalLayout(e, e.streamed, actions, null, extras))) {
+            } else if (hasExtras(extras) && e.streamTs && (await this.finalLayout(e, e.streamed, actions, null, extras))) {
               if (actions) buttonsTs = e.streamTs;
             }
           } else {
-            const tail = [...(extras.items.length ? replyBody('', extras, { maxBlocks: MAX_STREAM_BLOCKS, idPrefix: '' }) : []), ...(actions ? [actions] : [])];
-            if (actions && (await this.stopStreamTail(e, tail))) buttonsTs = e.streamTs;
-            else if (!actions) await this.stopStreamTail(e, tail);
+            const footer = footerBlock(extras);
+            const tail = [...(extras.items.length ? replyBody('', extras, { maxBlocks: MAX_STREAM_BLOCKS - footer.length, idPrefix: '' }) : []), ...(actions ? [actions] : []), ...footer];
+            const tailSent = await this.stopStreamTail(e, tail);
+            if (actions && tailSent) buttonsTs = e.streamTs;
             // The final layout keeps the turn's plan card above the reply (the live plan's tasks become the card).
             const card = await this.cardBlock();
-            if (card || e.blocksChunks > 0 || e.activityCards > 0 || charts.length) {
+            if (card || e.blocksChunks > 0 || e.activityCards > 0 || charts.length || (footer.length && !tailSent)) {
               if (await this.finalLayout(e, text, actions, card, extras)) {
                 if (actions) buttonsTs = e.streamTs;
                 await this.rememberExtras(e.streamTs, extras);
@@ -636,7 +648,7 @@ export class ReplyManager {
     if (last.ts) await this.rememberExtras(last.ts, extras);
     if (btnRow) await this.recordButtons(e, btnRow, buttonsTs && buttonsTs === last.ts ? buttonsTs : null, last, extras);
     this.delivered++;
-    if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs, ...(charts.length ? { extras } : {}) };
+    if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs, ...(hasExtras(extras) ? { extras } : {}) };
     this.deliveredTexts.push(text);
     await this.t.onDelivered?.({ ts: last.ts, text, buttons: Boolean(btnRow) }).catch((err) => log.warn({ err }, 'onDelivered failed'));
     if (files?.length || degradedFileIds(extras).length) {
@@ -667,7 +679,7 @@ export class ReplyManager {
 
   /** Persist extras before a plan card can re-render this message (a re-render rebuilds blocks from the DB). */
   private async rememberExtras(ts: string | null, extras: ReplyExtras): Promise<void> {
-    if (!ts || !extras.items.length) return;
+    if (!ts || !hasExtras(extras)) return;
     await saveReplyExtras(this.t.channelId, ts, extras).catch((err) => log.warn({ err }, 'saving reply extras failed'));
   }
 

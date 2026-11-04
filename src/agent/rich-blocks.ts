@@ -36,7 +36,37 @@ export interface ReplyExtras {
   items: ReplyExtra[];
   /** Slack refused the blocks once: render the fallbacks instead. */
   degraded?: boolean;
+  /** One small line shown under everything else as a context block (the response time, `footerBlock`). */
+  footer?: string;
 }
+
+/** True if the extras have anything to store or render (items or a footer). */
+export const hasExtras = (extras: ReplyExtras | null | undefined): extras is ReplyExtras => Boolean(extras?.items.length || extras?.footer);
+
+/** The footer as the message's last block (a context block: small grey text), or none. */
+export function footerBlock(extras: ReplyExtras | null | undefined, idPrefix = ''): { type: 'context'; block_id: string; elements: { type: 'mrkdwn'; text: string }[] }[] {
+  return extras?.footer ? [{ type: 'context', block_id: `${idPrefix}reply_footer`, elements: [{ type: 'mrkdwn', text: extras.footer }] }] : [];
+}
+
+/** How long a response took, for the footer: `0.8s`, `12s`, `2m 05s`, `1h 03m`. */
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, ms) / 1000;
+  if (s < 10) return `${s.toFixed(1)}s`;
+  if (Math.round(s) < 60) return `${Math.round(s)}s`;
+  const total = Math.round(s);
+  if (total < 3600) return `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, '0')}s`;
+  const mins = Math.round(total / 60);
+  return `${Math.floor(mins / 60)}h ${String(mins % 60).padStart(2, '0')}m`;
+}
+
+/** A Slack message ts (`1712345678.123456`) as epoch milliseconds, or null if it isn't one. */
+export function slackTsMs(ts: string): number | null {
+  const n = Number(ts);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 1000) : null;
+}
+
+/** The footer text of a reply delivered `ms` after the message that triggered it. */
+export const responseTimeFooter = (ms: number) => `Responded in ${formatDuration(ms)}`;
 
 export const MAX_IMAGES = 6;
 export const MAX_TABLES = 2;
@@ -390,19 +420,23 @@ export function degradedFileIds(extras: ReplyExtras | null | undefined): string[
 
 /** Stored form (reply_extras): plain JSON text, so the camelCase transform never touches block keys. */
 export function serializeExtras(extras: ReplyExtras): string {
-  return JSON.stringify({ items: extras.items, ...(extras.degraded ? { degraded: true } : {}) });
+  return JSON.stringify({ items: extras.items, ...(extras.degraded ? { degraded: true } : {}), ...(extras.footer ? { footer: extras.footer } : {}) });
 }
 
 export function parseExtras(raw: unknown): ReplyExtras | null {
   if (typeof raw !== 'string' || !raw) return null;
   try {
-    const o = JSON.parse(raw) as { items?: unknown; degraded?: unknown };
+    const o = JSON.parse(raw) as { items?: unknown; degraded?: unknown; footer?: unknown };
     if (!Array.isArray(o.items)) return null;
     const items = o.items.filter(
       (it): it is ReplyExtra =>
         !!it && typeof it === 'object' && typeof (it as ReplyExtra).ref === 'string' && !!(it as ReplyExtra).block && typeof (it as ReplyExtra).block === 'object',
     );
-    return { items: items.map((it) => ({ ...it, fallback: String(it.fallback ?? ''), summary: String(it.summary ?? '') })), ...(o.degraded === true ? { degraded: true } : {}) };
+    return {
+      items: items.map((it) => ({ ...it, fallback: String(it.fallback ?? ''), summary: String(it.summary ?? '') })),
+      ...(o.degraded === true ? { degraded: true } : {}),
+      ...(typeof o.footer === 'string' && o.footer ? { footer: o.footer } : {}),
+    };
   } catch {
     return null;
   }

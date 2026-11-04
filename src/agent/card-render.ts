@@ -15,7 +15,7 @@ import { cleanRichElements, markdownToRich, type RichTextElement, type RichTextI
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { sliceUnits } from '../tools/util.js';
 import { buttonsBlock, type ButtonsActionsBlock, type ButtonsState, type ContextBlock } from './reply-buttons.js';
-import { extrasFallback, replyBody, type ReplyExtras } from './rich-blocks.js';
+import { extrasFallback, footerBlock, replyBody, type ReplyExtras } from './rich-blocks.js';
 import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS, type ReplyBlock } from './slack-markdown.js';
 
 // Shapes mirror @slack/types PlanBlock / TaskCardBlock (not a direct dependency).
@@ -314,7 +314,7 @@ function cardText(card: CardState, runs: CardRun[]): string {
 }
 
 /**
- * The message a card lives in: [card, reply text and its extras, buttons / pressed note] when it lives in a reply, else
+ * The message a card lives in: [card, reply text and its extras, buttons / pressed note, footer] when it lives in a reply, else
  * the card alone. With the plain-text fallback (the reply, plus a one-line summary per extra block).
  */
 export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
@@ -324,7 +324,8 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
   if (reply != null) {
     // The reply exactly as delivered (slack-markdown.ts: prose as markdown, code as rich_text; extras inline or below),
     // leaving room for the card and the buttons.
-    const room = MAX_MESSAGE_BLOCKS - Math.max(blocks.length, 1) - (card.buttons ? 1 : 0);
+    const footer = footerBlock(card.extras, `card_${card.id}_`);
+    const room = MAX_MESSAGE_BLOCKS - Math.max(blocks.length, 1) - (card.buttons ? 1 : 0) - footer.length;
     const prefix = `card_${card.id}_`;
     const parts = replyBody(reply, card.extras, { maxBlocks: room, idPrefix: prefix });
     let n = 0;
@@ -338,6 +339,8 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
     }
     // The reply's buttons (or the note that replaced them) stay under the text and extras.
     if (card.buttons) blocks.push(buttonsBlock(card.buttons));
+    // The response time sits at the very bottom.
+    blocks.push(...footer);
   }
   // Plain-text fallback: the reply's own text when the card lives in a reply, else a summary of the card.
   const text = neutralizeBroadcasts(reply != null ? extrasFallback(reply, card.extras, MAX_FALLBACK_TEXT) : cardText(card, runs).slice(0, MAX_FALLBACK_TEXT));
