@@ -95,6 +95,9 @@ export const BUDGET = {
 } as const;
 
 const FALLBACK_TEXT = "Sorry, I couldn't come up with a reply to that. Could you try rephrasing?";
+/** Posted instead of FALLBACK_TEXT when every provider's safety filter refused the turn's last step. */
+export const FILTERED_TEXT =
+  "I can't respond to that: the model's safety filter blocked it (probably something in the conversation or what I read). Try asking differently.";
 const ERROR_NOTE = '_Something broke, try again._';
 
 /** Tool names (from any module) whose successful result is visible to users. reply/react record their own. */
@@ -750,6 +753,10 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
    * posted instead of the generic fallback when the turn ends with nothing visible.
    */
   let fallbackText: string | null = null;
+  /** The latest step ended in a content-filter refusal (every provider tier refused): explain instead of apologising. */
+  let lastStepFiltered = false;
+  /** This step was refused: with toolChoice 'required' the SDK reports finishReason 'error' and keeps the real one on its ToolChoiceViolationError. */
+  let stepFiltered = false;
   const anyVisible = () => state.visible.size > 0 || replies.anyVisible;
   /** A message (reply or send_message) went out: plain text is never posted on top of it. */
   const messaged = () => state.visible.has('reply') || state.visible.has('send') || replies.anyVisible;
@@ -883,6 +890,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             }).catch((err) => log.warn({ err }, 'recordModelUsage failed'));
             if (stepText.trim()) await appendEvent(turn.threadId, 'discarded_text', 'bot', { turnId, text: stepText });
             doneSteps.push([...stepTools]);
+            lastStepFiltered = stepFiltered || part.finishReason === 'content-filter';
+            stepFiltered = false;
             lastText = stepText;
             lastCalls = stepCalls.length;
             // Only text written alone (or next to end_turn): text beside report_user, leave_thread, remember… can be a
@@ -904,6 +913,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             // (its text arrives as discarded_text) and ends the loop. Handled below like any text-only step.
             if (ToolChoiceViolationError.isInstance(part.error)) {
               log.info({ turnId, finishReason: part.error.finishReason }, 'front step without a tool call');
+              if (part.error.finishReason === 'content-filter') stepFiltered = true;
               break;
             }
             throw part.error;
@@ -1035,10 +1045,15 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   else if (state.visible.size === 0 && needsFallback(turn, io, built.anyCancelled)) {
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
-    const text = fallbackText ? neutralizeBroadcasts(fallbackText) : FALLBACK_TEXT;
+    const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
     const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `fallback:${turnId}` });
     await noteCodeReply(res?.ts);
-    await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, ...(fallbackText ? { fromText: true } : {}), text });
+    await appendEvent(turn.threadId, 'reply', 'bot', {
+      turnId,
+      fallback: true,
+      ...(fallbackText ? { fromText: true } : lastStepFiltered ? { contentFiltered: true } : {}),
+      text,
+    });
   }
 }
 

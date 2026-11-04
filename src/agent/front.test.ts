@@ -113,7 +113,7 @@ const { simulateReadableStream } = await import('ai');
 await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
-const { runFrontTurn, barePingKind, barePingInstruction, needsFallback } = await import('./front.js');
+const { runFrontTurn, barePingKind, barePingInstruction, needsFallback, FILTERED_TEXT } = await import('./front.js');
 const { streamArgsText } = await import('./slack-markdown.js');
 
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
@@ -255,6 +255,17 @@ describe('runFrontTurn (mock model)', () => {
     await expect(runFrontTurn(turn({ id: 81 }), io(true).io)).resolves.toBeUndefined();
     expect(h.slack.filter((c) => c.method.startsWith('chat.'))).toHaveLength(0);
     expect(h.events.some((e) => e.type === 'reply' && e.payload?.fallback)).toBe(false);
+  });
+
+  it('a mention whose last step every provider refused (content filter) says so instead of the generic fallback', async () => {
+    h.model = mockModel([
+      [{ type: 'stream-start', warnings: [] }, { type: 'finish', usage, finishReason: { unified: 'content-filter', raw: 'refusal' } }],
+    ]);
+    await runFrontTurn(turn({ id: 83 }), io(true).io);
+    const posts = h.slack.filter((c) => c.method === 'chat.postMessage');
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.args.text).toBe(FILTERED_TEXT);
+    expect(h.events.some((e) => e.type === 'reply' && e.payload?.contentFiltered)).toBe(true);
   });
 
   it('a skipped reaction on a mention still gets the fallback (nothing was visible)', async () => {
