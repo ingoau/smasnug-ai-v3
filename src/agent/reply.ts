@@ -504,9 +504,6 @@ export class ReplyManager {
     const built = buildExtras({ charts: chartsRaw ?? rich.charts, tables: rich.tables, cards: rich.cards });
     const extras = built.extras;
     const chartNotes = built.notes;
-    // The response time: from the triggering message to this reply being complete.
-    const triggerMs = this.t.triggerTs ? slackTsMs(this.t.triggerTs) : null;
-    if (triggerMs != null) extras.footer = responseTimeFooter((this.t.now ?? Date.now)() - triggerMs);
     if (rich.images?.length) {
       const { images: imgs, failed } = await this.prepareImages(e, rich.images, chartNotes);
       // Image files that couldn't be uploaded for the blocks are attached as files instead (another try).
@@ -577,6 +574,10 @@ export class ReplyManager {
       });
     }
     const actions = btnRow ? buttonsActions(btnRow) : undefined;
+    // The response time: from the triggering message to now, when the complete reply goes out (after the stream
+    // caught up, images were uploaded and buttons created).
+    const triggerMs = this.t.triggerTs ? slackTsMs(this.t.triggerTs) : null;
+    if (triggerMs != null) extras.footer = responseTimeFooter((this.t.now ?? Date.now)() - triggerMs);
     /** The message that ended up carrying the buttons (set when they went out with it). */
     let buttonsTs: string | null = null;
     let delivered: 'streamed' | 'posted' = 'posted';
