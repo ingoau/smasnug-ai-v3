@@ -26,12 +26,24 @@ export function downloadTokens(sourcePublic: boolean, hasUserToken = Boolean(env
 }
 
 /**
+ * The `/download/` form of a `files-pri` URL. Slack 302s the plain `url_private` of PDFs (and other content it renders
+ * inline) to a sandboxed origin (slack-files.com/files-pri-safe/...), which the origin check below would treat as a
+ * refusal; the download form serves the bytes straight from files.slack.com.
+ */
+export function slackDownloadUrl(urlPrivate: string): string {
+  const url = new URL(urlPrivate);
+  const m = /^\/files-pri\/([^/]+)\/(?!download\/)(.+)$/.exec(url.pathname);
+  if (url.origin === SLACK_FILES_ORIGIN && m) url.pathname = `/files-pri/${m[1]}/download/${m[2]}`;
+  return url.toString();
+}
+
+/**
  * `expectHtml`: the file itself is HTML (otherwise an HTML response is Slack's login page: auth failed).
  * `token`: which token to send ('user' only for files from verified-public channels, see downloadTokens).
  */
 export async function downloadSlackFile(urlPrivate: string, maxBytes: number, expectHtml = false, token: 'bot' | 'user' = 'bot'): Promise<Buffer> {
   const fake = process.env.SLACK_FAKE === '1';
-  const url = new URL(urlPrivate);
+  const url = new URL(slackDownloadUrl(urlPrivate));
   if (!fake && url.origin !== SLACK_FILES_ORIGIN) throw new Error(`refusing to download from ${url.origin}`);
   const headers: Record<string, string> = { accept: '*/*' };
   const secret = token === 'user' ? env.SLACK_USER_TOKEN : env.SLACK_BOT_TOKEN;
