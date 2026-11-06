@@ -196,6 +196,8 @@ export async function deleteFact(userId: string, id: number): Promise<boolean> {
 
 export async function deleteAllFacts(userId: string): Promise<number> {
   const rows = await sql`delete from user_memory where user_id = ${userId} returning id`;
+  // The prune audit keeps copies of removed facts; "forget everything" means those too.
+  await sql`delete from memory_pruned where user_id = ${userId}`;
   return rows.length;
 }
 
