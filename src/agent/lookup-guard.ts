@@ -26,6 +26,7 @@ export const LOOKUP_TOOLS = new Set([
   'read_canvas',
   'read_file',
   'ask_file',
+  'search_past_conversations',
 ]);
 
 /**

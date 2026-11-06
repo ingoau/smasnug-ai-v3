@@ -27,6 +27,7 @@ const LABELS: Record<string, string> = {
   remember: 'Saving a note…',
   forget: 'Forgetting a note…',
   search_memory: 'Checking my notes…',
+  search_past_conversations: 'Looking through our past chats…',
   propose_workspace_fact: 'Noting a workspace fact…',
   send_message: 'Preparing a message…',
   read_canvas: 'Reading the canvas…',

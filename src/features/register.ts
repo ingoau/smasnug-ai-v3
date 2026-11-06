@@ -6,6 +6,7 @@ import { handleBotReportModAction, registerReportUserTool } from './bot-reports.
 import { handleAdminAction, handleMemoryAction, publishHome } from './home.js';
 import { handleSlash } from './killswitch.js';
 import { runMemoryExtraction } from './memory/extract.js';
+import { runMemoryPrune } from './memory/prune.js';
 import { registerMemoryTools } from './memory/tools.js';
 import { handleModAction, handleReport } from './reports.js';
 import { runRetention } from './retention.js';
@@ -47,6 +48,7 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {
   'features:memory-extraction': { everyMs: 5 * 60 * 1000, run: runMemoryExtraction },
+  'features:memory-prune': { everyMs: 30 * 60 * 1000, run: runMemoryPrune },
   'features:pending-send-expiry': { everyMs: 60 * 1000, run: expirePendingSends },
   'features:retention': { everyMs: 24 * 60 * 60 * 1000, run: async () => void (await runRetention()) },
   ...scheduleMaintenance,

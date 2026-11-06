@@ -106,6 +106,8 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
   await run('watches', sql`delete from watches where status <> 'active' and coalesce(ended_at, created_at) < ${older(long)} returning id`);
   await run('watch_notifications', sql`delete from watch_notifications where created_at < ${older(long)} returning id`);
 
+  await run('memory_pruned', sql`delete from memory_pruned where created_at < ${older(long)} returning id`);
+
   await run('pending_sends', sql`delete from pending_sends where created_at < ${older(short)} returning id`);
   await run('idempotency_keys', sql`delete from idempotency_keys where created_at < ${older(short)} returning key`);
   await run('privacy_held', sql`delete from privacy_held where created_at < ${older(short)} returning id`);

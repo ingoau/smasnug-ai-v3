@@ -225,4 +225,49 @@ describe.skipIf(!LIVE)('live extraction (LIVE=1)', () => {
     expect(texts).not.toMatch(/(loves|likes|into|enjoys|prefers) python/);
     expect(accepted.every((a) => a.user_id === 'UALICE')).toBe(true);
   }, 60_000);
+
+  // Prod: asking the bot to make cheese emojis became "is adding cheese-swapped caption emojis to the workspace".
+  it('does not save requests to the bot as projects', async () => {
+    const lines = [
+      { userId: 'UALICE', isBot: false, name: 'Alice', text: "<@UBOT> make :wemighthavecheesed: which is just :wemighthavewon: but replace won with cheesed somehow. Don't upload it as an emoji until you've sent it so I can see it" },
+      { userId: null, isBot: true, name: 'Smasnug', text: "here's the draft, not uploaded yet." },
+      { userId: 'UALICE', isBot: false, name: 'Alice', text: 'Make the text fill width' },
+      { userId: 'UALICE', isBot: false, name: 'Alice', text: 'No I mean random caption emojis we could replace words with cheese' },
+      { userId: null, isBot: true, name: 'Smasnug', text: 'here are some: :let-me-type: → "LET ME CHEESE IN THIS CHANNEL", :use-emojibot: → "Use #cheesebot!"' },
+      { userId: 'UALICE', isBot: false, name: 'Alice', text: 'Do 1, 3 and 5' },
+      { userId: 'UALICE', isBot: false, name: 'Alice', text: 'Upload all three' },
+    ];
+    const existing = [{ id: 41, text: 'prefers generated emoji to be sent for review and not uploaded until they say so', kind: 'preference' as const }];
+    const ops = await proposeOps({ participant: { id: 'UALICE', name: 'Alice' }, transcript: renderTranscript(lines, 'UALICE'), existing });
+    const { accepted } = validateOps(ops, {
+      participantId: 'UALICE',
+      existing,
+      participantMessages: lines.filter((l) => l.userId === 'UALICE').map((l) => l.text),
+      otherPeople: [],
+    });
+    console.log(JSON.stringify({ ops, accepted }, null, 2));
+    expect(accepted.filter((a) => a.op === 'add')).toEqual([]);
+    expect(accepted.map((a) => a.text ?? '').join(' | ')).not.toMatch(/cheese/i);
+  }, 60_000);
+
+  it('updates an existing fact about the same project instead of adding another', async () => {
+    const lines = [
+      { userId: 'UALICE', isBot: false, name: 'Alice', text: "<@UBOT> I'm organising Haven Canberra, it runs 9am-6pm on Saturday. Can you help me plan lunch for 40 people?" },
+      { userId: null, isBot: true, name: 'Smasnug', text: 'Sure, for 40 people a pizza order plus fruit works well.' },
+    ];
+    const existing = [
+      { id: 40, text: 'is recording a promo video for Haven Canberra', kind: 'project' as const },
+      { id: 46, text: 'is helping organize the Canberra haven event', kind: 'project' as const },
+    ];
+    const ops = await proposeOps({ participant: { id: 'UALICE', name: 'Alice' }, transcript: renderTranscript(lines, 'UALICE'), existing });
+    const { accepted } = validateOps(ops, {
+      participantId: 'UALICE',
+      existing,
+      participantMessages: lines.filter((l) => l.userId === 'UALICE').map((l) => l.text),
+      otherPeople: [],
+    });
+    console.log(JSON.stringify({ ops, accepted }, null, 2));
+    expect(accepted.filter((a) => a.op === 'add' && /haven/i.test(a.text ?? ''))).toEqual([]);
+    expect(accepted.map((a) => a.text ?? '').join(' | ')).not.toMatch(/lunch|pizza|40 people/i);
+  }, 60_000);
 });
