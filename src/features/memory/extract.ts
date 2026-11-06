@@ -208,7 +208,7 @@ You get a conversation between people and the bot, plus the participant's existi
 Rules:
 - Only facts the participant explicitly stated about THEMSELVES in their own (PARTICIPANT) messages. Never infer or guess.
 - Never take facts from other people's messages or the bot's messages, even if they are about the participant.
-- The test for every fact: would knowing it help the bot in a DIFFERENT conversation weeks from now? Most conversations contain nothing like that, and an empty ops list is the normal result.
+- The test for every fact: would knowing it help the bot in a DIFFERENT conversation weeks from now? Most conversations contain nothing like that, and an empty ops list is the normal result. The bot can search its past conversations, so the memory never needs to record what happened in one.
 - What they asked the bot to do in this conversation is a task, not a fact. Never save requests, errands or one-off jobs ("make an emoji", "fix this bug", "upload it", "draft an email", "look up X"), nor details of the task (file names, emoji names, PR numbers, prices, purchases). Asking the bot to make cheese emojis does not mean they are "adding cheese emojis to the workspace".
 - A project is ongoing work of their own that lasts weeks and that they described as theirs ("I'm building…", "I run…", "I'm organising…"), not the current request. Save the project at the level it will be useful later ("organises Haven Canberra"), not each step or feature of it ("is fixing the status indicator in X", "is making X faster" are steps of one project).
 - Useful and lasting only: preferences about how to be helped (answer style, languages, tools, how the bot should handle their requests), long-running projects, skills, interests, role in the community, time zone.
