@@ -60,14 +60,14 @@ describe.skipIf(!LIVE)('search_past_conversations (DB)', () => {
 
   const search = async (channel: string, ts: string, query: string | null) => {
     const t = mod.searchPastConversationsTool({ role: 'front', threadId: `${channel}:${ts}`, channelId: channel, threadTs: ts, speakerId: user, extras: {} });
-    return String(await t.execute!({ query }, { toolCallId: 'x', messages: [] }));
+    return String(await t.execute!({ query }, { toolCallId: 'x', messages: [], context: {} } as any));
   };
 
   it('shows only public threads in a public channel, and says some were withheld', async () => {
     const out = await search(here.channel, here.ts, 'cheese emoji');
     expect(out).toContain('wemighthavewon');
     expect(out).not.toMatch(/private channel|secret cheese|cheese for everyone/);
-    expect(out).toMatch(/2 matching threads are in conversations that can.t be shown here/);
+    expect(out).not.toMatch(/can.t be shown|private/i);
     expect(out).toContain(`https://slack.com/archives/C_PAST_PUB/p${threads[0]!.ts.replace('.', '')}`);
   });
 
@@ -75,6 +75,7 @@ describe.skipIf(!LIVE)('search_past_conversations (DB)', () => {
     const out = await search('D_PAST_DM', `${base + 10}.000100`, 'cheese');
     expect(out).toContain('the cheese plan for the private channel');
     expect(out).toContain('secret cheese thoughts'); // the same DM, older thread
+    expect(out).not.toContain('archives/D_PAST_DM'); // ask_thread can't open DM links
     expect(out).toContain('wemighthavewon');
   });
 

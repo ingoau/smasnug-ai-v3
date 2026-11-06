@@ -189,16 +189,24 @@ export async function updateFact(userId: string, id: number, text: string, sourc
   return rows.length > 0;
 }
 
+/** Serialises the prune pass and "forget everything" for one user (they touch the same rows in different orders). */
+export const memoryLockKey = (userId: string) => `memory:${userId}`;
+
 export async function deleteFact(userId: string, id: number): Promise<boolean> {
   const rows = await sql`delete from user_memory where id = ${id} and user_id = ${userId} returning id`;
+  // A deleted fact takes the prune pass's copies of what it was made from with it.
+  if (rows.length) await sql`delete from memory_pruned where user_id = ${userId} and (fact_id = ${id} or merged_into = ${id})`;
   return rows.length > 0;
 }
 
 export async function deleteAllFacts(userId: string): Promise<number> {
-  const rows = await sql`delete from user_memory where user_id = ${userId} returning id`;
-  // The prune audit keeps copies of removed facts; "forget everything" means those too.
-  await sql`delete from memory_pruned where user_id = ${userId}`;
-  return rows.length;
+  return sql.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext(${memoryLockKey(userId)}))`;
+    const rows = await tx`delete from user_memory where user_id = ${userId} returning id`;
+    // The prune audit keeps copies of removed facts; "forget everything" means those too.
+    await tx`delete from memory_pruned where user_id = ${userId}`;
+    return rows.length;
+  });
 }
 
 export async function touchFacts(userId: string, ids: number[]) {

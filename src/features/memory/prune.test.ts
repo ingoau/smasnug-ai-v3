@@ -43,10 +43,25 @@ describe('validatePruneOps', () => {
     expect(negated.rejected.map((r) => r.reason)).toEqual(['new_words']);
   });
 
+  it('never drops a negation or part of a preference in a merge', () => {
+    const fs: PruneFact[] = [
+      { id: 1, text: 'prefers short answers', kind: 'preference', statedAt: d },
+      { id: 2, text: 'prefers replies in Spanish', kind: 'preference', statedAt: d },
+      { id: 3, text: 'does not use Docker', kind: 'about', statedAt: d },
+      { id: 4, text: 'uses Docker at work', kind: 'about', statedAt: d },
+    ];
+    const lost = validatePruneOps([op({ op: 'merge', fact_id: 1, merge_ids: [2], text: 'prefers short answers' })], fs);
+    expect(lost.rejected.map((r) => r.reason)).toEqual(['lost_words']);
+    const kept = validatePruneOps([op({ op: 'merge', fact_id: 1, merge_ids: [2], text: 'prefers short replies answers in Spanish' })], fs);
+    expect(kept.accepted).toHaveLength(1);
+    const flipped = validatePruneOps([op({ op: 'merge', fact_id: 4, merge_ids: [3], text: 'uses Docker at work' })], fs);
+    expect(flipped.rejected.map((r) => r.reason)).toEqual(['lost_words']);
+  });
+
   it('merges preferences only with preferences', () => {
     const { rejected } = validatePruneOps([op({ op: 'merge', fact_id: 14, merge_ids: [41], text: 'is optimizing smasnug AI' })], facts);
     expect(rejected.map((r) => r.reason)).toEqual(['preference']);
-    const ok = validatePruneOps([op({ op: 'merge', fact_id: 50, merge_ids: [51], text: 'prefers short concise answers' })], facts);
+    const ok = validatePruneOps([op({ op: 'merge', fact_id: 50, merge_ids: [51], text: 'prefers short answers, likes concise replies' })], facts);
     expect(ok.accepted).toHaveLength(1);
   });
 

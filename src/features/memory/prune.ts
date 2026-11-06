@@ -13,7 +13,7 @@ import { log } from '../../log.js';
 import { chatModel, MODELS, modelOptions } from '../../models.js';
 import { recordModelUsage } from '../guard.js';
 import { factAge } from './render.js';
-import { cleanFactText, factLabel, FACT_MAX_CHARS, isSensitive, listFacts, similarityWords, type Fact } from './store.js';
+import { cleanFactText, factLabel, FACT_MAX_CHARS, isSensitive, listFacts, memoryLockKey, similarityWords, type Fact } from './store.js';
 
 export const PruneOpSchema = z.object({
   op: z.enum(['remove', 'merge']),
@@ -26,7 +26,7 @@ export const PruneOpsSchema = z.object({ ops: z.array(PruneOpSchema) });
 export type PruneOp = z.infer<typeof PruneOpSchema>;
 
 export type PruneFact = Pick<Fact, 'id' | 'text' | 'kind' | 'statedAt'>;
-export type PruneRejection = { op: PruneOp; reason: 'unknown_fact' | 'preference' | 'no_text' | 'too_long' | 'new_words' | 'sensitive' | 'too_many' };
+export type PruneRejection = { op: PruneOp; reason: 'unknown_fact' | 'preference' | 'no_text' | 'too_long' | 'new_words' | 'lost_words' | 'sensitive' | 'too_many' };
 
 export const MIN_FACTS_TO_PRUNE = 3;
 /** At most this share of a user's facts (and at most MAX_REMOVALS) disappears in one pass. */
@@ -100,10 +100,20 @@ export function validatePruneOps(ops: PruneOp[], facts: PruneFact[]): { accepted
         reject('preference');
         continue;
       }
-      // Every word (negations included, as "not") must come from the merged facts.
+      // Every word (negations included, as "not") must come from the merged facts, and a negation may not be dropped.
+      const out = new Set(similarityWords(text));
       const source = new Set(group.flatMap((f) => similarityWords(f.text)));
-      if (similarityWords(text).some((w) => !source.has(w))) {
+      if ([...out].some((w) => !source.has(w))) {
         reject('new_words');
+        continue;
+      }
+      if (source.has('not') && !out.has('not')) {
+        reject('lost_words');
+        continue;
+      }
+      // Preferences merge losslessly: every word of each one survives, so a merge can't quietly drop one of them.
+      if (group[0]!.kind === 'preference' && group.some((f) => similarityWords(f.text).some((w) => !out.has(w)))) {
+        reject('lost_words');
         continue;
       }
       if (isSensitive(text)) {
@@ -131,36 +141,49 @@ async function proposePruneOps(userId: string, facts: PruneFact[]): Promise<Prun
   return res.output.ops;
 }
 
+class Stale extends Error {}
+
+/**
+ * Apply each op in its own savepoint, only if every fact it touches is still exactly as the model saw it (an edit,
+ * App Home delete or extraction update during the model call skips that op instead of losing the change).
+ */
 async function applyPruneOps(userId: string, facts: PruneFact[], ops: PruneOp[]) {
   const byId = new Map(facts.map((f) => [f.id, f]));
+  let applied = 0;
   await sql.begin(async (tx) => {
+    await tx`select pg_advisory_xact_lock(hashtext(${memoryLockKey(userId)}))`;
+    // stated_at compared at millisecond precision, like the JS Date it was read into.
+    const unchanged = (f: PruneFact) => tx`id = ${f.id} and user_id = ${userId} and text = ${f.text} and date_trunc('milliseconds', stated_at) = ${f.statedAt}`;
     for (const op of ops) {
-      const goes = op.op === 'merge' ? op.merge_ids! : [op.fact_id];
-      for (const id of goes) {
-        const f = byId.get(id)!;
-        const rows = await tx`delete from user_memory where id = ${id} and user_id = ${userId} returning id`;
-        if (!rows.length) continue; // deleted meanwhile (App Home, forget)
-        await tx`
-          insert into memory_pruned (user_id, fact_id, kind, text, stated_at, action, merged_into, reason)
-          values (${userId}, ${id}, ${f.kind}, ${f.text}, ${f.statedAt}, ${op.op === 'merge' ? 'merged' : 'removed'},
-            ${op.op === 'merge' ? op.fact_id : null}, ${op.reason.slice(0, 200)})`;
-      }
-      if (op.op === 'merge') {
-        const keep = byId.get(op.fact_id)!;
-        const group = [keep, ...op.merge_ids!.map((id) => byId.get(id)!)];
-        // Keep the newest statement time of the group, so a merge doesn't make old project facts look fresh.
-        const statedAt = new Date(Math.max(...group.map((f) => f.statedAt.getTime())));
-        const rows = await tx`
-          update user_memory set text = ${op.text!}, stated_at = ${statedAt}
-          where id = ${op.fact_id} and user_id = ${userId} returning id`;
-        if (rows.length) {
-          await tx`
+      try {
+        await tx.savepoint(async (sp) => {
+          const audit = (f: PruneFact, action: 'removed' | 'merged') => sp`
             insert into memory_pruned (user_id, fact_id, kind, text, stated_at, action, merged_into, reason)
-            values (${userId}, ${keep.id}, ${keep.kind}, ${keep.text}, ${keep.statedAt}, 'merged', ${keep.id}, ${op.reason.slice(0, 200)})`;
-        }
+            values (${userId}, ${f.id}, ${f.kind}, ${f.text}, ${f.statedAt}, ${action}, ${action === 'merged' ? op.fact_id : null}, ${op.reason.slice(0, 200)})`;
+          if (op.op === 'remove') {
+            const f = byId.get(op.fact_id)!;
+            if (!(await sp`delete from user_memory where ${unchanged(f)} returning id`).length) throw new Stale();
+            await audit(f, 'removed');
+            return;
+          }
+          const keep = byId.get(op.fact_id)!;
+          const others = op.merge_ids!.map((id) => byId.get(id)!);
+          // Keep the newest statement time of the group, so a merge doesn't make old project facts look fresh.
+          const statedAt = new Date(Math.max(keep.statedAt.getTime(), ...others.map((f) => f.statedAt.getTime())));
+          if (!(await sp`update user_memory set text = ${op.text!}, stated_at = ${statedAt} where ${unchanged(keep)} returning id`).length) throw new Stale();
+          await audit(keep, 'merged');
+          for (const f of others) {
+            if (!(await sp`delete from user_memory where ${unchanged(f)} returning id`).length) throw new Stale();
+            await audit(f, 'merged');
+          }
+        });
+        applied++;
+      } catch (err) {
+        if (!(err instanceof Stale)) throw err;
       }
     }
   });
+  return applied;
 }
 
 /** Prune one user's memory now (exported for tests / manual runs). */
@@ -169,18 +192,19 @@ export async function pruneUser(userId: string) {
   if (facts.length < MIN_FACTS_TO_PRUNE) return { proposed: 0, applied: 0 };
   const ops = await proposePruneOps(userId, facts);
   const { accepted, rejected } = validatePruneOps(ops, facts);
-  if (accepted.length) await applyPruneOps(userId, facts, accepted);
+  const applied = accepted.length ? await applyPruneOps(userId, facts, accepted) : 0;
   log.info(
     {
       userId,
       facts: facts.length,
       proposed: ops.length,
-      applied: accepted.map((o) => `${o.op} ${factLabel(o.fact_id)}${o.merge_ids?.length ? `+${o.merge_ids.map(factLabel).join('+')}` : ''}`),
+      applied,
+      accepted: accepted.map((o) => `${o.op} ${factLabel(o.fact_id)}${o.merge_ids?.length ? `+${o.merge_ids.map(factLabel).join('+')}` : ''}`),
       rejected: rejected.map((r) => r.reason),
     },
     'memory prune pass',
   );
-  return { proposed: ops.length, applied: accepted.length };
+  return { proposed: ops.length, applied };
 }
 
 const USERS_PER_RUN = 5;

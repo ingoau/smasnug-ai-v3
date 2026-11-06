@@ -92,7 +92,9 @@ async function visibleCandidates(ctx: ToolContext, candidates: Candidate[]) {
     if (kind === 'public_channel' || kind === 'unknown') return name ? `#${name} (public)` : 'a public channel';
     return name ? `#${name} (private)` : kind === 'group_dm' ? 'a group DM' : 'a private channel';
   };
-  return { shown: shown.map(({ c, kind }) => ({ c, where: where(c, kind) })), hidden: decisions.length - shown.length };
+    // ask_thread opens public and private-channel links, never DM / group DM ones (resolveLinkAccess).
+  const openable = (kind: SourceKind) => kind === 'public_channel' || kind === 'private_channel' || kind === 'unknown';
+  return { shown: shown.map(({ c, kind }) => ({ c, where: where(c, kind), openable: openable(kind) })), hidden: decisions.length - shown.length };
 }
 
 export function searchPastConversationsTool(ctx: ToolContext) {
@@ -101,8 +103,8 @@ export function searchPastConversationsTool(ctx: ToolContext) {
       "Search the speaker's earlier conversations with you (other threads where they talked to you, from the last ~30 days). " +
       'Use it when they refer back to something ("last time", "the emoji you made me", "what did I say about…") instead of guessing. ' +
       'Returns the best-matching threads with their matching messages and where they were; threads from private conversations ' +
-      'only show where that is safe, so a missing result is not proof it never happened. To read more of one, pass its link to ' +
-      'ask_thread.',
+      'only show where that is safe, so a missing result is not proof it never happened. To read more of one, pass its link (when it ' +
+      'has one) to ask_thread.',
     inputSchema: z.object({
       query: z
         .string()
@@ -116,7 +118,8 @@ export function searchPastConversationsTool(ctx: ToolContext) {
       if (!candidates.length) return query ? 'No earlier conversation with the speaker matches.' : 'No earlier conversations with the speaker are stored.';
       const { shown, hidden } = await visibleCandidates(ctx, candidates);
       log.info({ threadId: ctx.threadId, candidates: candidates.length, shown: shown.length, hidden }, 'past conversation search');
-      if (!shown.length) return 'Matches exist only in private conversations that can’t be shown here. The speaker can ask in that conversation or in a DM with you.';
+      // Withheld threads are never mentioned: "there are private matches" would itself reveal private content.
+      if (!shown.length) return query ? 'No earlier conversation with the speaker matches.' : 'No earlier conversations with the speaker are stored.';
 
       const picked = shown.slice(0, THREADS_SHOWN);
       const channels = [...new Set(picked.map(({ c }) => c.channelId))];
@@ -126,7 +129,7 @@ export function searchPastConversationsTool(ctx: ToolContext) {
         select * from messages where not deleted and text <> '' and channel_id = any(${channels}) and ts = any(${tss})`;
       const budget = Math.floor(RESULT_CHARS / picked.length);
       const sections: string[] = [];
-      for (const { c, where } of picked) {
+      for (const { c, where, openable } of picked) {
         const want = new Set([c.threadTs, ...(query ? c.hitTs : [])]);
         const msgs = rows
           .filter((r) => r.channelId === c.channelId && want.has(r.ts) && !isHiddenMessage(r.text))
@@ -135,13 +138,12 @@ export function searchPastConversationsTool(ctx: ToolContext) {
         if (!msgs.length) continue;
         const env = await formatEnvFor(ctx.threadId, msgs, budget);
         const link = `https://slack.com/archives/${c.channelId}/p${c.threadTs.replace('.', '')}`;
-        const header = `### ${where}, started ${threadDate(c.threadTs)}: ${link}`;
+        const header = `### ${where}, started ${threadDate(c.threadTs)}${openable ? `: ${link}` : ''}`;
         sections.push(`${header}\n${formatMessages(msgs, env)}`);
       }
       if (!sections.length) return 'No earlier conversation with the speaker matches.';
       const more = shown.length > picked.length ? `\n\n(${shown.length - picked.length} more matching threads not shown; narrow the query.)` : '';
-      const note = hidden ? `\n(${hidden} matching threads are in conversations that can’t be shown here.)` : '';
-      return untrusted('past conversations', `${sections.join('\n\n')}${more}${note}`);
+            return untrusted('past conversations', `${sections.join('\n\n')}${more}`);
     },
   });
 }

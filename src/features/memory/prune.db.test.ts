@@ -19,6 +19,15 @@ let calls = 0;
 vi.mock('ai', async (orig) => ({
   ...(await orig<typeof import('ai')>()),
   generateText: async (opts: { prompt: string }) => {
+    if (opts.prompt.includes('stale-marker')) {
+      // The user edits the fact while the model is thinking: the removal must not apply.
+      const { sql } = await import('../../db/index.js');
+      await sql`update user_memory set text = 'stale-marker edited meanwhile', stated_at = now() where id = ${ids.stale!}`;
+      return {
+        output: { ops: [{ op: 'remove', fact_id: ids.stale, merge_ids: null, text: null, reason: 'one-off' }, { op: 'remove', fact_id: ids.stale2, merge_ids: null, text: null, reason: 'one-off' }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+    }
     // Other users' facts (other test files) get no ops.
     if (!opts.prompt.includes('cheese-swapped')) return { output: { ops: [] }, usage: { inputTokens: 1, outputTokens: 1 } };
     calls++;
@@ -77,8 +86,8 @@ describe.skipIf(!LIVE)('memory prune (DB)', () => {
       select fact_id, action, text, merged_into from memory_pruned where user_id = ${user} order by id`;
     expect(audit.map((a) => [Number(a.factId), a.action, a.text])).toEqual([
       [ids.cheese, 'removed', 'is adding cheese-swapped caption emojis to the workspace'],
-      [ids.faster, 'merged', 'is optimizing smasnug AI for faster initial responses'],
       [ids.improve, 'merged', 'is making improvements to smasnug AI'],
+      [ids.faster, 'merged', 'is optimizing smasnug AI for faster initial responses'],
     ]);
 
     // A new fact the same day doesn't trigger another pass.
@@ -87,10 +96,33 @@ describe.skipIf(!LIVE)('memory prune (DB)', () => {
     expect(calls).toBe(1);
   });
 
+  it('skips an op whose fact changed during the model call, and applies the rest', async () => {
+    const u2 = 'U_MEMPRUNE2';
+    await sql`delete from user_memory where user_id = ${u2}`;
+    for (const [key, text] of [['stale', 'stale-marker one-off task'], ['stale2', 'made one emoji once'], ['x', 'knows Go'], ['y', 'knows Rust']] as const) {
+      const [r] = await sql<{ id: string }[]>`insert into user_memory (user_id, text, kind) values (${u2}, ${text}, 'project') returning id`;
+      ids[key] = Number(r!.id);
+    }
+    await prune.pruneUser(u2);
+    const left = (await sql<{ text: string }[]>`select text from user_memory where user_id = ${u2} order by id`).map((r) => r.text);
+    expect(left).toEqual(['stale-marker edited meanwhile', 'knows Go', 'knows Rust']);
+    const audit = await sql<{ text: string }[]>`select text from memory_pruned where user_id = ${u2}`;
+    expect(audit.map((a) => a.text)).toEqual(['made one emoji once']);
+    await sql`delete from user_memory where user_id = ${u2}`;
+    await sql`delete from memory_pruned where user_id = ${u2}`;
+  });
+
+  it('deleting a merged fact deletes the copies it was made from', async () => {
+    const store = await import('./store.js');
+    expect(await store.deleteFact(user, ids.improve!)).toBe(true);
+    const rows = await sql<{ factId: string }[]>`select fact_id from memory_pruned where user_id = ${user}`;
+    expect(rows.map((r) => Number(r.factId))).toEqual([ids.cheese]);
+  });
+
   it('forget everything also deletes the audit copies', async () => {
     const store = await import('./store.js');
     await store.deleteAllFacts(user);
-    const [{ n }] = await sql<{ n: number }[]>`select count(*)::int as n from memory_pruned where user_id = ${user}`;
-    expect(n).toBe(0);
+    const [row] = await sql<{ n: number }[]>`select count(*)::int as n from memory_pruned where user_id = ${user}`;
+    expect(row?.n).toBe(0);
   });
 });
