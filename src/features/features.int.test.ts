@@ -518,6 +518,28 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       expect((await sql`select count(*)::int as n from usage where user_id = ${u} and kind = 'model'`)[0]!.n).toBe(1);
     });
 
+    it('admin views and resets a user\'s limits from App Home', async () => {
+      const u = uid();
+      const { limits } = await import('../config.js');
+      for (let i = 0; i < limits.userSendsPerHour; i++) await guard.takeLimit('send', u);
+      await guard.checkEntry(u);
+      expect(await guard.takeLimit('send', u)).toMatch(/Limit reached/);
+
+      // Non-admins can't pick a user.
+      await home.handleAdminAction(action({ userId: u, actionId: 'admin:limits_user', value: u }));
+      expect(await redis.get(`home:limits_user:${u}`)).toBeNull();
+
+      await home.handleAdminAction(action({ userId: 'UADMIN', actionId: 'admin:limits_user', value: u }));
+      const shown = JSON.stringify(await home.buildHomeBlocks('UADMIN'));
+      expect(shown).toContain(`Messages sent on their behalf: ${limits.userSendsPerHour}/${limits.userSendsPerHour} used this hour`);
+      expect(shown).toContain(`Messages: 1/${limits.userMessagesPerHour} used this hour`);
+      expect(shown).toContain('admin:limits_reset');
+
+      await home.handleAdminAction(action({ userId: 'UADMIN', actionId: 'admin:limits_reset', value: u }));
+      expect(await guard.takeLimit('send', u)).toBeNull();
+      expect((await guard.userLimitStates(u)).find((q) => q.kind === 'msg')?.remaining).toBe(limits.userMessagesPerHour);
+    });
+
     it('/smasnug off|on: only creator or admin', async () => {
       const ch = `CK${rand()}`;
       let m = (await fakeCalls()).length;

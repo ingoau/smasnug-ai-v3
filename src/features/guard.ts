@@ -88,7 +88,7 @@ export async function takeLimit(kind: LimitKind, userId: string, threadId?: stri
 
 /** One hourly limit's state for the turn message's low-quota warnings. */
 export interface QuotaState {
-  kind: Exclude<LimitKind, 'subagent'> | 'subagent';
+  kind: Exclude<LimitKind, 'subagent'> | 'subagent' | 'msg';
   noun: string;
   max: number;
   remaining: number;
@@ -134,6 +134,18 @@ export async function userQuotaStates(userId: string): Promise<QuotaState[]> {
   });
   out.push({ kind: 'subagent', noun: 'Subagents', max: limits.userConcurrentSubagents, remaining: Math.max(0, limits.userConcurrentSubagents - (rows[0]?.active ?? 0)) });
   return out;
+}
+
+/** Every per-user hourly window (incl. messages/hour) and subagent slots, for the admin's App Home view. Never counts. */
+export async function userLimitStates(userId: string): Promise<QuotaState[]> {
+  const [msgUsed, rest] = await Promise.all([redis.zcount(`limit:msg:${userId}`, Date.now() - HOUR_MS, '+inf'), userQuotaStates(userId)]);
+  const max = limits.userMessagesPerHour;
+  return [{ kind: 'msg', noun: 'Messages', max, remaining: Math.max(0, max - msgUsed) }, ...rest];
+}
+
+/** Clears the user's hourly windows (messages and every HOURLY kind). Subagent slots free up as runs finish. */
+export async function resetUserLimits(userId: string): Promise<void> {
+  await redis.del(...['msg', ...Object.keys(HOURLY)].map((k) => `limit:${k}:${userId}`));
 }
 
 /** Like takeLimit but never counts: used to fail early (e.g. before showing a send confirmation). */
