@@ -1,17 +1,18 @@
 /**
- * Privacy consent in the pipeline (policy + store: src/features/privacy.ts). A DM or mention from a user who hasn't
- * agreed to the current policy doesn't start a turn: the message is held (`privacy_held`) and the user gets an
+ * Privacy consent in the pipeline (policy + store: src/features/privacy.ts). A DM or mention from a user who has never
+ * agreed to the policy doesn't start a turn: the message is held (`privacy_held`) and the user gets an
  * ephemeral prompt (at most one per conversation per PROMPT_THROTTLE_S). "I agree" records the agreement and replays
  * the held messages (those under HOLD_REPLAY_MS old) as if they had just arrived. Other batch reasons (gated
  * follow-ups, answers to the bot) from such users are dropped silently. Their messages are still stored as context.
  * A held message deleted (or edited to `##`) in Slack is dropped (intake calls dropHeldMessage).
+ * Someone who agreed to an earlier version goes ahead, and gets a one-off "policy updated" ephemeral (noticePolicyUpdate).
  */
 import type { ActionContext } from '../core/actions.js';
 import { getBotIdentity, slackCall } from '../core/slack.js';
 import { redis } from '../core/redis.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
-import { hasAgreed, privacyPolicy, PROMPT_TEXT, promptBlocks, recordAgreement } from '../features/privacy.js';
+import { claimNotice, hasAgreed, privacyPolicy, PROMPT_TEXT, promptBlocks, recordAgreement, UPDATED_TEXT, updatedBlocks } from '../features/privacy.js';
 import { ephemeral, respond } from '../features/util.js';
 import { addToBatch } from './debounce.js';
 import { redirectGroupPing } from './guideline-actions.js';
@@ -59,6 +60,25 @@ export async function holdForConsent(opts: {
     { channel: channelId, user: userId, text: PROMPT_TEXT, blocks: promptBlocks(), ...(promptThreadTs ? { thread_ts: promptThreadTs } : {}) },
     { idempotencyKey: `privacy-prompt:${channelId}:${messageTs}` },
   ).catch((err) => log.warn({ err }, 'privacy prompt failed'));
+}
+
+/**
+ * For a user who has agreed (call after hasAgreed): if the policy changed since, tell them once, ephemerally, in
+ * `threadTs`'s thread or at the channel / DM root. Never blocks the request: a failure is only logged.
+ */
+export async function noticePolicyUpdate(opts: { userId: string; channelId: string; threadTs?: string; messageTs: string }): Promise<void> {
+  const { userId, channelId, threadTs, messageTs } = opts;
+  try {
+    if (!(await claimNotice(userId))) return;
+    log.info({ userId, channelId }, 'privacy policy update notice');
+    await slackCall(
+      'chat.postEphemeral',
+      { channel: channelId, user: userId, text: UPDATED_TEXT, blocks: updatedBlocks(), ...(threadTs ? { thread_ts: threadTs } : {}) },
+      { idempotencyKey: `privacy-updated:${channelId}:${messageTs}` },
+    );
+  } catch (err) {
+    log.warn({ err, userId }, 'privacy update notice failed');
+  }
 }
 
 /** A held message was deleted, or edited to `##`, in Slack: never replay it. */

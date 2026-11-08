@@ -9,7 +9,7 @@ import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { addToBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
-import { holdForConsent } from './consent.js';
+import { holdForConsent, noticePolicyUpdate } from './consent.js';
 import { hasAgreed } from '../features/privacy.js';
 import { groupRedirectText } from './guidelines.js';
 import { RATE_LIMITED_TEXT } from './intake.js';
@@ -50,6 +50,7 @@ export async function redirectGroupPing(
     await holdForConsent({ userId: authorId, channelId, conversation: threadIdOf(channelId, ev.ts), messageTs: ev.ts, item: { kind: 'redirect', event: ev } });
     return null;
   }
+  await noticePolicyUpdate({ userId: authorId, channelId, messageTs: ev.ts });
 
   const permalink = await slackCall<any>('chat.getPermalink', { channel: channelId, message_ts: ev.ts })
     .then((r) => (typeof r?.permalink === 'string' ? r.permalink : undefined))

@@ -21,7 +21,7 @@ import { rerenderButtonsMessage } from '../agent/cards.js';
 import { claimPress, loadReplyButtons, setPressedMessageTs } from '../agent/reply-buttons-store.js';
 import { REPLY_CHOICE_ACTION } from '../agent/reply-buttons.js';
 import { guardEntry } from './entry.js';
-import { holdForConsent } from './consent.js';
+import { holdForConsent, noticePolicyUpdate } from './consent.js';
 import { hasAgreed } from '../features/privacy.js';
 import { neutralizeBroadcasts } from './guidelines.js';
 import { RATE_LIMITED_TEXT } from './intake.js';
@@ -91,6 +91,7 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
     await holdForConsent({ userId: ctx.userId, channelId: row.channelId, conversation: row.threadId, promptThreadTs: threadTs, messageTs: pressTs(ctx) });
     return;
   }
+  await noticePolicyUpdate({ userId: ctx.userId, channelId: row.channelId, ...(threadTs ? { threadTs } : {}), messageTs: pressTs(ctx) });
 
   const ts = pressTs(ctx);
   const claimed = await claimPress({ id, index, userId: ctx.userId, pressedMessageTs: ts });

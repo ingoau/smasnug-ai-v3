@@ -196,6 +196,32 @@ describe.skipIf(!infra)('privacy consent (intake)', () => {
     expect(r!.args.blocks.length).toBeGreaterThan(3);
   });
 
+  it('someone who agreed to an earlier version goes ahead and is told about the update, once', async () => {
+    await sql`insert into privacy_consent (user_id, policy_version) values ('U10', 'oldversion')`;
+    const notices = async () => (await fakeCalls()).filter((c) => c.method === 'chat.postEphemeral' && c.args.text === privacy.UPDATED_TEXT);
+    const root = nextTs();
+    const tid = `${C}:${root}`;
+    await processSlackEvent(messageEnvelope({ user: 'U10', text: '<@UBOT> hi', ts: root }));
+    expect(await batchSeq(tid, 'U10')).toBe(1);
+    expect(await prompts()).toHaveLength(0);
+    const [n] = await notices();
+    expect(n!.args).toMatchObject({ channel: C, user: 'U10' });
+    expect(JSON.stringify(n!.args.blocks)).toContain(privacy.PRIVACY_READ_ACTION);
+    expect(await sql`select via from privacy_consent where user_id = 'U10' and policy_version = ${privacy.privacyPolicy().version}`).toEqual([{ via: 'notice' }]);
+
+    // Not again, even from a fresh process (no cache).
+    privacy.resetPrivacyCache();
+    await processSlackEvent(messageEnvelope({ user: 'U10', text: '<@UBOT> again', ts: nextTs(), thread_ts: root }));
+    expect(await notices()).toHaveLength(1);
+    expect(await batchSeq(tid, 'U10')).toBe(2);
+  });
+
+  it('someone who agreed to the current version gets no notice', async () => {
+    await sql`insert into privacy_consent (user_id, policy_version) values ('U11', ${privacy.privacyPolicy().version})`;
+    await processSlackEvent(messageEnvelope({ user: 'U11', text: '<@UBOT> hi', ts: nextTs() }));
+    expect((await fakeCalls()).filter((c) => c.method === 'chat.postEphemeral')).toHaveLength(0);
+  });
+
   it('is off when not required', async () => {
     privacy.privacySettings.required = false;
     const root = nextTs();

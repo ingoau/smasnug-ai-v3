@@ -68,7 +68,7 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
   const agreed = await hasAgreed(userId).catch(() => true);
   blocks.push(
     section(
-      agreed ? `*Privacy policy:* you've agreed to ${env.BOT_DISPLAY_NAME}'s current privacy policy.` : `*Privacy policy:* I'll ask you to agree the next time you message me.`,
+      agreed ? `*Privacy policy:* you've agreed to ${env.BOT_DISPLAY_NAME}'s privacy policy. It can change; I'll let you know when it does.` : `*Privacy policy:* I'll ask you to agree the next time you message me.`,
       btn(PRIVACY_READ_ACTION, 'Read the privacy policy', 'read'),
     ),
   );

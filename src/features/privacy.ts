@@ -1,9 +1,11 @@
 /**
  * Privacy policy consent. The policy is `PRIVACY.md` at the repo root (`PRIVACY_POLICY_PATH` overrides); its
- * version is a hash of the text, so editing the file asks everyone to agree again on their next request.
+ * version is a hash of the text.
  *
- * A user who hasn't agreed to the current version can't start a turn: the pipeline holds their message and shows an
- * ephemeral prompt (src/pipeline/consent.ts). Reading them is fine: their messages are still stored and give context
+ * A user who has never agreed (to any version) can't start a turn: the pipeline holds their message and shows an
+ * ephemeral prompt (src/pipeline/consent.ts). The policy says it can change at any time: someone who agreed to an
+ * earlier version isn't asked again, but gets a one-off ephemeral notice on their first request after the change
+ * (claimNotice), which records the current version for them (`via = 'notice'`). Reading them is fine: their messages are still stored and give context
  * for others' turns. "Read the privacy policy" opens it in a modal (no file upload: bots can't re-share a file by id,
  * and ephemerals carry no files).
  */
@@ -34,13 +36,15 @@ export function privacyPolicy(): { text: string; version: string } {
   return cached;
 }
 
-/** Users known to have agreed to the current version (agreement is never withdrawn short of a new version). */
+/** Users known to have agreed to some version (agreement is never withdrawn). */
 const agreed = new Set<string>();
+/** Users known to have the current version on record (agreed to it, or been told about it). */
+const current = new Set<string>();
 
-/** Only agreement is cached, so a "no" always comes from the DB. */
+/** Has the user ever agreed to the policy (any version)? Only a yes is cached, so a "no" always comes from the DB. */
 export async function hasAgreed(userId: string): Promise<boolean> {
   if (!privacySettings.required || agreed.has(userId)) return true;
-  const [row] = await sql`select 1 from privacy_consent where user_id = ${userId} and policy_version = ${privacyPolicy().version}`;
+  const [row] = await sql`select 1 from privacy_consent where user_id = ${userId} limit 1`;
   if (row) agreed.add(userId);
   return Boolean(row);
 }
@@ -50,16 +54,46 @@ export async function recordAgreement(userId: string): Promise<boolean> {
   const rows = await sql`insert into privacy_consent (user_id, policy_version) values (${userId}, ${privacyPolicy().version})
                          on conflict do nothing returning user_id`;
   agreed.add(userId);
+  current.add(userId);
+  return rows.length > 0;
+}
+
+/**
+ * For a user who has agreed to some version: true exactly once (across workers) when the current version isn't on
+ * record for them yet, recording it as seen via the update notice. The caller then shows the notice.
+ */
+export async function claimNotice(userId: string): Promise<boolean> {
+  if (!privacySettings.required || current.has(userId)) return false;
+  const rows = await sql`insert into privacy_consent (user_id, policy_version, via) values (${userId}, ${privacyPolicy().version}, 'notice')
+                         on conflict do nothing returning user_id`;
+  current.add(userId);
   return rows.length > 0;
 }
 
 /** For tests. */
 export function resetPrivacyCache() {
   agreed.clear();
+  current.clear();
   cached = undefined;
 }
 
 export const PROMPT_TEXT = `Before I can help, please read and agree to ${env.BOT_DISPLAY_NAME}'s privacy policy.`;
+
+export const UPDATED_TEXT = `${env.BOT_DISPLAY_NAME}'s privacy policy has been updated.`;
+
+/** The one-off notice for someone who agreed to an earlier version. */
+export function updatedBlocks(): unknown[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:information_source: *${env.BOT_DISPLAY_NAME}'s privacy policy has been updated.* Using me from now on means you accept the new version.`,
+      },
+      accessory: { type: 'button', action_id: PRIVACY_READ_ACTION, text: { type: 'plain_text', text: 'Read the privacy policy' }, value: 'read' },
+    },
+  ];
+}
 
 export function promptBlocks(): unknown[] {
   return [
