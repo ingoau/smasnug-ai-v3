@@ -1,7 +1,9 @@
 /** App Home: the user's own memory (with delete / forget everything) and, for the admin, moderation controls. */
 import { env } from '../config.js';
 import type { ActionContext } from '../core/actions.js';
+import { redis } from '../core/redis.js';
 import { slackCall } from '../core/slack.js';
+import { resetUserLimits, userLimitStates } from './guard.js';
 import { log } from '../log.js';
 import { factAge } from './memory/render.js';
 import { deleteAllFacts, deleteFact, factLabel, listFacts, parseFactId, type FactKind } from './memory/store.js';
@@ -74,6 +76,7 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
   );
   if (isAdmin(userId)) {
     blocks.push(...(await adminBlocks()));
+    blocks.push(...(await limitsBlocks(userId).catch((err) => (log.warn({ err }, 'limits home blocks failed'), []))));
     blocks.push(...(await sandboxAdminBlocks(userId).catch((err) => (log.warn({ err }, 'sandbox home blocks failed'), []))));
   }
   return blocks.slice(0, MAX_BLOCKS);
@@ -148,6 +151,46 @@ async function adminBlocks(): Promise<unknown[]> {
   return out;
 }
 
+/** The user an admin picked in "User limits" (per admin, kept for a day). */
+const limitsUserKey = (adminId: string) => `home:limits_user:${adminId}`;
+
+async function limitsBlocks(adminId: string): Promise<unknown[]> {
+  const target = await redis.get(limitsUserKey(adminId));
+  const out: unknown[] = [
+    section('*User limits*', {
+      type: 'users_select',
+      action_id: 'admin:limits_user',
+      placeholder: { type: 'plain_text', text: 'Pick a user' },
+      ...(target ? { initial_user: target } : {}),
+    }),
+  ];
+  if (!target) {
+    out.push(context("Pick someone to see what's left of their hourly limits."));
+    return out;
+  }
+  const states = await userLimitStates(target);
+  const lines = states.map((q) => {
+    const used = q.max - q.remaining;
+    const flag = q.remaining <= 0 ? ' :no_entry:' : '';
+    return q.kind === 'subagent'
+      ? `${q.noun}: ${used}/${q.max} running${flag}`
+      : `${q.noun}: ${used}/${q.max} used this hour${flag}`;
+  });
+  out.push(section(`<@${target}>\n${lines.join('\n')}`));
+  out.push({
+    type: 'actions',
+    elements: [
+      btn('admin:limits_reset', 'Reset hourly limits', target, {
+        style: 'danger',
+        confirm: confirmDialog('Reset limits?', 'Clears this user\'s hourly usage windows. Running subagents are not affected.', 'Reset'),
+      }),
+      btn('admin:limits_refresh', 'Refresh', target),
+    ],
+  });
+  out.push(context('Rolling one-hour windows. Subagent slots free up as their runs finish.'));
+  return out;
+}
+
 export async function publishHome(userId: string) {
   try {
     await slackCall('views.publish', { user_id: userId, view: { type: 'home', blocks: await buildHomeBlocks(userId) } });
@@ -166,10 +209,15 @@ export async function handleMemoryAction(ctx: ActionContext) {
   await publishHome(ctx.userId);
 }
 
-/** admin:pause / admin:resume */
+/** admin:pause / admin:resume / admin:limits_user (users_select) / admin:limits_reset / admin:limits_refresh */
 export async function handleAdminAction(ctx: ActionContext) {
   if (!(await requireAdmin(ctx))) return;
   if (ctx.actionId === 'admin:pause') await setPaused(true);
   else if (ctx.actionId === 'admin:resume') await setPaused(false);
+  else if (ctx.actionId === 'admin:limits_user' && ctx.value) await redis.set(limitsUserKey(ctx.userId), ctx.value, 'EX', 24 * 60 * 60);
+  else if (ctx.actionId === 'admin:limits_reset' && ctx.value) {
+    await resetUserLimits(ctx.value);
+    log.info({ adminId: ctx.userId, userId: ctx.value }, 'admin reset user limits');
+  }
   await publishHome(ctx.userId);
 }
