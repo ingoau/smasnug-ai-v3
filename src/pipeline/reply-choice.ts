@@ -21,7 +21,7 @@ import { rerenderButtonsMessage } from '../agent/cards.js';
 import { claimPress, loadReplyButtons, setPressedMessageTs } from '../agent/reply-buttons-store.js';
 import { REPLY_CHOICE_ACTION } from '../agent/reply-buttons.js';
 import { guardEntry } from './entry.js';
-import { holdForConsent } from './consent.js';
+import { holdForConsent, noticePolicyUpdate } from './consent.js';
 import { hasAgreed } from '../features/privacy.js';
 import { neutralizeBroadcasts } from './guidelines.js';
 import { RATE_LIMITED_TEXT } from './intake.js';
@@ -98,6 +98,7 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
     await ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
     return;
   }
+  await noticePolicyUpdate({ userId: ctx.userId, channelId: row.channelId, ...(threadTs ? { threadTs } : {}), messageTs: pressTs(ctx) });
   const label = neutralizeBroadcasts(claimed.pressedLabel ?? '');
 
   await rerenderButtonsMessage(claimed).catch((err) => log.warn({ err, buttonsId: id }, 'replacing reply buttons with the pressed note failed'));

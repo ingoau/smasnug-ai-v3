@@ -13,7 +13,7 @@ import { getState, listBlocks, setPaused } from './state.js';
 import { isAdmin, mrkdwnEscape, requireAdmin, truncate } from './util.js';
 import { listWorkspaceFacts } from './workspace.js';
 import { scheduleHomeBlocks } from './schedule/home.js';
-import { hasAgreed, PRIVACY_READ_ACTION } from './privacy.js';
+import { hasAgreed, PRIVACY_READ_ACTION, withdrawButton } from './privacy.js';
 import { sandboxAdminBlocks, sandboxDisclosureBlocks } from '../sandbox/home.js';
 
 const MAX_BLOCKS = 100;
@@ -70,9 +70,10 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
   const agreed = await hasAgreed(userId).catch(() => true);
   blocks.push(
     section(
-      agreed ? `*Privacy policy:* you've agreed to ${env.BOT_DISPLAY_NAME}'s current privacy policy.` : `*Privacy policy:* I'll ask you to agree the next time you message me.`,
+      agreed ? `*Privacy policy:* you've agreed to ${env.BOT_DISPLAY_NAME}'s privacy policy. It can change; I'll let you know when it does.` : `*Privacy policy:* I'll ask you to agree the next time you message me.`,
       btn(PRIVACY_READ_ACTION, 'Read the privacy policy', 'read'),
     ),
+    { type: 'actions', elements: [withdrawButton(agreed)] },
   );
   if (isAdmin(userId)) {
     blocks.push(...(await adminBlocks()));

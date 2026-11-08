@@ -1,18 +1,26 @@
 /**
- * Privacy consent in the pipeline (policy + store: src/features/privacy.ts). A DM or mention from a user who hasn't
- * agreed to the current policy doesn't start a turn: the message is held (`privacy_held`) and the user gets an
+ * Privacy consent in the pipeline (policy + store: src/features/privacy.ts). A DM or mention from a user who has never
+ * agreed to the policy doesn't start a turn: the message is held (`privacy_held`) and the user gets an
  * ephemeral prompt (at most one per conversation per PROMPT_THROTTLE_S). "I agree" records the agreement and replays
  * the held messages (those under HOLD_REPLAY_MS old) as if they had just arrived. Other batch reasons (gated
  * follow-ups, answers to the bot) from such users are dropped silently. Their messages are still stored as context.
  * A held message deleted (or edited to `##`) in Slack is dropped (intake calls dropHeldMessage).
+ * Someone who agreed to an earlier version goes ahead, and gets a one-off "policy updated" ephemeral (noticePolicyUpdate).
+ * App Home's withdraw button (handlePrivacyWithdraw) deletes their consent and stored data.
  */
 import type { ActionContext } from '../core/actions.js';
 import { getBotIdentity, slackCall } from '../core/slack.js';
 import { redis } from '../core/redis.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
-import { hasAgreed, privacyPolicy, PROMPT_TEXT, promptBlocks, recordAgreement } from '../features/privacy.js';
+import { claimNotice, forgetConsent, hasAgreed, privacyPolicy, PROMPT_TEXT, promptBlocks, recordAgreement, UPDATED_TEXT, updatedBlocks } from '../features/privacy.js';
 import { ephemeral, respond } from '../features/util.js';
+import { publishHome } from '../features/home.js';
+import { deleteAllFacts } from '../features/memory/store.js';
+import { applyDelete } from './store.js';
+import { removeFromBatch } from './debounce.js';
+import { removeMessageFromTurns } from './scheduler.js';
+import { requestThreadStop } from './stop.js';
 import { addToBatch } from './debounce.js';
 import { redirectGroupPing } from './guideline-actions.js';
 import type { BatchReason } from './rules.js';
@@ -59,6 +67,25 @@ export async function holdForConsent(opts: {
     { channel: channelId, user: userId, text: PROMPT_TEXT, blocks: promptBlocks(), ...(promptThreadTs ? { thread_ts: promptThreadTs } : {}) },
     { idempotencyKey: `privacy-prompt:${channelId}:${messageTs}` },
   ).catch((err) => log.warn({ err }, 'privacy prompt failed'));
+}
+
+/**
+ * For a user who has agreed (call after hasAgreed): if the policy changed since, tell them once, ephemerally, in
+ * `threadTs`'s thread or at the channel / DM root. Never blocks the request: a failure is only logged.
+ */
+export async function noticePolicyUpdate(opts: { userId: string; channelId: string; threadTs?: string; messageTs: string }): Promise<void> {
+  const { userId, channelId, threadTs, messageTs } = opts;
+  try {
+    if (!(await claimNotice(userId))) return;
+    log.info({ userId, channelId }, 'privacy policy update notice');
+    await slackCall(
+      'chat.postEphemeral',
+      { channel: channelId, user: userId, text: UPDATED_TEXT, blocks: updatedBlocks(), ...(threadTs ? { thread_ts: threadTs } : {}) },
+      { idempotencyKey: `privacy-updated:${channelId}:${messageTs}` },
+    );
+  } catch (err) {
+    log.warn({ err, userId }, 'privacy update notice failed');
+  }
 }
 
 /** A held message was deleted, or edited to `##`, in Slack: never replay it. */
@@ -141,4 +168,52 @@ export async function retryStaleReplays(): Promise<void> {
     select distinct user_id from privacy_held
     where claimed_at < now() - ${CLAIM_STALE_S} * interval '1 second' and created_at > now() - ${HOLD_REPLAY_MS / 1000} * interval '1 second'`;
   for (const { userId } of users) await replayHeld(userId).catch((err) => log.warn({ err, userId }, 'retrying a held replay failed'));
+}
+
+/**
+ * App Home "Withdraw consent & delete my data" (or "Delete my data" before agreeing): forget their consent, held
+ * messages, memory, pending reminders and active watches; delete each message of theirs we've stored, and everything
+ * in their DMs with the bot, the way a Slack deletion does (applyDelete: text and files gone, traces in that channel
+ * since then dropped), plus the summaries of threads they wrote in. Their queued batches and the turns answering
+ * them are dropped / stopped (without treating a thread root as gone: it is still in Slack). Messages they write
+ * afterwards are stored as context again, as for anyone who hasn't agreed. Ends with a DM saying what was deleted.
+ */
+export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
+  const userId = ctx.userId;
+  const wasAgreed = await hasAgreed(userId);
+  await forgetConsent(userId);
+  await sql`delete from privacy_held where user_id = ${userId}`;
+  const facts = await deleteAllFacts(userId);
+  await sql`update reminders set status = 'cancelled', text = '' where owner_id = ${userId} and status = 'pending'`;
+  await sql`update watches set status = 'cancelled', criteria = '', state = '{}'::jsonb where owner_id = ${userId} and status = 'active'`;
+  await sql`delete from thread_summaries where thread_id in (select distinct thread_id from messages where user_id = ${userId} and thread_id is not null)`;
+  // Theirs anywhere, and everything (the bot's replies too) in their DMs with the bot.
+  const msgs = await sql<{ channelId: string; ts: string; threadId: string | null; userId: string | null }[]>`
+    select channel_id, ts, thread_id, user_id from messages
+    where not deleted and (user_id = ${userId}
+      or channel_id in (select t.channel_id from threads t where t.is_dm and exists (select 1 from messages m where m.thread_id = t.id and m.user_id = ${userId})))
+    order by ts::numeric`;
+  let deleted = 0;
+  for (const m of msgs) {
+    try {
+      await applyDelete(m.channelId, m.ts);
+      if (m.userId === userId) deleted++;
+      if (m.threadId && m.userId === userId) {
+        const threadId = m.threadId;
+        await removeFromBatch(threadId, userId, m.ts);
+        await removeMessageFromTurns(threadId, m.ts, () => requestThreadStop(threadId));
+      }
+    } catch (err) {
+      log.warn({ err, userId }, 'privacy withdraw: deleting a message failed');
+    }
+  }
+  log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length }, 'privacy: consent withdrawn, data deleted');
+  await publishHome(userId);
+  const text =
+    (wasAgreed ? "Done: you've withdrawn your consent to my privacy policy. I won't answer you until you agree again. " : 'Done. ') +
+    `I deleted ${facts} remembered fact${facts === 1 ? '' : 's'}, ${deleted} stored message${deleted === 1 ? '' : 's'} of yours (with their files), our DMs, ` +
+    'your reminders and watches, and the records of my answers in those conversations. Other copies go within 30 days. Messages in Slack itself are untouched.';
+  await slackCall('chat.postMessage', { channel: userId, text }, { idempotencyKey: `privacy-withdraw:${userId}:${ctx.triggerId ?? ctx.messageTs ?? Date.now()}` }).catch((err) =>
+    log.warn({ err }, 'privacy withdraw DM failed'),
+  );
 }

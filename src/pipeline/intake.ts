@@ -13,7 +13,7 @@ import { log } from '../log.js';
 import { markMessage } from '../core/timing.js';
 import { addToBatch, removeFromBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
-import { dropHeldMessage, holdForConsent, updateHeldMessage } from './consent.js';
+import { dropHeldMessage, holdForConsent, noticePolicyUpdate, updateHeldMessage } from './consent.js';
 import { hasAgreed } from '../features/privacy.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
@@ -217,8 +217,8 @@ async function handleNewMessage(ev: MessageEvent) {
     return;
   }
 
-  // Privacy policy not agreed (consent.ts): a DM / mention is held behind the prompt, anything else dropped. The
-  // message stays stored as context either way.
+  // Privacy policy never agreed (consent.ts): a DM / mention is held behind the prompt, anything else dropped. The
+  // message stays stored as context either way. Agreed to an earlier version: a one-off "updated" notice, then on.
   if (!(await hasAgreed(authorId))) {
     if (decision.reason === 'dm' || decision.reason === 'mention') {
       await holdForConsent({
@@ -232,6 +232,7 @@ async function handleNewMessage(ev: MessageEvent) {
     }
     return;
   }
+  await noticePolicyUpdate({ userId: authorId, channelId, ...(ev.thread_ts ? { threadTs: ev.thread_ts } : {}), messageTs: ev.ts });
 
   // DMs and mentions get the status indicator right away, before the debounce window (fire-and-forget).
   if (decision.reason === 'dm' || decision.reason === 'mention') showIntakeStatus(threadId, authorId, ev.ts);

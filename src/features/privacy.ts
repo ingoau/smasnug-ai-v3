@@ -1,9 +1,12 @@
 /**
  * Privacy policy consent. The policy is `PRIVACY.md` at the repo root (`PRIVACY_POLICY_PATH` overrides); its
- * version is a hash of the text, so editing the file asks everyone to agree again on their next request.
+ * version is a hash of the text.
  *
- * A user who hasn't agreed to the current version can't start a turn: the pipeline holds their message and shows an
- * ephemeral prompt (src/pipeline/consent.ts). Reading them is fine: their messages are still stored and give context
+ * A user who has never agreed (to any version) can't start a turn: the pipeline holds their message and shows an
+ * ephemeral prompt (src/pipeline/consent.ts). The policy says it can change at any time: someone who agreed to an
+ * earlier version isn't asked again, but gets a one-off ephemeral notice on their first request after the change
+ * (claimNotice), which records the current version for them (`via = 'notice'`). App Home's "Withdraw consent & delete
+ * my data" (src/pipeline/consent.ts handlePrivacyWithdraw) removes their consent and stored data. Reading them is fine: their messages are still stored and give context
  * for others' turns. "Read the privacy policy" opens it in a modal (no file upload: bots can't re-share a file by id,
  * and ephemerals carry no files).
  */
@@ -19,6 +22,7 @@ import { respond } from './util.js';
 
 export const PRIVACY_READ_ACTION = 'privacy:read';
 export const PRIVACY_AGREE_ACTION = 'privacy:agree';
+export const PRIVACY_WITHDRAW_ACTION = 'privacy:withdraw';
 
 /** Swappable for tests (vitest turns consent off, see src/testing/test-db.ts). */
 export const privacySettings = { required: env.PRIVACY_CONSENT === 'on' };
@@ -34,14 +38,19 @@ export function privacyPolicy(): { text: string; version: string } {
   return cached;
 }
 
-/** Users known to have agreed to the current version (agreement is never withdrawn short of a new version). */
-const agreed = new Set<string>();
+/**
+ * Users known to have the current version on record (agreed to it, or been told about it). A stale entry after a
+ * withdrawal on another worker only means claimNotice says no, which is right then anyway.
+ */
+const current = new Set<string>();
 
-/** Only agreement is cached, so a "no" always comes from the DB. */
+/**
+ * Has the user agreed to the policy (any version)? Not cached: a withdrawal (on any worker) must take effect on the
+ * next request. An index lookup on the primary key.
+ */
 export async function hasAgreed(userId: string): Promise<boolean> {
-  if (!privacySettings.required || agreed.has(userId)) return true;
-  const [row] = await sql`select 1 from privacy_consent where user_id = ${userId} and policy_version = ${privacyPolicy().version}`;
-  if (row) agreed.add(userId);
+  if (!privacySettings.required) return true;
+  const [row] = await sql`select 1 from privacy_consent where user_id = ${userId} limit 1`;
   return Boolean(row);
 }
 
@@ -49,17 +58,78 @@ export async function hasAgreed(userId: string): Promise<boolean> {
 export async function recordAgreement(userId: string): Promise<boolean> {
   const rows = await sql`insert into privacy_consent (user_id, policy_version) values (${userId}, ${privacyPolicy().version})
                          on conflict do nothing returning user_id`;
-  agreed.add(userId);
+  current.add(userId);
   return rows.length > 0;
+}
+
+/**
+ * For a user who has agreed to some version: true exactly once (across workers) when the current version isn't on
+ * record for them yet, recording it as seen via the update notice. The caller then shows the notice.
+ */
+export async function claimNotice(userId: string): Promise<boolean> {
+  if (!privacySettings.required || current.has(userId)) return false;
+  // Only for someone with an agreement on record: a withdrawal racing this request must not be undone by it.
+  const rows = await sql`insert into privacy_consent (user_id, policy_version, via)
+                         select ${userId}, ${privacyPolicy().version}, 'notice'
+                         where exists (select 1 from privacy_consent where user_id = ${userId})
+                         on conflict do nothing returning user_id`;
+  if (rows.length) current.add(userId);
+  return rows.length > 0;
+}
+
+/** Withdraw consent: every version's record, so the next request asks them to agree again. */
+export async function forgetConsent(userId: string): Promise<void> {
+  await sql`delete from privacy_consent where user_id = ${userId}`;
+  current.delete(userId);
+}
+
+/** The App Home button. Confirm text is plain_text, at most 300 characters. */
+export function withdrawButton(agreedNow: boolean) {
+  return {
+    type: 'button',
+    action_id: PRIVACY_WITHDRAW_ACTION,
+    text: { type: 'plain_text', text: agreedNow ? 'Withdraw consent & delete my data' : 'Delete my data' },
+    value: 'withdraw',
+    style: 'danger',
+    confirm: {
+      title: { type: 'plain_text', text: agreedNow ? 'Withdraw and delete?' : 'Delete your data?' },
+      text: {
+        type: 'plain_text',
+        text:
+          (agreedNow ? "I'll stop answering you until you agree again, and permanently delete " : 'This permanently deletes ') +
+          "what I remember about you, your messages and files I've stored, our DMs, your reminders and watches, and records of my answers in those conversations. " +
+          'Other copies go within 30 days.',
+      },
+      confirm: { type: 'plain_text', text: agreedNow ? 'Withdraw & delete' : 'Delete' },
+      deny: { type: 'plain_text', text: 'Cancel' },
+      style: 'danger',
+    },
+  };
 }
 
 /** For tests. */
 export function resetPrivacyCache() {
-  agreed.clear();
+  current.clear();
   cached = undefined;
 }
 
 export const PROMPT_TEXT = `Before I can help, please read and agree to ${env.BOT_DISPLAY_NAME}'s privacy policy.`;
+
+export const UPDATED_TEXT = `${env.BOT_DISPLAY_NAME}'s privacy policy has been updated.`;
+
+/** The one-off notice for someone who agreed to an earlier version. */
+export function updatedBlocks(): unknown[] {
+  return [
+    {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: `:information_source: *${env.BOT_DISPLAY_NAME}'s privacy policy has been updated.* Using me from now on means you accept the new version. You can withdraw and delete your data any time in my *App Home*.`,
+      },
+      accessory: { type: 'button', action_id: PRIVACY_READ_ACTION, text: { type: 'plain_text', text: 'Read the privacy policy' }, value: 'read' },
+    },
+  ];
+}
 
 export function promptBlocks(): unknown[] {
   return [
@@ -71,6 +141,7 @@ export function promptBlocks(): unknown[] {
           `:wave: Before I can help, please agree to *${env.BOT_DISPLAY_NAME}'s privacy policy*. ` +
           `In short: I store messages in conversations I'm part of (for 30 days), remember facts about you to personalise answers ` +
           `(you can see and delete them in my App Home), and send what you ask to AI model providers to answer. ` +
+          `You can withdraw and delete your data any time in my App Home. ` +
           `I'll get to your message as soon as you agree.`,
       },
     },
