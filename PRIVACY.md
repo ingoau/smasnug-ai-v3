@@ -40,11 +40,12 @@ These services handle the data under their own privacy policies.
 
 - See and delete what the bot remembers about you in its App Home.
 - Delete your messages in Slack to remove them from the bot.
-- Stop using the bot at any time, or ask the Ingo to delete your data.
+- **Withdraw your consent and delete your data** with the button in the bot's App Home. The bot stops answering you until you agree again, and right away deletes what it remembers about you, the messages and files of yours it has stored, and the records of its answers in those conversations. Copies that ended up elsewhere (for example in records from other channels) are deleted within 30 days. Messages it sent on your behalf and reports are kept so reports stay accurate, your public directory entry follows your Slack profile, and nothing in Slack itself is touched. After withdrawing, messages you write in conversations the bot is part of are stored as context again, like anyone else's.
+- Stop using the bot at any time, or ask Ingo to delete your data.
 
 ## Changes to this policy
 
-This policy may be updated at any time. When it changes, the bot tells you the next time you use it, with a link to the new version. Continuing to use the bot after that means you accept the updated policy; if you don't, stop using it and ask Ingo to delete your data.
+This policy may be updated at any time. When it changes, the bot tells you the next time you use it, with a link to the new version. Continuing to use the bot after that means you accept the updated policy; if you don't, withdraw your consent in the bot's App Home (see below).
 
 ## Contact
 

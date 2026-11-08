@@ -222,6 +222,31 @@ describe.skipIf(!infra)('privacy consent (intake)', () => {
     expect((await fakeCalls()).filter((c) => c.method === 'chat.postEphemeral')).toHaveLength(0);
   });
 
+  it('withdrawing from App Home deletes consent and stored messages, and the next mention is held again', async () => {
+    await sql`insert into privacy_consent (user_id, policy_version) values ('U12', ${privacy.privacyPolicy().version})`;
+    const root = nextTs();
+    await processSlackEvent(messageEnvelope({ user: 'U12', text: '<@UBOT> my secret plan', ts: root }));
+    await processSlackEvent(messageEnvelope({ user: 'U13', text: 'someone else', ts: nextTs(), thread_ts: root }));
+    expect(await sql`select ts from messages where user_id = 'U12' and not deleted`).toHaveLength(1);
+
+    await processSlackEvent(
+      job({
+        kind: 'interactive' as const,
+        body: { type: 'block_actions', user: { id: 'U12' }, container: { type: 'view', view_id: 'V1' }, trigger_id: 'trig-w', actions: [{ action_id: privacy.PRIVACY_WITHDRAW_ACTION, value: 'withdraw' }] },
+      }),
+    );
+    expect(await sql`select 1 from privacy_consent where user_id = 'U12'`).toHaveLength(0);
+    expect(await sql`select text from messages where channel_id = ${C} and ts = ${root}`).toEqual([{ text: '' }]);
+    expect(await sql`select ts from messages where user_id = 'U13' and not deleted`).toHaveLength(1);
+    const dm = (await fakeCalls()).find((c) => c.method === 'chat.postMessage' && c.args.channel === 'U12');
+    expect(dm!.args.text).toContain('1 stored message');
+    expect((await fakeCalls()).some((c) => c.method === 'views.publish' && c.args.user_id === 'U12')).toBe(true);
+
+    // Their next mention is held behind the prompt again.
+    await processSlackEvent(messageEnvelope({ user: 'U12', text: '<@UBOT> hi again', ts: nextTs(), thread_ts: root }));
+    expect((await prompts()).filter((p) => p.args.user === 'U12')).toHaveLength(1);
+  });
+
   it('is off when not required', async () => {
     privacy.privacySettings.required = false;
     const root = nextTs();

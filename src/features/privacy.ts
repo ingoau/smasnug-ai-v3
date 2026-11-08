@@ -5,7 +5,8 @@
  * A user who has never agreed (to any version) can't start a turn: the pipeline holds their message and shows an
  * ephemeral prompt (src/pipeline/consent.ts). The policy says it can change at any time: someone who agreed to an
  * earlier version isn't asked again, but gets a one-off ephemeral notice on their first request after the change
- * (claimNotice), which records the current version for them (`via = 'notice'`). Reading them is fine: their messages are still stored and give context
+ * (claimNotice), which records the current version for them (`via = 'notice'`). App Home's "Withdraw consent & delete
+ * my data" (src/pipeline/consent.ts handlePrivacyWithdraw) removes their consent and stored data. Reading them is fine: their messages are still stored and give context
  * for others' turns. "Read the privacy policy" opens it in a modal (no file upload: bots can't re-share a file by id,
  * and ephemerals carry no files).
  */
@@ -21,6 +22,7 @@ import { respond } from './util.js';
 
 export const PRIVACY_READ_ACTION = 'privacy:read';
 export const PRIVACY_AGREE_ACTION = 'privacy:agree';
+export const PRIVACY_WITHDRAW_ACTION = 'privacy:withdraw';
 
 /** Swappable for tests (vitest turns consent off, see src/testing/test-db.ts). */
 export const privacySettings = { required: env.PRIVACY_CONSENT === 'on' };
@@ -36,16 +38,20 @@ export function privacyPolicy(): { text: string; version: string } {
   return cached;
 }
 
-/** Users known to have agreed to some version (agreement is never withdrawn). */
-const agreed = new Set<string>();
+/**
+ * Users known to have agreed to some version, until when (ms). Short-lived: a withdrawal on another worker only
+ * clears that worker's cache, so this one may still say yes for up to AGREED_TTL_MS.
+ */
+const agreed = new Map<string, number>();
+const AGREED_TTL_MS = 30_000;
 /** Users known to have the current version on record (agreed to it, or been told about it). */
 const current = new Set<string>();
 
-/** Has the user ever agreed to the policy (any version)? Only a yes is cached, so a "no" always comes from the DB. */
+/** Has the user agreed to the policy (any version)? Only a yes is cached, so a "no" always comes from the DB. */
 export async function hasAgreed(userId: string): Promise<boolean> {
-  if (!privacySettings.required || agreed.has(userId)) return true;
+  if (!privacySettings.required || (agreed.get(userId) ?? 0) > Date.now()) return true;
   const [row] = await sql`select 1 from privacy_consent where user_id = ${userId} limit 1`;
-  if (row) agreed.add(userId);
+  if (row) agreed.set(userId, Date.now() + AGREED_TTL_MS);
   return Boolean(row);
 }
 
@@ -53,7 +59,7 @@ export async function hasAgreed(userId: string): Promise<boolean> {
 export async function recordAgreement(userId: string): Promise<boolean> {
   const rows = await sql`insert into privacy_consent (user_id, policy_version) values (${userId}, ${privacyPolicy().version})
                          on conflict do nothing returning user_id`;
-  agreed.add(userId);
+  agreed.set(userId, Date.now() + AGREED_TTL_MS);
   current.add(userId);
   return rows.length > 0;
 }
@@ -68,6 +74,37 @@ export async function claimNotice(userId: string): Promise<boolean> {
                          on conflict do nothing returning user_id`;
   current.add(userId);
   return rows.length > 0;
+}
+
+/** Withdraw consent: every version's record, so the next request asks them to agree again. */
+export async function forgetConsent(userId: string): Promise<void> {
+  await sql`delete from privacy_consent where user_id = ${userId}`;
+  agreed.delete(userId);
+  current.delete(userId);
+}
+
+/** The App Home button. Confirm text is plain_text, at most 300 characters. */
+export function withdrawButton(agreedNow: boolean) {
+  return {
+    type: 'button',
+    action_id: PRIVACY_WITHDRAW_ACTION,
+    text: { type: 'plain_text', text: agreedNow ? 'Withdraw consent & delete my data' : 'Delete my data' },
+    value: 'withdraw',
+    style: 'danger',
+    confirm: {
+      title: { type: 'plain_text', text: agreedNow ? 'Withdraw and delete?' : 'Delete your data?' },
+      text: {
+        type: 'plain_text',
+        text:
+          (agreedNow ? "I'll stop answering you until you agree again, and permanently delete " : 'This permanently deletes ') +
+          "what I remember about you, your messages and files I've stored, and records of my answers in those conversations. " +
+          'Copies elsewhere are deleted within 30 days.',
+      },
+      confirm: { type: 'plain_text', text: agreedNow ? 'Withdraw & delete' : 'Delete' },
+      deny: { type: 'plain_text', text: 'Cancel' },
+      style: 'danger',
+    },
+  };
 }
 
 /** For tests. */
@@ -88,7 +125,7 @@ export function updatedBlocks(): unknown[] {
       type: 'section',
       text: {
         type: 'mrkdwn',
-        text: `:information_source: *${env.BOT_DISPLAY_NAME}'s privacy policy has been updated.* Using me from now on means you accept the new version.`,
+        text: `:information_source: *${env.BOT_DISPLAY_NAME}'s privacy policy has been updated.* Using me from now on means you accept the new version. You can withdraw and delete your data any time in my *App Home*.`,
       },
       accessory: { type: 'button', action_id: PRIVACY_READ_ACTION, text: { type: 'plain_text', text: 'Read the privacy policy' }, value: 'read' },
     },
@@ -105,6 +142,7 @@ export function promptBlocks(): unknown[] {
           `:wave: Before I can help, please agree to *${env.BOT_DISPLAY_NAME}'s privacy policy*. ` +
           `In short: I store messages in conversations I'm part of (for 30 days), remember facts about you to personalise answers ` +
           `(you can see and delete them in my App Home), and send what you ask to AI model providers to answer. ` +
+          `You can withdraw and delete your data any time in my App Home. ` +
           `I'll get to your message as soon as you agree.`,
       },
     },

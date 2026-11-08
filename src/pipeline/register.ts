@@ -4,8 +4,8 @@ import { QUEUE, type QueueName } from '../core/queues.js';
 import { registerAction } from '../core/actions.js';
 import { REPLY_CHOICE_ACTION } from '../agent/reply-buttons.js';
 import { handleReplyChoice } from './reply-choice.js';
-import { handlePrivacyAgree, retryStaleReplays } from './consent.js';
-import { PRIVACY_AGREE_ACTION, PRIVACY_READ_ACTION, handlePrivacyRead } from '../features/privacy.js';
+import { handlePrivacyAgree, handlePrivacyWithdraw, retryStaleReplays } from './consent.js';
+import { PRIVACY_AGREE_ACTION, PRIVACY_READ_ACTION, PRIVACY_WITHDRAW_ACTION, handlePrivacyRead } from '../features/privacy.js';
 import { processDebounce } from './fire.js';
 import { enableLocalDebounce } from './debounce.js';
 import { recoverOrphanedTurns } from './maintenance.js';
@@ -24,6 +24,8 @@ registerAction(REPLY_CHOICE_ACTION, handleReplyChoice);
 /** Privacy policy prompt (consent.ts): agree (replays held messages) and read (modal; also on App Home). */
 registerAction(PRIVACY_AGREE_ACTION, handlePrivacyAgree);
 registerAction(PRIVACY_READ_ACTION, handlePrivacyRead);
+/** App Home: withdraw consent and delete the user's stored data. */
+registerAction(PRIVACY_WITHDRAW_ACTION, handlePrivacyWithdraw);
 
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {
