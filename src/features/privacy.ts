@@ -39,19 +39,18 @@ export function privacyPolicy(): { text: string; version: string } {
 }
 
 /**
- * Users known to have agreed to some version, until when (ms). Short-lived: a withdrawal on another worker only
- * clears that worker's cache, so this one may still say yes for up to AGREED_TTL_MS.
+ * Users known to have the current version on record (agreed to it, or been told about it). A stale entry after a
+ * withdrawal on another worker only means claimNotice says no, which is right then anyway.
  */
-const agreed = new Map<string, number>();
-const AGREED_TTL_MS = 30_000;
-/** Users known to have the current version on record (agreed to it, or been told about it). */
 const current = new Set<string>();
 
-/** Has the user agreed to the policy (any version)? Only a yes is cached, so a "no" always comes from the DB. */
+/**
+ * Has the user agreed to the policy (any version)? Not cached: a withdrawal (on any worker) must take effect on the
+ * next request. An index lookup on the primary key.
+ */
 export async function hasAgreed(userId: string): Promise<boolean> {
-  if (!privacySettings.required || (agreed.get(userId) ?? 0) > Date.now()) return true;
+  if (!privacySettings.required) return true;
   const [row] = await sql`select 1 from privacy_consent where user_id = ${userId} limit 1`;
-  if (row) agreed.set(userId, Date.now() + AGREED_TTL_MS);
   return Boolean(row);
 }
 
@@ -59,7 +58,6 @@ export async function hasAgreed(userId: string): Promise<boolean> {
 export async function recordAgreement(userId: string): Promise<boolean> {
   const rows = await sql`insert into privacy_consent (user_id, policy_version) values (${userId}, ${privacyPolicy().version})
                          on conflict do nothing returning user_id`;
-  agreed.set(userId, Date.now() + AGREED_TTL_MS);
   current.add(userId);
   return rows.length > 0;
 }
@@ -70,16 +68,18 @@ export async function recordAgreement(userId: string): Promise<boolean> {
  */
 export async function claimNotice(userId: string): Promise<boolean> {
   if (!privacySettings.required || current.has(userId)) return false;
-  const rows = await sql`insert into privacy_consent (user_id, policy_version, via) values (${userId}, ${privacyPolicy().version}, 'notice')
+  // Only for someone with an agreement on record: a withdrawal racing this request must not be undone by it.
+  const rows = await sql`insert into privacy_consent (user_id, policy_version, via)
+                         select ${userId}, ${privacyPolicy().version}, 'notice'
+                         where exists (select 1 from privacy_consent where user_id = ${userId})
                          on conflict do nothing returning user_id`;
-  current.add(userId);
+  if (rows.length) current.add(userId);
   return rows.length > 0;
 }
 
 /** Withdraw consent: every version's record, so the next request asks them to agree again. */
 export async function forgetConsent(userId: string): Promise<void> {
   await sql`delete from privacy_consent where user_id = ${userId}`;
-  agreed.delete(userId);
   current.delete(userId);
 }
 
@@ -97,8 +97,8 @@ export function withdrawButton(agreedNow: boolean) {
         type: 'plain_text',
         text:
           (agreedNow ? "I'll stop answering you until you agree again, and permanently delete " : 'This permanently deletes ') +
-          "what I remember about you, your messages and files I've stored, and records of my answers in those conversations. " +
-          'Copies elsewhere are deleted within 30 days.',
+          "what I remember about you, your messages and files I've stored, our DMs, your reminders and watches, and records of my answers in those conversations. " +
+          'Other copies go within 30 days.',
       },
       confirm: { type: 'plain_text', text: agreedNow ? 'Withdraw & delete' : 'Delete' },
       deny: { type: 'plain_text', text: 'Cancel' },
@@ -109,7 +109,6 @@ export function withdrawButton(agreedNow: boolean) {
 
 /** For tests. */
 export function resetPrivacyCache() {
-  agreed.clear();
   current.clear();
   cached = undefined;
 }

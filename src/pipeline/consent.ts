@@ -18,6 +18,9 @@ import { ephemeral, respond } from '../features/util.js';
 import { publishHome } from '../features/home.js';
 import { deleteAllFacts } from '../features/memory/store.js';
 import { applyDelete } from './store.js';
+import { removeFromBatch } from './debounce.js';
+import { removeMessageFromTurns } from './scheduler.js';
+import { requestThreadStop } from './stop.js';
 import { addToBatch } from './debounce.js';
 import { redirectGroupPing } from './guideline-actions.js';
 import type { BatchReason } from './rules.js';
@@ -169,9 +172,11 @@ export async function retryStaleReplays(): Promise<void> {
 
 /**
  * App Home "Withdraw consent & delete my data" (or "Delete my data" before agreeing): forget their consent, held
- * messages and memory, and delete each message of theirs we've stored the way a Slack deletion does (applyDelete:
- * text and files gone, traces in that channel since then dropped). Messages they write afterwards are stored as
- * context again, as for anyone who hasn't agreed. Ends with a DM saying what was deleted.
+ * messages, memory, pending reminders and active watches; delete each message of theirs we've stored, and everything
+ * in their DMs with the bot, the way a Slack deletion does (applyDelete: text and files gone, traces in that channel
+ * since then dropped), plus the summaries of threads they wrote in. Their queued batches and the turns answering
+ * them are dropped / stopped (without treating a thread root as gone: it is still in Slack). Messages they write
+ * afterwards are stored as context again, as for anyone who hasn't agreed. Ends with a DM saying what was deleted.
  */
 export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   const userId = ctx.userId;
@@ -179,13 +184,25 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   await forgetConsent(userId);
   await sql`delete from privacy_held where user_id = ${userId}`;
   const facts = await deleteAllFacts(userId);
-  const msgs = await sql<{ channelId: string; ts: string }[]>`
-    select channel_id, ts from messages where user_id = ${userId} and not deleted order by ts::numeric`;
+  await sql`update reminders set status = 'cancelled', text = '' where owner_id = ${userId} and status = 'pending'`;
+  await sql`update watches set status = 'cancelled', criteria = '', state = '{}'::jsonb where owner_id = ${userId} and status = 'active'`;
+  await sql`delete from thread_summaries where thread_id in (select distinct thread_id from messages where user_id = ${userId} and thread_id is not null)`;
+  // Theirs anywhere, and everything (the bot's replies too) in their DMs with the bot.
+  const msgs = await sql<{ channelId: string; ts: string; threadId: string | null; userId: string | null }[]>`
+    select channel_id, ts, thread_id, user_id from messages
+    where not deleted and (user_id = ${userId}
+      or channel_id in (select t.channel_id from threads t where t.is_dm and exists (select 1 from messages m where m.thread_id = t.id and m.user_id = ${userId})))
+    order by ts::numeric`;
   let deleted = 0;
   for (const m of msgs) {
     try {
       await applyDelete(m.channelId, m.ts);
-      deleted++;
+      if (m.userId === userId) deleted++;
+      if (m.threadId && m.userId === userId) {
+        const threadId = m.threadId;
+        await removeFromBatch(threadId, userId, m.ts);
+        await removeMessageFromTurns(threadId, m.ts, () => requestThreadStop(threadId));
+      }
     } catch (err) {
       log.warn({ err, userId }, 'privacy withdraw: deleting a message failed');
     }
@@ -194,8 +211,8 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   await publishHome(userId);
   const text =
     (wasAgreed ? "Done: you've withdrawn your consent to my privacy policy. I won't answer you until you agree again. " : 'Done. ') +
-    `I deleted ${facts} remembered fact${facts === 1 ? '' : 's'} and ${deleted} stored message${deleted === 1 ? '' : 's'} (with their files and the records of my answers in those conversations). ` +
-    'Copies elsewhere are deleted within 30 days. Messages in Slack itself are untouched.';
+    `I deleted ${facts} remembered fact${facts === 1 ? '' : 's'}, ${deleted} stored message${deleted === 1 ? '' : 's'} of yours (with their files), our DMs, ` +
+    'your reminders and watches, and the records of my answers in those conversations. Other copies go within 30 days. Messages in Slack itself are untouched.';
   await slackCall('chat.postMessage', { channel: userId, text }, { idempotencyKey: `privacy-withdraw:${userId}:${ctx.triggerId ?? ctx.messageTs ?? Date.now()}` }).catch((err) =>
     log.warn({ err }, 'privacy withdraw DM failed'),
   );

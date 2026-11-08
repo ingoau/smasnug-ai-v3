@@ -39,6 +39,11 @@ const click = (user: string, actionId: string, value = actionId === privacy.PRIV
       actions: [{ action_id: actionId, value }],
     },
   });
+const withdraw = (user: string) =>
+  job({
+    kind: 'interactive' as const,
+    body: { type: 'block_actions', user: { id: user }, container: { type: 'view', view_id: 'V1' }, trigger_id: `trig-w-${user}`, actions: [{ action_id: privacy.PRIVACY_WITHDRAW_ACTION, value: 'withdraw' }] },
+  });
 const prompts = async () => (await fakeCalls()).filter((c) => c.method === 'chat.postEphemeral' && JSON.stringify(c.args.blocks ?? []).includes(privacy.PRIVACY_AGREE_ACTION));
 const batchSeq = async (threadId: string, authorId: string) => Number((await redis.get(`debounce:seq:${threadId}:${authorId}`)) ?? 0);
 
@@ -228,13 +233,19 @@ describe.skipIf(!infra)('privacy consent (intake)', () => {
     await processSlackEvent(messageEnvelope({ user: 'U12', text: '<@UBOT> my secret plan', ts: root }));
     await processSlackEvent(messageEnvelope({ user: 'U13', text: 'someone else', ts: nextTs(), thread_ts: root }));
     expect(await sql`select ts from messages where user_id = 'U12' and not deleted`).toHaveLength(1);
+    await sql`delete from reminders where owner_id = 'U12'`;
+    await sql`insert into user_memory (user_id, text) values ('U12', 'likes secret plans')`;
+    await sql`insert into reminders (owner_id, thread_id, channel_id, text, due_at) values ('U12', ${`${C}:${root}`}, ${C}, 'check the plan', now() + interval '1 day')`;
+    // Their mention is still waiting in the debounce batch.
+    expect(await batchSeq(`${C}:${root}`, 'U12')).toBe(1);
 
-    await processSlackEvent(
-      job({
-        kind: 'interactive' as const,
-        body: { type: 'block_actions', user: { id: 'U12' }, container: { type: 'view', view_id: 'V1' }, trigger_id: 'trig-w', actions: [{ action_id: privacy.PRIVACY_WITHDRAW_ACTION, value: 'withdraw' }] },
-      }),
-    );
+    await processSlackEvent(withdraw('U12'));
+    expect(await sql`select 1 from privacy_consent where user_id = 'U12'`).toHaveLength(0);
+    expect(await sql`select 1 from user_memory where user_id = 'U12'`).toHaveLength(0);
+    expect(await sql`select status, text from reminders where owner_id = 'U12'`).toEqual([{ status: 'cancelled', text: '' }]);
+    expect((await debounce.takeBatch({ threadId: `${C}:${root}`, authorId: 'U12', seq: 1 })) ?? []).toEqual([]);
+    // A request that passed hasAgreed before the withdrawal can't restore consent through the update notice.
+    expect(await privacy.claimNotice('U12')).toBe(false);
     expect(await sql`select 1 from privacy_consent where user_id = 'U12'`).toHaveLength(0);
     expect(await sql`select text from messages where channel_id = ${C} and ts = ${root}`).toEqual([{ text: '' }]);
     expect(await sql`select ts from messages where user_id = 'U13' and not deleted`).toHaveLength(1);
@@ -245,6 +256,17 @@ describe.skipIf(!infra)('privacy consent (intake)', () => {
     // Their next mention is held behind the prompt again.
     await processSlackEvent(messageEnvelope({ user: 'U12', text: '<@UBOT> hi again', ts: nextTs(), thread_ts: root }));
     expect((await prompts()).filter((p) => p.args.user === 'U12')).toHaveLength(1);
+  });
+
+  it('"Delete my data" works for someone who never agreed', async () => {
+    const root = nextTs();
+    await processSlackEvent(messageEnvelope({ user: 'U14', text: '<@UBOT> hi', ts: root }));
+    expect(await sql`select 1 from privacy_held where user_id = 'U14'`).toHaveLength(1);
+    await processSlackEvent(withdraw('U14'));
+    expect(await sql`select 1 from privacy_held where user_id = 'U14'`).toHaveLength(0);
+    expect(await sql`select text from messages where channel_id = ${C} and ts = ${root}`).toEqual([{ text: '' }]);
+    const dm = (await fakeCalls()).find((c) => c.method === 'chat.postMessage' && c.args.channel === 'U14');
+    expect(dm!.args.text).not.toContain('withdrawn');
   });
 
   it('is off when not required', async () => {

@@ -232,9 +232,7 @@ async function handleNewMessage(ev: MessageEvent) {
     }
     return;
   }
-  if (decision.reason === 'dm' || decision.reason === 'mention') {
-    await noticePolicyUpdate({ userId: authorId, channelId, ...(ev.thread_ts ? { threadTs: ev.thread_ts } : {}), messageTs: ev.ts });
-  }
+  await noticePolicyUpdate({ userId: authorId, channelId, ...(ev.thread_ts ? { threadTs: ev.thread_ts } : {}), messageTs: ev.ts });
 
   // DMs and mentions get the status indicator right away, before the debounce window (fire-and-forget).
   if (decision.reason === 'dm' || decision.reason === 'mention') showIntakeStatus(threadId, authorId, ev.ts);

@@ -91,7 +91,6 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
     await holdForConsent({ userId: ctx.userId, channelId: row.channelId, conversation: row.threadId, promptThreadTs: threadTs, messageTs: pressTs(ctx) });
     return;
   }
-  await noticePolicyUpdate({ userId: ctx.userId, channelId: row.channelId, ...(threadTs ? { threadTs } : {}), messageTs: pressTs(ctx) });
 
   const ts = pressTs(ctx);
   const claimed = await claimPress({ id, index, userId: ctx.userId, pressedMessageTs: ts });
@@ -99,6 +98,7 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
     await ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
     return;
   }
+  await noticePolicyUpdate({ userId: ctx.userId, channelId: row.channelId, ...(threadTs ? { threadTs } : {}), messageTs: pressTs(ctx) });
   const label = neutralizeBroadcasts(claimed.pressedLabel ?? '');
 
   await rerenderButtonsMessage(claimed).catch((err) => log.warn({ err, buttonsId: id }, 'replacing reply buttons with the pressed note failed'));
