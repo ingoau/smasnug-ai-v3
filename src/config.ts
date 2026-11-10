@@ -227,6 +227,14 @@ export const limits = {
   /** Threads quiet for longer than this are never extracted (a backlog would spend the model budget on stale talk). */
   memoryExtractMaxAgeMs: 14 * 24 * 60 * 60 * 1000,
   memoryFactExpiryMs: 180 * 24 * 60 * 60 * 1000,
+  /** Failure review (src/features/failures/review.ts): threads quiet this long get a look… */
+  failureReviewIdleMs: 30 * 60 * 1000,
+  /** …unless quiet for longer than this (a backlog would spend the model budget on stale talk). */
+  failureReviewMaxAgeMs: 3 * 24 * 60 * 60 * 1000,
+  /** Share of threads without a warning sign that are reviewed anyway (to see what the signals miss). */
+  failureReviewSampleRate: 0.1,
+  /** Model calls per UTC day at most. */
+  failureReviewPerDay: 150,
   /** Speaker facts per turn at most (only relevant ones and preferences are injected: memory/render.ts selectFacts). */
   memoryInjectCap: 13,
   retentionMs: 30 * 24 * 60 * 60 * 1000,

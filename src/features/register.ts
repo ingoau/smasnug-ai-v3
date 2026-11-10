@@ -3,6 +3,8 @@ import type { Job } from 'bullmq';
 import { registerAction, registerAppHome } from '../core/actions.js';
 import { QUEUE, type QueueName } from '../core/queues.js';
 import { handleBotReportModAction, registerReportUserTool } from './bot-reports.js';
+import { runFailureReview } from './failures/review.js';
+import { registerReportFailureTool } from './failures/tool.js';
 import { handleAdminAction, handleMemoryAction, publishHome } from './home.js';
 import { handleSlash } from './killswitch.js';
 import { runMemoryExtraction } from './memory/extract.js';
@@ -16,10 +18,11 @@ import { registerScheduleTools, scheduleMaintenance } from './schedule/register.
 import { handleScheduleAction } from './schedule/home.js';
 import { djMaintenance, processHuddleFm, registerDjTools } from './huddlefm/register.js';
 
-// Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user
+// Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user, report_failure
 registerMemoryTools();
 registerSendTool();
 registerReportUserTool();
+registerReportFailureTool();
 // Reminders and watches: set_reminder, list_reminders, cancel_reminder, create_watch, list_watches, cancel_watch
 registerScheduleTools();
 // HuddleFM DJ mode (only when HUDDLEFM_USER_ID is set): huddle_dj_mode, huddle_dj, huddle_dj_settings
@@ -49,6 +52,7 @@ export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>>
 export const maintenance: Record<string, { everyMs: number; run: () => Promise<void> }> = {
   'features:memory-extraction': { everyMs: 5 * 60 * 1000, run: runMemoryExtraction },
   'features:memory-prune': { everyMs: 30 * 60 * 1000, run: runMemoryPrune },
+  'features:failure-review': { everyMs: 10 * 60 * 1000, run: runFailureReview },
   'features:pending-send-expiry': { everyMs: 60 * 1000, run: expirePendingSends },
   'features:retention': { everyMs: 24 * 60 * 60 * 1000, run: async () => void (await runRetention()) },
   ...scheduleMaintenance,

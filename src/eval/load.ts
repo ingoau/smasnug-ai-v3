@@ -4,7 +4,7 @@
  * loadTurns keeps memory flat over a week of turns; loadFullTraces fills in the whole traces for the exported ones.
  */
 import { sql } from '../db/index.js';
-import type { EvalEvent, EvalRun, EvalTrace, EvalTurn } from './types.js';
+import type { EvalEvent, EvalFailureReport, EvalRun, EvalTrace, EvalTurn } from './types.js';
 
 const FOLLOW_UP_WINDOW_MIN = 30;
 const FOLLOW_UPS = 3;
@@ -45,7 +45,14 @@ async function botIds(threadIds: string[], given?: { botId?: string; userId?: st
   return { botId: row?.botId };
 }
 
-export async function loadTurns(opts: { since: Date; until?: Date; includeDms?: boolean; bot?: { botId?: string; userId?: string } }): Promise<EvalTurn[]> {
+export async function loadTurns(opts: {
+  since: Date;
+  until?: Date;
+  includeDms?: boolean;
+  bot?: { botId?: string; userId?: string };
+  /** Only these threads. */
+  threadIds?: string[];
+}): Promise<EvalTurn[]> {
   const until = opts.until ?? new Date();
   const turns = await sql<any[]>`
     select t.id, t.thread_id, t.kind, t.author_id, t.is_mention, t.addressed, t.status, t.message_ts,
@@ -53,6 +60,7 @@ export async function loadTurns(opts: { since: Date; until?: Date; includeDms?: 
     from turns t join threads th on th.id = t.thread_id
     where t.created_at >= ${opts.since} and t.created_at < ${until} and t.status in ('done', 'error', 'cancelled')
       and t.started_at is not null ${opts.includeDms === false ? sql`and not th.is_dm` : sql``}
+      ${opts.threadIds ? sql`and t.thread_id = any(${opts.threadIds})` : sql``}
     order by t.id`;
   if (!turns.length) return [];
   const ids = turns.map((t) => Number(t.id));
@@ -174,7 +182,43 @@ export async function loadFullTraces<T extends EvalTurn>(turns: T[]): Promise<T[
     if (r.kind === 'front' && r.turnId != null) front.set(Number(r.turnId), toTrace(r));
     if (r.kind === 'run' && r.runId != null) run.set(Number(r.runId), toTrace(r));
   }
-  return turns.map((t) => ({ ...t, trace: front.get(t.turn.id) ?? t.trace, runs: t.runs.map((r) => ({ ...r, trace: run.get(r.id) ?? r.trace })) }));
+  const reports = new Map<number, EvalFailureReport[]>();
+  for (const r of await failureReports(sql`turn_id = any(${ids})`)) {
+    if (!reports.has(r.turnId!)) reports.set(r.turnId!, []);
+    reports.get(r.turnId!)!.push(r);
+  }
+  return turns.map((t) => ({
+    ...t,
+    trace: front.get(t.turn.id) ?? t.trace,
+    runs: t.runs.map((r) => ({ ...r, trace: run.get(r.id) ?? r.trace })),
+    failureReports: reports.get(t.turn.id) ?? [],
+  }));
+}
+
+async function failureReports(where: ReturnType<typeof sql>): Promise<EvalFailureReport[]> {
+  const rows = await sql<any[]>`
+    select f.id, f.thread_id, f.turn_id, f.source, f.categories, f.summary, f.signal, f.review_verdict, f.evidence, f.created_at
+    from failure_reports f join threads th on th.id = f.thread_id where ${where} order by f.id`;
+  return rows.map((r) => ({
+    id: Number(r.id),
+    threadId: r.threadId,
+    turnId: r.turnId == null ? null : Number(r.turnId),
+    source: r.source,
+    categories: r.categories ?? [],
+    summary: r.summary,
+    signal: r.signal,
+    reviewVerdict: r.reviewVerdict,
+    evidence: Array.isArray(r.evidence) ? r.evidence : [],
+    createdAt: iso(r.createdAt)!,
+  }));
+}
+
+/** Failure reports in the window that aren't about a turn (mostly gate misses: a message the bot never answered). */
+export function loadTurnlessFailures(opts: { since: Date; until?: Date; includeDms?: boolean }): Promise<EvalFailureReport[]> {
+  const until = opts.until ?? new Date();
+  return failureReports(
+    sql`f.turn_id is null and f.created_at >= ${opts.since} and f.created_at < ${until} ${opts.includeDms === false ? sql`and not th.is_dm` : sql``}`,
+  );
 }
 
 /** System prompts by hash (prompt_versions). */
