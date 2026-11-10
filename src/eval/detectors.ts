@@ -34,6 +34,12 @@ function eventsOf(t: EvalTurn, type: string): EvalEvent[] {
   return t.events.filter((e) => e.type === type);
 }
 
+/** failure_report events, minus self reports the background review disputed (a failure_verdict event). */
+function failureEvents(t: EvalTurn): EvalEvent[] {
+  const disputed = new Set(eventsOf(t, 'failure_verdict').filter((e) => e.payload.verdict === 'disputed').map((e) => Number(e.payload.reportId)));
+  return eventsOf(t, 'failure_report').filter((e) => !disputed.has(Number(e.payload.reportId)));
+}
+
 function timing(t: EvalTurn): Record<string, any> | null {
   return eventsOf(t, 'turn_timing')[0]?.payload ?? null;
 }
@@ -100,9 +106,9 @@ export function detect(t: EvalTurn): Flag[] {
   const neg = t.reactions.filter((r) => isNegativeReaction(r.name));
   if (neg.length) add('negative_reaction', 5, neg.map((r) => `:${r.name}: ×${r.count}`).join(' '));
 
-  // Failure reports (src/features/failures/): the bot's own report_failure, and the background review's findings.
+  // Failure reports (src/features/failures/): the bot's own report_failure (unless the review disputed it), and the review's findings.
   for (const [source, code] of [['self', 'self_reported'], ['review', 'review_reported']] as const) {
-    const reports = eventsOf(t, 'failure_report').filter((e) => e.payload.source === source);
+    const reports = failureEvents(t).filter((e) => e.payload.source === source);
     if (reports.length) add(code, 6, [...new Set(reports.flatMap((e) => (Array.isArray(e.payload.categories) ? e.payload.categories : [])))].join(', '));
   }
 
@@ -187,7 +193,7 @@ export function summarize(turns: ScoredTurn[]): Summary {
     flags: count(turns.flatMap((t) => [...new Set(t.flags.map((f) => f.code))])).map(([code, n]) => ({ code, turns: n })),
     failures: count(
       turns.flatMap((t) =>
-        eventsOf(t, 'failure_report').flatMap((e) => (Array.isArray(e.payload.categories) ? e.payload.categories : []).map((c: string) => `${e.payload.source}\u0000${c}`)),
+        failureEvents(t).flatMap((e) => (Array.isArray(e.payload.categories) ? e.payload.categories : []).map((c: string) => `${e.payload.source}\u0000${c}`)),
       ),
     ).map(([k, n]) => {
       const [source, category] = k.split('\u0000') as [string, string];

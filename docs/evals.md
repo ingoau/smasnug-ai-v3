@@ -70,13 +70,15 @@ trace-based ones need traces. Thresholds are in `THRESHOLDS`.
   that a person saw (`WARNING_FLAGS`), a self report, a gate "no" whose author posted again within 30 min or a near miss
   (p ≥ 0.5); plus `failureReviewSampleRate` (10%) of the rest, and at most `failureReviewPerDay` calls per UTC day. The
   reviewer sees the transcript with the gate decision on each gated message, the flags and the self reports; it
-  returns findings that cite transcript lines (uncited ones are dropped, and a gate category needs a matching gate
-  decision among them) and confirms or disputes each self report (`review_verdict`). Quotes come from our stored copy,
+  returns findings that cite transcript lines (uncited ones are dropped, a gate category needs a matching gate
+  decision among them, and on a re-review a finding must cite a message newer than the last review; earlier review
+  findings are in the prompt and keyed by anchor message + categories, so none is filed twice) and confirms or disputes each self report (`review_verdict`). Quotes come from our stored copy,
   never from the model. It never posts.
 
-Each report also appends a `failure_report` event (categories only, no text) so the detectors see it. Reports are
+Each report also appends a `failure_report` event (categories only, no text) so the detectors see it; a disputed self
+report gets a `failure_verdict` event and stops counting. Reports are
 deleted with the thread, after 30 days, when a message in the channel is deleted (like traces), and by privacy withdraw.
-The export lists them per turn, counts them in SUMMARY.md, and lists the ones not tied to a turn (mostly gate misses).
+The export lists them per turn, counts them in SUMMARY.md, and lists the ones not on a turn in the window (mostly gate misses, or a later review of an older turn).
 
 ## Export
 

@@ -106,7 +106,7 @@ const prompts = await loadPrompts(hashes);
 for (const [hash, text] of prompts) await writeFile(path.join(out, 'prompts', `${hash}.md`), text);
 
 await writeFile(path.join(out, 'turns.jsonl'), jsonl.join('\n') + (jsonl.length ? '\n' : ''));
-const turnless = await loadTurnlessFailures({ since, until, includeDms: !flags.has('no-dms') });
+const turnless = await loadTurnlessFailures({ since, until, includeDms: !flags.has('no-dms'), loadedTurnIds: turns.map((t) => t.turn.id) });
 await writeFile(path.join(out, 'SUMMARY.md'), renderSummary(summarize(turns), { since, until, exported, prompts: [...prompts.keys()], turnless }));
 await writeFile(path.join(out, 'ANALYZE.md'), ANALYZE);
 

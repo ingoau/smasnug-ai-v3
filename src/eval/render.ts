@@ -111,8 +111,8 @@ ${s.flags.map((f) => `- ${f.code}: ${f.turns}`).join('\n') || '- none'}
 On these turns, by source and category:
 ${s.failures.map((f) => `- ${f.source} · ${f.category}: ${f.reports}`).join('\n') || '- none'}
 
-Not about a turn (gate misses and the like): ${meta.turnless?.length ?? 0}
-${(meta.turnless ?? []).slice(0, 40).map((r) => `${renderFailure(r)}\n  - thread \`${r.threadId}\``).join('\n')}
+Not on a turn in this window (gate misses, or a later review of an older turn): ${meta.turnless?.length ?? 0}
+${(meta.turnless ?? []).slice(0, 40).map((r) => `${renderFailure(r)}\n  - thread \`${r.threadId}\`${r.turnId != null ? ` · turn ${r.turnId}` : ''}`).join('\n')}
 
 ## Tool calls (front)
 

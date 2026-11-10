@@ -213,11 +213,16 @@ async function failureReports(where: ReturnType<typeof sql>): Promise<EvalFailur
   }));
 }
 
-/** Failure reports in the window that aren't about a turn (mostly gate misses: a message the bot never answered). */
-export function loadTurnlessFailures(opts: { since: Date; until?: Date; includeDms?: boolean }): Promise<EvalFailureReport[]> {
+/**
+ * Failure reports filed in the window that aren't on one of the loaded turns: mostly gate misses (a message the bot
+ * never answered), plus reports the review filed later about a turn from before the window.
+ */
+export function loadTurnlessFailures(opts: { since: Date; until?: Date; includeDms?: boolean; loadedTurnIds?: number[] }): Promise<EvalFailureReport[]> {
   const until = opts.until ?? new Date();
+  const ids = opts.loadedTurnIds ?? [];
   return failureReports(
-    sql`f.turn_id is null and f.created_at >= ${opts.since} and f.created_at < ${until} ${opts.includeDms === false ? sql`and not th.is_dm` : sql``}`,
+    sql`(f.turn_id is null or not (f.turn_id = any(${ids}))) and f.created_at >= ${opts.since} and f.created_at < ${until}
+        ${opts.includeDms === false ? sql`and not th.is_dm` : sql``}`,
   );
 }
 

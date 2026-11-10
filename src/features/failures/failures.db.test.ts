@@ -79,7 +79,7 @@ describe.skipIf(!LIVE)('failure reports (DB)', () => {
       insert into turns (thread_id, author_id, status, message_ts, created_at, started_at, finished_at)
       values (${threadId}, ${user}, 'done', ${[ts(3)]}, ${at(3)}, ${at(3)}, ${at(4)}) returning id::int`)[0]!.id;
     await sql`insert into thread_events (thread_id, type, actor, payload, created_at)
-              values (${threadId}, 'gate_decision', 'system', ${sql.json({ messageTs: ts(2), authorId: user, decision: 'no', probability: 0.3 })}, ${at(2)})`;
+              values (${threadId}, 'gate_decision', 'system', ${sql.json({ messageTs: [ts(2)], authorId: user, decision: 'no', probability: 0.3 })}, ${at(2)})`;
   });
 
   afterAll(async () => {
@@ -127,9 +127,28 @@ describe.skipIf(!LIVE)('failure reports (DB)', () => {
     expect(prompts).toHaveLength(1);
   });
 
+  it('a re-review never files an earlier finding again', async () => {
+    // New activity: the thread is picked again, and the model repeats an old finding plus one about the new message.
+    await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${channel}, ${ts(20)}, ${threadId}, ${user}, 'you still did not answer about food')`;
+    await sql`update threads set last_activity_at = ${at(20)}, failures_reviewed_at = ${at(10)} where id = ${threadId}`;
+    reply = {
+      findings: [
+        { categories: ['incorrect_info'], summary: 'wrong start time again', evidence_lines: [2, 4], bot_line: 2, signal: 'correction' },
+        { categories: ['gate_false_negative'], summary: 'food question still skipped', evidence_lines: [3, 6], bot_line: null, signal: 'explicit_complaint' },
+      ],
+      self_reports: [],
+    };
+    await review.reviewThread(threadId, at(10), { force: true });
+    expect(prompts.at(-1)).toContain('Already reported by an earlier review');
+    expect(prompts.at(-1)).toContain('food question skipped');
+    // The first cites nothing newer than the last review; the second has the same anchor and category as before.
+    expect((await reports()).filter((r) => r.source === 'review')).toHaveLength(2);
+  });
+
   it('a deleted Slack message drops the channel reports since then; privacy withdraw drops the rest of theirs', async () => {
     const { applyDelete } = await import('../../pipeline/store.js');
     await sql`update failure_reports set created_at = ${at(1)} where thread_id = ${threadId} and source = 'self'`;
+    await sql`delete from messages where thread_id = ${threadId} and ts = ${ts(20)}`;
     await applyDelete(channel, ts(2));
     expect((await reports()).map((r) => r.source)).toEqual(['self']);
     // The SQL that handlePrivacyWithdraw runs.

@@ -48,6 +48,13 @@ describe('detect', () => {
     const flags = detect(t);
     expect(flags.find((f) => f.code === 'self_reported')).toMatchObject({ weight: 6, detail: 'incomplete' });
     expect(flags.find((f) => f.code === 'review_reported')?.detail).toBe('incorrect_info, incomplete');
+    const disputed = turn({
+      events: [ev('self', ['incomplete']), { type: 'failure_verdict', actor: 'system', payload: { turnId: 1, reportId: 7, verdict: 'disputed' }, at: '' }].map((e, i) =>
+        i === 0 ? { ...e, payload: { ...e.payload, reportId: 7 } } : e,
+      ),
+    });
+    expect(codes(disputed)).not.toContain('self_reported');
+    expect(summarize([score(disputed)]).failures).toEqual([]);
     expect(summarize([score(t)]).failures).toEqual(
       expect.arrayContaining([
         { source: 'self', category: 'incomplete', reports: 1 },

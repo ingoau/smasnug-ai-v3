@@ -6,7 +6,7 @@ vi.hoisted(() => {
 vi.mock('../../db/index.js', () => ({ sql: {} }));
 vi.mock('../../core/redis.js', () => ({ redis: {} }));
 import { cleanCategories } from './categories.js';
-import { renderReviewTranscript, reviewReason, validateFindings, type Finding, type Line } from './review.js';
+import { findingKey, renderReviewTranscript, reviewReason, validateFindings, type Finding, type Line } from './review.js';
 
 const base = { flags: [], selfReports: 0, gate: [], humanMessages: [], sampleRate: 0, rand: () => 0.5 };
 
@@ -74,6 +74,19 @@ describe('validateFindings', () => {
     expect(validateFindings([finding({ categories: ['gate_false_negative'], evidence_lines: [2], bot_line: null })], lines)).toEqual([]);
     expect(validateFindings([finding({ categories: ['gate_false_positive', 'incomplete'], evidence_lines: [2] })], lines)[0]!.categories).toEqual(['incomplete']);
     expect(validateFindings([finding({ categories: ['gate_false_positive'], evidence_lines: [4], bot_line: null })], lines)[0]!.categories).toEqual(['gate_false_positive']);
+  });
+
+  it('on a re-review, keeps only findings that cite a message newer than the last review', () => {
+    const since = new Date(1300); // after ts 1.2, before 1.3
+    expect(validateFindings([finding({ evidence_lines: [1, 2], bot_line: null, categories: ['incomplete'] })], lines, since)).toEqual([]);
+    expect(validateFindings([finding({})], lines, since)).toHaveLength(1);
+  });
+
+  it('keys a finding by its anchor message and categories, not by when it was found', () => {
+    const [a] = validateFindings([finding({ categories: ['incomplete', 'incorrect_info'] })], lines);
+    const [b] = validateFindings([finding({ categories: ['incorrect_info', 'incomplete'], summary: 'other words', evidence_lines: [3] })], lines);
+    expect(findingKey('T', a!)).toBe(findingKey('T', b!));
+    expect(findingKey('T', a!)).toBe('failure:review:T:1.3:incomplete,incorrect_info');
   });
 
   it('keeps at most five', () => {

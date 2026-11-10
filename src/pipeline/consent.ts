@@ -209,6 +209,8 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
       log.warn({ err, userId }, 'privacy withdraw: deleting a message failed');
     }
   }
+  // Again, for a failure review that loaded their messages before they were deleted and filed after the first pass.
+  await sql`delete from failure_reports where speaker_id = ${userId} or evidence @> ${sql.json([{ userId }] as any)}`;
   log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length }, 'privacy: consent withdrawn, data deleted');
   await publishHome(userId);
   const text =
