@@ -14,7 +14,7 @@ import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { sql } from '../src/db/index.js';
 import { score, selectTurns, summarize } from '../src/eval/detectors.js';
-import { loadFullTraces, loadPrompts, loadTurns } from '../src/eval/load.js';
+import { loadFullTraces, loadPrompts, loadTurnlessFailures, loadTurns } from '../src/eval/load.js';
 import { renderSummary, renderTurn } from '../src/eval/render.js';
 
 const FLAGS = new Set(['no-dms']);
@@ -106,7 +106,8 @@ const prompts = await loadPrompts(hashes);
 for (const [hash, text] of prompts) await writeFile(path.join(out, 'prompts', `${hash}.md`), text);
 
 await writeFile(path.join(out, 'turns.jsonl'), jsonl.join('\n') + (jsonl.length ? '\n' : ''));
-await writeFile(path.join(out, 'SUMMARY.md'), renderSummary(summarize(turns), { since, until, exported, prompts: [...prompts.keys()] }));
+const turnless = await loadTurnlessFailures({ since, until, includeDms: !flags.has('no-dms'), loadedTurnIds: turns.map((t) => t.turn.id) });
+await writeFile(path.join(out, 'SUMMARY.md'), renderSummary(summarize(turns), { since, until, exported, prompts: [...prompts.keys()], turnless }));
 await writeFile(path.join(out, 'ANALYZE.md'), ANALYZE);
 
 console.log(`${turns.length} turns scored, ${picked.flagged.length} flagged + ${picked.controls.length} baseline exported to ${out}`);

@@ -186,6 +186,8 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   const facts = await deleteAllFacts(userId);
   await sql`update reminders set status = 'cancelled', text = '' where owner_id = ${userId} and status = 'pending'`;
   await sql`update watches set status = 'cancelled', criteria = '', state = '{}'::jsonb where owner_id = ${userId} and status = 'active'`;
+  // Failure reports about their requests or quoting them (the rest of their DMs' go with the messages below).
+  await sql`delete from failure_reports where speaker_id = ${userId} or evidence @> ${sql.json([{ userId }] as any)}`;
   await sql`delete from thread_summaries where thread_id in (select distinct thread_id from messages where user_id = ${userId} and thread_id is not null)`;
   // Theirs anywhere, and everything (the bot's replies too) in their DMs with the bot.
   const msgs = await sql<{ channelId: string; ts: string; threadId: string | null; userId: string | null }[]>`
@@ -207,6 +209,8 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
       log.warn({ err, userId }, 'privacy withdraw: deleting a message failed');
     }
   }
+  // Again, for a failure review that loaded their messages before they were deleted and filed after the first pass.
+  await sql`delete from failure_reports where speaker_id = ${userId} or evidence @> ${sql.json([{ userId }] as any)}`;
   log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length }, 'privacy: consent withdrawn, data deleted');
   await publishHome(userId);
   const text =

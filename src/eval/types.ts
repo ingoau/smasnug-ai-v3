@@ -49,6 +49,21 @@ export type EvalTurn = {
   followUps: { userId: string | null; text: string; minutesAfter: number }[];
   /** Reactions on the bot's messages posted during the turn. */
   reactions: { name: string; count: number }[];
+  /** Failure reports about the turn (src/features/failures/); filled for exported turns only (loadFullTraces). */
+  failureReports?: EvalFailureReport[];
+};
+
+export type EvalFailureReport = {
+  id: number;
+  threadId: string;
+  turnId: number | null;
+  source: string;
+  categories: string[];
+  summary: string;
+  signal: string | null;
+  reviewVerdict: string | null;
+  evidence: { ts: string; userId: string | null; quote: string }[];
+  createdAt: string;
 };
 
 export type Flag = { code: string; weight: number; detail: string };

@@ -146,6 +146,10 @@ export async function applyDelete(channelId: string, ts: string): Promise<{ thre
   await sql`delete from traces where channel_id = ${channelId} and coalesce(finished_at, now()) >= to_timestamp(${ts}::numeric)`.catch((err) =>
     log.warn({ err }, 'dropping traces of a deleted message failed'),
   );
+  // Failure reports (src/features/failures/) quote messages and summarise the conversation: the same rule.
+  await sql`delete from failure_reports where channel_id = ${channelId} and created_at >= to_timestamp(${ts}::numeric)`.catch((err) =>
+    log.warn({ err }, 'dropping failure reports of a deleted message failed'),
+  );
   const slackIds = (Array.isArray(before?.files) ? before.files : []).map((f) => f?.id).filter((id): id is string => !!id);
   await removeMessageFiles(channelId, ts).catch((err) => log.warn({ err }, 'removing deleted message files failed'));
   if (slackIds.length) await removeMessageFiles(channelId, ts, slackIds).catch((err) => log.warn({ err }, 'removing deleted message posts failed'));

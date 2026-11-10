@@ -1,7 +1,7 @@
 /** Readable markdown for the eval export (docs/evals.md): one file per turn, plus the summary. */
 import type { TraceStep } from '../agent/trace.js';
 import type { Summary } from './detectors.js';
-import type { EvalTrace, ScoredTurn } from './types.js';
+import type { EvalFailureReport, EvalTrace, ScoredTurn } from './types.js';
 
 const fence = (s: string) => `\`\`\`\n${s.replace(/```/g, "'''")}\n\`\`\``;
 const short = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)}… [+${s.length - n}]` : s);
@@ -55,6 +55,7 @@ export function renderTurn(t: ScoredTurn): string {
   if (replies.length) lines.push('', '## Bot replies', replies.map((e) => fence(short(String(e.payload.text), 3000))).join('\n\n'));
   if (t.followUps.length) lines.push('', '## What came next', t.followUps.map((f) => `- +${f.minutesAfter} min <@${f.userId}>${f.userId === u.authorId ? ' (author)' : ''}:\n${fence(short(f.text, 500))}`).join('\n'));
   if (t.reactions.length) lines.push('', `Reactions on the reply: ${t.reactions.map((r) => `:${r.name}: ×${r.count}`).join(' ')}`);
+  if (t.failureReports?.length) lines.push('', '## Failure reports', t.failureReports.map(renderFailure).join('\n'));
   lines.push('', '## Front agent');
   if (t.trace) lines.push(renderTrace(t.trace, { input: 12_000, output: 2000 }));
   else {
@@ -74,7 +75,17 @@ export function renderTurn(t: ScoredTurn): string {
   return `${lines.join('\n')}\n`;
 }
 
-export function renderSummary(s: Summary, meta: { since: Date; until: Date; exported: { file: string; turn: ScoredTurn }[]; prompts: string[] }): string {
+/** One failure report as a list item, its evidence quotes fenced. */
+export function renderFailure(r: EvalFailureReport): string {
+  const head = `- **${r.source}** #${r.id} [${r.categories.join(', ')}]${r.signal ? ` (${r.signal})` : ''}${r.reviewVerdict ? ` review: ${r.reviewVerdict}` : ''}: ${r.summary}`;
+  const ev = r.evidence.map((e) => `  - ${e.ts} <@${e.userId ?? '?'}>:\n${fence(short(e.quote, 300)).replace(/^/gm, '    ')}`);
+  return [head, ...ev].join('\n');
+}
+
+export function renderSummary(
+  s: Summary,
+  meta: { since: Date; until: Date; exported: { file: string; turn: ScoredTurn }[]; prompts: string[]; turnless?: EvalFailureReport[] },
+): string {
   const p = s.percentiles;
   const row = (name: string, d: { p50: number | null; p90: number | null; max: number | null }) => `| ${name} | ${d.p50 ?? '–'} | ${d.p90 ?? '–'} | ${d.max ?? '–'} |`;
   return `# Eval export ${meta.since.toISOString()} → ${meta.until.toISOString()}
@@ -94,6 +105,14 @@ ${row('subagent tokens (turns with runs)', p.runTokens)}
 ## Flags (turns)
 
 ${s.flags.map((f) => `- ${f.code}: ${f.turns}`).join('\n') || '- none'}
+
+## Failure reports (src/features/failures/)
+
+On these turns, by source and category:
+${s.failures.map((f) => `- ${f.source} · ${f.category}: ${f.reports}`).join('\n') || '- none'}
+
+Not on a turn in this window (gate misses, or a later review of an older turn): ${meta.turnless?.length ?? 0}
+${(meta.turnless ?? []).slice(0, 40).map((r) => `${renderFailure(r)}\n  - thread \`${r.threadId}\`${r.turnId != null ? ` · turn ${r.turnId}` : ''}`).join('\n')}
 
 ## Tool calls (front)
 

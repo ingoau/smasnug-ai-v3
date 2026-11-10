@@ -42,6 +42,28 @@ describe('detect', () => {
     expect(turnStats(t)).toMatchObject({ steps: 4, inputTokens: 4000, skills: ['bot-source'] });
   });
 
+  it('flags failure reports by source and counts their categories', () => {
+    const ev = (source: string, categories: string[]) => ({ type: 'failure_report', actor: 'bot', payload: { turnId: 1, source, categories }, at: '' });
+    const t = turn({ events: [ev('self', ['incomplete']), ev('review', ['incorrect_info', 'incomplete'])] });
+    const flags = detect(t);
+    expect(flags.find((f) => f.code === 'self_reported')).toMatchObject({ weight: 6, detail: 'incomplete' });
+    expect(flags.find((f) => f.code === 'review_reported')?.detail).toBe('incorrect_info, incomplete');
+    const disputed = turn({
+      events: [ev('self', ['incomplete']), { type: 'failure_verdict', actor: 'system', payload: { turnId: 1, reportId: 7, verdict: 'disputed' }, at: '' }].map((e, i) =>
+        i === 0 ? { ...e, payload: { ...e.payload, reportId: 7 } } : e,
+      ),
+    });
+    expect(codes(disputed)).not.toContain('self_reported');
+    expect(summarize([score(disputed)]).failures).toEqual([]);
+    expect(summarize([score(t)]).failures).toEqual(
+      expect.arrayContaining([
+        { source: 'self', category: 'incomplete', reports: 1 },
+        { source: 'review', category: 'incorrect_info', reports: 1 },
+        { source: 'review', category: 'incomplete', reports: 1 },
+      ]),
+    );
+  });
+
   it('flags many steps and heavy turns', () => {
     const steps = Array.from({ length: 7 }, (_, i) => step([['read_thread', { i }]], { input: 30_000, output: 10 }));
     expect(codes(turn({ trace: trace(steps) }))).toEqual(expect.arrayContaining(['many_steps', 'token_heavy']));

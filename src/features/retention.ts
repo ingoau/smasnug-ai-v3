@@ -90,6 +90,8 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
         returning f.id`,
   );
   await run('usage', sql`delete from usage where created_at < ${older(long)} returning id`);
+  // Failure reports (src/features/failures/) quote conversation content: same window as traces.
+  await run('failure_reports', sql`delete from failure_reports where created_at < ${older(long)} returning id`);
   await run(
     'bot_reports',
     sql`delete from bot_reports where status <> 'pending' and coalesce(reviewed_at, created_at) < ${older(long)} returning id`,
