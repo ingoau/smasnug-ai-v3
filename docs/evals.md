@@ -51,9 +51,32 @@ flag has a weight; a turn's score is their sum.
 | `skill_late`, `skill_reloaded` | `load_skill` only after a few steps / the same skill twice |
 | `slow_turn`, `slow_first_text` | latency outliers (from `turn_timing`) |
 | `run_failed`, `run_heavy`, `run_long` | subagent runs that errored, used many tokens or many steps |
+| `self_reported`, `review_reported` | a failure report about the turn: the bot's own `report_failure`, or the background review (below) |
 
 Turns from before tracing still get the event-based flags (`turn_tools`, `turn_timing`, `run_step` …); the
 trace-based ones need traces. Thresholds are in `THRESHOLDS`.
+
+## Failure reports
+
+`failure_reports` (`src/features/failures/`) says *why* a turn went wrong, in fixed categories (`categories.ts`:
+`gate_false_negative`, `gate_false_positive`, `incorrect_info`, `incomplete`, `misunderstood_request`,
+`false_action_claim`, `wrong_action`, `missed_context`, `tool_failure`, `format_or_tone`, `too_slow`,
+`capability_gap`, `other`). Two sources:
+
+- **self**: the front agent's `report_failure` tool, when someone complains, corrects or re-asks, or it finds its own
+  mistake. Invisible in the thread, one per turn, a few per thread per day. Evidence defaults to the triggering message.
+- **review**: `features:failure-review` (every 10 min, `review.ts`) looks at threads idle for 30 min (up to 3 days
+  old) once per new activity, like memory extraction. Only threads with a warning sign get a model call: a detector flag
+  that a person saw (`WARNING_FLAGS`), a self report, a gate "no" whose author posted again within 30 min or a near miss
+  (p ≥ 0.5); plus `failureReviewSampleRate` (10%) of the rest, and at most `failureReviewPerDay` calls per UTC day. The
+  reviewer sees the transcript with the gate decision on each gated message, the flags and the self reports; it
+  returns findings that cite transcript lines (uncited ones are dropped, and a gate category needs a matching gate
+  decision among them) and confirms or disputes each self report (`review_verdict`). Quotes come from our stored copy,
+  never from the model. It never posts.
+
+Each report also appends a `failure_report` event (categories only, no text) so the detectors see it. Reports are
+deleted with the thread, after 30 days, when a message in the channel is deleted (like traces), and by privacy withdraw.
+The export lists them per turn, counts them in SUMMARY.md, and lists the ones not tied to a turn (mostly gate misses).
 
 ## Export
 

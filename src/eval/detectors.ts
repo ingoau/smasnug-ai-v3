@@ -100,6 +100,12 @@ export function detect(t: EvalTurn): Flag[] {
   const neg = t.reactions.filter((r) => isNegativeReaction(r.name));
   if (neg.length) add('negative_reaction', 5, neg.map((r) => `:${r.name}: ×${r.count}`).join(' '));
 
+  // Failure reports (src/features/failures/): the bot's own report_failure, and the background review's findings.
+  for (const [source, code] of [['self', 'self_reported'], ['review', 'review_reported']] as const) {
+    const reports = eventsOf(t, 'failure_report').filter((e) => e.payload.source === source);
+    if (reports.length) add(code, 6, [...new Set(reports.flatMap((e) => (Array.isArray(e.payload.categories) ? e.payload.categories : [])))].join(', '));
+  }
+
   // Model behaviour
   const nudges = eventsOf(t, 'plain_text_nudge').length + eventsOf(t, 'plain_text_reply').length;
   if (nudges) add('plain_text', 2, 'answered in plain text instead of calling reply / end_turn');
@@ -157,6 +163,8 @@ export type Summary = {
   withTrace: number;
   flagged: number;
   flags: { code: string; turns: number }[];
+  /** Failure report categories on these turns, by source (turn-less ones, e.g. gate misses, are counted by the export). */
+  failures: { source: string; category: string; reports: number }[];
   tools: { name: string; calls: number }[];
   skills: { name: string; loads: number }[];
   percentiles: Record<'steps' | 'inputTokens' | 'turnEndMs' | 'firstTextMs' | 'runTokens', { p50: number | null; p90: number | null; max: number | null }>;
@@ -177,6 +185,14 @@ export function summarize(turns: ScoredTurn[]): Summary {
     withTrace: turns.filter((t) => t.trace).length,
     flagged: turns.filter((t) => t.score > 0).length,
     flags: count(turns.flatMap((t) => [...new Set(t.flags.map((f) => f.code))])).map(([code, n]) => ({ code, turns: n })),
+    failures: count(
+      turns.flatMap((t) =>
+        eventsOf(t, 'failure_report').flatMap((e) => (Array.isArray(e.payload.categories) ? e.payload.categories : []).map((c: string) => `${e.payload.source}\u0000${c}`)),
+      ),
+    ).map(([k, n]) => {
+      const [source, category] = k.split('\u0000') as [string, string];
+      return { source, category, reports: n };
+    }),
     tools: count(turns.flatMap((t) => t.stats.tools)).map(([name, n]) => ({ name, calls: n })),
     skills: count(turns.flatMap((t) => t.stats.skills)).map(([name, n]) => ({ name, loads: n })),
     percentiles: {
