@@ -27,6 +27,17 @@ describe('## prefix (hidden)', () => {
     expect(isHiddenMessage('')).toBe(false);
     expect(isHiddenMessage(undefined)).toBe(false);
   });
+  it('treats -- like ## (Slack renders a leading ## as a heading)', () => {
+    expect(isHiddenMessage('-- note to self')).toBe(true);
+    expect(isHiddenMessage('--')).toBe(true);
+    expect(isHiddenMessage(' \n-- indented')).toBe(true);
+    expect(isHiddenMessage(`--<@${BOT}> hi`)).toBe(true);
+    expect(isHiddenMessage('- list item')).toBe(false);
+    expect(isHiddenMessage('-1 from me')).toBe(false);
+    expect(isHiddenMessage('— em dash')).toBe(false);
+    expect(isHiddenMessage('pass --verbose')).toBe(false);
+    expect(isHiddenMessage(`<@${BOT}> -- hi`)).toBe(false);
+  });
 });
 
 describe('<> prefix (quiet)', () => {

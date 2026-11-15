@@ -2,7 +2,8 @@
  * Workspace AI-bot guidelines (design doc, "When the bot responds"). Pure detection helpers, no I/O, operating on
  * the raw Slack message text (mrkdwn: mentions are `<@U…>`, a literal `<` / `>` arrives as `&lt;` / `&gt;`).
  *
- * 1. `##` prefix: the message is ignored completely (never stored, never triggers anything, hidden from every read).
+ * 1. `##` or `--` prefix: the message is ignored completely (never stored, never triggers anything, hidden from every
+ *    read). `--` was added because Slack now renders a leading `##` as a heading.
  * 2. `@bot !stop`: stop the current response (stop.ts; there is no native stop button).
  * 3. A top-level channel message that pings a group (user group, @channel/@here/@everyone) and triggers the bot: the
  *    bot answers in a new top-level message instead of replying under the group ping.
@@ -12,9 +13,10 @@
 
 const lead = (text: string | null | undefined) => (text ?? '').trimStart();
 
-/** Rule 1: text (trimmed) starts with `##`. Such messages must be invisible to the bot. */
+/** Rule 1: text (trimmed) starts with `##` or `--`. Such messages must be invisible to the bot. */
 export function isHiddenMessage(text: string | null | undefined): boolean {
-  return lead(text).startsWith('##');
+  const t = lead(text);
+  return t.startsWith('##') || t.startsWith('--');
 }
 
 /** Rule 4: text (trimmed) starts with a literal `<>` (raw or entity-escaped, e.g. `&lt;&gt;`). */
