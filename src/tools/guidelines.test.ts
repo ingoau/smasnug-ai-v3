@@ -48,6 +48,7 @@ removers.push(
           { type: 'message', user: 'U1', text: 'root question', ts: rootTs, thread_ts: rootTs },
           { type: 'message', user: 'U2', text: 'visible reply', ts: '1790000000.000200', thread_ts: rootTs },
           { type: 'message', user: 'U2', text: '## hidden aside', ts: '1790000000.000300', thread_ts: rootTs },
+          { type: 'message', user: 'U2', text: '-- hidden dash aside', ts: '1790000000.000400', thread_ts: rootTs },
         ],
       };
     }
@@ -57,6 +58,7 @@ removers.push(
         has_more: false,
         messages: [
           { type: 'message', user: 'U3', text: ' ## hidden channel note', ts: '1789999999.000200' },
+          { type: 'message', user: 'U3', text: '-- hidden dash channel note', ts: '1789999999.000150' },
           { type: 'message', user: 'U3', text: 'visible channel note', ts: '1789999999.000100' },
         ],
       };
@@ -103,7 +105,7 @@ afterAll(async () => {
   await sql.end();
 });
 
-describe('## messages are invisible to read tools', () => {
+describe('## and -- messages are invisible to read tools', () => {
   it('read_thread', async () => {
     const out: string = await exec(toolsFor('front', ctx()).read_thread, {});
     expect(out).toContain('visible reply');
