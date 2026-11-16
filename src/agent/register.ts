@@ -80,7 +80,7 @@ export async function onShutdown(): Promise<void> {
 registerAction('coding:launch', handleCodingLaunch);
 registerAction('coding:cancel', handleCodingCancel);
 
-/** Quick-reply buttons marked no_turn (reply-quiet.ts): the press is recorded (plus an optional fixed reply), no turn. */
+/** Quick-reply buttons of type none / text / action (reply-quiet.ts): the press is recorded and handled by code, no turn. */
 registerAction(REPLY_QUIET_ACTION, handleQuietChoice);
 
 /** Link buttons on reply cards (rich-blocks.ts): Slack opens the URL itself and still sends the click; nothing to do. */

@@ -6,6 +6,7 @@
  *   [1727950100.000200] [bot] Smasnug (you): …
  * Tell the model in the system prompt that the bracketed number is the message ts (for react / read_thread).
  */
+import { parseButtonOutcome, parseButtonResponse } from '../agent/reply-buttons.js';
 import { limits, env } from '../config.js';
 import { sql } from '../db/index.js';
 import { getBotIdentity } from '../core/slack.js';
@@ -135,15 +136,19 @@ async function loadThreadMessages(thread: ThreadRow): Promise<RenderMsg[]> {
  */
 export async function withButtons(threadId: string, msgs: RenderMsg[]): Promise<RenderMsg[]> {
   if (!msgs.length) return msgs;
-  const rows = await sql<{ messageTs: string | null; labels: string[]; pressedBy: string | null; pressedLabel: string | null; pressedMessageTs: string | null }[]>`
-    select message_ts, labels, pressed_by, pressed_label, pressed_message_ts from reply_buttons
+  const rows = await sql<{ messageTs: string | null; labels: string[]; pressedBy: string | null; pressedLabel: string | null; pressedMessageTs: string | null; responses: unknown; outcome: unknown }[]>`
+    select message_ts, labels, pressed_by, pressed_label, pressed_message_ts, responses, outcome from reply_buttons
     where thread_id = ${threadId} and message_ts is not null order by id`;
   if (!rows.length) return msgs;
   const offered = new Map(rows.map((r) => [r.messageTs!, r]));
   const presses = new Set(rows.map((r) => r.pressedMessageTs).filter(Boolean));
   return msgs.map((m) => {
     const b = offered.get(m.ts);
-    const out = b ? { ...m, buttons: { labels: Array.isArray(b.labels) ? b.labels : [], pressedBy: b.pressedBy, pressedLabel: b.pressedLabel } } : m;
+    const actions = Array.isArray(b?.responses) ? b.responses.map((r) => (parseButtonResponse(r)?.kind === 'action' ? (r as { tool: string }).tool : null)) : undefined;
+    const outcome = b ? parseButtonOutcome(b.outcome) : null;
+    const out = b
+      ? { ...m, buttons: { labels: Array.isArray(b.labels) ? b.labels : [], pressedBy: b.pressedBy, pressedLabel: b.pressedLabel, ...(actions?.some(Boolean) ? { actions } : {}), ...(outcome ? { outcome } : {}) } }
+      : m;
     return presses.has(m.ts) && !m.botId ? { ...out, viaButton: true } : out;
   });
 }
