@@ -198,6 +198,13 @@ const METHOD_RPM: Record<string, number> = {
   'reactions.add': 100,
   'agents.sessions.setStatus': 300,
   'agents.sessions.rename': 50, // Tier 3 (docs.slack.dev/reference/methods/agents.sessions.rename)
+  // Code channels (docs/code-channels.md): agents.conversations.* are tier 2 (partner docs, 2026-11-16).
+  'agents.conversations.create': 20,
+  'agents.conversations.archive': 20,
+  'agents.conversations.setView': 20,
+  'agents.conversations.listViews': 20,
+  'agents.conversations.removeView': 20,
+  'agents.conversations.setCommands': 20,
   // ~25 per 30 s (≈50/min) measured on the dev app 2026-10-07 (429 on call 25–26 of a burst, Retry-After 30): 20 per
   // 30-s window (METHOD_WINDOW_MS) keeps bursts at 80 % of that, ≈40/min sustained.
   'search.messages': 20,

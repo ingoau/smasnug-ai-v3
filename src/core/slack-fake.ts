@@ -119,6 +119,10 @@ export async function fakeCall(method: string, args: Record<string, unknown>, to
       return { ok: true, canvas_id: `FCANVAS${++counter}` };
     case 'canvases.getContent':
       return { ok: true, content: '' };
+    case 'agents.conversations.create':
+      return { ok: true, channel_id: `CCODE${++counter}` };
+    case 'agents.conversations.listViews':
+      return { ok: true, views: [] };
     default:
       return { ok: true };
   }
