@@ -63,6 +63,27 @@ export async function fetchReplies(
   return bounded.sort((a, b) => compareTs(a.ts, b.ts));
 }
 
+/**
+ * A code channel's conversation (docs/code-channels.md): its newest top-level messages, up to `maxMessages`, oldest
+ * first. conversations.history also returns "also send to channel" thread replies (thread_broadcast); those belong
+ * to their thread, so they are dropped.
+ */
+export async function fetchConversationHistory(channelId: string, opts: { maxMessages: number }): Promise<any[]> {
+  const out: any[] = [];
+  let cursor: string | undefined;
+  do {
+    const res = await slackCall<any>('conversations.history', { channel: channelId, limit: Math.min(200, opts.maxMessages), ...(cursor ? { cursor } : {}) });
+    out.push(...(res.messages ?? []));
+    cursor = res.has_more ? res.response_metadata?.next_cursor || undefined : undefined;
+  } while (cursor && out.length < opts.maxMessages);
+  return isTopLevelOnly(out).slice(0, opts.maxMessages).sort((a, b) => compareTs(a.ts, b.ts));
+}
+
+/** Pure: drop thread replies (thread_ts set and not the message's own ts). */
+export function isTopLevelOnly<T extends { ts: string; thread_ts?: string }>(msgs: T[]): T[] {
+  return msgs.filter((m) => !m.thread_ts || m.thread_ts === m.ts);
+}
+
 /** conversations.history: up to `limit` top-level messages strictly before `latest` (oldest first). */
 export async function fetchHistoryBefore(channelId: string, opts: { latest?: string; limit: number }): Promise<any[]> {
   const res = await slackCall<any>('conversations.history', {

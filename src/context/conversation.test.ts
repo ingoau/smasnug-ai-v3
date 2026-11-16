@@ -26,6 +26,14 @@ describe('conversationInfoFromSlack', () => {
     expect(conversationInfoFromSlack({ id: 'C7', name: 'collab', is_private: false, is_ext_shared: true })?.isExtShared).toBe(true);
     expect(conversationInfoFromSlack(undefined)).toBeNull();
   });
+
+  it('recognises agent (code) channels and their origin link', () => {
+    const props = { record_channel: { record_type: 'agent_channel' }, agent_session: { origin_link: { channel_id: 'C9', ts: '1790000000.000100' } } };
+    expect(conversationInfoFromSlack({ id: 'C1', name: 'x', is_private: false, properties: props })?.agentChannel).toEqual({ originLink: { channelId: 'C9', ts: '1790000000.000100' } });
+    expect(conversationInfoFromSlack({ id: 'C1', name: 'x', properties: { record_channel: { record_type: 'agent_channel' } } })?.agentChannel).toEqual({});
+    expect(conversationInfoFromSlack({ id: 'C1', name: 'x', properties: { record_channel: { record_type: 'other' } } })?.agentChannel).toBeUndefined();
+    expect(conversationInfoFromSlack({ id: 'C1', name: 'x' })?.agentChannel).toBeUndefined();
+  });
 });
 
 describe('renderConversation', () => {

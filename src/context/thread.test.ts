@@ -141,6 +141,42 @@ describe('renderThreadContext', () => {
   });
 });
 
+describe('renderThreadContext in a code channel', () => {
+  it('backfills the :0 conversation from top-level history only, and gives its threads the conversation as background', async () => {
+    const ch = `C${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+    const base = 1790000000;
+    const top = (i: number, text: string, extra: object = {}) => ({ type: 'message', user: 'U0INGO', text, ts: `${base + i}.000100`, ...extra });
+    const history = [top(3, 'third top-level'), top(2, 'broadcast reply', { thread_ts: `${base + 1}.000100`, subtype: 'thread_broadcast' }), top(1, 'first top-level', { thread_ts: `${base + 1}.000100`, reply_count: 1 })];
+    const calls: string[] = [];
+    const rm = addFakeHandler((method, args) => {
+      if (args.channel !== ch) return undefined;
+      calls.push(method);
+      if (method === 'conversations.history') return { ok: true, messages: history, has_more: false };
+      if (method === 'conversations.replies') return { ok: true, messages: [top(1, 'first top-level', { thread_ts: `${base + 1}.000100` }), top(4, 'a reply <@U0BOT>', { thread_ts: `${base + 1}.000100` })] };
+      return undefined;
+    });
+    try {
+      const { createCodeChannelRow } = await import('../features/code-channels/store.js');
+      await createCodeChannelRow({ channelId: ch, sessionId: `test-${ch}`, kind: 'task', name: 'x' });
+      const ctx = await renderThreadContext(`${ch}:0`, { newMessageTs: [] });
+      expect(calls).not.toContain('conversations.replies');
+      expect(ctx.history).toContain('first top-level');
+      expect(ctx.history).toContain('third top-level');
+      expect(ctx.history).not.toContain('broadcast reply');
+      expect(ctx.threadFacts).toMatch(/^This is a code channel/);
+      expect(ctx.channelContext).toBe('');
+
+      const sub = await renderThreadContext(`${ch}:${base + 1}.000100`, { newMessageTs: [`${base + 4}.000100`] });
+      expect(sub.channelContext).toContain('third top-level');
+    } finally {
+      rm();
+      await sql`delete from code_channels where channel_id = ${ch}`;
+      await sql`delete from messages where channel_id = ${ch}`;
+      await sql`delete from threads where channel_id = ${ch}`;
+    }
+  });
+});
+
 describe('renderThreadFacts', () => {
   it('a fresh top-level message, or who started the thread and how much of it is shown', () => {
     expect(renderThreadFacts({ fresh: true, startedTs: '1790000000.000100', replies: 0, shownReplies: 0 })).toMatch(/new top-level message: it starts this thread/);
@@ -149,5 +185,11 @@ describe('renderThreadFacts', () => {
       'Started by <@U1|Ingo> on Monday 2026-09-21 14:13 UTC; 120 replies so far (only the newest 25 are shown here). The new messages are replies in this thread.',
     );
     expect(renderThreadFacts({ fresh: false, startedTs: '1790000000.000100', replies: 1, shownReplies: 1 })).toBe('Started on Monday 2026-09-21 14:13 UTC; 1 reply so far.');
+  });
+  it("a code channel's conversation has no root and no start date", () => {
+    const f = renderThreadFacts({ fresh: false, startedTs: '0', replies: 12, shownReplies: 5, codeChannel: true });
+    expect(f).toMatch(/^This is a code channel/);
+    expect(f).toContain('12 messages so far (only the newest 5 are shown here)');
+    expect(f).not.toContain('1970');
   });
 });
