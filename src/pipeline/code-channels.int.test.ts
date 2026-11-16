@@ -154,6 +154,24 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     expect(await acceptOwnParentPost(C, { ts, text: 'please also add tests', bot_id: 'BBOT', user: 'UBOT' }, marker)).toBe('duplicate');
   });
 
+  it('a parent post whose checks fail after the claim releases it, so a retry (or the echo) still starts the turn', async () => {
+    await makeCodeChannel({ parent: true });
+    const ts = nextTs();
+    const marker = { parentThreadId: PARENT, requesterId: 'U1' };
+    const real = redis.exists.bind(redis);
+    const spy = vi.spyOn(redis, 'exists').mockImplementation(((...keys: any[]) => {
+      if (keys.some((k) => String(k) === `slack:readonly:${C}`)) return Promise.reject(new Error('redis down'));
+      return (real as any)(...keys);
+    }) as any);
+    try {
+      await expect(acceptOwnParentPost(C, { ts, text: 'go', bot_id: 'BBOT', user: 'UBOT' }, marker)).rejects.toThrow('redis down');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await acceptOwnParentPost(C, { ts, text: 'go', bot_id: 'BBOT', user: 'UBOT' }, marker)).toBe('accepted');
+    expect(await takeBatch(CONV, 'U1')).toEqual([{ ts, reason: 'parent' }]);
+  });
+
   it('a parent post for someone who has not agreed to the privacy policy is held behind the prompt in the parent thread, then answered', async () => {
     const { privacySettings } = await import('../features/privacy.js');
     const { handlePrivacyAgree } = await import('./consent.js');

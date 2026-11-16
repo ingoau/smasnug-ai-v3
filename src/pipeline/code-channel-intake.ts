@@ -89,6 +89,10 @@ async function claimParentPost(channelId: string, ts: string): Promise<boolean> 
   return rows.length > 0;
 }
 
+async function releaseParentPost(channelId: string, ts: string): Promise<void> {
+  await sql`delete from slack_events_seen where event_id = ${parentPostClaimKey(channelId, ts)}`;
+}
+
 /**
  * What became of a parent post's turn:
  * - `accepted`: batched for the requester (the turn runs); `duplicate`: the other path (our own call or Slack's echo)
@@ -123,29 +127,36 @@ export async function acceptParentPost(channelId: string, msg: SlackMessage, mar
     log.debug({ channelId, ts: msg.ts }, 'parent post already taken');
     return 'duplicate';
   }
-  await appendEvent(threadId, 'message', msg.bot_id ? `bot:${msg.bot_id}` : null, { ts: msg.ts, bot: true });
-  await appendEvent(threadId, 'parent_message', marker.requesterId, { ts: msg.ts, parentThreadId: marker.parentThreadId });
-  // The conversation is always engaged (like a DM).
-  await sql`update threads set engaged = true, last_addressed_at = now(), messages_since_addressed = 0, last_activity_at = now() where id = ${threadId}`;
-  if (await isChannelReadOnly(channelId)) return 'read_only';
-  const entry = await guardEntry(marker.requesterId, channelId);
-  if (!entry.ok) return 'refused';
-  if (!(await hasAgreed(marker.requesterId))) {
-    const parent = parseThreadId(marker.parentThreadId);
-    await holdForConsent({
-      userId: marker.requesterId,
-      channelId: parent.channelId,
-      // The prompt throttle is per conversation, like intake's (a DM is one conversation).
-      conversation: parent.channelId.startsWith('D') ? parent.channelId : marker.parentThreadId,
-      promptThreadTs: parent.threadTs,
-      messageTs: msg.ts,
-      item: { kind: 'batch', threadId, ts: msg.ts, reason: 'parent' },
-    });
-    return 'held_for_consent';
+  // A failure from here on would lose the turn (the other path would find it claimed): release the claim so a retry
+  // (the job's, or Slack's echo) can take it.
+  try {
+    await appendEvent(threadId, 'message', msg.bot_id ? `bot:${msg.bot_id}` : null, { ts: msg.ts, bot: true });
+    await appendEvent(threadId, 'parent_message', marker.requesterId, { ts: msg.ts, parentThreadId: marker.parentThreadId });
+    // The conversation is always engaged (like a DM).
+    await sql`update threads set engaged = true, last_addressed_at = now(), messages_since_addressed = 0, last_activity_at = now() where id = ${threadId}`;
+    if (await isChannelReadOnly(channelId)) return 'read_only';
+    const entry = await guardEntry(marker.requesterId, channelId);
+    if (!entry.ok) return 'refused';
+    if (!(await hasAgreed(marker.requesterId))) {
+      const parent = parseThreadId(marker.parentThreadId);
+      await holdForConsent({
+        userId: marker.requesterId,
+        channelId: parent.channelId,
+        // The prompt throttle is per conversation, like intake's (a DM is one conversation).
+        conversation: parent.channelId.startsWith('D') ? parent.channelId : marker.parentThreadId,
+        promptThreadTs: parent.threadTs,
+        messageTs: msg.ts,
+        item: { kind: 'batch', threadId, ts: msg.ts, reason: 'parent' },
+      });
+      return 'held_for_consent';
+    }
+    showIntakeStatus(threadId, marker.requesterId, msg.ts);
+    await addToBatch(threadId, marker.requesterId, msg.ts, 'parent');
+    return 'accepted';
+  } catch (err) {
+    await releaseParentPost(channelId, msg.ts).catch((e) => log.warn({ err: e, channelId, ts: msg.ts }, 'releasing a parent post claim failed'));
+    throw err;
   }
-  showIntakeStatus(threadId, marker.requesterId, msg.ts);
-  await addToBatch(threadId, marker.requesterId, msg.ts, 'parent');
-  return 'accepted';
 }
 
 /**
