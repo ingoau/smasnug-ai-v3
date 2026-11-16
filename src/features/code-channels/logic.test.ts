@@ -65,7 +65,7 @@ describe('origin', () => {
     const origin = { channelId: 'D1', ts: '1.1' };
     expect(createOptions({ originIsDm: true, sourceIsPublic: false, origin })).toEqual({ isPrivate: true });
     expect(createOptions({ originIsDm: false, sourceIsPublic: true, origin: { channelId: 'C1', ts: '1.1' } })).toEqual({ origin: { channelId: 'C1', ts: '1.1' } });
-    expect(createOptions({ originIsDm: false, sourceIsPublic: true, private: true, origin: { channelId: 'C1', ts: '1.1' } })).toEqual({ isPrivate: true, origin: { channelId: 'C1', ts: '1.1' } });
+    expect(createOptions({ originIsDm: false, sourceIsPublic: true, private: true, origin: { channelId: 'C1', ts: '1.1' } })).toEqual({ isPrivate: true }); // no link: origin members could join
     expect(createOptions({ originIsDm: false, sourceIsPublic: true, origin: null })).toEqual({});
     // A private source (or one we couldn't look up) is never left to Slack's default, link or not.
     expect(createOptions({ originIsDm: false, sourceIsPublic: false, origin: null })).toEqual({ isPrivate: true });

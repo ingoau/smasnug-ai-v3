@@ -60,7 +60,8 @@ export function pickOrigin(o: OriginInput): { ts: string; authorId: string | nul
 
 /**
  * The create call's origin link and privacy. Slack refuses a DM as `origin_channel_id` (invalid_origin_link), and a
- * DM origin always makes a private channel anyway: no link then, and the requester is invited explicitly.
+ * DM origin always makes a private channel anyway: no link then, and the requester is invited explicitly. The same
+ * goes for `private` over a public origin (a link would let the origin channel's members join).
  * A channel is never less private than its source: anything but a known public channel (a private channel, a group
  * DM, a DM, or a conversation we couldn't look up) asks for `is_private` explicitly, so a missing origin link
  * doesn't leave the visibility to Slack's default.
@@ -71,7 +72,8 @@ export function createOptions(o: { originIsDm: boolean; sourceIsPublic: boolean;
 } {
   return {
     ...(o.originIsDm || !o.sourceIsPublic || o.private === true ? { isPrivate: true as const } : {}),
-    ...(o.origin && !o.originIsDm ? { origin: o.origin } : {}),
+    // `private` over a public origin drops the link too: with it, Slack would let the origin channel's members join.
+    ...(o.origin && !o.originIsDm && !(o.private === true && o.sourceIsPublic) ? { origin: o.origin } : {}),
   };
 }
 
