@@ -57,6 +57,16 @@ scopes.
   (`free_teams_cannot_create_standalone_canvases`) and the bot answers in the thread instead (a `.md` file for long
   content).
 
+- **Code channels** (optional, `docs/code-channels.md`): `features.code_channels.enabled: true` in the manifest, the
+  bot scopes `code_channels:manage`, `channels:manage`, `groups:write` (invites), `metadata.message:read`, plus the
+  existing `chat:write.customize` / `channels:read` / `groups:read`, and the `group_archive` / `group_unarchive`
+  events (private code channels; public ones use `channel_archive` / `channel_unarchive`). Reinstall after adding
+  them, then set `CODE_CHANNELS=1` for the worker (the admin can switch it off at runtime). `/archive` and `/rename`
+  are registered per channel at runtime (`agents.conversations.setCommands`), not in the manifest. Slack only
+  accepts `agents.conversations.create` for recognised agent apps (`feature_disabled` otherwise: the tool says so and
+  nothing is created). `agent_session_stopped` / `message_stream_stopped` stay unsubscribed (no native stop button);
+  the handler is ready if that changes.
+
 - **HuddleFM DJ mode** (optional): set `HUDDLEFM_USER_ID` to the HuddleFM bot user's id, and add this app's bot user
   id to HuddleFM's `INTEGRATION_USER_IDS` (HuddleFM ignores everyone else). It uses scopes the manifest already has:
   `im:write` (open the DM with HuddleFM), `chat:write`, `im:history` + the `message.im` event (HuddleFM's replies and
