@@ -1,3 +1,4 @@
+import '../tools/test-env.js';
 import { describe, expect, it } from 'vitest';
 import { codeChannelThreadId, isCodeChannelRoot, parseThreadId, slackThreadTs, threadIdOf, threadTsArg } from './events.js';
 
