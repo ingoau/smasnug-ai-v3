@@ -2,6 +2,8 @@
  * Quick-reply button press (`reply:choice:<i>`, value = reply_buttons id): act as if the presser had replied with the
  * button's label in that thread.
  *
+ * 0. `who: requester` buttons only work for the person the reply answered (others get an ephemeral note). A button
+ *    with `place` append / replace makes the turn's first reply go into this message (front.ts placeTarget).
  * 1. Entry guard (counted like a message; channel disable applies). Blocked users get nothing, rate-limited ones an
  *    ephemeral notice, and the buttons stay for others.
  * 1b. Privacy policy not agreed (consent.ts): the presser gets the prompt, nothing else happens.
@@ -19,7 +21,7 @@ import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { rerenderButtonsMessage } from '../agent/cards.js';
 import { claimPress, loadReplyButtons, setPressedMessageTs } from '../agent/reply-buttons-store.js';
-import { REPLY_CHOICE_ACTION } from '../agent/reply-buttons.js';
+import { REPLY_CHOICE_ACTION, buttonWho } from '../agent/reply-buttons.js';
 import { guardEntry } from './entry.js';
 import { holdForConsent, noticePolicyUpdate } from './consent.js';
 import { hasAgreed } from '../features/privacy.js';
@@ -77,6 +79,11 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
   const { threadTs } = parseThreadId(row.threadId);
   if (row.pressedAt) {
     await ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
+    return;
+  }
+  // `who: requester`: only the person the reply answered.
+  if (buttonWho(row.responses?.[index]) === 'requester' && row.requesterId && row.requesterId !== ctx.userId) {
+    await ephemeral(ctx, row.channelId, threadTs, `Only <@${row.requesterId}> can press that one.`);
     return;
   }
 

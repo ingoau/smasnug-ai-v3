@@ -28,7 +28,15 @@ export interface RenderMsg {
   replyCount?: number;
   reactions?: MessageReaction[];
   /** Quick-reply buttons the bot offered under this message (and who pressed which). */
-  buttons?: { labels: string[]; pressedBy?: string | null; pressedLabel?: string | null };
+  buttons?: {
+    labels: string[];
+    pressedBy?: string | null;
+    pressedLabel?: string | null;
+    /** Per label: the tool an action button runs (null / missing = not an action button). */
+    actions?: (string | null)[];
+    /** What the pressed action button's call did. */
+    outcome?: { ok: boolean; text: string } | null;
+  };
   /** This "message" is a quick-reply button press (its text is the label). */
   viaButton?: boolean;
   /** Forwarded messages and link unfurls shown with it (normalize.ts attachmentsFromSlack). */
@@ -144,11 +152,17 @@ export function reactionsLabel(reactions: MessageReaction[] | undefined, env: Fo
   return `[reactions: ${parts.join(', ')}]`;
 }
 
-/** `[buttons: Yes | No]`, or `[buttons: Yes | No; <@U1|Ingo> pressed "Yes"]` once pressed. */
+/**
+ * `[buttons: Yes | No]`, or `[buttons: Yes | No; <@U1|Ingo> pressed "Yes"]` once pressed. Action buttons say what they
+ * run (`Upload it (runs upload_emoji)`) and, once pressed, how it went (`→ done: …` / `→ failed`).
+ */
 export function buttonsLabel(b: RenderMsg['buttons'], env: FormatEnv): string {
   if (!b?.labels.length) return '';
   const who = b.pressedBy ? personRef(b.pressedBy, env.names.get(b.pressedBy)) : '';
-  return `[buttons: ${b.labels.join(' | ')}${b.pressedBy && b.pressedLabel != null ? `; ${who} pressed "${b.pressedLabel}"` : ''}]`;
+  const labels = b.labels.map((l, i) => (b.actions?.[i] ? `${l} (runs ${b.actions[i]})` : l));
+  // A failure's text can carry user-chosen names / raw errors: only the agent's outcome turn sees it (quoted as untrusted).
+  const outcome = b.outcome ? (b.outcome.ok ? ` → done: ${b.outcome.text.slice(0, 300)}` : ' → failed') : '';
+  return `[buttons: ${labels.join(' | ')}${b.pressedBy && b.pressedLabel != null ? `; ${who} pressed "${b.pressedLabel}"${outcome}` : ''}]`;
 }
 
 /** Per-attachment cuts: a forwarded message is content, a link preview just context. */

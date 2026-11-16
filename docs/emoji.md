@@ -34,3 +34,10 @@ dies if the account logs out or Slack ends it; uploads then answer "The userbot 
 values are replaced. Keep both values secret: together they act as that account for anything it can do in Slack.
 
 `emoji.add` is an undocumented, internal method, so Slack can change or block it at any time.
+
+## Upload buttons
+
+`upload_emoji` is also a button action (`docs/design.md`, "Quick-reply buttons"): when the agent shows an emoji for
+review, it puts an "Upload it" action button on that reply. Pressing it uploads the emoji with the arguments fixed in the
+reply, as the presser (only the requester by default), with no model turn, and appends the reply's `done_text` to the
+same message.

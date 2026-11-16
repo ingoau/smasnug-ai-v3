@@ -28,6 +28,7 @@ import { enqueueCardTitle, enqueueSessionTitle } from './titles.js';
 import { TurnCard } from './turn-card.js';
 import { CODING_AGENTS_PROMPT, frontSystemPrompt } from './prompts/front.js';
 import { skillsPrompt } from './skills.js';
+import { placeTargetFor } from './reply-buttons-store.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread, maybeSynthesize } from './subagents.js';
 import { loadSinceRound, renderSinceRound } from './round-since.js';
@@ -427,7 +428,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     const sched = await scheduledTurnInput(turn.id).catch((err) => (log.warn({ err }, 'scheduledTurnInput failed'), null));
     parts.push(sched ? sched.input : 'A scheduled turn whose details are missing. Do nothing: call end_turn.');
     if (queued) parts.push(queued);
-    if (sched && (sched.source === 'send' || sched.source === 'coding_launch' || sched.source === 'huddlefm')) outcome = { fallback: sched.fallback };
+    if (sched && (sched.source === 'send' || sched.source === 'coding_launch' || sched.source === 'huddlefm' || sched.source === 'button_action')) outcome = { fallback: sched.fallback };
   } else {
     parts.push(section('new_messages', clipTokens(ctx.newMessages, BUDGET.newMessages), ` from="<@${turn.authorId}>" note="The message(s) you are responding to now."`));
     const barePing = turn.isMention ? await isBarePing(turn).catch(() => null) : null;
@@ -638,7 +639,11 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const activityCards = Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks' && (io.isMention || Boolean(turn.addressed) || turn.kind === 'synthesis');
   // The turn's plan card (one per message): its own steps and the runs it starts.
   const turnCard = new TurnCard({ threadId: turn.threadId, turnId, enabled: activityCards });
+  // Started by a prompt button whose response goes into its own message (append / replace): the first reply goes there.
+  const placeTarget =
+    turn.kind === 'user' ? await placeTargetFor(turn.threadId, turn.messageTs ?? []).catch((err) => (log.warn({ err }, 'placeTargetFor failed'), null)) : null;
   const replies = new ReplyManager({
+    placeTarget,
     threadId: turn.threadId,
     channelId,
     threadTs,

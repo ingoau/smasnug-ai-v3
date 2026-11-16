@@ -51,20 +51,36 @@ export const buttonsSchema = z
       z.string(),
       z.object({
         label: z.string(),
-        no_turn: z
-          .boolean()
-          .optional()
-          .describe('true = a press only marks it pressed and does NOT start a turn for you (for "No thanks" / "All good" / "Never mind").'),
-        fixed_reply: z
+        type: z
           .string()
-          .optional()
-          .describe('Optional short text posted as your reply when pressed, without a turn (implies no_turn), e.g. "all good 👍".'),
-      }),
+          .nullish()
+          .describe(
+            '"prompt" (default): a press posts the label as their message and starts your turn. "text": a press posts `text` without a turn. "none": a press only marks it pressed. "action": a press runs `action` (a fixed tool call) without a turn; you only hear back if it fails.',
+          ),
+        text: z.string().nullish().describe('type "text": the short static answer posted on press, e.g. "no worries 👍".'),
+        // Loose on purpose: code checks it (normalizeButtons / prepareButtonActions); a schema error would fail a reply
+        // whose text already streamed.
+        action: z
+          .object({ tool: z.string().nullish(), args: z.unknown().optional().describe('The tool\'s arguments, as an object.') })
+          .passthrough()
+          .nullish()
+          .describe(
+            `type "action": the tool call to run on press, with its exact arguments (checked now; one that can't run makes it a prompt button and the result says why). Only tools whose description offers a button action can run (${MAX_BUTTONS} buttons max still applies).`,
+          ),
+        done_text: z.string().nullish().describe('type "action": short text shown when it worked, e.g. "uploaded, :cat_wave: is live". Without it the button note just says done.'),
+        place: z
+          .string()
+          .nullish()
+          .describe(
+            'Where the response goes (text: `text`; action: `done_text`; prompt: your reply on that turn): "new" (a message of its own), "append" (added below this reply, in the same message) or "replace" (instead of this reply\'s text, e.g. a "Regenerate" or "Make it shorter" whose result supersedes this one). Default: "append" for action, "new" otherwise.',
+          ),
+        who: z.string().nullish().describe('Who may press: "anyone" or "requester" (only the person you are answering). Default: "requester" for action, "anyone" otherwise.'),
+      }).passthrough(), // older fields (no_turn, fixed_reply) still reach normalizeButtons
     ]),
   )
   .optional()
   .describe(
-    `Optional quick-reply buttons under the message. Use them whenever the message asks a question with a few clear answers (options like "price, size or wireless?", a "which one?", a yes/no). And when there's a logical next step the user would likely want (dig deeper, draft or write it, run it, set a reminder, send it), end with one short offer plus buttons, e.g. "want me to draft it?" → ["Yes, draft it", { "label": "No thanks", "fixed_reply": "no worries 👍" }]. When you couldn't find what was asked, say so and offer to dig deeper: ["Dig deeper", { "label": "No thanks", "fixed_reply": "all good 👍" }]. At most one offer per message, only when genuinely useful: never on bare greetings or thanks, or while the user is mid-task giving you instructions. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars), each exactly what the user would type back; a press posts that label as their message and starts your turn. Decline / dismiss buttons that need nothing from you ("No thanks", "Never mind", "All good") always go as { label, fixed_reply } with a short static answer (e.g. "no worries 👍"), so a press posts that answer without starting a turn; never leave them as plain labels. Omit for open questions and when there's no clear next step.`,
+    `Optional quick-reply buttons under the message. Use them whenever the message asks a question with a few clear answers (options like "price, size or wireless?", a "which one?", a yes/no). And when there's a logical next step the user would likely want (dig deeper, draft or write it, run it, set a reminder, send it), end with one short offer plus buttons, e.g. "want me to draft it?" → ["Yes, draft it", { "label": "No thanks", "type": "text", "text": "no worries 👍" }]. When you couldn't find what was asked, say so and offer to dig deeper: ["Dig deeper", { "label": "No thanks", "type": "text", "text": "all good 👍" }]. At most one offer per message, only when genuinely useful: never on bare greetings or thanks, or while the user is mid-task giving you instructions. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars); a plain label is a prompt button: exactly what the user would type back, and a press posts it as their message and starts your turn. Decline / dismiss buttons that need nothing from you ("No thanks", "Never mind", "All good") are always type "text" with a short static answer, never plain labels. When the next step is a single fixed tool call (e.g. upload the emoji you just showed), use an "action" button instead of a prompt one. Omit for open questions and when there's no clear next step.`,
   );
 
 registerTool({
