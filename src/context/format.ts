@@ -102,9 +102,11 @@ export function authorName(m: RenderMsg, env: FormatEnv): string {
 }
 
 /** Slack mrkdwn → plain-ish text: decode entities, name mentions, flatten links and special mentions. */
+const MENTION = /<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g;
+
 export function renderSlackText(text: string, names: Map<string, string>): string {
   return text
-    .replace(/<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g, (_m, id: string) => personRef(id, names.get(id)))
+    .replace(MENTION, (_m, id: string) => personRef(id, names.get(id)))
     // Keep channel ids so the agent can link channels as <#ID> (Slack renders only that form as a link).
     .replace(/<#(C[A-Z0-9]+)\|([^>]*)>/g, (_m, id: string, name: string) => (name ? `<#${id}|${name}>` : `<#${id}>`))
     .replace(/<!subteam\^[A-Z0-9]+(?:\|([^>]*))?>/g, (_m, label?: string) => label || '@group')
@@ -114,7 +116,10 @@ export function renderSlackText(text: string, names: Map<string, string>): strin
     .replace(/<((?:https?|mailto):[^>]+)>/g, '$1')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&');
+    .replace(/&amp;/g, '&')
+    // A mention typed as text (`&lt;@U…|Any Name&gt;`) decodes to one: name it from the directory too, so the
+    // label after | is never one the writer chose.
+    .replace(MENTION, (_m, id: string) => personRef(id, names.get(id)));
 }
 
 export function truncateText(s: string, maxChars: number): string {
@@ -240,17 +245,19 @@ export function annotateTsDates(text: string): string {
 
 /**
  * A line inside a message's text that starts like a message line (`[1790000000.000100 · …] <@U…|Name>: …`,
- * `[bot] Name: …`, `<@U…|Name>: …`). Someone pasting (or forging) one would otherwise pass as a separate message
- * from another person.
+ * `[bot] Name: …`, `<@U…|Name>: …`), possibly behind spaces, invisible characters, a quote `>` or a bullet. Someone
+ * pasting (or forging) one would otherwise pass as a separate message from another person. A line that merely starts
+ * with a mention (`<@U…> can you review`) is left alone.
  */
-const FORGED_LINE = /^([ \t]*)(?=\[\s*\d{6,}|\[\s*bot\s*\]|<@[UW][A-Z0-9]*)/gim;
+const FORGED_LINE = /^((?:[^\S\n]|[\u200b-\u200f\u2060\ufeff>•◦▪‣*\-–—])*)(?=\[\s*\d{6,}|\[\s*bot\s*\]|<@[UW][A-Z0-9]*(?:\|[^>\n]*)?>\s*:)/gim;
 export const QUOTED_MARK = '(quoted)';
 
 /** Marks continuation lines of a message's text that imitate a message line, so they read as part of this message. */
 export function markForgedLines(text: string): string {
-  const nl = text.indexOf('\n');
-  if (nl < 0) return text;
-  return text.slice(0, nl) + text.slice(nl).replace(FORGED_LINE, `$1${QUOTED_MARK} `);
+  const lines = text.replace(/\r\n?|[\u2028\u2029\u0085]/g, '\n');
+  const nl = lines.indexOf('\n');
+  if (nl < 0) return lines;
+  return lines.slice(0, nl) + lines.slice(nl).replace(FORGED_LINE, `$1${QUOTED_MARK} `);
 }
 
 export function formatMessage(m: RenderMsg, env: FormatEnv): string {
