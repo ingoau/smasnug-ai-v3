@@ -27,6 +27,7 @@ const { stopKey } = await import('./stop.js');
 const store = await import('../features/code-channels/store.js');
 const { setCodeChannelsDisabled } = await import('../features/code-channels/settings.js');
 const { parentMessageMetadata } = await import('../features/code-channels/parent-message.js');
+const { acceptOwnParentPost } = await import('./code-channel-intake.js');
 
 const run = vi.mocked(runFrontTurn);
 const C = 'C0CODE';
@@ -132,6 +133,23 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     await processSlackEvent(messageEnvelope({ bot_id: 'BBOT', user: 'UBOT', username: 'smasnug ai · from parent', text: 'please also add tests', ts, metadata: parentMessageMetadata({ parentThreadId: PARENT, requesterId: 'U1' }) }));
     expect(await takeBatch(CONV, 'U1')).toEqual([{ ts, reason: 'parent' }]);
     expect((await sql`select type, actor from thread_events where thread_id = ${CONV} and type = 'parent_message'`)[0]).toMatchObject({ actor: 'U1' });
+  });
+
+  it('a parent post the bot just made starts its turn directly; the echo (with or without metadata) adds nothing', async () => {
+    await makeCodeChannel({ parent: true });
+    const ts = nextTs();
+    const marker = { parentThreadId: PARENT, requesterId: 'U1' };
+    expect(await acceptOwnParentPost(C, { ts, text: 'please also add tests', bot_id: 'BBOT', user: 'UBOT', username: 'smasnug ai · from parent' }, marker)).toBe(true);
+    expect(await debounceJobs()).toEqual([expect.objectContaining({ threadId: CONV, authorId: 'U1' })]);
+    // Slack's echo: with the marker (deduped) and without it (an ordinary bot post).
+    await processSlackEvent(messageEnvelope({ bot_id: 'BBOT', user: 'UBOT', username: 'smasnug ai · from parent', text: 'please also add tests', ts, metadata: parentMessageMetadata(marker) }));
+    await processSlackEvent(messageEnvelope({ bot_id: 'BBOT', user: 'UBOT', username: 'smasnug ai · from parent', text: 'please also add tests', ts }));
+    expect(await debounceJobs()).toHaveLength(1);
+    expect(await takeBatch(CONV, 'U1')).toEqual([{ ts, reason: 'parent' }]);
+    expect(await sql`select 1 from thread_events where thread_id = ${CONV} and type = 'parent_message'`).toHaveLength(1);
+    expect((await sql`select thread_id, username from messages where channel_id = ${C} and ts = ${ts}`)[0]).toMatchObject({ threadId: CONV, username: 'smasnug ai · from parent' });
+    // A marker for another parent thread is refused.
+    expect(await acceptOwnParentPost(C, { ts: nextTs(), text: 'x', bot_id: 'BBOT' }, { parentThreadId: 'C9:1.1', requesterId: 'U1' })).toBe(false);
   });
 
   it('adopts a Slack-created agent channel on a mention; ordinary channels are left alone', async () => {

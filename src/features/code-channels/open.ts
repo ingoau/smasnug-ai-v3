@@ -9,9 +9,9 @@
  *
  * How the channel's first turn starts: the brief (task) and, after a fork seed, the quoted latest user message are
  * posted as *parent posts* (parent-message.ts: the bot under "smasnug ai · from <parent>", with the marker metadata).
- * When Slack delivers them, intake (src/pipeline/code-channel-intake.ts) records a `parent_message` and starts a turn
- * in `${channel}:0` for the requester, so the channel answers like any other message there: consent, limits, the
- * thread lock and status all apply. The fork summary itself (and a button's seed) is an ordinary bot post: stored,
+ * Right after posting, postParentMessage hands them to src/pipeline/code-channel-intake.ts (acceptOwnParentPost), which
+ * records a `parent_message` and starts a turn in `${channel}:0` for the requester, so the channel answers like any
+ * other message there: consent, limits, the thread lock and status all apply. Slack's echo of the post is deduped. The fork summary itself (and a button's seed) is an ordinary bot post: stored,
  * no turn.
  */
 import { createHash } from 'node:crypto';
@@ -20,6 +20,7 @@ import { appendEvent, codeChannelThreadId, parseThreadId, threadTsArg } from '..
 import { getBotIdentity, slackCall, slackErrorCode } from '../../core/slack.js';
 import { getConversationInfo, type ConversationInfo } from '../../context/conversation.js';
 import { log } from '../../log.js';
+import { acceptOwnParentPost } from '../../pipeline/code-channel-intake.js';
 import { neutralizeBroadcasts } from '../../pipeline/guidelines.js';
 import { createCodeChannel } from './api.js';
 import { codeChannelDisplayName } from './ids.js';
@@ -66,20 +67,26 @@ export async function inviteUsers(channelId: string, users: readonly string[], k
   }
 }
 
-/** Post as the bot for the parent thread's agent: custom username + the parent marker (starts a turn there). */
+/**
+ * Post as the bot for the parent thread's agent: custom username + the parent marker, then start the channel's turn
+ * for the requester right away (acceptOwnParentPost; Slack's echo of the post is deduped). A failure to start the
+ * turn is logged, not thrown: the post is there, and the echo may still start it.
+ */
 export async function postParentMessage(o: { channelId: string; parentThreadId: string; requesterId: string; label: string; text: string; key: string }): Promise<string> {
+  const text = neutralizeBroadcasts(o.text);
+  const username = parentPostUsername(env.BOT_DISPLAY_NAME, o.label);
+  const marker = { parentThreadId: o.parentThreadId, requesterId: o.requesterId };
   const res = await slackCall<any>(
     'chat.postMessage',
-    {
-      channel: o.channelId,
-      text: neutralizeBroadcasts(o.text),
-      username: parentPostUsername(env.BOT_DISPLAY_NAME, o.label),
-      metadata: parentMessageMetadata({ parentThreadId: o.parentThreadId, requesterId: o.requesterId }),
-      unfurl_links: false,
-    },
+    { channel: o.channelId, text, username, metadata: parentMessageMetadata(marker), unfurl_links: false },
     { idempotencyKey: o.key },
   );
-  return String(res.ts);
+  const ts = String(res.ts);
+  const bot = await getBotIdentity().catch(() => undefined);
+  const echo = res.message && typeof res.message === 'object' ? res.message : {};
+  const msg = { text, username, ...(bot ? { user: bot.userId, bot_id: bot.botId } : {}), ...echo, ts };
+  await acceptOwnParentPost(o.channelId, msg, marker).catch((err) => log.warn({ err, channelId: o.channelId, ts }, 'starting the parent post turn failed'));
+  return ts;
 }
 
 export type OpenMode = 'fork' | 'task' | 'button';

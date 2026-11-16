@@ -5,18 +5,28 @@
  * - A top-level message belongs to the channel's one conversation, `${channel}:0` (rules.ts conversationRootTs).
  * - A thread reply keeps its own thread, `${channel}:${thread_ts}`, and follows the ordinary channel-thread rules:
  *   ignored until the bot is @mentioned in that thread, then the usual engaged-thread rules.
- * - A marked parent-agent post (parent-message.ts) at the top level starts a turn for the requester.
+ * - A marked parent-agent post (parent-message.ts) at the top level starts a turn for the requester
+ *   (`acceptParentPost`). The bot's own code calls it right after posting (src/features/code-channels/open.ts
+ *   postParentMessage), so the turn doesn't depend on Slack echoing the post back with its metadata; when the echo
+ *   does arrive, intake calls it again and the per-message claim makes the second call a no-op.
  * - Any human message (or parent post) resets the idle clock; a message in a channel marked archived means someone
  *   reopened it, so it's live again.
  */
 import { appendEvent, codeChannelThreadId } from '../core/events.js';
+import { isChannelReadOnly } from '../core/slack.js';
+import { sql } from '../db/index.js';
 import { log } from '../log.js';
+import { hasAgreed } from '../features/privacy.js';
 import { adoptIfAgentChannel } from '../features/code-channels/adopt.js';
 import { parseParentMessage, type ParentMessageMarker } from '../features/code-channels/parent-message.js';
 import { codeChannelsEnabled } from '../features/code-channels/settings.js';
 import { getCodeChannel, isCodeChannel, touchCodeChannel, unarchiveCodeChannel } from '../features/code-channels/store.js';
 import { restoreSessionStatus } from './agent-session.js';
+import { addToBatch } from './debounce.js';
+import { guardEntry } from './entry.js';
 import { isTopLevel } from './rules.js';
+import { showIntakeStatus } from './session-status.js';
+import { storeMessage, upsertThread, type SlackMessage } from './store.js';
 
 export interface CodeChannelRoute {
   /** Top-level: the message belongs to `${channel}:0`. */
@@ -54,12 +64,68 @@ export async function routeCodeChannel(ev: RouteInput, o: { isDm: boolean; isBot
 async function verifiedParentPost(ev: RouteInput, botId: string | undefined): Promise<ParentMessageMarker | null> {
   const marker = parseParentMessage(ev);
   if (!marker || !botId || ev.bot_id !== botId) return null;
+  return (await markerMatchesChannel(ev, marker)) ? marker : null;
+}
+
+/** The marker's parent thread is the channel's recorded parent thread. */
+async function markerMatchesChannel(ev: { channel: string; ts: string }, marker: ParentMessageMarker): Promise<boolean> {
   const row = await getCodeChannel(ev.channel);
   if (!row?.parentThreadId || row.parentThreadId !== marker.parentThreadId) {
     log.warn({ channel: ev.channel, ts: ev.ts, marker }, 'parent post marker does not match the code channel; ignored');
-    return null;
+    return false;
   }
-  return marker;
+  return true;
+}
+
+/** The dedupe key a parent post is claimed under (slack_events_seen, pruned by retention after ~2 days). Pure. */
+export function parentPostClaimKey(channelId: string, ts: string): string {
+  return `cc-parent:${channelId}:${ts}`;
+}
+
+/** Claim a parent post's turn: true for the first caller only (the direct call after posting, or Slack's echo). */
+async function claimParentPost(channelId: string, ts: string): Promise<boolean> {
+  const rows = await sql`insert into slack_events_seen (event_id) values (${parentPostClaimKey(channelId, ts)}) on conflict do nothing returning event_id`;
+  return rows.length > 0;
+}
+
+/**
+ * A verified parent post (`marker` already checked against the channel's row) in a code channel's conversation:
+ * store it, reset the idle clock, and start a turn in `${channel}:0` for the requester (batch reason `parent`, no
+ * gate), behind the same checks as any message there: read-only channel, the entry guard (limits, suspension) and
+ * consent (a requester who withdrew is dropped, never held). Storage and bookkeeping are idempotent; the events and
+ * the batch happen once per post (claimParentPost), whichever of the two paths gets there first.
+ */
+export async function acceptParentPost(channelId: string, msg: SlackMessage, marker: ParentMessageMarker): Promise<void> {
+  const threadId = codeChannelThreadId(channelId);
+  await noteCodeChannelActivity(channelId, marker.requesterId);
+  await upsertThread({ id: threadId, channelId, threadTs: '0', isDm: false });
+  const { deleted } = await storeMessage(channelId, threadId, msg);
+  if (deleted) return;
+  if (!(await claimParentPost(channelId, msg.ts))) {
+    log.debug({ channelId, ts: msg.ts }, 'parent post already taken');
+    return;
+  }
+  await appendEvent(threadId, 'message', msg.bot_id ? `bot:${msg.bot_id}` : null, { ts: msg.ts, bot: true });
+  await appendEvent(threadId, 'parent_message', marker.requesterId, { ts: msg.ts, parentThreadId: marker.parentThreadId });
+  // The conversation is always engaged (like a DM).
+  await sql`update threads set engaged = true, last_addressed_at = now(), messages_since_addressed = 0, last_activity_at = now() where id = ${threadId}`;
+  if (await isChannelReadOnly(channelId)) return;
+  const entry = await guardEntry(marker.requesterId, channelId);
+  if (!entry.ok) return;
+  if (!(await hasAgreed(marker.requesterId))) return;
+  showIntakeStatus(threadId, marker.requesterId, msg.ts);
+  await addToBatch(threadId, marker.requesterId, msg.ts, 'parent');
+}
+
+/**
+ * The bot just posted a parent post (open.ts postParentMessage): start its turn now rather than waiting for Slack's
+ * echo (which may arrive without the metadata). Checks the marker against the channel's row like intake does.
+ */
+export async function acceptOwnParentPost(channelId: string, msg: SlackMessage, marker: ParentMessageMarker): Promise<boolean> {
+  if (!(await codeChannelsEnabled())) return false;
+  if (!(await markerMatchesChannel({ channel: channelId, ts: msg.ts }, marker))) return false;
+  await acceptParentPost(channelId, msg, marker);
+  return true;
 }
 
 /**
