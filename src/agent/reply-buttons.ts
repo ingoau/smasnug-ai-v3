@@ -66,10 +66,10 @@ export function placeText(replyText: string | null, response: string, place: 'ap
   return place === 'append' && replyText?.trim() ? `${replyText.trimEnd()}\n\n${response}` : response;
 }
 
-/** The stored response of the pressed button (by its label), or null. */
-export function pressedResponse(b: Pick<ButtonsState, 'labels' | 'pressedLabel' | 'responses'>): ButtonResponse | null {
+/** The stored response of the pressed button (by its index; older rows: by its label), or null. */
+export function pressedResponse(b: Pick<ButtonsState, 'labels' | 'pressedLabel' | 'responses'> & Pick<Partial<ButtonsState>, 'pressedIndex'>): ButtonResponse | null {
   if (b.pressedLabel == null) return null;
-  const i = b.labels.indexOf(b.pressedLabel);
+  const i = b.pressedIndex ?? b.labels.indexOf(b.pressedLabel);
   return i >= 0 ? (b.responses?.[i] ?? null) : null;
 }
 export const MAX_BUTTONS = 5;
@@ -88,6 +88,8 @@ export interface ButtonsState {
   responses?: (ButtonResponse | null)[] | null;
   /** An action button's result, once it ran. */
   outcome?: ButtonOutcome | null;
+  /** Which button was pressed (null on older rows: found by its label). */
+  pressedIndex?: number | null;
 }
 
 export interface ButtonElement {
@@ -167,7 +169,8 @@ function buttonResponse(obj: Record<string, unknown>, label: string, notes: stri
       const done = str(obj.done_text);
       return { kind: 'action', tool, args: json, ...(done ? { done: neutralizeBroadcasts(cut(done, MAX_FIXED_REPLY_CHARS)) } : {}), ...opt };
     }
-    return who === 'requester' ? { kind: 'prompt', who } : null;
+    // Falls back to a prompt button that keeps the action's default: only the requester may press it.
+    return who === 'anyone' ? null : { kind: 'prompt', who: 'requester' };
   }
   // prompt: stored only when it differs from a plain button.
   const placed = place && place !== 'new' ? place : undefined;
@@ -219,9 +222,9 @@ function mrkdwnLabel(label: string): string {
 }
 
 /** "<@U> pressed *label*", plus how an action button's run went (running / done / failed). */
-export function pressedText(b: Pick<ButtonsState, 'pressedBy' | 'pressedLabel'> & Partial<Pick<ButtonsState, 'labels' | 'responses' | 'outcome'>>): string {
+export function pressedText(b: Pick<ButtonsState, 'pressedBy' | 'pressedLabel'> & Partial<Pick<ButtonsState, 'labels' | 'responses' | 'outcome' | 'pressedIndex'>>): string {
   const base = `<@${b.pressedBy}> pressed *${mrkdwnLabel(b.pressedLabel ?? '')}*`;
-  const r = b.labels ? pressedResponse({ labels: b.labels, pressedLabel: b.pressedLabel ?? null, responses: b.responses ?? null }) : null;
+  const r = b.labels ? pressedResponse({ labels: b.labels, pressedLabel: b.pressedLabel ?? null, responses: b.responses ?? null, pressedIndex: b.pressedIndex ?? null }) : null;
   if (r?.kind !== 'action') return base;
   if (!b.outcome) return `${base} · working on it…`;
   return b.outcome.ok ? `${base} · done ✓` : `${base} · didn't work`;

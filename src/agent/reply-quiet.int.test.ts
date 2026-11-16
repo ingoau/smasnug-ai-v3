@@ -188,4 +188,21 @@ describe.skipIf(!INTEGRATION)('reply buttons: no-turn presses', () => {
     expect(await store.placeTargetFor(threadId, ['1700000700.000001'])).toEqual({ ts, buttonsId: id, place: 'append' });
     expect(await store.placeTargetFor(threadId, ['1700000799.000001'])).toBeNull();
   });
+
+  it('an action press that never finished resumes when the presser presses again (only after a while)', async () => {
+    const { id, ts } = await offer([{ label: 'Say', type: 'action', action: { tool: 'test_echo', args: { say: 'again' } } }], 'here', 'UQBTH');
+    // The first press was claimed, then the worker died before the action finished.
+    await store.claimPress({ id, index: 0, userId: 'UQBTH', pressedMessageTs: '1700000800.000001' });
+    const k = (await fakeCalls()).length;
+    await press({ user: 'UQBTH', id, actionId: 'reply:quiet:0', ts, actionTs: '1700000801.000001' });
+    expect((await callsSince(k)).map((c) => c.args.text)).toEqual(['Still working on that one.']);
+    expect((await store.loadReplyButtons(id))!.outcome).toBeNull();
+
+    await sql`update reply_buttons set pressed_at = now() - interval '5 minutes' where id = ${id}`;
+    await press({ user: 'UQBTX', id, actionId: 'reply:quiet:0', ts, actionTs: '1700000802.000001' });
+    expect((await store.loadReplyButtons(id))!.outcome).toBeNull(); // someone else can't resume it
+    await press({ user: 'UQBTH', id, actionId: 'reply:quiet:0', ts, actionTs: '1700000803.000001' });
+    expect((await store.loadReplyButtons(id))!.outcome).toEqual({ ok: true, text: 'said again' });
+    expect(ran.at(-1)).toMatchObject({ speaker: 'UQBTH', say: 'again' });
+  });
 });

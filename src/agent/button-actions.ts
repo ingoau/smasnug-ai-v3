@@ -10,7 +10,7 @@
  */
 import type { z } from 'zod';
 import { log } from '../log.js';
-import type { ButtonOutcome, ButtonResponse } from './reply-buttons.js';
+import { buttonWho, type ButtonOutcome, type ButtonResponse } from './reply-buttons.js';
 
 export interface ButtonActionContext {
   threadId: string;
@@ -79,7 +79,7 @@ export async function prepareButtonActions(labels: readonly string[], responses:
       }
       if (!problem) return r;
       notes.push(`Button "${labels[i]}" can't run ${r.tool}: ${problem}. It starts a turn like a normal button instead.`);
-      return r.who === 'requester' ? ({ kind: 'prompt', who: 'requester' } as const) : null;
+      return buttonWho(r) === 'requester' ? ({ kind: 'prompt', who: 'requester' } as const) : null;
     }),
   );
   return { responses: out, notes };

@@ -11,6 +11,8 @@
  *    action: code runs the bound call (button-actions.ts) as the presser; its outcome is recorded once
  *    (reply_buttons.outcome) and shown in the note; on success `done_text` goes where `place` says; on failure an
  *    outcome turn tells the agent (if the presser agreed to the privacy policy; else they get the error privately).
+ * An action press that never got an outcome (the worker died mid-run) resumes when the presser presses again after
+ * RESUME_AFTER_MS (the side effect is keyed per buttons row, so it isn't repeated).
  * No privacy prompt otherwise: no turn starts and their messages are stored anyway (CLAUDE.md privacy policy). A stored
  * row without a response for that button (older rows, prompt buttons) falls through to the normal press handler.
  */
@@ -55,6 +57,9 @@ async function storePress(channelId: string, threadId: string, userId: string, t
 }
 
 /** Only the requester may press it: true when this presser may not (they were told). Same check: reply-choice.ts. */
+/** An action press without an outcome this long after it started is taken as interrupted: pressing again resumes it. */
+export const RESUME_AFTER_MS = 2 * 60_000;
+
 async function refuseWrongPresser(ctx: ActionContext, row: ReplyButtonsRow, response: ButtonResponse | null, threadTs: string): Promise<boolean> {
   if (buttonWho(response) !== 'requester' || !row.requesterId || row.requesterId === ctx.userId) return false;
   await ephemeral(ctx, row.channelId, threadTs, `Only <@${row.requesterId}> can press that one.`);
@@ -72,7 +77,13 @@ export async function handleQuietChoice(ctx: ActionContext): Promise<void> {
   // No stored response for this button, or a prompt one: a normal press (starts a turn).
   if (!response || response.kind === 'prompt') return handleReplyChoice({ ...ctx, actionId: `${REPLY_CHOICE_ACTION}:${index}` });
   const { threadTs } = parseThreadId(row.threadId);
-  if (row.pressedAt) return ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
+  if (row.pressedAt) {
+    // The presser's own action press that never finished (the worker died mid-run): pressing again resumes it. The
+    // action's side effect is keyed per buttons row, so a run that did go through isn't repeated.
+    const unfinished = response.kind === 'action' && row.pressedBy === ctx.userId && row.pressedIndex === index && !row.outcome;
+    if (unfinished && row.pressedAt.getTime() < Date.now() - RESUME_AFTER_MS) return runAction(ctx, row, response, buttonPlace(response));
+    return ephemeral(ctx, row.channelId, threadTs, unfinished ? 'Still working on that one.' : ALREADY_ANSWERED_TEXT);
+  }
   if (await refuseWrongPresser(ctx, row, response, threadTs)) return;
 
   const entry = await guardEntry(ctx.userId, row.channelId);
@@ -91,6 +102,9 @@ export async function handleQuietChoice(ctx: ActionContext): Promise<void> {
   if (response.kind === 'text' && place !== 'new') claimed = await replaceReplyText(claimed, placeText(claimed.replyText, neutralizeBroadcasts(response.text), place));
   await rerenderButtonsMessage(claimed).catch((err) => log.warn({ err, buttonsId: id }, 'replacing reply buttons with the pressed note failed'));
 
+  // An action runs first: nothing else may fail between the "working on it" note and the run.
+  if (response.kind === 'action') await runAction(ctx, claimed, response, place);
+
   const storedTs = await storePress(row.channelId, row.threadId, ctx.userId, ts, label);
   if (storedTs !== ts) await setPressedMessageTs(id, storedTs);
   await appendEvent(row.threadId, 'message', ctx.userId, { ts: storedTs, button: { id, label, messageTs: row.messageTs, noTurn: true, type: response.kind } });
@@ -99,8 +113,6 @@ export async function handleQuietChoice(ctx: ActionContext): Promise<void> {
     const text = neutralizeBroadcasts(response.text);
     if (place === 'new') await postText(row, ctx.userId, text, `reply-quiet:${id}`);
     await appendEvent(row.threadId, 'reply', 'bot', { turnId: row.turnId, buttonsId: id, fixedReply: true, place, text });
-  } else if (response.kind === 'action') {
-    await runAction(ctx, claimed, response, place);
   }
   log.info({ threadId: row.threadId, buttonsId: id, userId: ctx.userId, response: response.kind }, 'no-turn reply button pressed');
 }
@@ -116,7 +128,7 @@ async function postText(row: ReplyButtonsRow, partnerId: string, text: string, k
 async function runAction(ctx: ActionContext, row: ReplyButtonsRow, r: Extract<ButtonResponse, { kind: 'action' }>, place: ButtonPlace): Promise<void> {
   const outcome = await runButtonAction(r, { threadId: row.threadId, channelId: row.channelId, speakerId: ctx.userId, key: String(row.id) });
   let saved = await setButtonOutcome(row.id, outcome);
-  if (!saved) return; // recorded already (a retried job): that run showed it
+  if (!saved) return; // recorded already (a resumed press racing the original run): that run showed it
   await appendEvent(row.threadId, 'button_action', ctx.userId, { buttonsId: row.id, tool: r.tool, ok: outcome.ok, text: outcome.text });
   log.info({ threadId: row.threadId, buttonsId: row.id, tool: r.tool, ok: outcome.ok }, 'button action ran');
   if (outcome.ok && r.done && place !== 'new') saved = await replaceReplyText(saved, placeText(saved.replyText, r.done, place));

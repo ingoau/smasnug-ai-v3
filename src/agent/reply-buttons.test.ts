@@ -149,8 +149,8 @@ describe('reply buttons: types', () => {
     expect(buttonPlace({ kind: 'text', text: 'x' })).toBe('new');
     expect(buttonWho(null)).toBe('anyone');
     // An action without a tool: a prompt button, and the model hears why.
-    const bad = normalizeButtons([{ label: 'Go', type: 'action' }]);
-    expect(bad.responses).toEqual([null]);
+    const bad = normalizeButtons([{ label: 'Go', type: 'action' }, { label: 'Open', type: 'action', who: 'anyone' }]);
+    expect(bad.responses).toEqual([{ kind: 'prompt', who: 'requester' }, null]);
     expect(bad.notes[0]).toContain('"Go"');
   });
 
@@ -173,6 +173,10 @@ describe('reply buttons: types', () => {
     expect(pressedText({ ...b, outcome: { ok: true, text: '' } })).toBe('<@U1> pressed *Up* · done ✓');
     expect(pressedText({ ...b, outcome: { ok: false, text: '' } })).toBe("<@U1> pressed *Up* · didn't work");
     expect(pressedText({ ...b, responses: [null] })).toBe('<@U1> pressed *Up*');
+    // Repeated labels: the stored index decides which button's response it was.
+    const dup = { id: 1, labels: ['Up', 'Up'], responses: [null, { kind: 'action' as const, tool: 't', args: '{}' }], pressedBy: 'U1', pressedLabel: 'Up', outcome: { ok: true, text: '' } };
+    expect(pressedText({ ...dup, pressedIndex: 1 })).toBe('<@U1> pressed *Up* · done ✓');
+    expect(pressedText({ ...dup, pressedIndex: 0 })).toBe('<@U1> pressed *Up*');
     expect(placeText('here it is  ', 'done', 'append')).toBe('here it is\n\ndone');
     expect(placeText(null, 'done', 'append')).toBe('done');
     expect(placeText('here it is', 'done', 'replace')).toBe('done');
@@ -189,7 +193,9 @@ describe('reply buttons: actions', () => {
       [action('unit_echo', { say: 'hi' }), action('nope', {}), action('unit_echo', { say: 3 }), { ...action('unit_echo', { say: 'no' }), who: 'requester' }],
       ctx,
     );
-    expect(responses).toEqual([action('unit_echo', { say: 'hi' }), null, null, { kind: 'prompt', who: 'requester' }]);
+    const req = { kind: 'prompt', who: 'requester' };
+    expect(responses).toEqual([action('unit_echo', { say: 'hi' }), req, req, req]);
+    expect((await prepareButtonActions(['x'], [{ ...action('nope', {}), who: 'anyone' }], ctx)).responses).toEqual([null]);
     expect(notes).toHaveLength(3);
     expect(notes[0]).toContain('unit_echo');
     expect(notes[2]).toContain('not allowed');
@@ -326,6 +332,9 @@ describe('reply buttons: context rendering', () => {
     expect(formatMessage({ ...base, buttons: { labels: ['Up', 'No'], actions: ['upload_emoji', null] } }, env)).toBe('[1.2] [bot] Smasnug (you): here [buttons: Up (runs upload_emoji) | No]');
     expect(formatMessage({ ...base, buttons: { labels: ['Up'], actions: ['upload_emoji'], pressedBy: 'U1', pressedLabel: 'Up', outcome: { ok: true, text: 'Added :x:' } } }, env)).toBe(
       '[1.2] [bot] Smasnug (you): here [buttons: Up (runs upload_emoji); <@U1|Ingo> pressed "Up" → done: Added :x:]',
+    );
+    expect(formatMessage({ ...base, buttons: { labels: ['Up'], actions: ['upload_emoji'], pressedBy: 'U1', pressedLabel: 'Up', outcome: { ok: false, text: '<injected>' } } }, env)).toBe(
+      '[1.2] [bot] Smasnug (you): here [buttons: Up (runs upload_emoji); <@U1|Ingo> pressed "Up" → failed]',
     );
   });
 

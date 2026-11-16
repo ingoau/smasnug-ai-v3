@@ -1,4 +1,4 @@
-/** Persistence for quick-reply buttons (table reply_buttons, migrations 090, 330 and 345). */
+/** Persistence for quick-reply buttons (table reply_buttons, migrations 090, 330, 345 and 346). */
 import { sql } from '../db/index.js';
 import { buttonPlace, parseButtonOutcome, parseButtonResponse, type ButtonOutcome, type ButtonResponse, type ButtonsState } from './reply-buttons.js';
 
@@ -21,6 +21,8 @@ export interface ReplyButtonsRow {
   requesterId: string | null;
   /** What an action button's press did. */
   outcome: ButtonOutcome | null;
+  /** Which button was pressed (null on older rows). */
+  pressedIndex: number | null;
 }
 
 const norm = (r: any): ReplyButtonsRow => ({
@@ -31,9 +33,10 @@ const norm = (r: any): ReplyButtonsRow => ({
   responses: Array.isArray(r.responses) ? r.responses.map(parseButtonResponse) : null,
   requesterId: r.requesterId ?? null,
   outcome: parseButtonOutcome(r.outcome),
+  pressedIndex: r.pressedIndex == null ? null : Number(r.pressedIndex),
 });
 
-export const toButtonsState = (r: ReplyButtonsRow): ButtonsState => ({ id: r.id, labels: r.labels, pressedBy: r.pressedBy, pressedLabel: r.pressedLabel, responses: r.responses, outcome: r.outcome });
+export const toButtonsState = (r: ReplyButtonsRow): ButtonsState => ({ id: r.id, labels: r.labels, pressedBy: r.pressedBy, pressedLabel: r.pressedLabel, responses: r.responses, outcome: r.outcome, pressedIndex: r.pressedIndex });
 
 /** Create (or, for a retried turn, reuse) the row for one reply's buttons. Its id goes into the button values. */
 export async function createReplyButtons(o: { threadId: string; channelId: string; turnId: number; key: string; labels: string[]; responses?: (ButtonResponse | null)[]; requesterId?: string | null }): Promise<ReplyButtonsRow> {
@@ -73,7 +76,7 @@ export async function buttonsForMessage(channelId: string, messageTs: string | n
  */
 export async function claimPress(o: { id: number; index: number; userId: string; pressedMessageTs: string }): Promise<ReplyButtonsRow | undefined> {
   const [row] = await sql`
-    update reply_buttons set pressed_by = ${o.userId}, pressed_label = labels->>${o.index}::int,
+    update reply_buttons set pressed_by = ${o.userId}, pressed_label = labels->>${o.index}::int, pressed_index = ${o.index}::int,
       pressed_message_ts = ${o.pressedMessageTs}, pressed_at = now()
     where id = ${o.id} and pressed_at is null and message_ts is not null
       and ${o.index}::int >= 0 and ${o.index}::int < jsonb_array_length(labels)
@@ -119,7 +122,7 @@ export async function placeTargetFor(threadId: string, messageTs: readonly strin
     order by pressed_at desc`;
   for (const raw of rows) {
     const row = norm(raw);
-    const i = row.pressedLabel == null ? -1 : row.labels.indexOf(row.pressedLabel);
+    const i = row.pressedIndex ?? (row.pressedLabel == null ? -1 : row.labels.indexOf(row.pressedLabel));
     const r = i >= 0 ? row.responses?.[i] : null;
     const place = buttonPlace(r);
     if (r?.kind === 'prompt' && place !== 'new' && row.messageTs) return { ts: row.messageTs, buttonsId: row.id, place };

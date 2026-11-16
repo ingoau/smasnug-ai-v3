@@ -154,13 +154,14 @@ export function reactionsLabel(reactions: MessageReaction[] | undefined, env: Fo
 
 /**
  * `[buttons: Yes | No]`, or `[buttons: Yes | No; <@U1|Ingo> pressed "Yes"]` once pressed. Action buttons say what they
- * run (`Upload it (runs upload_emoji)`) and, once pressed, how it went (`→ done: …` / `→ failed: …`).
+ * run (`Upload it (runs upload_emoji)`) and, once pressed, how it went (`→ done: …` / `→ failed`).
  */
 export function buttonsLabel(b: RenderMsg['buttons'], env: FormatEnv): string {
   if (!b?.labels.length) return '';
   const who = b.pressedBy ? personRef(b.pressedBy, env.names.get(b.pressedBy)) : '';
   const labels = b.labels.map((l, i) => (b.actions?.[i] ? `${l} (runs ${b.actions[i]})` : l));
-  const outcome = b.outcome ? ` → ${b.outcome.ok ? 'done' : 'failed'}: ${b.outcome.text.slice(0, 300)}` : '';
+  // A failure's text can carry user-chosen names / raw errors: only the agent's outcome turn sees it (quoted as untrusted).
+  const outcome = b.outcome ? (b.outcome.ok ? ` → done: ${b.outcome.text.slice(0, 300)}` : ' → failed') : '';
   return `[buttons: ${labels.join(' | ')}${b.pressedBy && b.pressedLabel != null ? `; ${who} pressed "${b.pressedLabel}"${outcome}` : ''}]`;
 }
 
