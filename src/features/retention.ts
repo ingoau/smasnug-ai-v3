@@ -10,6 +10,7 @@ import path from 'node:path';
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
+import { retainCodeChannels } from './code-channels/store.js';
 import { expireFacts } from './memory/store.js';
 
 export const SHORT_RETENTION_MS = 2 * 24 * 60 * 60 * 1000;
@@ -105,6 +106,15 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
     'reminders',
     sql`delete from reminders where status not in ('pending', 'firing') and coalesce(fired_at, updated_at) < ${older(long)} returning id`,
   );
+  // Code channels (docs/code-channels.md, Retention and withdrawal): rows go with their conversation thread (cascade,
+  // above); seed summaries / briefs are blanked after the window and archived channels idle past it are dropped.
+  try {
+    const cc = await retainCodeChannels(limits.retentionMs);
+    counts.code_channel_seeds = cc.blanked;
+    counts.code_channels = cc.deleted;
+  } catch (err) {
+    log.error({ err, step: 'code_channels' }, 'retention step failed');
+  }
   await run('watches', sql`delete from watches where status <> 'active' and coalesce(ended_at, created_at) < ${older(long)} returning id`);
   await run('watch_notifications', sql`delete from watch_notifications where created_at < ${older(long)} returning id`);
 

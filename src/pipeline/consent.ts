@@ -16,6 +16,7 @@ import { log } from '../log.js';
 import { claimNotice, forgetConsent, hasAgreed, privacyPolicy, PROMPT_TEXT, promptBlocks, recordAgreement, UPDATED_TEXT, updatedBlocks } from '../features/privacy.js';
 import { ephemeral, respond } from '../features/util.js';
 import { publishHome } from '../features/home.js';
+import { forgetUserCodeChannelData } from '../features/code-channels/store.js';
 import { deleteAllFacts } from '../features/memory/store.js';
 import { applyDelete } from './store.js';
 import { removeFromBatch } from './debounce.js';
@@ -189,6 +190,8 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   // Failure reports about their requests or quoting them (the rest of their DMs' go with the messages below).
   await sql`delete from failure_reports where speaker_id = ${userId} or evidence @> ${sql.json([{ userId }] as any)}`;
   await sql`delete from thread_summaries where thread_id in (select distinct thread_id from messages where user_id = ${userId} and thread_id is not null)`;
+  // Code-channel seed summaries and briefs they asked for or that cover threads they wrote in (before their messages go).
+  const codeChannelSeeds = await forgetUserCodeChannelData(userId);
   // Theirs anywhere, and everything (the bot's replies too) in their DMs with the bot.
   const msgs = await sql<{ channelId: string; ts: string; threadId: string | null; userId: string | null }[]>`
     select channel_id, ts, thread_id, user_id from messages
@@ -211,7 +214,7 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   }
   // Again, for a failure review that loaded their messages before they were deleted and filed after the first pass.
   await sql`delete from failure_reports where speaker_id = ${userId} or evidence @> ${sql.json([{ userId }] as any)}`;
-  log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length }, 'privacy: consent withdrawn, data deleted');
+  log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length, codeChannelSeeds }, 'privacy: consent withdrawn, data deleted');
   await publishHome(userId);
   const text =
     (wasAgreed ? "Done: you've withdrawn your consent to my privacy policy. I won't answer you until you agree again. " : 'Done. ') +
