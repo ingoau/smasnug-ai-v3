@@ -157,7 +157,9 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     const rm = addFakeHandler((method, args) => {
       if (method !== 'conversations.info') return undefined;
       if (args.channel === 'C0ADOPT')
-        return { ok: true, channel: { id: 'C0ADOPT', name: 'agent-thing', is_private: false, is_member: true, properties: { record_channel: { record_type: 'agent_channel' }, agent_session: { origin_link: { channel_id: 'C0PARENT', ts: '1700000000.000001' } } } } };
+        return { ok: true, channel: { id: 'C0ADOPT', name: 'agent-thing', is_private: false, is_member: true, properties: { record_channel: { record_type: 'agent_channel' }, agent_session: { encoded_agent_bot_user_ids: ['UBOT'], origin_link: { channel_id: 'C0PARENT', ts: '1700000000.000001' } } } } };
+      if (args.channel === 'C0OTHER')
+        return { ok: true, channel: { id: 'C0OTHER', name: 'their-agent', is_private: false, is_member: true, properties: { record_channel: { record_type: 'agent_channel' }, agent_session: { encoded_agent_bot_user_ids: ['UOTHERBOT'] } } } };
       if (args.channel === 'C0PLAIN') return { ok: true, channel: { id: 'C0PLAIN', name: 'plain', is_private: false, is_member: true } };
       return undefined;
     });
@@ -166,6 +168,15 @@ describe.skipIf(!infra)('code channels (intake)', () => {
       await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> hi', ts }, 'C0ADOPT'));
       expect(await store.getCodeChannel('C0ADOPT')).toMatchObject({ kind: 'adopted', parentThreadId: PARENT, originChannelId: 'C0PARENT', originTs: '1700000000.000001', requesterId: 'U1' });
       expect(await takeBatch('C0ADOPT:0', 'U1')).toEqual([{ ts, reason: 'mention' }]);
+      // Its slash commands are registered on adoption.
+      const cmds = (await fakeCalls()).filter((c) => c.method === 'agents.conversations.setCommands');
+      expect(cmds.map((c) => c.args)).toEqual([{ channel_id: 'C0ADOPT', commands: [expect.objectContaining({ name: 'archive' }), expect.objectContaining({ name: 'rename', argument_hint: '<new title>' })] }]);
+
+      // Another app's agent channel is an ordinary channel to us.
+      const other = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> hi', ts: other }, 'C0OTHER'));
+      expect(await store.getCodeChannel('C0OTHER')).toBeNull();
+      expect(await takeBatch(`C0OTHER:${other}`, 'U1')).toEqual([{ ts: other, reason: 'mention' }]);
 
       const plain = nextTs();
       await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> hi', ts: plain }, 'C0PLAIN'));

@@ -23,6 +23,7 @@ import { log } from '../../log.js';
 import { acceptOwnParentPost } from '../../pipeline/code-channel-intake.js';
 import { neutralizeBroadcasts } from '../../pipeline/guidelines.js';
 import { createCodeChannel } from './api.js';
+import { registerCodeChannelCommands } from './commands.js';
 import { codeChannelDisplayName } from './ids.js';
 import { briefText, createOptions, forkHandoffText, forkSeedText } from './logic.js';
 import { parentMessageMetadata, parentPostUsername } from './parent-message.js';
@@ -168,6 +169,9 @@ export async function openCodeChannel(i: OpenInput): Promise<OpenResult> {
     await appendEvent(i.sourceThreadId, 'code_channel_opened', i.createdBy, ev);
     log.info({ channelId, sourceThreadId: i.sourceThreadId, mode: i.mode, originIsDm }, 'code channel opened');
   }
+
+  const commandsErr = await registerCodeChannelCommands(channelId);
+  if (commandsErr) problems.push(commandsErr);
 
   // Slack invites the origin's author when there is an origin link; everyone else named here is invited by us.
   const bot = await getBotIdentity().catch(() => undefined);

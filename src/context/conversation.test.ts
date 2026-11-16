@@ -33,6 +33,10 @@ describe('conversationInfoFromSlack', () => {
     expect(conversationInfoFromSlack({ id: 'C1', name: 'x', properties: { record_channel: { record_type: 'agent_channel' } } })?.agentChannel).toEqual({});
     expect(conversationInfoFromSlack({ id: 'C1', name: 'x', properties: { record_channel: { record_type: 'other' } } })?.agentChannel).toBeUndefined();
     expect(conversationInfoFromSlack({ id: 'C1', name: 'x' })?.agentChannel).toBeUndefined();
+    const ours = { record_channel: { record_type: 'agent_channel' }, agent_session: { encoded_agent_bot_user_ids: ['UBOT', ' '] } };
+    expect(conversationInfoFromSlack({ id: 'C1', name: 'x', properties: ours })?.agentChannel).toEqual({ agentBotUserIds: ['UBOT'] });
+    const csv = { record_channel: { record_type: 'agent_channel' }, agent_session: { encoded_agent_bot_user_ids: 'UA, UBOT' } };
+    expect(conversationInfoFromSlack({ id: 'C1', name: 'x', properties: csv })?.agentChannel).toEqual({ agentBotUserIds: ['UA', 'UBOT'] });
   });
 });
 

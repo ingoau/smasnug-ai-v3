@@ -8,9 +8,11 @@
  * commands here.
  */
 import { appendEvent, codeChannelThreadId, threadIdOf } from '../../core/events.js';
-import { getConversationInfo } from '../../context/conversation.js';
+import { getConversationInfo, type ConversationInfo } from '../../context/conversation.js';
 import { sql } from '../../db/index.js';
+import { getBotIdentity } from '../../core/slack.js';
 import { log } from '../../log.js';
+import { registerCodeChannelCommands } from './commands.js';
 import { deriveSessionId } from './ids.js';
 import { createCodeChannelRow, type CodeChannel } from './store.js';
 
@@ -23,6 +25,11 @@ async function originThreadId(o: { channelId: string; ts: string }): Promise<str
   return t ? id : null;
 }
 
+/** Pure: the agent channel's agent is this bot (its user id among `encoded_agent_bot_user_ids`). */
+export function isOurAgentChannel(agentChannel: NonNullable<ConversationInfo['agentChannel']>, botUserId: string): boolean {
+  return Boolean(botUserId && agentChannel.agentBotUserIds?.includes(botUserId));
+}
+
 /**
  * Record `channelId` as an adopted code channel if Slack says it is an agent channel. Returns the row, or null for
  * an ordinary channel (or when the lookup fails: tried again on a later mention).
@@ -30,6 +37,11 @@ async function originThreadId(o: { channelId: string; ts: string }): Promise<str
 export async function adoptIfAgentChannel(channelId: string, requesterId: string | undefined): Promise<CodeChannel | null> {
   const info = await getConversationInfo(channelId);
   if (!info?.agentChannel || info.kind === 'dm' || info.kind === 'group_dm') return null;
+  const bot = await getBotIdentity();
+  if (!isOurAgentChannel(info.agentChannel, bot.userId)) {
+    log.debug({ channelId }, "agent channel of another app; not adopted");
+    return null;
+  }
   const origin = info.agentChannel.originLink ?? null;
   const parentThreadId = origin ? await originThreadId(origin).catch(() => null) : null;
   const { row, created } = await createCodeChannelRow({
@@ -45,6 +57,7 @@ export async function adoptIfAgentChannel(channelId: string, requesterId: string
   if (created) {
     await appendEvent(codeChannelThreadId(channelId), 'code_channel_adopted', requesterId ?? null, { origin, parentThreadId });
     log.info({ channelId, origin, parentThreadId }, 'code channel adopted');
+    await registerCodeChannelCommands(channelId);
   }
   return row;
 }

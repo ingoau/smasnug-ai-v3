@@ -29,15 +29,16 @@ export interface ConversationInfo {
   /**
    * Slack marks it as an agent ("code") channel: `properties.record_channel.record_type === 'agent_channel'`
    * (docs/code-channels.md). `originLink`: `properties.agent_session.origin_link`, the message it was opened from.
+   * `agentBotUserIds`: `properties.agent_session.encoded_agent_bot_user_ids`, the bot user(s) that are its agent.
    */
-  agentChannel?: { originLink?: { channelId: string; ts: string } };
+  agentChannel?: { originLink?: { channelId: string; ts: string }; agentBotUserIds?: string[] };
 }
 
 /** Topic / purpose length in the prompt. */
 export const CONVERSATION_FIELD_MAX = 160;
 const TTL_S = 10 * 60;
 const NEG_TTL_S = 2 * 60;
-const key = (id: string) => `slack:conv:v2:${id}`;
+const key = (id: string) => `slack:conv:v3:${id}`;
 
 /** Pure: conversations.info `channel` → ConversationInfo, or null when it isn't one. */
 export function conversationInfoFromSlack(ch: any): ConversationInfo | null {
@@ -64,7 +65,9 @@ export function agentChannelFromSlack(props: any): Pick<ConversationInfo, 'agent
   if (props?.record_channel?.record_type !== 'agent_channel') return null;
   const o = props?.agent_session?.origin_link;
   const originLink = typeof o?.channel_id === 'string' && typeof o?.ts === 'string' && o.channel_id && o.ts ? { channelId: o.channel_id, ts: o.ts } : undefined;
-  return { agentChannel: originLink ? { originLink } : {} };
+  const ids = props?.agent_session?.encoded_agent_bot_user_ids;
+  const agentBotUserIds = (Array.isArray(ids) ? ids : typeof ids === 'string' ? ids.split(',') : []).filter((x: unknown): x is string => typeof x === 'string' && x.trim() !== '').map((x: string) => x.trim());
+  return { agentChannel: { ...(originLink ? { originLink } : {}), ...(agentBotUserIds.length ? { agentBotUserIds } : {}) } };
 }
 
 /**
