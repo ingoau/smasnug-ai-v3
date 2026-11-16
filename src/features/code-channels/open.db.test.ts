@@ -249,10 +249,10 @@ describe('code channels: opening and the agent tools', () => {
     const row = (await getCodeChannelBySession(deriveSessionId({ via: 'tool', turnId: String(turnId), n: 0 })))!;
     created.push(row.channelId);
 
-    const parent = await loadCodeChannelTurnContext(src.threadId);
+    const parent = await loadCodeChannelTurnContext(src.threadId, 'U0ASK');
     expect(parent.children.map((c) => c.channelId)).toContain(row.channelId);
     expect(hiddenToolsFor(parent).sort()).toEqual(['archive_code_channel', 'remove_view', 'report_to_parent', 'set_view']);
-    const inside = await loadCodeChannelTurnContext(`${row.channelId}:0`);
+    const inside = await loadCodeChannelTurnContext(`${row.channelId}:0`, 'U0ASK');
     expect(inside.here?.channelId).toBe(row.channelId);
     expect(inside.topLevel).toBe(true);
     expect(hiddenToolsFor(inside).sort()).toEqual(['ask_code_channel', 'message_code_channel', 'open_code_channel']);
@@ -281,11 +281,39 @@ describe('code channels: opening and the agent tools', () => {
     expect((await getCodeChannel(row.channelId))?.archivedAt).toBeNull();
   });
 
+  it('a private child channel: only its members see it in the parent thread or can ask / message it', async () => {
+    const src = await sourceThread();
+    const { tools, turnId } = frontCtx(src.threadId);
+    await exec(tools.open_code_channel, { name: 'private child', brief: 'Do it' });
+    const row = (await getCodeChannelBySession(deriveSessionId({ via: 'tool', turnId: String(turnId), n: 0 })))!;
+    created.push(row.channelId);
+    await sql`update code_channels set is_private = true where channel_id = ${row.channelId}`;
+    const undo = addFakeHandler((method, args) =>
+      method === 'conversations.members' && args.channel === row.channelId ? { ok: true, members: ['U0MEM', 'UBOT'], response_metadata: { next_cursor: '' } } : undefined,
+    );
+    try {
+      // Not a member: not listed, the parent tools hidden, and the tools refuse as for an unknown channel.
+      const outsider = await loadCodeChannelTurnContext(src.threadId, 'U0ASK');
+      expect(outsider.children.map((c) => c.channelId)).not.toContain(row.channelId);
+      const o = frontCtx(src.threadId, 'U0ASK');
+      expect(await exec(o.tools.ask_code_channel, { channel: `<#${row.channelId}>`, question: 'what is the status?' })).toMatch(/isn't a code channel this thread opened/);
+      expect(await exec(o.tools.message_code_channel, { channel: `<#${row.channelId}>`, text: 'stop' })).toMatch(/isn't a code channel this thread opened/);
+      expect(await exec(o.tools.message_code_channel, { channel: 'private', text: 'stop' })).not.toContain(row.channelId);
+      // A member: listed, and the tools work.
+      const member = await loadCodeChannelTurnContext(src.threadId, 'U0MEM');
+      expect(member.children.map((c) => c.channelId)).toContain(row.channelId);
+      const m = frontCtx(src.threadId, 'U0MEM');
+      expect(await exec(m.tools.message_code_channel, { channel: `<#${row.channelId}>`, text: 'go on' })).toContain('Posted in');
+    } finally {
+      undo();
+    }
+  });
+
   it('switched off: every code-channel tool is hidden', async () => {
     const src = await sourceThread();
     await setCodeChannelsDisabled(true);
     try {
-      const off = await loadCodeChannelTurnContext(src.threadId);
+      const off = await loadCodeChannelTurnContext(src.threadId, 'U0ASK');
       expect(off.enabled).toBe(false);
       expect(hiddenToolsFor(off)).toContain('open_code_channel');
     } finally {

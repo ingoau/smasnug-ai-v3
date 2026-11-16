@@ -50,6 +50,7 @@ import { closeCodeChannel, handleArchiveSlash, handleRenameSlash } from './lifec
 import { inviteUsers, isDmConversation, openCodeChannel, parentLabel, postInThread, postParentMessage } from './open.js';
 import { codeChannelsEnabled } from './settings.js';
 import { getCodeChannel, isCodeChannel, listChildCodeChannels, type CodeChannel } from './store.js';
+import { visibleChildren } from './turn-context.js';
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 /** Slack allows 10 tabs per channel. */
@@ -96,9 +97,10 @@ async function askInviteConfirmation(threadId: string, requesterId: string, chan
 }
 
 /** A live child code channel of this thread, from the model's reference; or why not. */
-async function resolveChild(threadId: string, ref: string): Promise<CodeChannel | string> {
+async function resolveChild(threadId: string, ref: string, speakerId: string): Promise<CodeChannel | string> {
   const id = parseChannelRef(ref);
-  const children = await listChildCodeChannels(threadId);
+  // Private children the speaker isn't in are as good as absent (not named, not listed): no leak.
+  const children = await visibleChildren(await listChildCodeChannels(threadId), speakerId);
   const row = id ? children.find((c) => c.channelId === id) : children.find((c) => c.name.toLowerCase().includes(ref.trim().toLowerCase()));
   if (!row) return `That isn't a code channel this thread opened. Channels: ${children.map((c) => `<#${c.channelId}> ("${c.channelId}")`).join(', ') || 'none'}.`;
   if (row.archivedAt) return `<#${row.channelId}> is archived.`;
@@ -380,7 +382,7 @@ export function registerCodeChannelTools(): void {
         execute: async ({ channel, question }, options) => {
           if (calls >= ASK_MAX_CALLS) return `ask_code_channel already used ${ASK_MAX_CALLS} times this turn.`;
           calls++;
-          const row = await resolveChild(ctx.threadId, channel);
+          const row = await resolveChild(ctx.threadId, channel, ctx.speakerId);
           if (typeof row === 'string') return row;
           try {
             return await askChannel(ctx, row, question, options?.abortSignal);
@@ -406,7 +408,7 @@ export function registerCodeChannelTools(): void {
           text: z.string().min(1).max(3000).describe("The instruction, self-contained (the channel doesn't see this thread)."),
         }),
         execute: async ({ channel, text }) => {
-          const row = await resolveChild(ctx.threadId, channel);
+          const row = await resolveChild(ctx.threadId, channel, ctx.speakerId);
           if (typeof row === 'string') return row;
           const index = n++;
           const info = await getConversationInfo(ctx.channelId).catch(() => null);

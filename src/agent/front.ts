@@ -713,7 +713,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     // EXTRAS.queueUserImage deliberately unset: Luna accepts images in tool results.
   };
   // Code channels: which of their tools apply here (none when switched off; no nesting) and what the prompt says.
-  const codeChannels = await loadCodeChannelTurnContext(turn.threadId);
+  const codeChannels = await loadCodeChannelTurnContext(turn.threadId, turn.authorId);
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, abortSignal: stopAbort.signal, extras });
   for (const name of hiddenToolsFor(codeChannels)) delete tools[name];
   recordReactVisibility(tools, state);

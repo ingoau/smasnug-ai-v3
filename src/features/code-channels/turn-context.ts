@@ -5,6 +5,7 @@
  * hiddenCodeChannelTools) and puts the sections rendered here into the turn message (never the system prompt, which
  * must stay byte-identical across turns).
  */
+import { isChannelMember } from '../../context/conversation.js';
 import { isCodeChannelRoot, parseThreadId } from '../../core/events.js';
 import { log } from '../../log.js';
 import { hiddenCodeChannelTools, KIND_LABEL, offersMoveButton } from './logic.js';
@@ -19,14 +20,27 @@ export interface CodeChannelTurnContext {
   here: CodeChannel | null;
   /** The turn is the channel's top-level conversation (`:0`), not a thread in it. */
   topLevel: boolean;
-  /** Live (unarchived) code channels the current thread opened, newest first. */
+  /** Live (unarchived) code channels the current thread opened that the speaker may see (visibleChildren), newest first. */
   children: CodeChannel[];
+}
+
+/**
+ * The child channels `speakerId` may see from the parent thread: public ones, and private ones only when they are a
+ * member of that channel (the private-link rule's membership check, conversations.members, cached briefly; a failed
+ * lookup counts as not a member). Anyone in a public parent thread must not read or drive a private child.
+ */
+export async function visibleChildren(rows: CodeChannel[], speakerId: string | null | undefined): Promise<CodeChannel[]> {
+  const ok = await Promise.all(rows.map((r) => (!r.isPrivate ? true : speakerId ? isChannelMember(r.channelId, speakerId).catch(() => false) : false)));
+  return rows.filter((_, i) => ok[i]);
 }
 
 export const NO_CODE_CHANNELS: CodeChannelTurnContext = { enabled: false, here: null, topLevel: false, children: [] };
 
-/** Load it for a turn. Never throws: a failure counts as the feature being off for this turn. */
-export async function loadCodeChannelTurnContext(threadId: string): Promise<CodeChannelTurnContext> {
+/**
+ * Load it for a turn (`speakerId`: whose turn it is; private child channels are listed only for their members).
+ * Never throws: a failure counts as the feature being off for this turn.
+ */
+export async function loadCodeChannelTurnContext(threadId: string, speakerId: string | null | undefined): Promise<CodeChannelTurnContext> {
   try {
     if (!(await codeChannelsEnabled())) return NO_CODE_CHANNELS;
     const { channelId, threadTs } = parseThreadId(threadId);
@@ -37,7 +51,7 @@ export async function loadCodeChannelTurnContext(threadId: string): Promise<Code
     ]);
     // An adopted channel with an origin link is a fork of that message's thread: its seed is written on first use.
     if (here && here.kind === 'adopted' && !here.seedSummary && here.originTs) here.seedSummary = await ensureAdoptedSeed(here);
-    return { enabled: true, here, topLevel: Boolean(here) && isCodeChannelRoot(threadTs), children: here ? [] : children };
+    return { enabled: true, here, topLevel: Boolean(here) && isCodeChannelRoot(threadTs), children: here ? [] : await visibleChildren(children, speakerId) };
   } catch (err) {
     log.warn({ err, threadId }, 'loading code channel context failed');
     return NO_CODE_CHANNELS;

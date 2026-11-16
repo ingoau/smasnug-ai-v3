@@ -203,6 +203,10 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
       `parent_thread_id`. It records a `parent_message` event and batches the post for the requester with reason
       `parent`, which skips the gate and counts as a mention. Every other bot post is stored and ignored.
   - `read_channel` also works on the channel.
+  - A private child is only for its members: `ask_code_channel` / `message_code_channel` and the parent thread's
+    `<code_channels>` list (and the tool gating) only include a private child when the speaker is a member of it
+    (`isChannelMember`, as in the private-link rules; a failed lookup counts as not a member). For anyone else it
+    is as if it didn't exist (`turn-context.ts visibleChildren`).
 
 ### Lifecycle
 - **Auto-archive:**
