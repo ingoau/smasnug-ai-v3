@@ -248,6 +248,22 @@ describe('code channels: lifecycle', () => {
     expect(r).toMatchObject({ closeFailures: 0, closeRetryAt: null, closingSummary: null });
   });
 
+  it('switched off: the invite confirmation button does nothing', async () => {
+    const row = await codeChannel();
+    await setCodeChannelsDisabled(true);
+    try {
+      const { handleInviteConfirm } = await import('./tools.js');
+      const { encodeInviteValue } = await import('./logic.js');
+      const mark = recorded.length;
+      await handleInviteConfirm({ userId: 'U0REQ', actionId: 'cc_invite', value: encodeInviteValue({ c: row.channelId, u: ['U0NEW'], r: 'U0REQ' }), responseUrl: `https://hooks.fake/${rand()}`, body: {} });
+      const out = recorded.slice(mark);
+      expect(out.some((c) => c.method === 'conversations.invite')).toBe(false);
+      expect(out.find((c) => c.method === 'response_url')?.args.text).toMatch(/switched off/);
+    } finally {
+      await setCodeChannelsDisabled(false);
+    }
+  });
+
   it('channel_unarchive reopens an archived code channel (live, clock restarted); channel_archive in Slack marks it archived', async () => {
     const row = await codeChannel();
     await sql`update code_channels set last_activity_at = now() - interval '8 days' where channel_id = ${row.channelId}`;

@@ -11,6 +11,7 @@ import { limits, env } from '../config.js';
 import { sql } from '../db/index.js';
 import { getBotIdentity } from '../core/slack.js';
 import { isCodeChannelRoot, parseThreadId } from '../core/events.js';
+import { codeChannelsEnabled } from '../features/code-channels/settings.js';
 import { isCodeChannel } from '../features/code-channels/store.js';
 import type { StoredMessage } from '../core/types.js';
 import { log } from '../log.js';
@@ -234,7 +235,9 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
   if (win.compactTo) requestThreadSummary(threadId, win.compactTo).catch((err) => log.warn({ err, threadId }, 'thread summary enqueue failed'));
   const codeChannelRoot = isCodeChannelRoot(thread.threadTs);
   // A thread under a code channel's message: the channel conversation is always its background.
-  const codeChannelThread = !thread.isDm && !codeChannelRoot && (await isCodeChannel(thread.channelId).catch(() => false));
+  // Only while the feature is on (no lookup per turn otherwise; a switched-off feature changes nothing here).
+  const codeChannelThread =
+    !thread.isDm && !codeChannelRoot && (await codeChannelsEnabled()) && (await isCodeChannel(thread.channelId).catch(() => false));
   const background =
     !thread.isDm &&
     !codeChannelRoot &&

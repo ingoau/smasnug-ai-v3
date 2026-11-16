@@ -279,6 +279,7 @@ async function askChannel(ctx: ToolContext, row: CodeChannel, question: string, 
 export async function handleInviteConfirm(ctx: ActionContext): Promise<void> {
   const v = decodeInviteValue(ctx.value);
   if (!v) return ephemeral(ctx, "That button doesn't work any more.", { replace: true });
+  if (!(await codeChannelsEnabled())) return ephemeral(ctx, 'Code channels are switched off right now.');
   if (ctx.userId !== v.r) return ephemeral(ctx, `Only <@${v.r}> can confirm that.`);
   const row = await getCodeChannel(v.c);
   if (!row || (row.requesterId !== v.r && row.createdBy !== v.r)) return ephemeral(ctx, "That isn't your code channel.", { replace: true });

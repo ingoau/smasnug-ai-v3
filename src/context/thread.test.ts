@@ -177,6 +177,40 @@ describe('renderThreadContext in a code channel', () => {
   });
 });
 
+describe('renderThreadContext in code channels: gated by the feature switch', () => {
+  it("a long thread under a code channel's message gets the conversation as background only while the feature is on", async () => {
+    const { env } = await import('../config.js');
+    const ch = `C${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
+    const base = 1790000000;
+    const root = `${base + 1}.000100`;
+    const msg = (i: number, text: string, extra: object = {}) => ({ type: 'message', user: 'U0INGO', text, ts: `${base + i}.000100`, ...extra });
+    const replies = [msg(1, 'root', { thread_ts: root, reply_count: 6 }), ...[2, 3, 4, 5, 6].map((i) => msg(i, `reply ${i} about the parser`, { thread_ts: root })), msg(7, 'Please rewrite the parser module so it handles nested quotes and escaped delimiters correctly', { thread_ts: root })];
+    const rm = addFakeHandler((method, args) => {
+      if (args.channel !== ch) return undefined;
+      if (method === 'conversations.history') return { ok: true, messages: [msg(9, 'top-level background line')], has_more: false };
+      if (method === 'conversations.replies') return { ok: true, messages: replies };
+      return undefined;
+    });
+    const was = env.CODE_CHANNELS;
+    try {
+      const { createCodeChannelRow } = await import('../features/code-channels/store.js');
+      await createCodeChannelRow({ channelId: ch, sessionId: `test-${ch}`, kind: 'task', name: 'x' });
+      (env as any).CODE_CHANNELS = undefined;
+      const off = await renderThreadContext(`${ch}:${root}`, { newMessageTs: [`${base + 7}.000100`] });
+      expect(off.channelContext).toBe('');
+      (env as any).CODE_CHANNELS = '1';
+      const on = await renderThreadContext(`${ch}:${root}`, { newMessageTs: [`${base + 7}.000100`] });
+      expect(on.channelContext).toContain('top-level background line');
+    } finally {
+      (env as any).CODE_CHANNELS = was;
+      rm();
+      await sql`delete from code_channels where channel_id = ${ch}`;
+      await sql`delete from messages where channel_id = ${ch}`;
+      await sql`delete from threads where channel_id = ${ch}`;
+    }
+  });
+});
+
 describe('renderThreadFacts', () => {
   it('a fresh top-level message, or who started the thread and how much of it is shown', () => {
     expect(renderThreadFacts({ fresh: true, startedTs: '1790000000.000100', replies: 0, shownReplies: 0 })).toMatch(/new top-level message: it starts this thread/);
