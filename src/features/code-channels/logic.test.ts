@@ -22,7 +22,7 @@ import {
 import { codeChannelDisplayName } from './ids.js';
 import { isParentPostUsername, parentPostUsername, USERNAME_MAX } from './parent-message.js';
 import { tailLines } from './seed.js';
-import { MOVE_BUTTON_NOTE, renderChildrenSection } from './turn-context.js';
+import { MOVE_BUTTON_NOTE, privateChildrenReadableIn, renderChildrenSection } from './turn-context.js';
 
 const gate = (o: Partial<Parameters<typeof hiddenCodeChannelTools>[0]> = {}) =>
   hiddenCodeChannelTools({ enabled: true, inCodeChannel: false, hasParent: false, liveChildren: 0, ...o }).sort();
@@ -139,5 +139,15 @@ describe('names and texts', () => {
     const text = renderChildrenSection({ enabled: true, here: null, topLevel: false, children: [row] }, now);
     expect(text).toContain('<#C0CODE|smasnug ai: x> (channel "C0CODE"), forked from a thread, last activity 2 days ago');
     expect(renderChildrenSection({ enabled: true, here: null, topLevel: false, children: [] }, now)).toBe('');
+    // A private child is named only where it may be read (the speaker's DM with the bot).
+    const priv = { ...row, channelId: 'C0PRIV', name: 'secret', isPrivate: true };
+    const shared = renderChildrenSection({ enabled: true, here: null, topLevel: false, children: [row, priv] }, now);
+    expect(shared).toContain('C0CODE');
+    expect(shared).not.toMatch(/C0PRIV|secret/);
+    expect(renderChildrenSection({ enabled: true, here: null, topLevel: false, children: [priv] }, now)).toBe('');
+    expect(renderChildrenSection({ enabled: true, here: null, topLevel: false, children: [row, priv], privateReadable: true }, now)).toContain('<#C0PRIV|secret>');
+    expect(privateChildrenReadableIn('D123')).toBe(true);
+    expect(privateChildrenReadableIn('C123')).toBe(false);
+    expect(privateChildrenReadableIn('G123')).toBe(false);
   });
 });

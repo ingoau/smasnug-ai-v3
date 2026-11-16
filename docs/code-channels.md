@@ -212,6 +212,9 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
     `<code_channels>` list (and the tool gating) only include a private child when the speaker is a member of it
     (`isChannelMember`, as in the private-link rules; a failed lookup counts as not a member). For anyone else it
     is as if it didn't exist (`turn-context.ts visibleChildren`).
+  - Reading a private child also needs the private-link rule's place: the parent thread must be the speaker's DM with
+    the bot (`privateChildrenReadableIn`). Elsewhere `<code_channels>` leaves it out (no name) and `ask_code_channel`
+    refuses with the ask-in-a-DM answer. `message_code_channel` only writes into the child, so membership is enough.
 
 ### Lifecycle
 - **Auto-archive:**

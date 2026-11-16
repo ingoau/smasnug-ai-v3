@@ -26,6 +26,7 @@ import { registerButtonAction } from '../../agent/button-actions.js';
 import { loadReplyButtons } from '../../agent/reply-buttons-store.js';
 import { turnState } from '../../agent/turn-state.js';
 import { askThreadSystemPrompt, askThreadUserPrompt, fitThread } from '../../tools/ask-thread-prompt.js';
+import { askInDmMessage } from '../../tools/private-links.js';
 import { visibleWithAttachments } from '../../tools/public-thread.js';
 import { errMsg, untrusted } from '../../tools/util.js';
 import { recordModelUsage } from '../guard.js';
@@ -51,7 +52,7 @@ import { inviteUsers, isDmConversation, openCodeChannel, parentLabel, postInThre
 import { parentPostTurnStarts } from '../../pipeline/code-channel-intake.js';
 import { codeChannelsEnabled } from './settings.js';
 import { getCodeChannel, isCodeChannel, listChildCodeChannels, type CodeChannel } from './store.js';
-import { visibleChildren } from './turn-context.js';
+import { privateChildrenReadableIn, visibleChildren } from './turn-context.js';
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 /** Slack allows 10 tabs per channel. */
@@ -97,13 +98,13 @@ async function askInviteConfirmation(threadId: string, requesterId: string, chan
   );
 }
 
-/** A live child code channel of this thread, from the model's reference; or why not. */
-async function resolveChild(threadId: string, ref: string, speakerId: string): Promise<CodeChannel | string> {
+/** A live child code channel of this thread, from the model's reference; or why not (`listPrivate`: name private ones in that answer). */
+async function resolveChild(threadId: string, ref: string, speakerId: string, listPrivate: boolean): Promise<CodeChannel | string> {
   const id = parseChannelRef(ref);
   // Private children the speaker isn't in are as good as absent (not named, not listed): no leak.
   const children = await visibleChildren(await listChildCodeChannels(threadId), speakerId);
   const row = id ? children.find((c) => c.channelId === id) : children.find((c) => c.name.toLowerCase().includes(ref.trim().toLowerCase()));
-  if (!row) return `That isn't a code channel this thread opened. Channels: ${children.map((c) => `<#${c.channelId}> ("${c.channelId}")`).join(', ') || 'none'}.`;
+  if (!row) return `That isn't a code channel this thread opened. Channels: ${children.filter((c) => listPrivate || !c.isPrivate).map((c) => `<#${c.channelId}> ("${c.channelId}")`).join(', ') || 'none'}.`;
   if (row.archivedAt) return `<#${row.channelId}> is archived.`;
   return row;
 }
@@ -427,8 +428,10 @@ export function registerCodeChannelTools(): void {
         execute: async ({ channel, question }, options) => {
           if (calls >= ASK_MAX_CALLS) return `ask_code_channel already used ${ASK_MAX_CALLS} times this turn.`;
           calls++;
-          const row = await resolveChild(ctx.threadId, channel, ctx.speakerId);
+          const row = await resolveChild(ctx.threadId, channel, ctx.speakerId, privateChildrenReadableIn(ctx.channelId));
           if (typeof row === 'string') return row;
+          // Reading a private child is the private-link rule: only in the speaker's DM with the bot.
+          if (row.isPrivate && !privateChildrenReadableIn(ctx.channelId)) return askInDmMessage('channel');
           try {
             return await askChannel(ctx, row, question, options?.abortSignal);
           } catch (err) {
@@ -453,7 +456,7 @@ export function registerCodeChannelTools(): void {
           text: z.string().min(1).max(3000).describe("The instruction, self-contained (the channel doesn't see this thread)."),
         }),
         execute: async ({ channel, text }) => {
-          const row = await resolveChild(ctx.threadId, channel, ctx.speakerId);
+          const row = await resolveChild(ctx.threadId, channel, ctx.speakerId, privateChildrenReadableIn(ctx.channelId));
           if (typeof row === 'string') return row;
           const index = n++;
           const info = await getConversationInfo(ctx.channelId).catch(() => null);

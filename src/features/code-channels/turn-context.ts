@@ -22,7 +22,19 @@ export interface CodeChannelTurnContext {
   topLevel: boolean;
   /** Live (unarchived) code channels the current thread opened that the speaker may see (visibleChildren), newest first. */
   children: CodeChannel[];
+  /**
+   * Private children may be read here (`<code_channels>`, ask_code_channel): the private-link rule's "only in the
+   * speaker's DM with the bot" (privateChildrenReadableIn). Otherwise the section leaves them out.
+   */
+  privateReadable?: boolean;
 }
+
+/**
+ * Whether a private child's content (its name, an ask_code_channel summary) may go into a turn in `parentChannelId`:
+ * only in a 1:1 DM with the bot (the private-link rule, src/tools/private-links.ts; a parent thread is never in the
+ * child channel itself). message_code_channel writes into the child without reading it, so it keeps membership only.
+ */
+export const privateChildrenReadableIn = (parentChannelId: string): boolean => parentChannelId.startsWith('D');
 
 /**
  * The child channels `speakerId` may see from the parent thread: public ones, and private ones only when they are a
@@ -51,7 +63,13 @@ export async function loadCodeChannelTurnContext(threadId: string, speakerId: st
     ]);
     // An adopted channel with an origin link is a fork of that message's thread: its seed is written on first use.
     if (here && here.kind === 'adopted' && !here.seedSummary && here.originTs) here.seedSummary = await ensureAdoptedSeed(here);
-    return { enabled: true, here, topLevel: Boolean(here) && isCodeChannelRoot(threadTs), children: here ? [] : await visibleChildren(children, speakerId) };
+    return {
+      enabled: true,
+      here,
+      topLevel: Boolean(here) && isCodeChannelRoot(threadTs),
+      children: here ? [] : await visibleChildren(children, speakerId),
+      privateReadable: privateChildrenReadableIn(channelId),
+    };
   } catch (err) {
     log.warn({ err, threadId }, 'loading code channel context failed');
     return NO_CODE_CHANNELS;
@@ -102,9 +120,11 @@ export async function renderHereSection(c: CodeChannelTurnContext): Promise<stri
 
 /** The `<code_channels>` section of a parent thread: the live channels it opened. Pure. */
 export function renderChildrenSection(c: CodeChannelTurnContext, now = new Date()): string {
-  if (!c.children.length) return '';
+  // A private child is named here only where it may be read (a DM with the speaker), never in a shared thread.
+  const children = c.children.filter((r) => !r.isPrivate || c.privateReadable);
+  if (!children.length) return '';
   const day = 24 * 3600_000;
-  const rows = c.children.map((r) => {
+  const rows = children.map((r) => {
     const idle = Math.floor((now.getTime() - new Date(r.lastActivityAt).getTime()) / day);
     return `- <#${r.channelId}|${strip(r.name)}> (channel "${r.channelId}"), ${KIND_LABEL[r.kind]}, last activity ${idle <= 0 ? 'today' : `${idle} day${idle === 1 ? '' : 's'} ago`}`;
   });
