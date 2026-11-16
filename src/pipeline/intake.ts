@@ -2,7 +2,7 @@
  * Message intake: storage, engagement bookkeeping, deterministic rules, entry guard, then into the debounce batch.
  * The relevance gate runs later, once per debounced batch (see fire.ts).
  */
-import { appendEvent, parseThreadId, threadIdOf } from '../core/events.js';
+import { appendEvent, isCodeChannelRoot, parseThreadId, threadIdOf } from '../core/events.js';
 import { getBotIdentity, isChannelReadOnly, markThreadGone, slackCall } from '../core/slack.js';
 import { cancelThreadRuns } from '../agent/subagents.js';
 import { rehomeCodingAgents } from '../agent/cursor/agents.js';
@@ -17,7 +17,10 @@ import { dropHeldMessage, holdForConsent, noticePolicyUpdate, updateHeldMessage 
 import { hasAgreed } from '../features/privacy.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
-import { answersOtherOffer, awaitedReplyFresh, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs } from './rules.js';
+import { answersOtherOffer, awaitedReplyFresh, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs, conversationRootTs, isTopLevel } from './rules.js';
+import { noteCodeChannelActivity, routeCodeChannel } from './code-channel-intake.js';
+import { codeChannelsEnabled } from '../features/code-channels/settings.js';
+import { isCodeChannel } from '../features/code-channels/store.js';
 import { isBotPeerDm } from './dm-peer.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { handleHuddleFmMessage, isFromHuddleFm } from '../features/huddlefm/inbound.js';
@@ -57,6 +60,15 @@ interface MessageEvent extends SlackMessage {
   message?: SlackMessage;
   previous_message?: SlackMessage;
   deleted_ts?: string;
+  /** Message metadata (a parent-agent post in a code channel carries a marker, features/code-channels/parent-message.ts). */
+  metadata?: unknown;
+}
+
+/** Is the channel a code channel (feature on, recorded)? For edits / deletes, which never adopt. */
+async function inCodeChannel(channelId: string, isDm: boolean): Promise<boolean> {
+  if (isDm || channelId.startsWith('D')) return false;
+  if (!(await codeChannelsEnabled())) return false;
+  return isCodeChannel(channelId).catch(() => false);
 }
 
 export async function handleMessageEvent(ev: MessageEvent) {
@@ -120,19 +132,26 @@ async function handleNewMessage(ev: MessageEvent) {
   const channelId = ev.channel;
   const isDm = ev.channel_type === 'im';
   const isBot = isBotMessage(ev) || ev.user === bot.userId;
-  const threadId = threadIdOf(channelId, threadRootTs(ev));
   const text = ev.text ?? '';
   // A DM with another bot or app (its user posting as a user): never a conversation. Cached per DM channel.
   if (isDm && !isBot && ev.user && (await isBotPeerDm(channelId, ev.user).catch(() => false))) return;
   const { mentionsBot, mentionsOthers } = isBot ? { mentionsBot: false, mentionsOthers: false } : mentionFacts(mentionText(ev), bot.userId);
-  if (!isBot && ev.user && shouldRedirectGroupPing({ isDm, threadTs: ev.thread_ts, ts: ev.ts, mentionsBot, text }) && !isBangStop(text, bot.userId)) {
+  // Code channels (docs/code-channels.md): top-level messages are one conversation, `${channel}:0`. Null elsewhere.
+  const cc = await routeCodeChannel(ev, { isDm, isBot, mentionsBot, botId: bot.botId });
+  const ccConversation = Boolean(cc?.topLevel);
+  const parentPost = cc?.parent ?? null;
+  const rootTs = conversationRootTs(ev, ccConversation);
+  const threadId = threadIdOf(channelId, rootTs);
+  if (cc && ((!isBot && ev.user) || parentPost)) await noteCodeChannelActivity(channelId, parentPost?.requesterId ?? ev.user ?? null);
+  // In a code channel's conversation replies are top level anyway: no group-ping redirect.
+  if (!ccConversation && !isBot && ev.user && shouldRedirectGroupPing({ isDm, threadTs: ev.thread_ts, ts: ev.ts, mentionsBot, text }) && !isBangStop(text, bot.userId)) {
     await redirectGroupPing({ ...ev, user: ev.user }, bot);
     return;
   }
 
   let thread = await getThread(threadId);
-  if (!thread && !isBot && (isDm || mentionsBot)) {
-    thread = await upsertThread({ id: threadId, channelId, threadTs: threadRootTs(ev), isDm });
+  if (!thread && ((!isBot && (isDm || mentionsBot || ccConversation)) || parentPost)) {
+    thread = await upsertThread({ id: threadId, channelId, threadTs: rootTs, isDm });
   }
   // Threads the bot was never part of: not stored (the context module backfills what it needs).
   if (!thread) return;
@@ -146,13 +165,17 @@ async function handleNewMessage(ev: MessageEvent) {
     ...(ev.files?.length ? { files: ev.files.length } : {}),
     ...(isBot ? { bot: true } : {}),
   });
-  if (isBot || !ev.user) return; // bots never start a turn
+  // A parent-agent post: an instruction from the requester (the turn is theirs, parent-message.ts).
+  if (parentPost) await appendEvent(threadId, 'parent_message', parentPost.requesterId, { ts: ev.ts, parentThreadId: parentPost.parentThreadId });
+  // Bots never start a turn (a parent-agent post in a code channel is the one exception).
+  if (!parentPost && (isBot || !ev.user)) return;
   markMessage(channelId, ev.ts, { i_stored: Date.now() });
 
-  const authorId = ev.user;
-  if (isBangStop(text, bot.userId, { isDm })) return handleBangStop(channelId, threadRootTs(ev), authorId, ev.ts);
+  const authorId = parentPost ? parentPost.requesterId : ev.user!;
+  if (!parentPost && isBangStop(text, bot.userId, { isDm })) return handleBangStop(channelId, rootTs, authorId, ev.ts);
   let disengageDue = false;
-  if (isDm || mentionsBot) {
+  // A code channel's conversation is always engaged and never disengages (like a DM).
+  if (isDm || mentionsBot || ccConversation) {
     await markAddressed(threadId, true);
   } else if (thread.engaged) {
     disengageDue = await countUnaddressed(thread);
@@ -190,7 +213,23 @@ async function handleNewMessage(ev: MessageEvent) {
       ? isRecentPartner({ authorId, lastBotPartner: thread.lastBotPartner, lastBotReplyAt: thread.lastBotReplyAt, othersSpoke: othersSinceReply }, now, limits.recentPartnerMs)
       : false;
 
-  const decision = decide({ isBot, isDm, mentionsBot, mentionsOthers, engaged: isDm || thread.engaged, disengageDue, twoParty, partner, awaitedReply, answersOther, runRequester, recentPartner, quietPrefix });
+  const decision = decide({
+    isBot,
+    isDm,
+    mentionsBot,
+    mentionsOthers,
+    engaged: isDm || ccConversation || thread.engaged,
+    disengageDue,
+    twoParty,
+    partner,
+    awaitedReply,
+    answersOther,
+    runRequester,
+    recentPartner,
+    quietPrefix,
+    codeChannel: ccConversation,
+    parentPost: Boolean(parentPost),
+  });
   log.debug({ threadId, ts: ev.ts, decision }, 'message decision');
   if (decision.action === 'ignore') {
     if (decision.reason === 'disengaged') await disengage(threadId, 'idle', null);
@@ -210,7 +249,7 @@ async function handleNewMessage(ev: MessageEvent) {
     if (entry.reason === 'rate_limited' && (isDm || mentionsBot)) {
       await slackCall(
         'chat.postEphemeral',
-        { channel: channelId, user: authorId, text: RATE_LIMITED_TEXT, ...(ev.thread_ts ? { thread_ts: ev.thread_ts } : {}) },
+        { channel: channelId, user: authorId, text: RATE_LIMITED_TEXT, ...(ev.thread_ts && !ccConversation ? { thread_ts: ev.thread_ts } : {}) },
         { idempotencyKey: `rate-limited:${channelId}:${ev.ts}` },
       ).catch((err) => log.warn({ err }, 'rate-limit ephemeral failed'));
     }
@@ -220,22 +259,24 @@ async function handleNewMessage(ev: MessageEvent) {
   // Privacy policy never agreed (consent.ts): a DM / mention is held behind the prompt, anything else dropped. The
   // message stays stored as context either way. Agreed to an earlier version: a one-off "updated" notice, then on.
   if (!(await hasAgreed(authorId))) {
-    if (decision.reason === 'dm' || decision.reason === 'mention') {
+    // A code channel's conversation is a session with the bot (like a DM): held too. A parent post's requester
+    // agreed in the parent thread; if not (withdrawn since), it's dropped, never held.
+    if (decision.reason === 'dm' || decision.reason === 'mention' || decision.reason === 'code_channel') {
       await holdForConsent({
         userId: authorId,
         channelId,
         conversation: isDm ? channelId : threadId,
-        ...(ev.thread_ts ? { promptThreadTs: ev.thread_ts } : {}),
+        ...(ev.thread_ts && !ccConversation ? { promptThreadTs: ev.thread_ts } : {}),
         messageTs: ev.ts,
         item: { kind: 'batch', threadId, ts: ev.ts, reason: decision.reason },
       });
     }
     return;
   }
-  await noticePolicyUpdate({ userId: authorId, channelId, ...(ev.thread_ts ? { threadTs: ev.thread_ts } : {}), messageTs: ev.ts });
+  if (!parentPost) await noticePolicyUpdate({ userId: authorId, channelId, ...(ev.thread_ts && !ccConversation ? { threadTs: ev.thread_ts } : {}), messageTs: ev.ts });
 
-  // DMs and mentions get the status indicator right away, before the debounce window (fire-and-forget).
-  if (decision.reason === 'dm' || decision.reason === 'mention') showIntakeStatus(threadId, authorId, ev.ts);
+  // DMs and mentions (and parent posts) get the status indicator right away, before the debounce window (fire-and-forget).
+  if (decision.reason === 'dm' || decision.reason === 'mention' || decision.reason === 'parent') showIntakeStatus(threadId, authorId, ev.ts);
   await addToBatch(threadId, authorId, ev.ts, decision.reason);
   markMessage(channelId, ev.ts, { debounce_scheduled: Date.now() });
 }
@@ -270,11 +311,12 @@ async function handleEdit(ev: MessageEvent) {
   if (!threadId && msg.edited) {
     // Edit processed before the original message (parallel workers): store the edited version for threads the
     // original will engage or already has. The original's own event still triggers the turn (and keeps this text).
-    const candidate = threadIdOf(ev.channel, threadRootTs(msg));
+    const isDm = ev.channel_type === 'im';
+    const cc = await inCodeChannel(ev.channel, isDm);
+    const candidate = threadIdOf(ev.channel, conversationRootTs(msg, cc));
     let known = Boolean(await getThread(candidate));
     if (!known && !isBotMessage(msg) && msg.user) {
       const bot = await getBotIdentity();
-      const isDm = ev.channel_type === 'im';
       const mentionsBot = mentionFacts(mentionText(msg), bot.userId).mentionsBot;
       // A group-ping trigger is answered in a new thread (guidelines), never under the original message.
       if ((isDm || mentionsBot) && !shouldRedirectGroupPing({ isDm, threadTs: msg.thread_ts, ts: msg.ts, mentionsBot, text: msg.text })) {
@@ -299,7 +341,8 @@ async function handleDelete(channelId: string, ts: string | undefined, prev?: Sl
   const row = await applyDelete(channelId, ts);
   let threadId = row?.threadId ?? null;
   if (!threadId && prev) {
-    const candidate = threadIdOf(channelId, prev.thread_ts ?? ts);
+    const cc = await inCodeChannel(channelId, false);
+    const candidate = threadIdOf(channelId, conversationRootTs({ ts, ...(prev.thread_ts ? { thread_ts: prev.thread_ts } : {}) }, cc));
     if (await getThread(candidate)) threadId = candidate;
   }
   if (!threadId) return;
@@ -311,6 +354,11 @@ async function handleDelete(channelId: string, ts: string | undefined, prev?: Sl
   const orphaned = await removeMessageFromTurns(threadId, ts, () => requestThreadStop(threadId));
   if (orphaned != null) await appendEvent(threadId, 'turn_trigger_deleted', 'system', { turnId: orphaned, ts });
   if (ts === parseThreadId(threadId).threadTs) await handleRootDeleted(threadId);
+  // A code channel's top-level message is stored in `${channel}:0`, but may root a Slack thread of its own.
+  else if (isCodeChannelRoot(parseThreadId(threadId).threadTs) && isTopLevel({ ts, ...(prev?.thread_ts ? { thread_ts: prev.thread_ts } : {}) })) {
+    const sub = threadIdOf(channelId, ts);
+    if (await getThread(sub)) await handleRootDeleted(sub);
+  }
 }
 
 /**

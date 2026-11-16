@@ -9,7 +9,7 @@
  * background subagents keep running (the agent can cancel them or leave the thread with its tools when asked).
  * Slack has already halted the streams listed in `streaming_message_ts`; the reply manager tolerates that.
  */
-import { appendEvent, threadIdOf } from '../core/events.js';
+import { appendEvent, codeChannelThreadId, isCodeChannelRoot, threadIdOf, threadTsArg } from '../core/events.js';
 import { redis } from '../core/redis.js';
 import { slackCall } from '../core/slack.js';
 import { sql } from '../db/index.js';
@@ -19,6 +19,8 @@ import { guardEntry } from './entry.js';
 import { dropPendingUserTurns } from './scheduler.js';
 import { restoreSessionStatus } from './agent-session.js';
 import { getThread } from './store.js';
+import { codeChannelsEnabled } from '../features/code-channels/settings.js';
+import { isCodeChannel } from '../features/code-channels/store.js';
 
 export const STOPPED_TEXT = 'Stopped.';
 
@@ -45,13 +47,28 @@ export interface AgentSessionStoppedEvent {
   streaming_message_ts?: string[];
 }
 
-export async function handleAgentSessionStopped(ev: AgentSessionStoppedEvent): Promise<void> {
-  const { channel, thread_ts: threadTs, user } = ev;
-  if (!channel || !threadTs || !user) {
+/**
+ * The thread an `agent_session_stopped` is for. In a code channel (docs/code-channels.md) the session is the
+ * channel: no thread_ts means its conversation `${channel}:0`, a thread_ts that thread. Elsewhere thread_ts is required.
+ */
+export async function stoppedThreadId(channel: string, threadTs: string | undefined): Promise<string | null> {
+  if (threadTs) return threadIdOf(channel, threadTs);
+  if (channel.startsWith('D') || !(await codeChannelsEnabled())) return null;
+  return (await isCodeChannel(channel).catch(() => false)) ? codeChannelThreadId(channel) : null;
+}
+
+/**
+ * `native`: the event came from Slack (not `!stop`). In a code channel Slack wants no further `agents.*` calls for
+ * that context after a stop, so the session status is left to Slack.
+ */
+export async function handleAgentSessionStopped(ev: AgentSessionStoppedEvent, opts: { native?: boolean } = {}): Promise<void> {
+  const { channel, thread_ts: eventThreadTs, user } = ev;
+  const threadId = channel && user ? await stoppedThreadId(channel, eventThreadTs) : null;
+  if (!channel || !user || !threadId) {
     log.warn({ ev }, 'agent_session_stopped without channel/thread_ts/user');
     return;
   }
-  const threadId = threadIdOf(channel, threadTs);
+  const threadTs = threadId.slice(channel.length + 1);
   // Not a conversation turn: gate without counting, and without the channel. Stopping work is always allowed (it
   // only reduces activity); the guard decides whether we also post the confirmation.
   const entry = await guardEntry(user, undefined, { countMessage: false, allowSuspended: true });
@@ -71,12 +88,12 @@ export async function handleAgentSessionStopped(ev: AgentSessionStoppedEvent): P
   log.info({ threadId, user, droppedTurns }, 'agent session stopped');
 
   // Back to `active` — or what a DM session rests in (`suspended` while a send confirmation is pending).
-  await restoreSessionStatus(threadId, user);
+  if (!(opts.native && isCodeChannelRoot(threadTs))) await restoreSessionStatus(threadId, user);
   if (!entry.ok) return;
   try {
     await slackCall(
       'chat.postMessage',
-      { channel, thread_ts: threadTs, text: STOPPED_TEXT },
+      { channel, ...threadTsArg(threadTs), text: STOPPED_TEXT },
       { idempotencyKey: `session-stopped:${threadId}:${ev.event_ts ?? Date.now()}` },
     );
   } catch (err) {

@@ -107,11 +107,25 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
     bot unless it's side chatter or aimed at another person").
   - Unmentioned thread replies are ignored.
   - An @mention inside a thread is answered in that thread, with the channel conversation as context.
+  - *Decision (stage 2):* a thread in a code channel follows the ordinary channel-thread rules. It is ignored
+    until the bot is @mentioned in it; from then on it is an engaged thread like any other (unmentioned follow-ups
+    go through the normal gate, and it disengages normally). The thread's context always includes the channel's
+    conversation as background.
+  - *Decision (stage 2):* an unmentioned top-level message that names someone else still goes to the gate (the
+    code-channel note tells it to skip messages aimed at another person); a `<>` / `# ` message is still never
+    answered without a mention. The gate uses the partner threshold there. Consent holds unmentioned top-level
+    messages too, the same as a mention.
+  - *Decision (stage 2):* adoption is checked only when the bot is @mentioned in a channel that isn't recorded
+    (one cached `conversations.info`).
 - **Replies:** posted top level (streamed without `thread_ts`).
 - **Status:**
   - `processing` while a turn runs.
   - `active` when the turn ends.
   - `suspended` when the reply asked the user something, and while the archive warning is out.
+    *Stage 2:* the conversation rests `suspended` while `threads.awaits_reply_from` is set (the reply ended with a
+    question, an offer or buttons) or `warned_at` is set, until the next message. A native `agent_session_stopped`
+    in a code channel makes no further `agents.*` calls (Slack settles the status); `!stop` still sets it.
+  - Turns in a thread under a channel message don't set the session status (Slack refuses `thread_ts` there).
   - `closed` on archive.
 - **`agent_session_stopped`:** stops the current turn, like `!stop`.
 - **Views** (`set_view`, code channels only): canvas, HTML and Block Kit tabs, keyed by `view_key`. A canvas tab
@@ -132,6 +146,11 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   - `message_code_channel(channel, text)`: posts into the channel under a distinct identity
     (`chat:write.customize`, "smasnug ai · from <parent>"). The post is recorded as a parent-message event and
     starts a turn there as an instruction from the requester.
+    - *Marker (stage 2):* message metadata `{ event_type: "smasnug_parent_message", event_payload: { parentThreadId,
+      requesterId } }` (`src/features/code-channels/parent-message.ts`, `parentMessageMetadata`). Intake accepts it
+      only from the bot's own bot_id, at the channel's top level, with `parentThreadId` equal to the row's
+      `parent_thread_id`. It records a `parent_message` event and batches the post for the requester with reason
+      `parent`, which skips the gate and counts as a mention. Every other bot post is stored and ignored.
   - `read_channel` also works on the channel.
 
 ### Lifecycle

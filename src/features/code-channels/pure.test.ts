@@ -142,3 +142,18 @@ describe('setViewArgs / commandsArg', () => {
     ]);
   });
 });
+
+describe('parent-message marker', async () => {
+  const { parentMessageMetadata, parseParentMessage, PARENT_MESSAGE_EVENT_TYPE } = await import('./parent-message.js');
+  it('round-trips through the metadata stage 3 posts', () => {
+    const md = parentMessageMetadata({ parentThreadId: 'C1:1790000000.000100', requesterId: 'U0INGO' });
+    expect(md.event_type).toBe(PARENT_MESSAGE_EVENT_TYPE);
+    expect(parseParentMessage({ metadata: md })).toEqual({ parentThreadId: 'C1:1790000000.000100', requesterId: 'U0INGO' });
+  });
+  it('rejects other metadata and malformed payloads', () => {
+    expect(parseParentMessage({})).toBeNull();
+    expect(parseParentMessage({ metadata: { event_type: 'other', event_payload: { parentThreadId: 'C1:1', requesterId: 'U1' } } })).toBeNull();
+    expect(parseParentMessage({ metadata: { event_type: PARENT_MESSAGE_EVENT_TYPE, event_payload: { parentThreadId: 'C1:1' } } })).toBeNull();
+    expect(parseParentMessage({ metadata: { event_type: PARENT_MESSAGE_EVENT_TYPE, event_payload: { parentThreadId: 'C1:1', requesterId: 'not a user' } } })).toBeNull();
+  });
+});

@@ -9,7 +9,7 @@
  */
 import type { Job } from 'bullmq';
 import { runFrontTurn, type TurnIO } from '../agent/front.js';
-import { appendEvent, parseThreadId } from '../core/events.js';
+import { appendEvent, isCodeChannelRoot, parseThreadId, threadTsArg } from '../core/events.js';
 import { slackCall, ThreadGoneError } from '../core/slack.js';
 import type { TurnRow } from '../core/types.js';
 import { log } from '../log.js';
@@ -105,7 +105,8 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
   const untrack = trackTurnStatus(turn.threadId, indicator);
   // DMs / mentions usually already show the status from intake (adopted here); otherwise show it now. Never awaited:
   // the model call must not wait for Slack.
-  if (turn.isMention) {
+  // A code channel's conversation shows `processing` for every turn (docs/code-channels.md, Status).
+  if (turn.isMention || isCodeChannelRoot(threadTs)) {
     if (await adoptIntakeStatus(turn.threadId)) indicator.adopt();
     else void indicator.start().then(() => timing.mark('status_done'));
   }
@@ -135,7 +136,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     } else {
       log.error({ err, turnId: turn.id, threadId: turn.threadId }, 'front turn failed');
       try {
-        await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, text: ERROR_TEXT }, { idempotencyKey: `turn-error:${turn.id}` });
+        await slackCall('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), text: ERROR_TEXT }, { idempotencyKey: `turn-error:${turn.id}` });
       } catch (postErr) {
         log.error({ err: postErr, turnId: turn.id }, 'failed to post error message');
       }
