@@ -17,7 +17,7 @@ import { dropHeldMessage, holdForConsent, noticePolicyUpdate, updateHeldMessage 
 import { hasAgreed } from '../features/privacy.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
 import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
-import { answersOtherOffer, awaitedReplyFresh, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, threadRootTs, conversationRootTs, isTopLevel } from './rules.js';
+import { answersOtherOffer, awaitedReplyFresh, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, conversationRootTs, isTopLevel } from './rules.js';
 import { acceptParentPost, noteCodeChannelActivity, routeCodeChannel } from './code-channel-intake.js';
 import { codeChannelsEnabled } from '../features/code-channels/settings.js';
 import { isCodeChannel } from '../features/code-channels/store.js';
@@ -322,7 +322,7 @@ async function handleEdit(ev: MessageEvent) {
       const mentionsBot = mentionFacts(mentionText(msg), bot.userId).mentionsBot;
       // A group-ping trigger is answered in a new thread (guidelines), never under the original message.
       if ((isDm || mentionsBot) && !shouldRedirectGroupPing({ isDm, threadTs: msg.thread_ts, ts: msg.ts, mentionsBot, text: msg.text })) {
-        await upsertThread({ id: candidate, channelId: ev.channel, threadTs: threadRootTs(msg), isDm });
+        await upsertThread({ id: candidate, channelId: ev.channel, threadTs: conversationRootTs(msg, cc), isDm });
         known = true;
       }
     }

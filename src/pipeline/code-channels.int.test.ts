@@ -240,6 +240,14 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     }
   });
 
+  it('an edit that arrives before its top-level original is stored in the :0 conversation', async () => {
+    await makeCodeChannel();
+    const ts = nextTs();
+    await processSlackEvent(messageEnvelope({ subtype: 'message_changed', message: { type: 'message', user: 'U1', text: '<@UBOT> edited', ts, edited: { user: 'U1', ts: nextTs() } }, previous_message: { type: 'message', user: 'U1', text: '<@UBOT> hi', ts } }));
+    expect((await sql`select thread_ts from threads where id = ${CONV}`)[0]).toMatchObject({ threadTs: '0' });
+    expect((await sql`select thread_id from messages where channel_id = ${C} and ts = ${ts}`)[0]).toMatchObject({ threadId: CONV });
+  });
+
   it('a message in a channel marked archived reopens it', async () => {
     await makeCodeChannel();
     await store.markCodeChannelArchived(C);
