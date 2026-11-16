@@ -22,6 +22,7 @@ import { redis } from '../../core/redis.js';
 import { sql } from '../../db/index.js';
 import { runButtonAction } from '../../agent/button-actions.js';
 import { createReplyButtons, setButtonsMessage } from '../../agent/reply-buttons-store.js';
+import { openCodeChannel } from './open.js';
 import { parseParentMessage } from './parent-message.js';
 import { setCodeChannelsDisabled } from './settings.js';
 import { getCodeChannel, getCodeChannelBySession } from './store.js';
@@ -131,6 +132,35 @@ describe('code channels: opening and the agent tools', () => {
     expect(generateText).toHaveBeenCalledOnce(); // no second summary
     const after = (await fakeCalls()).slice(before).filter((c) => c.method === 'agents.conversations.create');
     expect(after.every((c) => c.args.session_id === row.sessionId)).toBe(true);
+  });
+
+  it('a private source with no origin link: created private (never left to Slack default), the row says so', async () => {
+    const src = await sourceThread();
+    const undo = addFakeHandler((method, args) =>
+      method === 'conversations.info' && args.channel === src.channelId ? { ok: true, channel: { id: args.channel, name: 'secret', is_private: true, is_member: true } } : undefined,
+    );
+    try {
+      const sessionId = `s-priv-${rand()}`;
+      const res = await openCodeChannel({
+        mode: 'task',
+        name: 'secret work',
+        sessionId,
+        sourceThreadId: src.threadId,
+        originTs: null,
+        originAuthorId: null,
+        requesterId: 'U0ASK',
+        createdBy: 'U0ASK',
+        explicitInvites: ['U0ASK'],
+        brief: 'do it',
+      });
+      created.push(res.channel.channelId);
+      expect(res.channel.isPrivate).toBe(true);
+      const create = (await fakeCalls()).find((c) => c.method === 'agents.conversations.create' && c.args.session_id === sessionId)!;
+      expect(create.args.is_private).toBe(true);
+      expect(create.args.origin_channel_id).toBeUndefined();
+    } finally {
+      undo();
+    }
   });
 
   it('a DM origin: private, no origin link, the requester invited explicitly; other members need confirmation', async () => {

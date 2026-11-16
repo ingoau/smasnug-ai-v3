@@ -87,6 +87,9 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   - Slack invites the origin's author. `is_private` is omitted, so privacy follows the origin.
   - A DM origin always creates a private channel.
   - `private: true` makes a channel from a public origin private.
+  - A channel is never less private than its source: a source that isn't a known public channel (private channel,
+    group DM, DM, or a failed lookup) always passes `is_private: true`, so a source with no origin message doesn't
+    fall back to Slack's default visibility. The row's `is_private` is exactly what was asked for.
   - *Stage 3:* Slack refuses a DM as `origin_channel_id`, so a DM origin is created private with no origin link and
     the requester is invited with `conversations.invite`. The row still records the origin message (for the
     "Forked from" link and the parent thread).

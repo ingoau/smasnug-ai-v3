@@ -63,10 +63,13 @@ describe('origin', () => {
   });
   it('a DM origin: private and no origin link; private: true forces private; otherwise privacy follows the origin', () => {
     const origin = { channelId: 'D1', ts: '1.1' };
-    expect(createOptions({ originIsDm: true, origin })).toEqual({ isPrivate: true });
-    expect(createOptions({ originIsDm: false, origin: { channelId: 'C1', ts: '1.1' } })).toEqual({ origin: { channelId: 'C1', ts: '1.1' } });
-    expect(createOptions({ originIsDm: false, private: true, origin: { channelId: 'C1', ts: '1.1' } })).toEqual({ isPrivate: true, origin: { channelId: 'C1', ts: '1.1' } });
-    expect(createOptions({ originIsDm: false, origin: null })).toEqual({});
+    expect(createOptions({ originIsDm: true, sourceIsPublic: false, origin })).toEqual({ isPrivate: true });
+    expect(createOptions({ originIsDm: false, sourceIsPublic: true, origin: { channelId: 'C1', ts: '1.1' } })).toEqual({ origin: { channelId: 'C1', ts: '1.1' } });
+    expect(createOptions({ originIsDm: false, sourceIsPublic: true, private: true, origin: { channelId: 'C1', ts: '1.1' } })).toEqual({ isPrivate: true, origin: { channelId: 'C1', ts: '1.1' } });
+    expect(createOptions({ originIsDm: false, sourceIsPublic: true, origin: null })).toEqual({});
+    // A private source (or one we couldn't look up) is never left to Slack's default, link or not.
+    expect(createOptions({ originIsDm: false, sourceIsPublic: false, origin: null })).toEqual({ isPrivate: true });
+    expect(createOptions({ originIsDm: false, sourceIsPublic: false, origin: { channelId: 'G1', ts: '1.1' } })).toEqual({ isPrivate: true, origin: { channelId: 'G1', ts: '1.1' } });
   });
 });
 

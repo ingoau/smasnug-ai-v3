@@ -147,7 +147,8 @@ export async function openCodeChannel(i: OpenInput): Promise<OpenResult> {
     });
   }
 
-  const opts = createOptions({ originIsDm, private: i.private, origin });
+  // Unknown (the lookup failed) counts as not public: a channel is never less private than its source.
+  const opts = createOptions({ originIsDm, sourceIsPublic: info?.kind === 'public_channel', private: i.private, origin });
   const name = codeChannelDisplayName(i.name, env.BOT_DISPLAY_NAME);
   const { channelId } = await createCodeChannel({ name, sessionId: i.sessionId, ...opts });
   const { row, created } = await createCodeChannelRow({
@@ -161,7 +162,7 @@ export async function openCodeChannel(i: OpenInput): Promise<OpenResult> {
     brief: i.brief ?? null,
     createdBy: i.createdBy,
     requesterId: i.requesterId,
-    isPrivate: Boolean(opts.isPrivate) || info?.kind === 'private_channel',
+    isPrivate: Boolean(opts.isPrivate),
   });
   if (created) {
     const ev = { channelId, kind: row.kind, mode: i.mode, origin, linked: Boolean(opts.origin) };
