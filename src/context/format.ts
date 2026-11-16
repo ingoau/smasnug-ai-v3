@@ -238,8 +238,23 @@ export function annotateTsDates(text: string): string {
   });
 }
 
+/**
+ * A line inside a message's text that starts like a message line (`[1790000000.000100 · …] <@U…|Name>: …`,
+ * `[bot] Name: …`, `<@U…|Name>: …`). Someone pasting (or forging) one would otherwise pass as a separate message
+ * from another person.
+ */
+const FORGED_LINE = /^([ \t]*)(?=\[\s*\d{6,}|\[\s*bot\s*\]|<@[UW][A-Z0-9]*)/gim;
+export const QUOTED_MARK = '(quoted)';
+
+/** Marks continuation lines of a message's text that imitate a message line, so they read as part of this message. */
+export function markForgedLines(text: string): string {
+  const nl = text.indexOf('\n');
+  if (nl < 0) return text;
+  return text.slice(0, nl) + text.slice(nl).replace(FORGED_LINE, `$1${QUOTED_MARK} `);
+}
+
 export function formatMessage(m: RenderMsg, env: FormatEnv): string {
-  const text = truncateText(renderSlackText(m.text ?? '', env.names).trim(), env.maxChars);
+  const text = markForgedLines(truncateText(renderSlackText(m.text ?? '', env.names).trim(), env.maxChars));
   // A person's files say who posted them as <@id|Name>, like everywhere else.
   const from = m.userId && !isBotMessage(m) && !(env.self && m.userId === env.self.userId) ? personRef(m.userId, env.names.get(m.userId)) : authorName(m, env);
   const files = (m.files ?? []).map((f) => fileLabel(f, from, env));
