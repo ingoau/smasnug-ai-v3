@@ -205,6 +205,9 @@ const METHOD_RPM: Record<string, number> = {
   'agents.conversations.listViews': 20,
   'agents.conversations.removeView': 20,
   'agents.conversations.setCommands': 20,
+  // Code channels also invite people (tier 3) and check membership (conversations.members, tier 4).
+  'conversations.invite': 50,
+  'conversations.members': 100,
   // ~25 per 30 s (≈50/min) measured on the dev app 2026-10-07 (429 on call 25–26 of a burst, Retry-After 30): 20 per
   // 30-s window (METHOD_WINDOW_MS) keeps bursts at 80 % of that, ≈40/min sustained.
   'search.messages': 20,
