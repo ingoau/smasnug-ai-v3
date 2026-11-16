@@ -13,7 +13,7 @@ import { EXTRAS } from '../tools/extras.js';
 import { toolsFor } from '../core/tools.js';
 import type { StoredMessage, TurnRow } from '../core/types.js';
 import { renderMessages, renderThreadContext } from '../context/thread.js';
-import { annotateTsDates, personRef } from '../context/format.js';
+import { annotateTsDates, markForgedLines, personRef } from '../context/format.js';
 import { lowQuotaLines, recordModelUsage, userQuotaStates } from '../features/guard.js';
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
@@ -828,7 +828,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             inbox.forEach((m) => seenTs.add(m.ts));
             const latest = latestTs(inbox.map((m) => m.ts));
             if (latest && (!extras[EXTRAS.defaultReactTs] || Number(latest) > Number(extras[EXTRAS.defaultReactTs]))) extras[EXTRAS.defaultReactTs] = latest;
-            const rendered = await renderMessages(turn.threadId, inbox.map((m) => m.ts)).catch(() => inbox.map((m) => m.text).join('\n'));
+            const rendered = await renderMessages(turn.threadId, inbox.map((m) => m.ts)).catch(() => inbox.map((m) => markForgedLines(m.text)).join('\n'));
             extra.push({ role: 'user', content: section('new_messages', clipTokens(rendered, BUDGET.inbox), ` from="<@${turn.authorId}>" note="sent while you were working"`) });
             await appendEvent(turn.threadId, 'inbox_injected', 'system', { turnId, ts: inbox.map((m) => m.ts) });
           }
