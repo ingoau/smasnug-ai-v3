@@ -18,11 +18,15 @@ vi.mock('../core/events.js', () => ({ appendEvent: vi.fn(async () => {}) }));
 vi.mock('./files.js', () => ({ uploadFiles: vi.fn(async () => {}) }));
 const recorded: { id: number; ts: string; text: string | null }[] = [];
 let placedRow: any = null;
+let posted = false;
 const detached: string[] = [];
 vi.mock('./reply-buttons-store.js', () => ({
   loadReplyButtons: vi.fn(async () => placedRow),
   messageHasLiveCard: vi.fn(async () => false),
-  detachMessageCards: vi.fn(async (_c: string, ts: string) => void detached.push(ts)),
+  detachMessageCards: vi.fn(async (_c: string, ts: string) => (detached.push(ts), [])),
+  reattachMessageCards: vi.fn(async () => {}),
+  setReplyText: vi.fn(async () => {}),
+  postedBefore: vi.fn(async () => posted),
   createReplyButtons: vi.fn(async (o: any) => ({ id: 42, threadId: o.threadId, channelId: o.channelId, turnId: o.turnId, messageTs: null, replyText: null, labels: o.labels, pressedBy: null, pressedLabel: null, pressedMessageTs: null, pressedAt: null })),
   setButtonsMessage: vi.fn(async (id: number, ts: string, text: string | null) => void recorded.push({ id, ts, text })),
   toButtonsState: (r: any) => ({ id: r.id, labels: r.labels, pressedBy: r.pressedBy, pressedLabel: r.pressedLabel }),
@@ -53,6 +57,7 @@ beforeEach(() => {
   recorded.length = 0;
   detached.length = 0;
   placedRow = null;
+  posted = false;
   failOn = null;
 });
 
@@ -123,6 +128,10 @@ describe('reply buttons: no-turn buttons', () => {
     expect(
       buttonsSchema.parse(['Yes', { label: 'No thanks', type: 'text', text: 'all good' }, { label: 'Up', type: 'action', action: { tool: 'upload_emoji', args: { name: 'x', file_id: 'file_1' } }, done_text: 'done', place: 'append', who: 'requester' }]),
     ).toHaveLength(3);
+    // Lenient: a missing or stringified args, nulls and older fields never fail the call.
+    expect(() => buttonsSchema.parse([{ label: 'Up', type: 'action', action: { tool: 'upload_emoji' } }, { label: 'A', action: { tool: 't', args: '{"x":1}' }, place: null, who: null }, { label: 'No', fixed_reply: 'ok' }])).not.toThrow();
+    expect((buttonsSchema.parse([{ label: 'No', fixed_reply: 'ok' }]) as any)[0].fixed_reply).toBe('ok');
+    expect((normalizeButtons(buttonsSchema.parse([{ label: 'A', action: { tool: 't', args: '{"x":1}' } }]) as any).responses[0] as any).args).toBe('{"x":1}');
     const json = JSON.stringify(z.toJSONSchema(buttonsSchema));
     for (const word of ['prompt', 'none', 'action', 'append', 'replace', 'requester', 'done_text']) expect(json).toContain(word);
   });
@@ -293,7 +302,8 @@ describe('reply buttons: plan card re-render', () => {
 describe('reply buttons: placing a reply into a pressed button\'s message', () => {
   it('the first reply is appended into that message by chat.update; the next one posts as usual', async () => {
     placedRow = { id: 7, channelId: 'C1', messageTs: '1700000000.000500', replyText: 'here it is\n[[chart:1]]' };
-    const rm = new ReplyManager({ ...target('user'), placeTarget: { ts: '1700000000.000500', buttonsId: 7, place: 'append' } });
+    const delivered: any[] = [];
+    const rm = new ReplyManager({ ...target('user'), triggerTs: '1700000000.000900', onDelivered: async (r: any) => void delivered.push(r), placeTarget: { ts: '1700000000.000500', buttonsId: 7, place: 'append' } });
     rm.delta('tc1', '{"text":"bigger now');
     await sleep(50);
     const res = await rm.finish('tc1', 'bigger now', undefined, ['Again']);
@@ -307,12 +317,31 @@ describe('reply buttons: placing a reply into a pressed button\'s message', () =
     expect(detached).toEqual(['1700000000.000500']);
     expect(recorded.at(-1)).toMatchObject({ ts: '1700000000.000500', text: expect.stringContaining('bigger now') });
     expect(res).toContain('Replied (posted)');
+    // The thread's "last bot reply" is the press, not the old message's ts.
+    expect(delivered[0].ts).toBe('1700000000.000900');
     await rm.finish('tc2', 'one more thing');
     expect(calls.filter((c) => c.method === 'chat.postMessage')).toHaveLength(1);
   });
 
+  it('the place goes to the first reply actually delivered, never to one with files or one a retry already posted', async () => {
+    placedRow = { id: 7, channelId: 'C1', messageTs: '1700000000.000500', replyText: 'old', labels: ['Go'], pressedBy: 'U1', pressedLabel: 'Go' };
+    const place = { ts: '1700000000.000500', buttonsId: 7, place: 'replace' as const };
+    const rm = new ReplyManager({ ...target('user'), placeTarget: place });
+    expect(await rm.finish('tc1', '   ')).toContain('Not posted');
+    await rm.finish('tc2', 'second');
+    const upd = calls.find((c) => c.method === 'chat.update' && c.args.ts === place.ts)!;
+    expect(upd.args.text).toBe('second');
+    // No new buttons: the press's note stays in the message.
+    expect(upd.args.blocks.at(-1)).toMatchObject({ type: 'context', block_id: 'reply_7_pressed' });
+
+    calls.length = 0;
+    posted = true;
+    await new ReplyManager({ ...target('user'), placeTarget: place }).finish('tc1', 'retried');
+    expect(calls.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text)).toEqual(['retried']);
+  });
+
   it('replace swaps the text; a message that can\'t take it gets a new post instead', async () => {
-    placedRow = { id: 7, channelId: 'C1', messageTs: '1700000000.000500', replyText: 'old' };
+    placedRow = { id: 7, channelId: 'C1', messageTs: '1700000000.000500', replyText: 'old', labels: ['Go'], pressedBy: 'U1', pressedLabel: 'Go' };
     const rm = new ReplyManager({ ...target('user'), placeTarget: { ts: '1700000000.000500', buttonsId: 7, place: 'replace' } });
     await rm.finish('tc1', 'new');
     expect(calls.find((c) => c.method === 'chat.update')!.args.text).toBe('new');

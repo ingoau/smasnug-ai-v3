@@ -32,12 +32,12 @@ import { recordFilePosts } from '../files/store.js';
 import { extractPartialString } from './partial-json.js';
 import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chooseDelivery, type DeliveryMode } from './util.js';
-import { buttonsActions, buttonsFallbackText, normalizeButtonLabels, normalizeButtons, placeText, type ButtonsActionsBlock } from './reply-buttons.js';
+import { buttonsActions, buttonsBlock, buttonsFallbackText, normalizeButtonLabels, normalizeButtons, placeText, type ButtonsActionsBlock, type ContextBlock } from './reply-buttons.js';
 import { saveReplyExtras } from './charts-store.js';
 import { buildExtras, degradedFileIds, extrasFallback, footerBlock, hasExtras, imageExtras, replyBody, responseTimeFooter, slackTsMs, withoutMarkers, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { prepareButtonActions } from './button-actions.js';
-import { createReplyButtons, detachMessageCards, loadReplyButtons, messageHasLiveCard, setButtonsMessage, type PlaceTarget, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
+import { createReplyButtons, detachMessageCards, loadReplyButtons, messageHasLiveCard, postedBefore, reattachMessageCards, setReplyText, setButtonsMessage, type PlaceTarget, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
 import { forgetOpenActivity, recordOpenActivity } from './activity-registry.js';
 
@@ -147,6 +147,8 @@ interface ReplyEntry {
   place?: PlaceTarget;
   /** The text of that message once the reply went into it (the earlier text plus this reply, when appended). */
   placedText?: string;
+  /** Carries files: never placed (attaching files to the earlier message could drop the files it already has). */
+  noPlace?: boolean;
 }
 
 /**
@@ -193,7 +195,7 @@ export function markdownMessage(text: string) {
 }
 
 /** A reply message's final layout: [plan card, reply with its extras, buttons, footer] (each part when given). */
-function replyLayout(text: string, actions?: ButtonsActionsBlock, card?: CardBlock | null, extras?: ReplyExtras | null): { text: string; blocks: unknown[] } {
+function replyLayout(text: string, actions?: ButtonsActionsBlock | ContextBlock, card?: CardBlock | null, extras?: ReplyExtras | null): { text: string; blocks: unknown[] } {
   const footer = footerBlock(extras);
   const maxBlocks = MAX_MESSAGE_BLOCKS - 1 - (card ? 1 : 0) - footer.length;
   // An empty markdown block is invalid: an extras-only reply is their blocks plus a text fallback.
@@ -290,10 +292,10 @@ export class ReplyManager {
   start(toolCallId: string): ReplyEntry {
     let e = this.entries.get(toolCallId);
     if (e) return e;
-    // The turn's first reply goes into a button's message: posted whole (Slack can't stream into an existing message).
-    const place = this.t.placeTarget && !this.placeUsed ? this.t.placeTarget : undefined;
-    if (place) this.placeUsed = true;
-    const mode = place
+    // While the turn's first delivered reply may still go into a button's message, replies are posted whole (Slack
+    // can't stream into an existing message). The place is claimed only when a reply is actually delivered (postWhole):
+    // a dropped or failed first call leaves it for the retry.
+    const mode = this.t.placeTarget && !this.placeUsed
       ? Promise.resolve('post' as const)
       : this.t.activeRuns().then(
           (n) => chooseDelivery({ turnKind: this.t.turnKind, runningRuns: n }),
@@ -322,7 +324,6 @@ export class ReplyManager {
       dropped: null,
       finished: false,
       posting: false,
-      ...(place ? { place } : {}),
     };
     this.entries.set(toolCallId, e);
     return e;
@@ -573,6 +574,7 @@ export class ReplyManager {
         return `Replied (posted) with the files only.${btnNote}${chartSuffix()}`;
       }
     }
+    if (files?.length) e.noPlace = true;
     // Files go up (privately) while the reply is delivered, so attaching them right after leaves no gap for another
     // render of the message (plan card, button press) to be overwritten.
     const filesUpload = files?.length
@@ -676,7 +678,10 @@ export class ReplyManager {
     this.delivered++;
     if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs, ...(hasExtras(extras) ? { extras } : {}) };
     this.deliveredTexts.push(text);
-    await this.t.onDelivered?.({ ts: last.ts, text, buttons: Boolean(btnRow) }).catch((err) => log.warn({ err }, 'onDelivered failed'));
+    // A reply placed into an earlier message: the bot's latest word is now (the press that started the turn), not that
+    // message's old ts (the thread's partner / unhandled-message tracking would count everything since it).
+    const placedTs = e.placedText != null ? (this.t.triggerTs ?? null) : undefined;
+    await this.t.onDelivered?.({ ts: placedTs !== undefined ? placedTs : last.ts, text, buttons: Boolean(btnRow) }).catch((err) => log.warn({ err }, 'onDelivered failed'));
     if (files?.length || degradedFileIds(extras).length) {
       const lastMsg = last;
       // Read when attaching (after the upload): the message's latest layout.
@@ -853,8 +858,13 @@ export class ReplyManager {
   private async postWhole(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock, extras?: ReplyExtras): Promise<string | null> {
     e.posting = true;
     try {
-      const placed = e.place ? await this.placeInto(e, text, actions, extras) : null;
-      if (placed) return placed;
+      // The first reply delivered this turn takes the place (if any): into the pressed button's message.
+      if (this.t.placeTarget && !this.placeUsed && !e.noPlace) {
+        this.placeUsed = true;
+        e.place = this.t.placeTarget;
+        const placed = await this.placeInto(e, text, actions, extras);
+        if (placed) return placed;
+      }
       const card = await this.cardBlock();
       const ts = (await this.postIntoActivity(text, actions, card, extras)) ?? (await this.post(e, text, '', actions, card, extras));
       if (extras) await this.rememberExtras(ts, extras);
@@ -873,23 +883,31 @@ export class ReplyManager {
    */
   private async placeInto(e: ReplyEntry, text: string, actions: ButtonsActionsBlock | undefined, extras?: ReplyExtras): Promise<string | null> {
     const target = e.place!;
+    let detached: number[] = [];
     try {
       const row = await loadReplyButtons(target.buttonsId);
       if (!row?.messageTs || row.messageTs !== target.ts) return null;
-      // Its plan card still tracks running subagents there: leave that message alone.
-      if (await messageHasLiveCard(this.t.channelId, target.ts)) return null;
+      // A retried turn whose earlier attempt posted this reply as a new message: keep doing that (no second copy).
+      if (await postedBefore(this.key(e))) return null;
+      // An earlier turn's plan card still tracks running subagents there: leave that message alone.
+      if (await messageHasLiveCard(this.t.channelId, target.ts, this.t.turnId)) return null;
       // The earlier text's chart / image markers would point at this reply's extras: dropped.
       const full = placeText(row.replyText != null ? withoutMarkers(row.replyText) : null, text, target.place);
       const card = await this.cardBlock();
-      await this.updateLayout(target.ts, () => replyLayout(full, actions, card, extras), extras);
+      // Without new buttons the message keeps the press's note (a plan card render would put it back anyway).
+      const tail = actions ?? buttonsBlock(toButtonsState(row));
+      // The earlier card goes first, so a render of it that is due can't write the old layout over this reply.
+      detached = await detachMessageCards(this.t.channelId, target.ts, this.t.turnId);
+      await this.updateLayout(target.ts, () => replyLayout(full, tail, card, extras), extras);
       this.t.timing?.mark('reply_posted');
       await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
-      await detachMessageCards(this.t.channelId, target.ts).catch((err) => log.warn({ err }, 'detaching the earlier plan card failed'));
+      await setReplyText(row.id, full).catch((err) => log.warn({ err }, 'saving the placed reply text failed'));
       if (card) await this.attachCard(target.ts, full);
       e.placedText = full;
       return target.ts;
     } catch (err) {
       log.info({ code: slackErrorCode(err), turnId: this.t.turnId, ts: target.ts }, 'the pressed button\'s message cannot take the reply; posting a new one');
+      if (detached.length) await reattachMessageCards(detached, target.ts).catch((e2) => log.warn({ err: e2 }, 'reattaching the earlier plan card failed'));
       return null;
     }
   }

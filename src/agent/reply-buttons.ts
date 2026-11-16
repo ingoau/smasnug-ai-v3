@@ -161,7 +161,16 @@ function buttonResponse(obj: Record<string, unknown>, label: string, notes: stri
   if (kind === 'text') return { kind: 'text', text: neutralizeBroadcasts(cut(text, MAX_FIXED_REPLY_CHARS)), ...opt };
   if (kind === 'action') {
     const tool = str(rawAction?.tool);
-    const args = rawAction?.args && typeof rawAction.args === 'object' && !Array.isArray(rawAction.args) ? rawAction.args : {};
+    // Models sometimes send nested arguments as a JSON string.
+    let rawArgs: unknown = rawAction?.args;
+    if (typeof rawArgs === 'string') {
+      try {
+        rawArgs = JSON.parse(rawArgs);
+      } catch {
+        rawArgs = null;
+      }
+    }
+    const args = rawArgs && typeof rawArgs === 'object' && !Array.isArray(rawArgs) ? rawArgs : {};
     const json = JSON.stringify(args);
     if (!tool) notes.push(`Button "${label}" has no action.tool, so it starts a turn like a normal button.`);
     else if (json.length > MAX_ACTION_ARGS_CHARS) notes.push(`Button "${label}": the action's args are too long, so it starts a turn like a normal button.`);

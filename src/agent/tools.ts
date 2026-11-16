@@ -53,26 +53,29 @@ export const buttonsSchema = z
         label: z.string(),
         type: z
           .string()
-          .optional()
+          .nullish()
           .describe(
             '"prompt" (default): a press posts the label as their message and starts your turn. "text": a press posts `text` without a turn. "none": a press only marks it pressed. "action": a press runs `action` (a fixed tool call) without a turn; you only hear back if it fails.',
           ),
-        text: z.string().optional().describe('type "text": the short static answer posted on press, e.g. "no worries 👍".'),
+        text: z.string().nullish().describe('type "text": the short static answer posted on press, e.g. "no worries 👍".'),
+        // Loose on purpose: code checks it (normalizeButtons / prepareButtonActions); a schema error would fail a reply
+        // whose text already streamed.
         action: z
-          .object({ tool: z.string(), args: z.record(z.string(), z.unknown()) })
-          .optional()
+          .object({ tool: z.string().nullish(), args: z.unknown().optional().describe('The tool\'s arguments, as an object.') })
+          .passthrough()
+          .nullish()
           .describe(
             `type "action": the tool call to run on press, with its exact arguments (checked now; one that can't run makes it a prompt button and the result says why). Only tools whose description offers a button action can run (${MAX_BUTTONS} buttons max still applies).`,
           ),
-        done_text: z.string().optional().describe('type "action": short text shown when it worked, e.g. "uploaded, :cat_wave: is live". Without it the button note just says done.'),
+        done_text: z.string().nullish().describe('type "action": short text shown when it worked, e.g. "uploaded, :cat_wave: is live". Without it the button note just says done.'),
         place: z
           .string()
-          .optional()
+          .nullish()
           .describe(
             'Where the response goes (text: `text`; action: `done_text`; prompt: your reply on that turn): "new" (a message of its own), "append" (added below this reply, in the same message) or "replace" (instead of this reply\'s text, e.g. a "Regenerate" or "Make it shorter" whose result supersedes this one). Default: "append" for action, "new" otherwise.',
           ),
-        who: z.string().optional().describe('Who may press: "anyone" or "requester" (only the person you are answering). Default: "requester" for action, "anyone" otherwise.'),
-      }),
+        who: z.string().nullish().describe('Who may press: "anyone" or "requester" (only the person you are answering). Default: "requester" for action, "anyone" otherwise.'),
+      }).passthrough(), // older fields (no_turn, fixed_reply) still reach normalizeButtons
     ]),
   )
   .optional()

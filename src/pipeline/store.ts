@@ -201,11 +201,13 @@ export async function recentMessages(threadId: string, beforeTs: string, n: numb
 /**
  * The bot replied in a thread (any turn kind): the idle clock restarts, `partnerId` (the turn's speaker) is who it
  * was talking with, and `awaitsReply` (rules.ts awaitsReply: a question, an offer or buttons) lets that person's next
- * message skip the gate. Called by the front agent after each delivered reply.
+ * message skip the gate. Called by the front agent after each delivered reply. `last_bot_reply_ts` never moves back.
  */
 export async function noteBotReply(threadId: string, o: { ts: string | null; partnerId: string; awaitsReply: boolean }): Promise<void> {
   await sql`
-    update threads set last_bot_reply_at = now(), last_bot_reply_ts = coalesce(${o.ts}, last_bot_reply_ts),
+    update threads set last_bot_reply_at = now(),
+      last_bot_reply_ts = case when ${o.ts}::text is null or (last_bot_reply_ts is not null and last_bot_reply_ts::numeric > ${o.ts}::numeric)
+                               then last_bot_reply_ts else ${o.ts} end,
       last_bot_partner = ${o.partnerId}, awaits_reply_from = ${o.awaitsReply ? o.partnerId : null}, last_activity_at = now()
     where id = ${threadId}`;
 }

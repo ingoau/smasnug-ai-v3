@@ -130,15 +130,38 @@ export async function placeTargetFor(threadId: string, messageTs: readonly strin
   return null;
 }
 
-/** True when a plan card in this message still has runs going (it must keep re-rendering there). */
-export async function messageHasLiveCard(channelId: string, messageTs: string): Promise<boolean> {
+/** True when a plan card in this message (other than turn `exceptTurnId`'s) still has runs going: it must keep re-rendering there. */
+export async function messageHasLiveCard(channelId: string, messageTs: string, exceptTurnId: number): Promise<boolean> {
   const [row] = await sql<{ live: boolean }[]>`
     select exists (select 1 from cards c join runs r on r.card_id = c.id
-                   where c.channel_id = ${channelId} and c.message_ts = ${messageTs} and r.status in ('queued', 'running')) as live`;
+                   where c.channel_id = ${channelId} and c.message_ts = ${messageTs} and c.turn_id is distinct from ${exceptTurnId}
+                     and r.status in ('queued', 'running')) as live`;
   return Boolean(row?.live);
 }
 
-/** Plan cards living in a message lose it (a reply placed into that message brings its own card, or none). */
-export async function detachMessageCards(channelId: string, messageTs: string): Promise<void> {
-  await sql`update cards set message_ts = null where channel_id = ${channelId} and message_ts = ${messageTs}`;
+/**
+ * Earlier plan cards living in a message lose it (a reply placed into that message brings its own card, or none);
+ * turn `exceptTurnId`'s own card stays (a retried turn). Returns the detached card ids.
+ */
+export async function detachMessageCards(channelId: string, messageTs: string, exceptTurnId: number): Promise<number[]> {
+  const rows = await sql<{ id: number }[]>`
+    update cards set message_ts = null where channel_id = ${channelId} and message_ts = ${messageTs} and turn_id is distinct from ${exceptTurnId}
+    returning id`;
+  return rows.map((r) => Number(r.id));
+}
+
+/** Undo detachMessageCards (the placed reply didn't go in). */
+export async function reattachMessageCards(ids: number[], messageTs: string): Promise<void> {
+  if (ids.length) await sql`update cards set message_ts = ${messageTs} where id in ${sql(ids)} and message_ts is null`;
+}
+
+/** The reply text on a row only (no card update): a reply placed into its message. */
+export async function setReplyText(id: number, text: string): Promise<void> {
+  await sql`update reply_buttons set reply_text = ${text} where id = ${id}`;
+}
+
+/** True if a chat.postMessage with this idempotency key went out before (a retried turn's earlier attempt). */
+export async function postedBefore(idempotencyKey: string): Promise<boolean> {
+  const [row] = await sql`select 1 from idempotency_keys where key = ${`chat.postMessage:${idempotencyKey}`} and result is not null`;
+  return Boolean(row);
 }
