@@ -73,26 +73,44 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   - Slack invites the origin's author. `is_private` is omitted, so privacy follows the origin.
   - A DM origin always creates a private channel.
   - `private: true` makes a channel from a public origin private.
+  - *Stage 3:* Slack refuses a DM as `origin_channel_id`, so a DM origin is created private with no origin link and
+    the requester is invited with `conversations.invite`. The row still records the origin message (for the
+    "Forked from" link and the parent thread).
 - **Invites:**
   - The agent may invite members of the origin conversation directly.
   - Anyone else needs a confirm button pressed by the requester, because they would see carried-over context.
   - When the origin is a DM, everyone invited needs that confirmation.
+  - *Stage 3:* the confirmation is an ephemeral prompt to the requester in the source thread (Invite / Don't invite,
+    `cc_invite:*`); the speaker is always invited (explicitly unless Slack already invites them as the origin's author).
 - **Fork:**
   - The bot writes a frozen summary of the source thread up to the fork point and posts it as the channel's first
     message ("Forked from <link>").
   - The latest user message is then answered in the channel.
   - The source thread gets a one-line link, and the current turn ends.
   - The source thread carries on as normal.
+  - *Stage 3:* the summary is written before the channel is created (one children's-model call, built on the
+    thread's rolling summary when there is one, `src/features/code-channels/seed.ts`). The seed is an ordinary bot
+    post. The latest user message is then posted, quoted, as a *parent post* (custom username + the parent marker):
+    when Slack delivers it, intake starts the channel's turn for its author, so it goes through consent, limits, the
+    thread lock and status like any message. The tool posts the link in the source thread and ends the turn
+    (`FrontTurnState.endRequested`).
 - **Brief:** the brief is posted as the first message. The bot runs one ordinary turn on it (which may spawn
   subagents or sandboxes), then waits for people.
+  - *Stage 3:* the brief is that parent post (same mechanism as the fork hand-off); the current turn goes on and
+    tells the speaker with the link.
 - **The button:** the front agent can add a "Move to a code channel" action button (`move_to_code_channel`)
   to any reply when it judges the thread is drifting off topic, and may do so more than once per thread.
   - Anyone in the thread can press it.
   - The origin is the reply carrying the button, so the presser and the original requester are invited explicitly.
   - The seed is posted and the bot waits without starting a turn.
   - The reply's button area changes to "Moved → <link to the first message>".
+  - *Stage 3:* a button action's outcome can carry a `note` that replaces the pressed note; actions can default
+    to `who: anyone` (`ButtonActionDef.who`). The front agent sees a one-line offer in its turn message whenever
+    the feature is on outside code channels; the details are the `code-channels` skill.
 - **Adoption:** a code channel created from Slack's own UI is adopted on the bot's first message event there.
   If it has an `origin_link`, it is treated as a fork of that message's thread.
+  - *Stage 3:* its seed summary is written on its first turn (when the origin's thread is known to the bot); it is
+    shown in the prompt, not posted.
 
 ### Inside the channel
 - **Conversation:** top-level messages form one conversation, `threadId = ${channel}:0`.
@@ -134,6 +152,10 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   - `/archive` (any member): posts a closing summary, reports to the parent, archives.
   - `/rename <title>`: calls `agents.sessions.rename`.
 - **Source thread:** the agent can still read it under the private-link rules.
+- *Stage 3, prompt:* a turn in a code channel gets a `<code_channel>` section (name, kind, brief or seed summary,
+  parent thread link); a parent thread lists its live channels in `<code_channels>`. Parent posts render as
+  "[bot] smasnug ai · from #x (the parent thread's agent …)", not "(you)". `set_view` checks the limits before
+  calling Slack (complete HTML documents, ≤ 1 MB, ≤ 20 https CSP origins, ≤ 10 tabs, canvases made in this channel).
 
 ### Parent link
 - **Ownership:** the thread that opened the channel is its parent. Its `code_channels` row links the two.

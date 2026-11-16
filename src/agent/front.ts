@@ -43,6 +43,7 @@ import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 import { saveTrace, TraceRecorder } from './trace.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
+import { hiddenToolsFor, loadCodeChannelTurnContext, moveButtonNote, NO_CODE_CHANNELS, renderChildrenSection, renderHereSection, type CodeChannelTurnContext } from '../features/code-channels/turn-context.js';
 
 export interface TurnIO {
   /** Messages pushed to this turn's inbox since the last drain (same author). Call before every model step. */
@@ -331,9 +332,16 @@ function section(tag: string, body: string, attrs = ''): string {
   return body.trim() ? `<${tag}${attrs}>\n${body.trim()}\n</${tag}>` : '';
 }
 
-async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; outcome?: { fallback: string | null } }> {
+async function buildTurnMessage(
+  turn: TurnRow,
+  speaker: Speaker,
+  viewingChannelId?: string | null,
+  timing = new TurnTiming(),
+  session?: SessionInfo | null,
+  codeChannels: CodeChannelTurnContext = NO_CODE_CHANNELS,
+): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; outcome?: { fallback: string | null } }> {
   const { channelId } = parseThreadId(turn.threadId);
-  const [memory, snapshot, ctx, dj, self, conversation, pending, quotas] = await Promise.all([
+  const [memory, snapshot, ctx, dj, self, conversation, pending, quotas, codeChannelHere] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId, { threadId: turn.threadId })).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
     timing.span('ctx_thread', () => renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs, timing })),
@@ -342,6 +350,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     timing.span('ctx_conversation', () => getConversationInfo(channelId)).catch((err) => (log.warn({ err }, 'getConversationInfo failed'), null)),
     timing.span('ctx_pending', () => loadPendingActions(turn.authorId)).catch((err) => (log.warn({ err }, 'loadPendingActions failed'), null)),
     timing.span('ctx_quota', () => userQuotaStates(turn.authorId)).catch((err) => (log.debug({ err }, 'userQuotaStates failed'), [])),
+    renderHereSection(codeChannels).catch((err) => (log.warn({ err }, 'renderHereSection failed'), '')),
   ]);
   const participants = await timing
     .span('ctx_participants', () => renderParticipantsSection(ctx.participantIds, turn.authorId, self?.userId))
@@ -353,6 +362,8 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
   // summary updates), then the speaker / thread state, then the clock, then what this turn responds to. The
   // conversation itself (channel, topic, members) changes least, so it comes first.
   parts.push(section('conversation', conversation ? renderConversation(conversation) : '', ' note="Where this conversation happens. Topic and purpose are user-written."'));
+  // Code channels (docs/code-channels.md): what this channel is, when the turn is in one.
+  parts.push(section('code_channel', codeChannelHere));
   parts.push(
     section(
       'thread_summary',
@@ -399,6 +410,9 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     );
   }
   parts.push(section('thread', ctx.threadFacts ?? ''));
+  parts.push(section('code_channels', renderChildrenSection(codeChannels, now)));
+  const moveNote = moveButtonNote(codeChannels);
+  if (moveNote) parts.push(moveNote);
   parts.push(section('pending_actions', pending ? renderPendingActions(pending, now) : '', ' note="The speaker\'s own pending confirmations and running reminders / watches."'));
   parts.push(section('low_quota', lowQuotaLines(quotas), ' note="The speaker\'s limits that are nearly used up. Plan around them; if one runs out, tell them briefly."'));
   parts.push(section('current_time', renderNow(now, speaker.tz)));
@@ -698,7 +712,10 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     [EXTRAS.defaultReactTs]: latestTs(turn.messageTs),
     // EXTRAS.queueUserImage deliberately unset: Luna accepts images in tool results.
   };
+  // Code channels: which of their tools apply here (none when switched off; no nesting) and what the prompt says.
+  const codeChannels = await loadCodeChannelTurnContext(turn.threadId);
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, abortSignal: stopAbort.signal, extras });
+  for (const name of hiddenToolsFor(codeChannels)) delete tools[name];
   recordReactVisibility(tools, state);
   // Coding agents change the bot's own code: only offered in the admin's own message turns when configured (not in
   // synthesis / scheduled turns, whose input is other content; re-checked on use).
@@ -710,7 +727,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     timing.span('ctx_speaker', () => speakerInfo(turn.authorId)),
     loadSessionInfo(turn.threadId).catch((err) => (log.warn({ err }, 'loadSessionInfo failed'), null)),
   ]);
-  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session)]);
+  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
   timing.mark('context_built');
   timing.set('prompt_chars', system.length + built.text.length);
   const messages: ModelMessage[] = [{ role: 'user', content: built.text }];
@@ -796,6 +813,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
         stopWhen: [
           stepCountIs(MAX_STEPS - earlierSteps),
           hasToolCall('end_turn'),
+          // A tool finished the turn's work itself (open_code_channel with fork moved the conversation).
+          () => state.endRequested === true,
           ({ steps }) => {
             const last = steps.at(-1);
             return Boolean(last && endsTurnAfterStep(last.toolCalls as StepCall[], last.toolResults as StepResultPart[]));
