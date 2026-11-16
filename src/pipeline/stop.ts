@@ -32,6 +32,22 @@ export async function requestThreadStop(threadId: string, at = Date.now()): Prom
   await redis.set(stopKey(threadId), String(at), 'EX', STOP_TTL_S);
 }
 
+/**
+ * A native stop (Slack's stop button) in a code channel's conversation: Slack wants no further `agents.*` calls for
+ * that context, so the turn it stopped must not set the status when it finishes (thread-run.ts).
+ */
+const nativeStopKey = (threadId: string) => `thread:${threadId}:stop:native`;
+
+export async function recordNativeStop(threadId: string, at = Date.now()): Promise<void> {
+  await redis.set(nativeStopKey(threadId), String(at), 'EX', STOP_TTL_S);
+}
+
+/** True if a native stop was recorded for the thread after `sinceMs`. Fails closed to false. */
+export async function nativeStopRequestedSince(threadId: string, sinceMs: number): Promise<boolean> {
+  const v = Number(await redis.get(nativeStopKey(threadId)).catch(() => null));
+  return Number.isFinite(v) && v > sinceMs;
+}
+
 /** True if a stop was requested for the thread after `sinceMs` (i.e. while a turn started then was running). */
 export async function stopRequestedSince(threadId: string, sinceMs: number): Promise<boolean> {
   const v = Number(await redis.get(stopKey(threadId)));
@@ -102,7 +118,11 @@ export async function handleAgentSessionStopped(ev: AgentSessionStoppedEvent, op
   // only reduces activity); the guard decides whether we also post the confirmation.
   const entry = await guardEntry(user, undefined, { countMessage: false, allowSuspended: true });
 
-  await requestThreadStop(threadId);
+  const nativeInCodeChannel = Boolean(opts.native) && isCodeChannelRoot(threadTs);
+  const at = Date.now();
+  // Recorded before the stop itself, so the stopped turn sees it by the time it notices the stop.
+  if (nativeInCodeChannel) await recordNativeStop(threadId, at);
+  await requestThreadStop(threadId, at);
   await clearBatch(threadId, user);
   const thread = await getThread(threadId);
   let droppedTurns: number[] = [];
@@ -117,7 +137,7 @@ export async function handleAgentSessionStopped(ev: AgentSessionStoppedEvent, op
   log.info({ threadId, user, droppedTurns }, 'agent session stopped');
 
   // Back to `active` — or what a DM session rests in (`suspended` while a send confirmation is pending).
-  if (!(opts.native && isCodeChannelRoot(threadTs))) await restoreSessionStatus(threadId, user);
+  if (!nativeInCodeChannel) await restoreSessionStatus(threadId, user);
   if (!entry.ok) return;
   try {
     await slackCall(

@@ -19,7 +19,7 @@ import { claimNextTurn, drainInbox, ensureThreadRun, finishTurn, hasPendingTurns
 import { adoptIntakeStatus, clearIntakeStatus, noteStatusCleared, setSessionStatus, trackTurnStatus, TurnStatus, type FinalSessionStatus } from './session-status.js';
 import { removeOpenActivity } from '../agent/activity-registry.js';
 import { finalSessionStatus, isNotedSuspended, noteSessionSettled, noteSessionSuspended, resumeSuspendedSession } from './agent-session.js';
-import { stopRequestedSince } from './stop.js';
+import { nativeStopRequestedSince, stopRequestedSince } from './stop.js';
 import { hasPendingHumanInput } from './debounce.js';
 import { enqueue, QUEUE } from '../core/queues.js';
 import { currentlyViewing } from './view-context.js';
@@ -144,14 +144,17 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
   } finally {
     // DMs may end `suspended` (a send confirmation is pending) or `closed` (leave_thread); else `active`.
     final = await finalSessionStatus(turn.threadId, Number(turn.id)).catch((err) => (log.warn({ err }, 'finalSessionStatus failed'), 'active' as const));
-    await indicator.finish(final);
+    // A native stop in a code channel's conversation: Slack wants no further agents.* calls there, so the stopped
+    // turn leaves the status alone (stop.ts handleAgentSessionStopped skips its restore for the same reason).
+    const silent = isCodeChannelRoot(threadTs) && (await nativeStopRequestedSince(turn.threadId, started));
+    await indicator.finish(final, { silent });
     untrack();
     // Resume promptly when the confirmation expires (not only at the next expiry sweep).
     if (final === 'suspended') await noteSessionSuspended(turn.threadId);
     else if (indicator.isShown) await noteSessionSettled(turn.threadId);
     // This turn cleared the indicator (any intake status with it); a turn that never showed one still takes back an
     // intake status left for messages that ended up in its inbox.
-    if (indicator.isShown) await noteStatusCleared(turn.threadId);
+    if (indicator.isShown || silent) await noteStatusCleared(turn.threadId);
     else await clearIntakeStatus(turn.threadId, turn.authorId, final);
     const followUp = await finishTurn(turn.id, status);
     await appendEvent(turn.threadId, 'turn_finished', 'system', {

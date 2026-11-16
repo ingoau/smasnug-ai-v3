@@ -214,6 +214,24 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     expect(calls.filter((c) => c.method.startsWith('agents.'))).toEqual([]);
   });
 
+  it('a native stop during a :0 turn: the stopped turn sets no status when it finishes', async () => {
+    await makeCodeChannel();
+    await sql`insert into threads (id, channel_id, thread_ts) values (${CONV}, ${C}, '0') on conflict do nothing`;
+    const ts = nextTs();
+    await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> long job', ts }));
+    const [dj] = await debounceJobs();
+    await processDebounce(job(dj!));
+    run.mockImplementation(async () => {
+      // Wait until the turn's `processing` went out, then press Slack's stop button.
+      for (let i = 0; i < 50 && !(await fakeCalls()).some((c) => c.method === 'agents.sessions.setStatus'); i++) await new Promise((r) => setTimeout(r, 20));
+      await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'agent_session_stopped', channel: C, user: 'U1', event_ts: nextTs() } } }));
+    });
+    await processThreadRun(job({ threadId: CONV }));
+    expect(run).toHaveBeenCalledOnce();
+    const status = (await fakeCalls()).filter((c) => c.method === 'agents.sessions.setStatus').map((c) => c.args.status);
+    expect(status).toEqual(['processing']);
+  });
+
   it('message_stream_stopped is an alias of agent_session_stopped, and the pair Slack sends during the rename counts once', async () => {
     await makeCodeChannel();
     const ev = { channel: C, user: 'U1', event_ts: nextTs(), streaming_message_ts: ['1700000000.000050'] };

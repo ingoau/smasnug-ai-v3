@@ -125,12 +125,16 @@ export class TurnStatus {
     this.live = false;
   }
 
-  /** Set the final status (default `active`) if anything was shown, or if the turn asks for a non-default one. Idempotent. */
-  async finish(final: FinalSessionStatus = 'active'): Promise<void> {
+  /**
+   * Set the final status (default `active`) if anything was shown, or if the turn asks for a non-default one.
+   * `silent`: set nothing (a native stop in a code channel: Slack wants no further agents.* calls). Idempotent.
+   */
+  async finish(final: FinalSessionStatus = 'active', opts: { silent?: boolean } = {}): Promise<void> {
     if (this.finished) return this.chain;
     this.finished = true;
     this.closed = true;
     this.chain = this.chain.then(async () => {
+      if (opts.silent) return;
       if (this.shown || final !== 'active') await this.safe(() => this.transport.lifecycle(final));
     });
     return this.chain;

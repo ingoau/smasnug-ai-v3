@@ -109,6 +109,16 @@ describe('TurnStatus', () => {
     expect(b.calls).toEqual(['processing', 'active']);
   });
 
+  it('finish({ silent }) sets nothing (a native stop in a code channel), even a non-default final status', async () => {
+    const a = make();
+    await a.status.start();
+    await a.status.finish('active', { silent: true });
+    expect(a.calls).toEqual(['processing']);
+    const b = make();
+    await b.status.finish('closed', { silent: true });
+    expect(b.calls).toEqual([]);
+  });
+
   it('final status: suspended / closed replace active, and apply even when nothing was shown', async () => {
     const a = make();
     await a.status.start();
