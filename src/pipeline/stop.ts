@@ -39,7 +39,8 @@ export async function stopRequestedSince(threadId: string, sinceMs: number): Pro
 }
 
 export interface AgentSessionStoppedEvent {
-  type: 'agent_session_stopped';
+  /** `message_stream_stopped` is the event's old name; Slack sends both while the rename rolls out. */
+  type: 'agent_session_stopped' | 'message_stream_stopped';
   channel?: string;
   thread_ts?: string;
   user?: string;
@@ -55,6 +56,34 @@ export async function stoppedThreadId(channel: string, threadTs: string | undefi
   if (threadTs) return threadIdOf(channel, threadTs);
   if (channel.startsWith('D') || !(await codeChannelsEnabled())) return null;
   return (await isCodeChannel(channel).catch(() => false)) ? codeChannelThreadId(channel) : null;
+}
+
+/** Both names of one stop arrive within moments of each other: only the first within this window counts. */
+const NATIVE_STOP_DEDUPE_MS = 15_000;
+
+/**
+ * The dedupe key of a native stop (pure): the same click under either event name maps to the same key (channel,
+ * thread, user, and the streams it halted when Slack lists them).
+ */
+export function nativeStopDedupeKey(ev: Pick<AgentSessionStoppedEvent, 'channel' | 'thread_ts' | 'user' | 'streaming_message_ts'>): string {
+  const streams = [...(ev.streaming_message_ts ?? [])].sort().join(',');
+  return `stop:native:${ev.channel ?? ''}:${ev.thread_ts ?? '0'}:${ev.user ?? ''}:${streams}`;
+}
+
+/**
+ * A native stop event from Slack (`agent_session_stopped` or its old name `message_stream_stopped`, which Slack
+ * fires as well during the rename): handled once. Fail open (a Redis error handles it).
+ */
+export async function handleNativeStopEvent(ev: AgentSessionStoppedEvent): Promise<void> {
+  const first = await redis
+    .set(nativeStopDedupeKey(ev), ev.type, 'PX', NATIVE_STOP_DEDUPE_MS, 'NX')
+    .then((r) => r === 'OK')
+    .catch(() => true);
+  if (!first) {
+    log.debug({ type: ev.type, channel: ev.channel }, 'duplicate native stop event ignored');
+    return;
+  }
+  return handleAgentSessionStopped(ev, { native: true });
 }
 
 /**
