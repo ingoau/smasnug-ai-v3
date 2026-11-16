@@ -189,7 +189,13 @@ async function close(row: CodeChannel, i: CloseInput): Promise<CloseResult> {
       return null;
     });
     clean = summary ? neutralizeBroadcasts(summary) : null;
-    if (clean) await saveClosingSummary(row.channelId, clean);
+    // Kept only while nobody has written since the row was read (a message clears it and makes it stale).
+    if (clean) await saveClosingSummary(row.channelId, clean, row.lastActivityAt);
+  }
+  // The summary is a model call: a message that arrived meanwhile makes the channel live again, so the sweep stops.
+  if (i.reason === 'sweep') {
+    const fresh = await getCodeChannel(row.channelId);
+    if (!fresh || sweepAction(fresh, i.now ?? new Date()) !== 'archive') return { ok: false, text: 'This channel is no longer idle.' };
   }
   const key = `cc-close:${row.channelId}:${i.attemptKey}`;
   let summaryTs: string | null = null;

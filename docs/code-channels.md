@@ -244,7 +244,9 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   earlier → the closing flow (a sweep that was down warns first instead of archiving an hour after the warning).
   Any human message or parent post resets `last_activity_at` and clears `warned_at` (`touchCodeChannel`).
   The sweep re-reads each row before acting: the warning is only recorded while the row is still 6 days idle, and a
-  sweep close re-runs `sweepAction` on the fresh row under the close lock, so a message since the listing wins.
+  sweep close re-runs `sweepAction` on the fresh row under the close lock, so a message since the listing wins; it
+  re-reads the row once more after the closing summary (a model call) and stops if a message came in meanwhile. The
+  summary is kept only if `last_activity_at` is still what the close read (`saveClosingSummary`).
   A failing sweep close keeps its summary (`closing_summary`, migration 348; later attempts reuse it instead of a
   new model call) and backs off (`close_failures`, `close_retry_at`: 2 h, 4 h, 8 h, …); it gives up after
   `CLOSE_MAX_ATTEMPTS` (5), or at once for a refusal that won't change (`unavailable`, `not_allowed`,

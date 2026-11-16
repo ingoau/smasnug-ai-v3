@@ -209,6 +209,23 @@ describe('code channels: lifecycle', () => {
     expect((await getCodeChannel(row.channelId))!.archivedAt).toBeNull();
   });
 
+  it('sweep: a message that arrives while the closing summary is written stops the archive (and the summary is not kept)', async () => {
+    const row = await codeChannel();
+    await sql`update code_channels set last_activity_at = now() - interval '7 days 1 hour', warned_at = now() - interval '25 hours' where channel_id = ${row.channelId}`;
+    const { touchCodeChannel } = await import('./store.js');
+    vi.mocked(generateText).mockImplementationOnce((async () => {
+      await touchCodeChannel(row.channelId);
+      return { text: '- stale summary', usage: { inputTokens: 1, outputTokens: 1 } };
+    }) as any);
+    const res = await closeCodeChannel({ channelId: row.channelId, actor: null, reason: 'sweep', attemptKey: 'sweep:midway' });
+    expect(res).toMatchObject({ ok: false, text: expect.stringMatching(/no longer idle/) });
+    expect(generateText).toHaveBeenCalledOnce();
+    expect(callsFor(row.channelId)).toEqual([]);
+    const r = (await getCodeChannel(row.channelId))!;
+    expect(r.archivedAt).toBeNull();
+    expect(r.closingSummary).toBeNull();
+  });
+
   it('sweep: a failing archive keeps its summary, backs off, and stops (at once for a refusal that will not change)', async () => {
     const row = await codeChannel();
     const idle = () => sql`update code_channels set last_activity_at = now() - interval '7 days 1 hour', warned_at = now() - interval '25 hours' where channel_id = ${row.channelId}`;

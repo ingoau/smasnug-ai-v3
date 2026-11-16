@@ -170,8 +170,13 @@ export async function markCodeChannelWarned(channelId: string, idleMs: number): 
 }
 
 /** Keep the closing summary a close wrote, for the next attempt if this one fails. */
-export async function saveClosingSummary(channelId: string, summary: string): Promise<void> {
-  await sql`update code_channels set closing_summary = ${summary} where channel_id = ${channelId} and archived_at is null`;
+export async function saveClosingSummary(channelId: string, summary: string, lastActivityAt?: Date): Promise<boolean> {
+  const rows = await sql`
+    update code_channels set closing_summary = ${summary}
+    where channel_id = ${channelId} and archived_at is null
+      ${lastActivityAt ? sql`and date_trunc('milliseconds', last_activity_at) = ${lastActivityAt}` : sql``}
+    returning channel_id`;
+  return rows.length > 0;
 }
 
 /**
