@@ -67,6 +67,13 @@ registerButtonAction({
   check: async (_ctx, a) => (a.say === 'no' ? 'not allowed' : null),
   run: async (_ctx, a) => (a.say === 'boom' ? Promise.reject(new Error('kaput')) : { ok: true, text: `said ${a.say}` }),
 });
+registerButtonAction({
+  name: 'unit_open',
+  args: z.object({}),
+  who: 'anyone',
+  check: async () => null,
+  run: async () => ({ ok: true, text: 'opened' }),
+});
 
 describe('reply buttons: labels and schema', () => {
   it(`shows labels as written: only ping neutralising, Slack's 75-char limit and at most ${MAX_BUTTONS}`, () => {
@@ -169,6 +176,7 @@ describe('reply buttons: types', () => {
     expect(parseButtonResponse({ kind: 'action', tool: 't' })).toBeNull();
     expect(parseButtonOutcome({ ok: false, text: 'x' })).toEqual({ ok: false, text: 'x' });
     expect(parseButtonOutcome({ text: 'x' })).toBeNull();
+    expect(parseButtonOutcome({ ok: true, text: 'x', note: 'Moved → <#C1>' })).toEqual({ ok: true, text: 'x', note: 'Moved → <#C1>' });
   });
 
   it('prompt buttons (also with place / who) start turns; the rest go to reply:quiet', () => {
@@ -181,6 +189,9 @@ describe('reply buttons: types', () => {
     expect(pressedText(b)).toBe('<@U1> pressed *Up* · working on it…');
     expect(pressedText({ ...b, outcome: { ok: true, text: '' } })).toBe('<@U1> pressed *Up* · done ✓');
     expect(pressedText({ ...b, outcome: { ok: false, text: '' } })).toBe("<@U1> pressed *Up* · didn't work");
+    // An action that knows what it made says so instead (only once it worked).
+    expect(pressedText({ ...b, outcome: { ok: true, text: '', note: 'Moved → <#C1>' } })).toBe('Moved → <#C1>');
+    expect(pressedText({ ...b, outcome: { ok: false, text: '', note: 'Moved → <#C1>' } })).toBe("<@U1> pressed *Up* · didn't work");
     expect(pressedText({ ...b, responses: [null] })).toBe('<@U1> pressed *Up*');
     // Repeated labels: the stored index decides which button's response it was.
     const dup = { id: 1, labels: ['Up', 'Up'], responses: [null, { kind: 'action' as const, tool: 't', args: '{}' }], pressedBy: 'U1', pressedLabel: 'Up', outcome: { ok: true, text: '' } };
@@ -208,6 +219,13 @@ describe('reply buttons: actions', () => {
     expect(notes).toHaveLength(3);
     expect(notes[0]).toContain('unit_echo');
     expect(notes[2]).toContain('not allowed');
+  });
+
+  it("an action's default presser applies when the button doesn't say who", async () => {
+    const ctx = { threadId: 'C1:1.1', channelId: 'C1', speakerId: 'U1' };
+    const r = { kind: 'action' as const, tool: 'unit_open', args: '{}' };
+    expect((await prepareButtonActions(['x'], [r], ctx)).responses).toEqual([{ ...r, who: 'anyone' }]);
+    expect((await prepareButtonActions(['x'], [{ ...r, who: 'requester' as const }], ctx)).responses).toEqual([{ ...r, who: 'requester' }]);
   });
 
   it('run re-checks, runs, and turns throws into failed outcomes', async () => {

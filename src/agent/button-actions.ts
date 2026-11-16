@@ -10,7 +10,7 @@
  */
 import type { z } from 'zod';
 import { log } from '../log.js';
-import { buttonWho, type ButtonOutcome, type ButtonResponse } from './reply-buttons.js';
+import { buttonWho, type ButtonOutcome, type ButtonResponse, type ButtonWho } from './reply-buttons.js';
 
 export interface ButtonActionContext {
   threadId: string;
@@ -25,6 +25,11 @@ export interface ButtonActionDef<A = any> {
   /** The tool name the model refers to (`action.tool`). */
   name: string;
   args: z.ZodType<A>;
+  /**
+   * Who may press a button bound to this action when the reply doesn't say (`who`). Default: the requester (the
+   * person the reply answered), like every action button.
+   */
+  who?: ButtonWho;
   /** Null when the action can run with these arguments, else why not (said to the model / the presser). */
   check(ctx: ButtonActionContext, args: A): Promise<string | null>;
   run(ctx: ButtonActionContext & { key: string }, args: A): Promise<ButtonOutcome>;
@@ -77,7 +82,7 @@ export async function prepareButtonActions(labels: readonly string[], responses:
           return 'it could not be checked';
         });
       }
-      if (!problem) return r;
+      if (!problem) return !r.who && !('error' in p) && p.def.who ? { ...r, who: p.def.who } : r;
       notes.push(`Button "${labels[i]}" can't run ${r.tool}: ${problem}. It starts a turn like a normal button instead.`);
       return buttonWho(r) === 'requester' ? ({ kind: 'prompt', who: 'requester' } as const) : null;
     }),

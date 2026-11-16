@@ -46,6 +46,11 @@ const PLACES = new Set<string>(['new', 'append', 'replace']);
 export interface ButtonOutcome {
   ok: boolean;
   text: string;
+  /**
+   * Shown instead of the "pressed · done ✓" note once it worked: what the press made, when the action knows it only
+   * after running (e.g. "Moved → <link>" for move_to_code_channel). Slack mrkdwn written by code, not the model.
+   */
+  note?: string;
 }
 /** Action arguments are cut off (and the action dropped) beyond this many JSON characters. */
 export const MAX_ACTION_ARGS_CHARS = 4000;
@@ -205,8 +210,9 @@ export function parseButtonResponse(v: unknown): ButtonResponse | null {
 /** A stored outcome → ButtonOutcome (null if absent / malformed). */
 export function parseButtonOutcome(v: unknown): ButtonOutcome | null {
   if (!v || typeof v !== 'object') return null;
-  const o = v as { ok?: unknown; text?: unknown };
-  return typeof o.ok === 'boolean' ? { ok: o.ok, text: typeof o.text === 'string' ? o.text : '' } : null;
+  const o = v as { ok?: unknown; text?: unknown; note?: unknown };
+  if (typeof o.ok !== 'boolean') return null;
+  return { ok: o.ok, text: typeof o.text === 'string' ? o.text : '', ...(typeof o.note === 'string' && o.note ? { note: o.note } : {}) };
 }
 
 export const buttonsBlockId = (id: number) => `reply_${id}_buttons`;
@@ -236,6 +242,7 @@ export function pressedText(b: Pick<ButtonsState, 'pressedBy' | 'pressedLabel'> 
   const r = b.labels ? pressedResponse({ labels: b.labels, pressedLabel: b.pressedLabel ?? null, responses: b.responses ?? null, pressedIndex: b.pressedIndex ?? null }) : null;
   if (r?.kind !== 'action') return base;
   if (!b.outcome) return `${base} · working on it…`;
+  if (b.outcome.ok && b.outcome.note) return b.outcome.note;
   return b.outcome.ok ? `${base} · done ✓` : `${base} · didn't work`;
 }
 
