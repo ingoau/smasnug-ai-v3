@@ -33,6 +33,8 @@ import {
   listIdleCodeChannels,
   markCodeChannelArchived,
   markCodeChannelWarned,
+  recordCloseFailure,
+  saveClosingSummary,
   unarchiveCodeChannel,
   type CodeChannel,
 } from './store.js';
@@ -105,6 +107,8 @@ export interface CloseInput {
    */
   attemptKey: string;
   abortSignal?: AbortSignal;
+  /** The sweep's clock (reason 'sweep': the decision is re-made on the fresh row against it). */
+  now?: Date;
 }
 
 export type CloseResult = { ok: true; summaryTs: string | null; alreadyArchived: boolean } | { ok: false; text: string };
@@ -152,22 +156,41 @@ export async function closeCodeChannel(i: CloseInput): Promise<CloseResult> {
     const row = await getCodeChannel(i.channelId);
     if (!row) return { ok: false, text: "That isn't a code channel." };
     if (row.archivedAt) return { ok: false, text: 'This channel is already archived.' };
+    // The sweep listed this row a while ago (and closes one channel after another, a model call each): someone may
+    // have written in it since. Decide again on the fresh row, under the lock.
+    if (i.reason === 'sweep' && sweepAction(row, i.now ?? new Date()) !== 'archive') return { ok: false, text: 'This channel is no longer idle.' };
     return await close(row, i);
   } catch (err) {
     log.error({ err, channelId: i.channelId }, 'closing a code channel failed');
+    if (i.reason === 'sweep') await backOffSweepClose(i.channelId, err).catch((e) => log.warn({ err: e, channelId: i.channelId }, 'recording a failed close failed'));
     return { ok: false, text: `Archiving failed: ${err instanceof CodeChannelError ? err.userMessage : `Slack error ${slackErrorCode(err) ?? 'unknown'}.`}` };
   } finally {
     if (locked) await redis.del(lockKey).catch(() => {});
   }
 }
 
+/** Refusals another attempt won't change: the sweep stops trying at once. */
+const FINAL_CLOSE_ERRORS = new Set(['unavailable', 'not_allowed', 'bad_request', 'gone']);
+
+/** A sweep close failed: back off, or give up (after CLOSE_MAX_ATTEMPTS, or at once for a final refusal). */
+async function backOffSweepClose(channelId: string, err: unknown): Promise<void> {
+  const final = err instanceof CodeChannelError && FINAL_CLOSE_ERRORS.has(err.kind);
+  const { failures, gaveUp } = await recordCloseFailure(channelId, { final });
+  if (gaveUp) log.warn({ channelId, failures, final, error: err instanceof CodeChannelError ? err.slackError : String(err) }, 'code channel sweep gave up archiving');
+}
+
 async function close(row: CodeChannel, i: CloseInput): Promise<CloseResult> {
   const threadId = row.threadId;
-  const summary = await generateClosingSummary({ threadId, userId: i.actor ?? row.requesterId, ...(i.abortSignal ? { abortSignal: i.abortSignal } : {}) }).catch((err) => {
-    log.warn({ err, channelId: row.channelId }, 'closing summary failed');
-    return null;
-  });
-  const clean = summary ? neutralizeBroadcasts(summary) : null;
+  // A failed earlier attempt already wrote it (nobody has written since: a message clears it).
+  let clean = row.closingSummary;
+  if (!clean) {
+    const summary = await generateClosingSummary({ threadId, userId: i.actor ?? row.requesterId, ...(i.abortSignal ? { abortSignal: i.abortSignal } : {}) }).catch((err) => {
+      log.warn({ err, channelId: row.channelId }, 'closing summary failed');
+      return null;
+    });
+    clean = summary ? neutralizeBroadcasts(summary) : null;
+    if (clean) await saveClosingSummary(row.channelId, clean);
+  }
   const key = `cc-close:${row.channelId}:${i.attemptKey}`;
   let summaryTs: string | null = null;
   try {
@@ -219,11 +242,13 @@ export function sweepAction(row: Pick<CodeChannel, 'lastActivityAt' | 'warnedAt'
 export async function sweepCodeChannels(now = new Date()): Promise<{ warned: number; archived: number }> {
   const out = { warned: 0, archived: 0 };
   if (!(await codeChannelsEnabled())) return out;
-  for (const row of await listIdleCodeChannels({ idleMs: WARN_AFTER_MS, warned: false })) {
-    if (sweepAction(row, now) !== 'warn') continue;
+  for (const listed of await listIdleCodeChannels({ idleMs: WARN_AFTER_MS, warned: false })) {
+    // Each warning is a few Slack calls: re-read the row so a message since the listing counts.
+    const row = await getCodeChannel(listed.channelId);
+    if (!row || sweepAction(row, now) !== 'warn') continue;
     try {
       await slackCall('chat.postMessage', { channel: row.channelId, text: warningText(), unfurl_links: false }, { idempotencyKey: `cc-warn:${row.channelId}:${new Date(row.lastActivityAt).getTime()}` });
-      if (!(await markCodeChannelWarned(row.channelId))) continue;
+      if (!(await markCodeChannelWarned(row.channelId, WARN_AFTER_MS))) continue;
       await appendEvent(row.threadId, 'code_channel_warned', null, {}).catch(() => {});
       await setSessionStatus(row.channelId, '0', 'suspended').catch(() => {});
       out.warned++;
@@ -232,9 +257,9 @@ export async function sweepCodeChannels(now = new Date()): Promise<{ warned: num
       if (slackErrorCode(err) === 'is_archived' || slackErrorCode(err) === 'channel_not_found') await markArchived(row.channelId, null, { reason: 'gone' });
     }
   }
-  for (const row of await listIdleCodeChannels({ idleMs: ARCHIVE_AFTER_MS, warned: true })) {
+  for (const row of await listIdleCodeChannels({ idleMs: ARCHIVE_AFTER_MS, warned: true, closable: true })) {
     if (sweepAction(row, now) !== 'archive') continue;
-    const res = await closeCodeChannel({ channelId: row.channelId, actor: null, reason: 'sweep', attemptKey: `sweep:${new Date(row.warnedAt!).getTime()}` });
+    const res = await closeCodeChannel({ channelId: row.channelId, actor: null, reason: 'sweep', attemptKey: `sweep:${new Date(row.warnedAt!).getTime()}`, now });
     if (res.ok) out.archived++;
   }
   if (out.warned || out.archived) log.info(out, 'code channel sweep');

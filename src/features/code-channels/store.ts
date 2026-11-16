@@ -32,7 +32,16 @@ export interface CodeChannel {
   lastActivityAt: Date;
   warnedAt: Date | null;
   archivedAt: Date | null;
+  /** The closing summary a failed close already wrote (reused by the next attempt; cleared by any message). */
+  closingSummary: string | null;
+  /** Failed sweep closes since the last message; the sweep stops at CLOSE_MAX_ATTEMPTS. */
+  closeFailures: number;
+  /** The sweep's next close attempt not before this. */
+  closeRetryAt: Date | null;
 }
+
+/** The sweep gives up closing a channel after this many failed attempts. */
+export const CLOSE_MAX_ATTEMPTS = 5;
 
 export interface NewCodeChannel {
   channelId: string;
@@ -121,12 +130,14 @@ export async function listChildCodeChannels(parentThreadId: string): Promise<Cod
  * Live (unarchived) channels with no activity for `idleMs`. `warned`: only ones already warned (true) / not yet
  * warned (false); omit for both. Oldest first.
  */
-export async function listIdleCodeChannels(opts: { idleMs: number; warned?: boolean; limit?: number }): Promise<CodeChannel[]> {
+export async function listIdleCodeChannels(opts: { idleMs: number; warned?: boolean; closable?: boolean; limit?: number }): Promise<CodeChannel[]> {
   const secs = Math.floor(opts.idleMs / 1000);
   const warned = opts.warned === undefined ? sql`` : opts.warned ? sql`and warned_at is not null` : sql`and warned_at is null`;
+  // `closable`: the sweep may try to close it now (not given up on, not backing off).
+  const closable = opts.closable ? sql`and close_failures < ${CLOSE_MAX_ATTEMPTS} and (close_retry_at is null or close_retry_at <= now())` : sql``;
   return sql<CodeChannel[]>`
     select * from code_channels
-    where archived_at is null and last_activity_at < now() - ${secs} * interval '1 second' ${warned}
+    where archived_at is null and last_activity_at < now() - ${secs} * interval '1 second' ${warned} ${closable}
     order by last_activity_at limit ${opts.limit ?? 100}`;
 }
 
@@ -136,7 +147,7 @@ export async function listIdleCodeChannels(opts: { idleMs: number; warned?: bool
  */
 export async function touchCodeChannel(channelId: string): Promise<{ wasWarned: boolean; wasArchived: boolean } | null> {
   const [row] = await sql<{ wasWarned: boolean; wasArchived: boolean }[]>`
-    update code_channels c set last_activity_at = now(), warned_at = null
+    update code_channels c set last_activity_at = now(), warned_at = null, closing_summary = null, close_failures = 0, close_retry_at = null
     from (select channel_id, warned_at is not null as was_warned, archived_at is not null as was_archived
           from code_channels where channel_id = ${channelId} for update) old
     where c.channel_id = old.channel_id
@@ -144,10 +155,38 @@ export async function touchCodeChannel(channelId: string): Promise<{ wasWarned: 
   return row ?? null;
 }
 
-/** The day-6 warning went out. False if it was already warned, archived or isn't recorded. */
-export async function markCodeChannelWarned(channelId: string): Promise<boolean> {
-  const rows = await sql`update code_channels set warned_at = now() where channel_id = ${channelId} and warned_at is null and archived_at is null returning channel_id`;
+/**
+ * The day-6 warning went out. False if it was already warned, archived, isn't recorded, or isn't idle for `idleMs`
+ * any more (someone wrote in it since the sweep listed it).
+ */
+export async function markCodeChannelWarned(channelId: string, idleMs: number): Promise<boolean> {
+  const secs = Math.floor(idleMs / 1000);
+  const rows = await sql`
+    update code_channels set warned_at = now()
+    where channel_id = ${channelId} and warned_at is null and archived_at is null
+      and last_activity_at <= now() - ${secs} * interval '1 second'
+    returning channel_id`;
   return rows.length > 0;
+}
+
+/** Keep the closing summary a close wrote, for the next attempt if this one fails. */
+export async function saveClosingSummary(channelId: string, summary: string): Promise<void> {
+  await sql`update code_channels set closing_summary = ${summary} where channel_id = ${channelId} and archived_at is null`;
+}
+
+/**
+ * A sweep close failed: count it and back off (2h, 4h, 8h, … before the next try); `final` (a refusal that won't
+ * change) gives up at once. Returns the failures so far and whether the sweep has given up.
+ */
+export async function recordCloseFailure(channelId: string, o: { final: boolean }): Promise<{ failures: number; gaveUp: boolean }> {
+  const [row] = await sql<{ closeFailures: number }[]>`
+    update code_channels
+    set close_failures = case when ${o.final} then ${CLOSE_MAX_ATTEMPTS} else least(close_failures + 1, ${CLOSE_MAX_ATTEMPTS}) end,
+        close_retry_at = now() + power(2, least(close_failures + 1, 10)) * interval '1 hour'
+    where channel_id = ${channelId}
+    returning close_failures`;
+  const failures = row?.closeFailures ?? CLOSE_MAX_ATTEMPTS;
+  return { failures, gaveUp: failures >= CLOSE_MAX_ATTEMPTS };
 }
 
 /** Archived (by the sweep, /archive or a request). False if already archived or not recorded. */
@@ -159,7 +198,8 @@ export async function markCodeChannelArchived(channelId: string): Promise<boolea
 /** Reopened in Slack and posted in: live again, clock restarted. False if it wasn't archived. */
 export async function unarchiveCodeChannel(channelId: string): Promise<boolean> {
   const rows = await sql`
-    update code_channels set archived_at = null, warned_at = null, last_activity_at = now()
+    update code_channels set archived_at = null, warned_at = null, last_activity_at = now(),
+                             closing_summary = null, close_failures = 0, close_retry_at = null
     where channel_id = ${channelId} and archived_at is not null returning channel_id`;
   if (rows.length) remember(channelId, true);
   return rows.length > 0;
@@ -179,8 +219,8 @@ export async function setCodeChannelSeedTs(channelId: string, seedTs: string): P
 export async function retainCodeChannels(retentionMs = limits.retentionMs): Promise<{ blanked: number; deleted: number }> {
   const secs = Math.floor(retentionMs / 1000);
   const blanked = await sql`
-    update code_channels set seed_summary = null, brief = null
-    where created_at < now() - ${secs} * interval '1 second' and (seed_summary is not null or brief is not null)
+    update code_channels set seed_summary = null, brief = null, closing_summary = null
+    where created_at < now() - ${secs} * interval '1 second' and (seed_summary is not null or brief is not null or closing_summary is not null)
     returning channel_id`;
   const deleted = await sql`
     delete from code_channels where archived_at is not null and last_activity_at < now() - ${secs} * interval '1 second'
@@ -196,8 +236,8 @@ export async function retainCodeChannels(retentionMs = limits.retentionMs): Prom
  */
 export async function forgetUserCodeChannelData(userId: string): Promise<number> {
   const rows = await sql`
-    update code_channels c set seed_summary = null, brief = null
-    where (c.seed_summary is not null or c.brief is not null)
+    update code_channels c set seed_summary = null, brief = null, closing_summary = null
+    where (c.seed_summary is not null or c.brief is not null or c.closing_summary is not null)
       and (c.created_by = ${userId} or c.requester_id = ${userId}
            or exists (select 1 from messages m where m.user_id = ${userId} and (m.thread_id = c.parent_thread_id or m.thread_id = c.thread_id)))
     returning channel_id`;

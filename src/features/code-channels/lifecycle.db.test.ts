@@ -26,7 +26,7 @@ import { processSlackEvent } from '../../pipeline/slack-events.js';
 import { finalSessionStatus } from '../../pipeline/agent-session.js';
 import { closeCodeChannel, sweepCodeChannels } from './lifecycle.js';
 import { setCodeChannelsDisabled } from './settings.js';
-import { createCodeChannelRow, getCodeChannel } from './store.js';
+import { CLOSE_MAX_ATTEMPTS, createCodeChannelRow, getCodeChannel } from './store.js';
 import { registerCodeChannelTools } from './tools.js';
 
 registerCodeChannelTools();
@@ -195,6 +195,57 @@ describe('code channels: lifecycle', () => {
     const { touchCodeChannel } = await import('./store.js');
     expect(await touchCodeChannel(quiet.channelId)).toMatchObject({ wasWarned: true });
     expect((await getCodeChannel(quiet.channelId))!.warnedAt).toBeNull();
+  });
+
+  it('sweep: a channel written in since the listing is not archived (the decision is re-made under the lock)', async () => {
+    const row = await codeChannel();
+    await sql`update code_channels set last_activity_at = now() - interval '7 days 1 hour', warned_at = now() - interval '25 hours' where channel_id = ${row.channelId}`;
+    const { touchCodeChannel } = await import('./store.js');
+    await touchCodeChannel(row.channelId);
+    const res = await closeCodeChannel({ channelId: row.channelId, actor: null, reason: 'sweep', attemptKey: 'sweep:stale' });
+    expect(res).toMatchObject({ ok: false, text: expect.stringMatching(/no longer idle/) });
+    expect(callsFor(row.channelId)).toEqual([]);
+    expect(generateText).not.toHaveBeenCalled();
+    expect((await getCodeChannel(row.channelId))!.archivedAt).toBeNull();
+  });
+
+  it('sweep: a failing archive keeps its summary, backs off, and stops (at once for a refusal that will not change)', async () => {
+    const row = await codeChannel();
+    const idle = () => sql`update code_channels set last_activity_at = now() - interval '7 days 1 hour', warned_at = now() - interval '25 hours' where channel_id = ${row.channelId}`;
+    await idle();
+    const archives = () => callsFor(row.channelId).filter((c) => c.method === 'agents.conversations.archive').length;
+
+    archiveError = 'internal_error';
+    await sweepCodeChannels();
+    let r = (await getCodeChannel(row.channelId))!;
+    expect(r.archivedAt).toBeNull();
+    expect(r.closeFailures).toBe(1);
+    expect(r.closeRetryAt!.getTime()).toBeGreaterThan(Date.now() + 3600_000);
+    expect(r.closingSummary).toContain('fixed the login bug');
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(archives()).toBe(1);
+
+    // Backing off: the next sweep leaves it alone.
+    await sweepCodeChannels();
+    expect(archives()).toBe(1);
+
+    // Due again: the kept summary is reused (no second model call); a refusal stops the sweep for good.
+    await sql`update code_channels set close_retry_at = now() - interval '1 minute' where channel_id = ${row.channelId}`;
+    archiveError = 'not_authorized';
+    await sweepCodeChannels();
+    expect(generateText).toHaveBeenCalledTimes(1);
+    expect(archives()).toBe(2);
+    r = (await getCodeChannel(row.channelId))!;
+    expect(r.closeFailures).toBe(CLOSE_MAX_ATTEMPTS);
+    await sql`update code_channels set close_retry_at = now() - interval '1 minute' where channel_id = ${row.channelId}`;
+    await sweepCodeChannels();
+    expect(archives()).toBe(2);
+
+    // A message resets it all.
+    const { touchCodeChannel } = await import('./store.js');
+    await touchCodeChannel(row.channelId);
+    r = (await getCodeChannel(row.channelId))!;
+    expect(r).toMatchObject({ closeFailures: 0, closeRetryAt: null, closingSummary: null });
   });
 
   it('channel_unarchive reopens an archived code channel (live, clock restarted); channel_archive in Slack marks it archived', async () => {

@@ -227,6 +227,12 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   idle ≥ 6 days and not warned → the warning post, `suspended`, `warned_at`; idle ≥ 7 days and warned at least a day
   earlier → the closing flow (a sweep that was down warns first instead of archiving an hour after the warning).
   Any human message or parent post resets `last_activity_at` and clears `warned_at` (`touchCodeChannel`).
+  The sweep re-reads each row before acting: the warning is only recorded while the row is still 6 days idle, and a
+  sweep close re-runs `sweepAction` on the fresh row under the close lock, so a message since the listing wins.
+  A failing sweep close keeps its summary (`closing_summary`, migration 348; later attempts reuse it instead of a
+  new model call) and backs off (`close_failures`, `close_retry_at`: 2 h, 4 h, 8 h, …); it gives up after
+  `CLOSE_MAX_ATTEMPTS` (5), or at once for a refusal that won't change (`unavailable`, `not_allowed`,
+  `bad_request`, `gone`), and logs it. A message resets all three; retention and withdrawal blank the summary.
 - *Stage 4, reopening:* `channel_unarchive` / `group_unarchive` for a code channel unarchives the row (clock
   restarted, `code_channel_reopened`, resting status); a message in a channel still marked archived does the same
   (stage 2), whichever comes first. `channel_archive` / `group_archive` (archived in Slack, or our own archive's

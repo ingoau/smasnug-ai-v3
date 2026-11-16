@@ -88,8 +88,10 @@ describe('code_channels store', () => {
     await sql`update code_channels set last_activity_at = now() - interval '6 days 1 hour' where channel_id = ${row.channelId}`;
     const sixDays = 6 * 24 * 3600 * 1000;
     expect((await listIdleCodeChannels({ idleMs: sixDays, warned: false, limit: 1000 })).map((r) => r.channelId)).toContain(row.channelId);
-    expect(await markCodeChannelWarned(row.channelId)).toBe(true);
-    expect(await markCodeChannelWarned(row.channelId)).toBe(false);
+    // Written in since it was listed: no warning.
+    expect(await markCodeChannelWarned(row.channelId, 7 * 24 * 3600 * 1000)).toBe(false);
+    expect(await markCodeChannelWarned(row.channelId, sixDays)).toBe(true);
+    expect(await markCodeChannelWarned(row.channelId, sixDays)).toBe(false);
     expect((await listIdleCodeChannels({ idleMs: sixDays, warned: false, limit: 1000 })).map((r) => r.channelId)).not.toContain(row.channelId);
     expect((await listIdleCodeChannels({ idleMs: sixDays, warned: true, limit: 1000 })).map((r) => r.channelId)).toContain(row.channelId);
 
