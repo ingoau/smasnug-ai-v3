@@ -112,13 +112,17 @@ describe('code_channels store', () => {
     const a = (await newRow({ seedSummary: 'old seed', brief: 'old brief' })).row;
     const b = (await newRow()).row;
     const c = (await newRow()).row;
-    await sql`update code_channels set created_at = now() - interval '31 days' where channel_id = ${a.channelId}`;
+    const live = (await newRow({ seedSummary: 'live seed', brief: 'live brief' })).row;
+    await sql`update code_channels set created_at = now() - interval '40 days', last_activity_at = now() - interval '31 days' where channel_id = ${a.channelId}`;
+    // Opened long ago but still in use: its seed and brief stay.
+    await sql`update code_channels set created_at = now() - interval '40 days' where channel_id = ${live.channelId}`;
     await sql`update code_channels set archived_at = now(), last_activity_at = now() - interval '31 days' where channel_id = ${b.channelId}`;
     const counts = await retainCodeChannels(30 * 24 * 3600 * 1000);
     expect(counts.blanked).toBeGreaterThanOrEqual(1);
     const after = await getCodeChannel(a.channelId);
     expect(after?.seedSummary).toBeNull();
     expect(after?.brief).toBeNull();
+    expect(await getCodeChannel(live.channelId)).toMatchObject({ seedSummary: 'live seed', brief: 'live brief' });
     expect(await getCodeChannel(b.channelId)).toBeNull();
     // The thread's retention delete cascades.
     await sql`delete from threads where id = ${c.threadId}`;

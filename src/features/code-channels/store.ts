@@ -218,14 +218,15 @@ export async function setCodeChannelSeedTs(channelId: string, seedTs: string): P
 // ---- retention and withdrawal ----------------------------------------------------------------------------------
 
 /**
- * Retention step (runRetention): seed summaries and briefs older than the window are blanked, archived channels idle
- * past it are deleted. (Rows of channels whose conversation thread retention deleted already went by cascade.)
+ * Retention step (runRetention): the seed summary, brief and closing summary of a channel idle past the window are
+ * blanked (keyed on last activity, like a thread's own summary: a long-lived active channel keeps them), archived
+ * channels idle past it are deleted. (Rows of channels whose conversation thread retention deleted already went by cascade.)
  */
 export async function retainCodeChannels(retentionMs = limits.retentionMs): Promise<{ blanked: number; deleted: number }> {
   const secs = Math.floor(retentionMs / 1000);
   const blanked = await sql`
     update code_channels set seed_summary = null, brief = null, closing_summary = null
-    where created_at < now() - ${secs} * interval '1 second' and (seed_summary is not null or brief is not null or closing_summary is not null)
+    where last_activity_at < now() - ${secs} * interval '1 second' and (seed_summary is not null or brief is not null or closing_summary is not null)
     returning channel_id`;
   const deleted = await sql`
     delete from code_channels where archived_at is not null and last_activity_at < now() - ${secs} * interval '1 second'

@@ -227,6 +227,8 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
 - **Reopening:** if someone reopens the channel and posts, the bot resumes with the stored context and the
   clock restarts.
 - **Retention and withdrawal:** both cover `code_channels` rows and their seed summaries, the same as thread data.
+  Retention keys on `last_activity_at` (like a thread's summary): a channel idle past the window has its seed
+  summary, brief and closing summary blanked; an active one keeps them however old it is.
 - *Stage 4, closing* (`src/features/code-channels/lifecycle.ts`, `closeCodeChannel`; shared by `/archive`, the
   tool and the sweep):
   - One closing summary (children's model, over the `:0` conversation and its rolling summary;
