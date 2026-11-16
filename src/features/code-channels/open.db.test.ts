@@ -27,7 +27,8 @@ import { parseParentMessage } from './parent-message.js';
 import { setCodeChannelsDisabled } from './settings.js';
 import { getCodeChannel, getCodeChannelBySession } from './store.js';
 import { registerCodeChannelTools } from './tools.js';
-import { hiddenToolsFor, loadCodeChannelTurnContext } from './turn-context.js';
+import { askInDmMessage } from '../../tools/private-links.js';
+import { hiddenToolsFor, loadCodeChannelTurnContext, renderChildrenSection } from './turn-context.js';
 import { deriveSessionId } from './ids.js';
 
 registerCodeChannelTools();
@@ -339,6 +340,10 @@ describe('code channels: opening and the agent tools', () => {
       expect(member.children.map((c) => c.channelId)).toContain(row.channelId);
       const m = frontCtx(src.threadId, 'U0MEM');
       expect(await exec(m.tools.message_code_channel, { channel: `<#${row.channelId}>`, text: 'go on' })).toContain('Posted in');
+      // ...but reading it from a shared parent thread is the private-link rule's ask-in-a-DM, and it isn't named there.
+      expect(await exec(m.tools.ask_code_channel, { channel: `<#${row.channelId}>`, question: 'what is the status?' })).toBe(askInDmMessage('channel'));
+      expect(member.privateReadable).toBe(false);
+      expect(renderChildrenSection(member)).not.toContain(row.channelId);
     } finally {
       undo();
     }
