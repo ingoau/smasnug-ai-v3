@@ -132,6 +132,12 @@ const Env = z.object({
   WRANGLER_VERSION: z.string().default('4.148.0'),
   /** Hack Club Auth (identity verification check for sandbox access). */
   HCA_URL: z.string().default('https://auth.hackclub.com'),
+  /**
+   * Code channels (docs/code-channels.md, src/features/code-channels/): `1` turns the feature on. Off by default; the
+   * admin can also switch it off at runtime (the `code_channels_disabled` setting). Check `codeChannelsEnabled()`.
+   * Needs the manifest's `features.code_channels.enabled` and the `code_channels:manage` scope.
+   */
+  CODE_CHANNELS: z.enum(['0', '1']).default('0'),
 });
 
 export const env = Env.parse(process.env);
@@ -238,6 +244,11 @@ export const limits = {
   /** Speaker facts per turn at most (only relevant ones and preferences are injected: memory/render.ts selectFacts). */
   memoryInjectCap: 13,
   retentionMs: 30 * 24 * 60 * 60 * 1000,
+  /** Code channels (docs/code-channels.md, Lifecycle): no messages for this long → warning + `suspended`, then archive. */
+  codeChannelWarnMs: 6 * 24 * 60 * 60 * 1000,
+  codeChannelArchiveMs: 7 * 24 * 60 * 60 * 1000,
+  /** In-process cache of isCodeChannel answers (positive and negative). */
+  codeChannelCacheMs: 30_000,
   // per user
   userMessagesPerHour: 500,
   userConcurrentSubagents: 10,
