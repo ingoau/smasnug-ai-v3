@@ -159,18 +159,20 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     const { handlePrivacyAgree } = await import('./consent.js');
     await makeCodeChannel({ parent: true });
     const was = privacySettings.required;
+    const user = `U0NEW${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     privacySettings.required = true;
     try {
       const ts = nextTs();
-      const marker = { parentThreadId: PARENT, requesterId: 'U0NEW' };
+      const marker = { parentThreadId: PARENT, requesterId: user };
       expect(await acceptOwnParentPost(C, { ts, text: 'handed off', bot_id: 'BBOT', user: 'UBOT' }, marker)).toBe('held_for_consent');
       expect(await debounceJobs()).toEqual([]);
-      const prompt = (await fakeCalls()).find((c) => c.method === 'chat.postEphemeral' && c.args.user === 'U0NEW')!;
+      const prompt = (await fakeCalls()).find((c) => c.method === 'chat.postEphemeral' && c.args.user === user)!;
       expect(prompt.args).toMatchObject({ channel: 'C0PARENT', thread_ts: '1700000000.000001' });
-      await handlePrivacyAgree({ userId: 'U0NEW', actionId: 'privacy_agree', responseUrl: 'https://hooks.fake/x', body: {} });
-      expect(await takeBatch(CONV, 'U0NEW')).toEqual([{ ts, reason: 'parent' }]);
+      await handlePrivacyAgree({ userId: user, actionId: 'privacy_agree', responseUrl: 'https://hooks.fake/x', body: {} });
+      expect(await takeBatch(CONV, user)).toEqual([{ ts, reason: 'parent' }]);
     } finally {
       privacySettings.required = was;
+      await sql`delete from privacy_consent where user_id = ${user}`;
     }
   });
 
