@@ -203,6 +203,8 @@ describe.skipIf(!infra)('code channels (intake)', () => {
       if (args.channel === 'C0OTHER')
         return { ok: true, channel: { id: 'C0OTHER', name: 'their-agent', is_private: false, is_member: true, properties: { record_channel: { record_type: 'agent_channel' }, agent_session: { encoded_agent_bot_user_ids: ['UOTHERBOT'] } } } };
       if (args.channel === 'C0PLAIN') return { ok: true, channel: { id: 'C0PLAIN', name: 'plain', is_private: false, is_member: true } };
+      if (args.channel === 'C0NEST')
+        return { ok: true, channel: { id: 'C0NEST', name: 'nested', is_private: false, is_member: true, properties: { record_channel: { record_type: 'agent_channel' }, agent_session: { encoded_agent_bot_user_ids: ['UBOT'], origin_link: { channel_id: C, ts: '1700000000.000050' } } } } };
       return undefined;
     });
     try {
@@ -224,6 +226,13 @@ describe.skipIf(!infra)('code channels (intake)', () => {
       await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> hi', ts: plain }, 'C0PLAIN'));
       expect(await store.getCodeChannel('C0PLAIN')).toBeNull();
       expect(await takeBatch(`C0PLAIN:${plain}`, 'U1')).toEqual([{ ts: plain, reason: 'mention' }]);
+
+      // An origin in another code channel's conversation: adopted, but no parent link (no nesting).
+      await makeCodeChannel();
+      await sql`insert into threads (id, channel_id, thread_ts) values (${CONV}, ${C}, '0') on conflict do nothing`;
+      await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values (${C}, '1700000000.000050', ${CONV}, 'U1', 'top level')`;
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> hi', ts: nextTs() }, 'C0NEST'));
+      expect(await store.getCodeChannel('C0NEST')).toMatchObject({ kind: 'adopted', parentThreadId: null, originChannelId: C });
     } finally {
       rm();
     }

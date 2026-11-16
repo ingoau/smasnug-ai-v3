@@ -12,7 +12,7 @@
  * - Any human message (or parent post) resets the idle clock; a message in a channel marked archived means someone
  *   reopened it, so it's live again.
  */
-import { appendEvent, codeChannelThreadId, parseThreadId } from '../core/events.js';
+import { appendEvent, codeChannelThreadId, parseThreadId, slackThreadTs } from '../core/events.js';
 import { isChannelReadOnly } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
@@ -144,7 +144,8 @@ export async function acceptParentPost(channelId: string, msg: SlackMessage, mar
         channelId: parent.channelId,
         // The prompt throttle is per conversation, like intake's (a DM is one conversation).
         conversation: parent.channelId.startsWith('D') ? parent.channelId : marker.parentThreadId,
-        promptThreadTs: parent.threadTs,
+        // A `:0` conversation has no Slack thread: prompt at its top level.
+        promptThreadTs: slackThreadTs(parent.threadTs),
         messageTs: msg.ts,
         item: { kind: 'batch', threadId, ts: msg.ts, reason: 'parent' },
       });

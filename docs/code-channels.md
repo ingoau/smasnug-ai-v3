@@ -126,7 +126,8 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
     to `who: anyone` (`ButtonActionDef.who`). The front agent sees a one-line offer in its turn message whenever
     the feature is on outside code channels; the details are the `code-channels` skill.
 - **Adoption:** a code channel created from Slack's own UI is adopted on the bot's first message event there.
-  If it has an `origin_link`, it is treated as a fork of that message's thread.
+  If it has an `origin_link`, it is treated as a fork of that message's thread. An origin inside another code
+  channel (its `:0` conversation or a thread there) gives no parent thread: code channels don't nest.
   - *Stage 3:* its seed summary is written on its first turn (when the origin's thread is known to the bot); it is
     shown in the prompt, not posted.
 

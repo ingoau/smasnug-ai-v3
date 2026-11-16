@@ -7,14 +7,14 @@
  * written on its first turn (seed.ts ensureAdoptedSeed, from turn-context.ts). TODO(stage 4): register its slash
  * commands here.
  */
-import { appendEvent, codeChannelThreadId, threadIdOf } from '../../core/events.js';
+import { appendEvent, codeChannelThreadId, isCodeChannelRoot, parseThreadId, threadIdOf } from '../../core/events.js';
 import { getConversationInfo, type ConversationInfo } from '../../context/conversation.js';
 import { sql } from '../../db/index.js';
 import { getBotIdentity } from '../../core/slack.js';
 import { log } from '../../log.js';
 import { registerCodeChannelCommands } from './commands.js';
 import { deriveSessionId } from './ids.js';
-import { createCodeChannelRow, type CodeChannel } from './store.js';
+import { createCodeChannelRow, isCodeChannel, type CodeChannel } from './store.js';
 
 /** The thread we know the origin message by: its own stored thread, or the thread it roots. Null if we never saw it. */
 async function originThreadId(o: { channelId: string; ts: string }): Promise<string | null> {
@@ -23,6 +23,12 @@ async function originThreadId(o: { channelId: string; ts: string }): Promise<str
   const id = threadIdOf(o.channelId, o.ts);
   const [t] = await sql<{ id: string }[]>`select id from threads where id = ${id}`;
   return t ? id : null;
+}
+
+/** The origin thread is a code channel's conversation (`:0`) or a thread in one. */
+async function originInCodeChannel(threadId: string): Promise<boolean> {
+  const { channelId, threadTs } = parseThreadId(threadId);
+  return isCodeChannelRoot(threadTs) || (await isCodeChannel(channelId));
 }
 
 /** Pure: the agent channel's agent is this bot (its user id among `encoded_agent_bot_user_ids`). */
@@ -43,7 +49,9 @@ export async function adoptIfAgentChannel(channelId: string, requesterId: string
     return null;
   }
   const origin = info.agentChannel.originLink ?? null;
-  const parentThreadId = origin ? await originThreadId(origin).catch(() => null) : null;
+  // No nesting: an origin inside another code channel (its `:0` conversation or a thread there) gives no parent link.
+  const originThread = origin ? await originThreadId(origin).catch(() => null) : null;
+  const parentThreadId = originThread && !(await originInCodeChannel(originThread)) ? originThread : null;
   const { row, created } = await createCodeChannelRow({
     channelId,
     sessionId: deriveSessionId({ via: 'adopt', channelId }),
