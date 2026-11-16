@@ -5,9 +5,23 @@ derailing thread into one. Top-level messages in the channel form a single conve
 them without an @mention. Slack shows extra chrome around the conversation: a session status, view tabs, and
 per-channel slash commands. A channel is archived when its work is done.
 
-Status: built behind the `code_channels` kill switch (off by default). There is no plain-channel fallback: if
-Slack refuses `agents.conversations.create` (`feature_disabled`, `user_not_enabled`), the tool and button
-report that and nothing is created.
+Status: built (stages 1–4) behind the `code_channels` kill switch (off by default). There is no plain-channel
+fallback: if Slack refuses `agents.conversations.create` (`feature_disabled`, `user_not_enabled`), the tool and
+button report that and nothing is created.
+
+**Enabling it:** apply the manifest's code-channel parts (`features.code_channels.enabled`, the scopes
+`code_channels:manage`, `channels:manage`, `groups:write`, `metadata.message:read`, the `group_archive` /
+`group_unarchive` events; docs/slack-setup.md), reinstall the app, and set `CODE_CHANNELS=1` for the worker. The
+admin's runtime switch is the `code_channels_disabled` setting.
+
+**Code map:** `src/features/code-channels/` (api, store, open, tools, seed, commands, lifecycle, adopt,
+turn-context), `src/pipeline/code-channel-intake.ts` (routing, parent posts, activity), `skills/code-channels/`.
+
+**Not verified against Slack yet** (built from the partner docs, tested against the fake Slack): the shape of
+`agents.*` responses and errors, the `command` string a runtime slash command arrives with (both `/archive` and
+`archive` are handled), `encoded_agent_bot_user_ids` (format assumed: an array or comma-separated user ids),
+whether `channel_unarchive` / `group_unarchive` fire for code channels, and the payload of
+`message_stream_stopped`.
 
 ## Slack API (partner docs, read 2026-11-16)
 
@@ -151,6 +165,12 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
 - **Slash commands**, registered when the channel is created or adopted:
   - `/archive` (any member): posts a closing summary, reports to the parent, archives.
   - `/rename <title>`: calls `agents.sessions.rename`.
+  - *Stage 4:* `setCommands` runs right after the row is recorded (open.ts) and on adoption (adopt.ts),
+    `src/features/code-channels/commands.ts`. Invocations come through the ordinary slash path (ingress acks at once;
+    the worker dispatches `slash:/archive` / `slash:/rename`, with or without the slash). Outside a code channel
+    they answer ephemerally and do nothing. `/rename` titles are "smasnug ai: <title>" like creation; the row's
+    name follows. The agent's `archive_code_channel()` tool (code channels only, when someone asks) runs the same
+    closing flow and ends the turn.
 - **Source thread:** the agent can still read it under the private-link rules.
 - *Stage 3, prompt:* a turn in a code channel gets a `<code_channel>` section (name, kind, brief or seed summary,
   parent thread link); a parent thread lists its live channels in `<code_channels>`. Parent posts render as
@@ -168,6 +188,12 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   - `message_code_channel(channel, text)`: posts into the channel under a distinct identity
     (`chat:write.customize`, "smasnug ai · from <parent>"). The post is recorded as a parent-message event and
     starts a turn there as an instruction from the requester.
+    - *Stage 4:* the turn no longer waits for Slack's echo: right after posting, `postParentMessage` hands the post
+      to `acceptOwnParentPost` (src/pipeline/code-channel-intake.ts), which checks the marker against the row,
+      stores the post, resets the idle clock and batches the requester's turn (read-only channel, entry guard and
+      consent as for any message; a requester who withdrew is dropped). The echo goes through the same
+      `acceptParentPost`; a per-post claim (`slack_events_seen`, `cc-parent:<channel>:<ts>`) makes the turn start
+      once. An echo without metadata is an ordinary bot post. The marker stays for rendering and labels.
     - *Marker (stage 2):* message metadata `{ event_type: "smasnug_parent_message", event_payload: { parentThreadId,
       requesterId } }` (`src/features/code-channels/parent-message.ts`, `parentMessageMetadata`). Intake accepts it
       only from the bot's own bot_id, at the channel's top level, with `parentThreadId` equal to the row's
@@ -185,3 +211,29 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
 - **Reopening:** if someone reopens the channel and posts, the bot resumes with the stored context and the
   clock restarts.
 - **Retention and withdrawal:** both cover `code_channels` rows and their seed summaries, the same as thread data.
+- *Stage 4, closing* (`src/features/code-channels/lifecycle.ts`, `closeCodeChannel`; shared by `/archive`, the
+  tool and the sweep):
+  - One closing summary (children's model, over the `:0` conversation and its rolling summary;
+    `seed.ts generateClosingSummary`) is posted top level ("*Closing summary* …", who asked or "after a week
+    without messages", how to reopen); a failed model call posts a note instead of the summary.
+  - Then "<#channel> finished: <summary>" in the parent thread, unless it has no parent or its root was deleted.
+  - Then `agents.conversations.archive` with the summary's ts; the row is marked archived, a `code_channel_archived`
+    event is recorded and the session set `closed` (an archived conversation also rests `closed`).
+  - Every post and the archive call are keyed by the attempt (the slash `trigger_id`, the turn, the sweep's
+    `warned_at`), so a retry posts nothing twice; a Redis lock allows one close per channel at a time. An archive
+    error (e.g. `not_authorized`) is reported and the row stays live (the next attempt with the same key reuses the
+    posts).
+- *Stage 4, sweep* (maintenance `features:code-channel-sweep`, hourly; `sweepAction` is the pure selection):
+  idle ≥ 6 days and not warned → the warning post, `suspended`, `warned_at`; idle ≥ 7 days and warned at least a day
+  earlier → the closing flow (a sweep that was down warns first instead of archiving an hour after the warning).
+  Any human message or parent post resets `last_activity_at` and clears `warned_at` (`touchCodeChannel`).
+- *Stage 4, reopening:* `channel_unarchive` / `group_unarchive` for a code channel unarchives the row (clock
+  restarted, `code_channel_reopened`, resting status); a message in a channel still marked archived does the same
+  (stage 2), whichever comes first. `channel_archive` / `group_archive` (archived in Slack, or our own archive's
+  echo) marks the row archived and the session `closed`.
+- *Stage 4, adoption* only takes channels whose `properties.agent_session.encoded_agent_bot_user_ids` contains the
+  bot's user id.
+- *Stage 4, stop events:* `message_stream_stopped` is routed like `agent_session_stopped`; a 15-s Redis claim per
+  (channel, thread, user, halted streams) handles the pair Slack sends during the rename once. Neither is
+  subscribed in the manifest: subscribing brings back the native stop button everywhere (docs/design.md, "No
+  native stop button"), so that stays the owner's call.
