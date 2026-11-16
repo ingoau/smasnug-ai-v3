@@ -5,7 +5,8 @@ import { markMessage } from '../core/timing.js';
 import { handleAppHomeOpened, handleInteractive, handleSlash } from './interactions.js';
 import { handleMessageEvent } from './intake.js';
 import { handleReactionEvent } from './reactions.js';
-import { handleAgentSessionStopped } from './stop.js';
+import { handleNativeStopEvent } from './stop.js';
+import { handleCodeChannelArchiveEvent } from '../features/code-channels/lifecycle.js';
 import { handleSessionTitleChanged } from './agent-session.js';
 import { handleAppContextChanged } from './view-context.js';
 import { handleDirectoryEvent } from '../tools/directory/events.js';
@@ -36,8 +37,10 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
         case 'app_home_opened':
           return handleAppHomeOpened(event);
         case 'agent_session_stopped':
-          // Not subscribed any more (no native stop button, slack-manifest.yml); kept for an app still on an old manifest.
-          return handleAgentSessionStopped(event, { native: true });
+        case 'message_stream_stopped':
+          // Not subscribed (no native stop button, slack-manifest.yml); kept for an app still on an old manifest and
+          // for code channels. message_stream_stopped is the old name, which Slack sends too: deduped.
+          return handleNativeStopEvent(event);
         case 'app_context_changed':
           return handleAppContextChanged(body); // user is in body.authorizations
         case 'agent_session_title_changed':
@@ -54,6 +57,13 @@ export async function processSlackEvent(job: Job<SlackEnvelopeJob>) {
         case 'channel_rename':
         case 'channel_archive':
         case 'channel_unarchive':
+          // Code channels (docs/code-channels.md, Lifecycle): archived / reopened in Slack.
+          await handleCodeChannelArchiveEvent(event);
+          await handleDirectoryEvent(event);
+          return;
+        case 'group_archive':
+        case 'group_unarchive':
+          return handleCodeChannelArchiveEvent(event); // private channels: code channels only (no directory)
         case 'channel_deleted':
           await handleDirectoryEvent(event);
           return;

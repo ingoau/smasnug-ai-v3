@@ -213,4 +213,14 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     // Native stop in a code channel: no further agents.* calls.
     expect(calls.filter((c) => c.method.startsWith('agents.'))).toEqual([]);
   });
+
+  it('message_stream_stopped is an alias of agent_session_stopped, and the pair Slack sends during the rename counts once', async () => {
+    await makeCodeChannel();
+    const ev = { channel: C, user: 'U1', event_ts: nextTs(), streaming_message_ts: ['1700000000.000050'] };
+    await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'message_stream_stopped', ...ev } } }));
+    await processSlackEvent(job({ kind: 'event' as const, body: { event: { type: 'agent_session_stopped', ...ev } } }));
+    expect(Number(await redis.get(stopKey(CONV)))).toBeGreaterThan(Date.now() - 5000);
+    expect((await fakeCalls()).filter((c) => c.method === 'chat.postMessage').map((c) => c.args)).toEqual([{ channel: C, text: 'Stopped.' }]);
+    expect(await sql`select 1 from thread_events where thread_id = ${CONV} and type = 'session_stopped'`).toHaveLength(1);
+  });
 });

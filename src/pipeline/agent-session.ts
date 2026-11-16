@@ -270,19 +270,21 @@ const AWAITING_USER = sql`(
 /**
  * The status a turn leaves its session in. DMs: `suspended` while a confirmation from this thread is pending
  * (the user has to act), `closed` after leave_thread in this turn, else `active`. Channel threads: always `active`,
- * except a code channel's conversation, which rests `suspended` while waiting on a person.
+ * except a code channel's conversation, which rests `suspended` while waiting on a person and `closed` once archived.
  * Without `turnId` (side paths that clear a status outside a turn: intake, stop, a resolved confirmation): the
  * status the session rests in, i.e. `closed` if the latest turn that ran (or runs) is the one that closed it.
  */
 export async function finalSessionStatus(threadId: string, turnId?: number): Promise<FinalSessionStatus> {
-  const [row] = await sql<{ isDm: boolean; closeTurnId: number | null; pendingSend: boolean; lastTurnId: number | null; ccWaiting: boolean | null }[]>`
+  const [row] = await sql<{ isDm: boolean; closeTurnId: number | null; pendingSend: boolean; lastTurnId: number | null; ccWaiting: boolean | null; ccArchived: boolean | null }[]>`
     select t.is_dm, s.close_turn_id, ${AWAITING_USER} as pending_send,
       (select max(u.id) from turns u where u.thread_id = t.id and u.status <> 'pending') as last_turn_id,
       (select c.archived_at is null and (c.warned_at is not null or t.awaits_reply_from is not null)
-         from code_channels c where c.thread_id = t.id) as cc_waiting
+         from code_channels c where c.thread_id = t.id) as cc_waiting,
+      (select c.archived_at is not null from code_channels c where c.thread_id = t.id) as cc_archived
     from threads t left join agent_sessions s on s.thread_id = t.id where t.id = ${threadId}`;
-  // A code channel's conversation (docs/code-channels.md, Status): `suspended` while the bot's latest reply asked
-  // someone something (threads.awaits_reply_from) or the archive warning is out.
+  // A code channel's conversation (docs/code-channels.md, Status): `closed` once archived, `suspended` while the
+  // bot's latest reply asked someone something (threads.awaits_reply_from) or the archive warning is out.
+  if (row?.ccArchived) return 'closed';
   if (row?.ccWaiting) return 'suspended';
   if (!row?.isDm) return 'active';
   if (row.pendingSend) return 'suspended';

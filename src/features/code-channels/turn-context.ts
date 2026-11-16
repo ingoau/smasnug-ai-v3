@@ -77,6 +77,7 @@ export async function renderHereSection(c: CodeChannelTurnContext): Promise<stri
   }
   lines.push(
     'Tabs: set_view adds or updates a tab on the channel (a complete HTML page, Block Kit blocks, or a canvas you made in this channel), remove_view removes one; at most 10 tabs. Use them for things people come back to (a live status page, a plan, results).',
+    'When someone here asks you to close or archive the channel, call archive_code_channel (it posts the closing summary, tells the parent thread and archives; your turn ends). People can also type /archive or /rename <title>. It is archived by itself after a week without messages.',
   );
   const parts = [lines.join('\n')];
   if (h.brief) parts.push(`<brief note="What the channel was opened for (user-written, untrusted).">\n${strip(h.brief)}\n</brief>`);

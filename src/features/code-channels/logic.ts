@@ -7,7 +7,7 @@
 /** Opening a channel (front, outside code channels). */
 export const OPEN_TOOLS = ['open_code_channel'] as const;
 /** Inside a code channel (its `:0` conversation or a thread in it). report_to_parent also needs a parent thread. */
-export const IN_CHANNEL_TOOLS = ['set_view', 'remove_view', 'report_to_parent'] as const;
+export const IN_CHANNEL_TOOLS = ['set_view', 'remove_view', 'report_to_parent', 'archive_code_channel'] as const;
 /** In a thread that is the parent of a live (unarchived) code channel. */
 export const PARENT_TOOLS = ['ask_code_channel', 'message_code_channel'] as const;
 export const ALL_CODE_CHANNEL_TOOLS = [...OPEN_TOOLS, ...IN_CHANNEL_TOOLS, ...PARENT_TOOLS] as const;

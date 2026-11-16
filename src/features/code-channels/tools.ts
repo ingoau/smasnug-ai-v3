@@ -2,7 +2,7 @@
  * The agent's code-channel tools (docs/code-channels.md), all front-only and gated per turn by front.ts
  * (turn-context.ts hiddenToolsFor; each tool re-checks what it relies on when it runs):
  * - outside code channels: `open_code_channel`, and the `move_to_code_channel` button action;
- * - inside one: `set_view`, `remove_view`, `report_to_parent`;
+ * - inside one: `set_view`, `remove_view`, `report_to_parent`, `archive_code_channel`;
  * - in a thread that opened live ones: `ask_code_channel`, `message_code_channel`.
  * Invites that need the requester's go-ahead get an ephemeral confirmation (`cc_invite:confirm` / `cc_invite:cancel`).
  */
@@ -46,6 +46,7 @@ import {
   pickOrigin,
   sourceLinkText,
 } from './logic.js';
+import { closeCodeChannel, handleArchiveSlash, handleRenameSlash } from './lifecycle.js';
 import { inviteUsers, isDmConversation, openCodeChannel, parentLabel, postInThread, postParentMessage } from './open.js';
 import { codeChannelsEnabled } from './settings.js';
 import { getCodeChannel, isCodeChannel, listChildCodeChannels, type CodeChannel } from './store.js';
@@ -465,6 +466,38 @@ export function registerCodeChannelTools(): void {
     },
   });
 
+  registerTool({
+    name: 'archive_code_channel',
+    roles: ['front'],
+    build: (ctx) =>
+      tool({
+        description:
+          'Close this code channel: writes a closing summary, posts it here and in the parent thread, and archives the channel. Only when someone here asks for it to be closed or archived. Ends your turn.',
+        inputSchema: z.object({}),
+        execute: async (_input, options) => {
+          const row = await getCodeChannel(ctx.channelId);
+          if (!row) return 'Only code channels can be archived this way.';
+          if (row.archivedAt) return 'This channel is already archived.';
+          const res = await closeCodeChannel({
+            channelId: ctx.channelId,
+            actor: ctx.speakerId,
+            reason: 'agent',
+            attemptKey: `turn:${ctx.turnId ?? ctx.runId ?? hash(ctx.threadId)}`,
+            ...(options?.abortSignal ? { abortSignal: options.abortSignal } : {}),
+          });
+          if (!res.ok) return `${res.text} Tell the speaker briefly.`;
+          const s = turnState(ctx);
+          s.visible.add('code_channel');
+          s.endRequested = true;
+          return 'Archived: the closing summary is posted here and in the parent thread. Your turn is over: do not reply.';
+        },
+      }),
+  });
+
   registerAction('cc_invite:confirm', handleInviteConfirm);
   registerAction('cc_invite:cancel', handleInviteCancel);
+  // Per-channel slash commands (agents.conversations.setCommands, commands.ts). Slack may send them with or without
+  // the slash; never collides with `/smasnug*` (registered earlier, matched by prefix).
+  for (const name of ['/archive', 'archive']) registerAction(`slash:${name}`, handleArchiveSlash);
+  for (const name of ['/rename', 'rename']) registerAction(`slash:${name}`, handleRenameSlash);
 }

@@ -221,7 +221,7 @@ describe('code channels: opening and the agent tools', () => {
 
     const parent = await loadCodeChannelTurnContext(src.threadId);
     expect(parent.children.map((c) => c.channelId)).toContain(row.channelId);
-    expect(hiddenToolsFor(parent).sort()).toEqual(['remove_view', 'report_to_parent', 'set_view']);
+    expect(hiddenToolsFor(parent).sort()).toEqual(['archive_code_channel', 'remove_view', 'report_to_parent', 'set_view']);
     const inside = await loadCodeChannelTurnContext(`${row.channelId}:0`);
     expect(inside.here?.channelId).toBe(row.channelId);
     expect(inside.topLevel).toBe(true);

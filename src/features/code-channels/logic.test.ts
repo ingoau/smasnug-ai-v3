@@ -35,8 +35,8 @@ describe('tool gating', () => {
   });
 
   it('an ordinary thread can open one; parent tools only with live children', () => {
-    expect(gate()).toEqual(['ask_code_channel', 'message_code_channel', 'remove_view', 'report_to_parent', 'set_view']);
-    expect(gate({ liveChildren: 1 })).toEqual(['remove_view', 'report_to_parent', 'set_view']);
+    expect(gate()).toEqual(['archive_code_channel', 'ask_code_channel', 'message_code_channel', 'remove_view', 'report_to_parent', 'set_view']);
+    expect(gate({ liveChildren: 1 })).toEqual(['archive_code_channel', 'remove_view', 'report_to_parent', 'set_view']);
     expect(offersMoveButton({ enabled: true, inCodeChannel: false })).toBe(true);
   });
 
