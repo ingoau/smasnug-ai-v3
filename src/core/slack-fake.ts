@@ -5,6 +5,8 @@
 import { redis } from './redis.js';
 
 let counter = 0;
+/** agents.conversations.create session_id → channel id. */
+const fakeSessions = new Map<string, string>();
 
 /**
  * Test/dev hook: handlers run before the built-in cases; the first one returning non-undefined wins. A handler may
@@ -119,8 +121,14 @@ export async function fakeCall(method: string, args: Record<string, unknown>, to
       return { ok: true, canvas_id: `FCANVAS${++counter}` };
     case 'canvases.getContent':
       return { ok: true, content: '' };
-    case 'agents.conversations.create':
-      return { ok: true, channel_id: `CCODE${++counter}` };
+    case 'agents.conversations.create': {
+      // Like Slack: idempotent on session_id.
+      const sid = typeof args?.session_id === 'string' ? args.session_id : null;
+      const known = sid ? fakeSessions.get(sid) : undefined;
+      const channelId = known ?? `CCODE${++counter}`;
+      if (sid) fakeSessions.set(sid, channelId);
+      return { ok: true, channel_id: channelId };
+    }
     case 'agents.conversations.listViews':
       return { ok: true, views: [] };
     default:

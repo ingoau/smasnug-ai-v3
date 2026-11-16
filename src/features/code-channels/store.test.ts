@@ -148,7 +148,7 @@ describe('code channel API (fake Slack)', () => {
     // Filtered by session id: other test files share the fake's call log.
     const creates = async (id: string) => (await fakeCalls()).filter((c) => c.method === 'agents.conversations.create' && c.args.session_id === id);
     const calls = await creates(sessionId);
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2); // unkeyed: Slack itself is idempotent on session_id
     expect(calls[0]?.args).toEqual({ name: 'smasnug ai: x', session_id: sessionId, origin_channel_id: 'CORIG', origin_message_ts: '1.2' });
     const privateId = deriveSessionId({ via: 'tool', turnId: rand() });
     await createCodeChannel({ name: 'p', sessionId: privateId, isPrivate: true });

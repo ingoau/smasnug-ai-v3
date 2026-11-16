@@ -2,7 +2,7 @@
  * Typed wrappers over `slackCall` for the code-channel methods (docs/code-channels.md, Slack API). Every failure is
  * thrown as a CodeChannelError (errors.ts) with a message fit for people. Bot token only.
  *
- * Idempotency: `create` is keyed by its session_id (Slack is idempotent on it too). `archive` takes a key from the
+ * Idempotency: `create` is sent unkeyed; Slack is idempotent on its session_id. `archive` takes a key from the
  * caller (a channel can be archived, reopened and archived again). setView / setCommands / rename / removeView are
  * upserts or replacements at Slack, so they're sent unkeyed unless the caller passes a key.
  */
@@ -38,9 +38,9 @@ export async function createCodeChannel(a: CreateArgs): Promise<{ channelId: str
       ...(a.isPrivate ? { is_private: true } : {}),
       ...(a.origin ? { origin_channel_id: a.origin.channelId, origin_message_ts: a.origin.ts } : {}),
     },
-    `code-channel-create:${a.sessionId}`,
+    // No idempotency key: Slack is idempotent on session_id (a repeat returns the same channel), while a claimed key
+    // whose first call never finished (the worker died) would answer every retry with `{ skipped: true }` and no id.
   );
-  // A repeat is answered from idempotency_keys, whose json comes back camelCased (postgres.camel).
   const channelId = res.channel_id ?? res.channelId;
   if (!channelId) throw toCodeChannelError('agents.conversations.create', { data: { error: 'channel_creation_failed' } });
   return { channelId };

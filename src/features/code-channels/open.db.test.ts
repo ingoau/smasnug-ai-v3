@@ -65,11 +65,15 @@ const exec = (t: any, input: unknown) => t.execute(input, { toolCallId: 't1', me
 // channel ids unique across test processes.
 const recorded: { method: string; args: any }[] = [];
 let refuseCreate: string | null = null;
+const sessions = new Map<string, string>();
 addFakeHandler((method, args) => {
   recorded.push({ method, args });
   if (method !== 'agents.conversations.create') return undefined;
   if (refuseCreate) throw fakeSlackError(refuseCreate);
-  return { ok: true, channel_id: `CCODE${rand()}${rand()}` };
+  // Like Slack: idempotent on session_id.
+  const sid = String(args.session_id);
+  if (!sessions.has(sid)) sessions.set(sid, `CCODE${rand()}${rand()}`);
+  return { ok: true, channel_id: sessions.get(sid) };
 });
 const fakeCalls = async () => recorded;
 const callsFor = async (channel: string) => recorded.filter((c) => c.args?.channel === channel || c.args?.channel_id === channel);
