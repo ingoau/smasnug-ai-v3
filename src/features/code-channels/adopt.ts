@@ -3,8 +3,9 @@
  * time the bot is mentioned there. Recognised by conversations.info (`getConversationInfo`, cached in Redis, which
  * also caches the negative answer for ordinary channels). Callers check `codeChannelsEnabled()` first.
  *
- * TODO(stage 3/4): an adopted channel with an origin link is "treated as a fork of that message's thread" (seed
- * summary), and gets its slash commands registered; this only records the row.
+ * An adopted channel with an origin link is "treated as a fork of that message's thread": its seed summary is
+ * written on its first turn (seed.ts ensureAdoptedSeed, from turn-context.ts). TODO(stage 4): register its slash
+ * commands here.
  */
 import { appendEvent, codeChannelThreadId, threadIdOf } from '../../core/events.js';
 import { getConversationInfo } from '../../context/conversation.js';
