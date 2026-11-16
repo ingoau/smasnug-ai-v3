@@ -16,7 +16,7 @@ vi.hoisted(() => {
   }
   process.env.OPENROUTER_KEY ||= 'test';
 });
-vi.mock('../core/events.js', () => ({ appendEvent: vi.fn(async () => {}) }));
+vi.mock('../core/events.js', async (orig) => ({ ...(await orig<typeof import('../core/events.js')>()), appendEvent: vi.fn(async () => {}) }));
 vi.mock('./files.js', () => ({ uploadFiles: vi.fn(async () => {}) }));
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

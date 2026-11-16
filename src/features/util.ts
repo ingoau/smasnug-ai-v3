@@ -1,7 +1,7 @@
 /** Small helpers shared by the features module. */
 import { env } from '../config.js';
 import type { ActionContext } from '../core/actions.js';
-import { parseThreadId } from '../core/events.js';
+import { parseThreadId, slackThreadTs, threadTsArg } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { fakeCall } from '../core/slack-fake.js';
 import { log } from '../log.js';
@@ -46,7 +46,7 @@ export async function respond(responseUrl: string | undefined, payload: Record<s
  */
 export async function ephemeral(ctx: ActionContext, text: string, opts: { replace?: boolean; threadTs?: string } = {}) {
   // A click on a thread's parent message (thread_ts = its own ts) stays a root-level answer.
-  const threadTs = opts.threadTs ?? (ctx.threadTs && ctx.threadTs !== ctx.messageTs ? ctx.threadTs : undefined);
+  const threadTs = slackThreadTs(opts.threadTs ?? (ctx.threadTs && ctx.threadTs !== ctx.messageTs ? ctx.threadTs : undefined));
   if (ctx.channelId && threadTs) {
     if (opts.replace) {
       if (isEphemeralSource(ctx)) await deleteOriginal(ctx);
@@ -66,7 +66,7 @@ export async function ephemeral(ctx: ActionContext, text: string, opts: { replac
       channel: ctx.channelId,
       user: ctx.userId,
       text,
-      ...(ctx.threadTs ? { thread_ts: ctx.threadTs } : {}),
+      ...threadTsArg(ctx.threadTs),
     }).catch((err) => log.warn({ err }, 'ephemeral fallback failed'));
   }
 }

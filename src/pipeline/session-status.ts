@@ -24,6 +24,7 @@
  * instead of `active`: see src/pipeline/agent-session.ts.
  */
 import { redis } from '../core/redis.js';
+import { threadTsArg } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { markMessage } from '../core/timing.js';
 import { log } from '../log.js';
@@ -43,7 +44,8 @@ export async function setSessionStatus(channelId: string, threadTs: string, stat
   try {
     await slackCall('agents.sessions.setStatus', {
       channel_id: channelId,
-      thread_ts: threadTs,
+      // A code channel's conversation (root `0`) is the channel's session: no thread_ts (thread_ts_not_allowed).
+      ...threadTsArg(threadTs),
       status,
       ...(initiatorUserId ? { initiator_user_id: initiatorUserId } : {}),
     });

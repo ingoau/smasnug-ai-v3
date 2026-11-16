@@ -15,7 +15,7 @@
  *    into their running turn, or a new / extended pending turn) — the same scheduling a debounced DM/mention gets.
  */
 import type { ActionContext } from '../core/actions.js';
-import { appendEvent, parseThreadId } from '../core/events.js';
+import { appendEvent, parseThreadId, threadTsArg } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
@@ -51,7 +51,7 @@ function bumpTs(ts: string): string {
 
 async function ephemeral(ctx: ActionContext, channelId: string, threadTs: string, text: string) {
   const at = pressTs(ctx);
-  await slackCall('chat.postEphemeral', { channel: channelId, user: ctx.userId, thread_ts: threadTs, text }, { idempotencyKey: `reply-choice:${channelId}:${ctx.userId}:${at}` }).catch((err) =>
+  await slackCall('chat.postEphemeral', { channel: channelId, user: ctx.userId, ...threadTsArg(threadTs), text }, { idempotencyKey: `reply-choice:${channelId}:${ctx.userId}:${at}` }).catch((err) =>
     log.warn({ err }, 'reply-choice ephemeral failed'),
   );
 }

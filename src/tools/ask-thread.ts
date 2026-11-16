@@ -14,6 +14,7 @@ import { recordModelUsage } from '../features/guard.js';
 import { chatModel, MODELS, modelOptions } from '../models.js';
 import { annotateTsDates, formatMessage, personRef, userIdsIn, type FormatEnv, type RenderMsg } from '../context/format.js';
 import { fetchReplies } from '../context/slack-messages.js';
+import { isCodeChannelRoot } from '../core/events.js';
 import { getUserNames } from '../context/users.js';
 import { log } from '../log.js';
 import { byFilePriority, registerExternalFiles } from '../files/store.js';
@@ -55,6 +56,8 @@ async function loadThread(ctx: ToolContext, permalink: string | undefined): Prom
       ...(t.origin ? { hint: citationHint(t.origin, t.channel, t.rootTs) } : {}),
     };
   }
+  // A code channel's top level has no thread to fetch (conversations.replies needs a real root).
+  if (isCodeChannelRoot(ctx.threadTs)) return { error: "This conversation is a code channel's top level, not a thread: use read_channel to read it, or pass a thread permalink." };
   try {
     const raws = await fetchReplies(ctx.channelId, ctx.threadTs, { maxMessages: MAX_FETCH, slack });
     // `##` and hidden messages dropped (fromSlack via visibleWithAttachments); forwarded content inlined.

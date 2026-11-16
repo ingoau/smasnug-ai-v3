@@ -8,7 +8,7 @@
  */
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
-import { appendEvent, parseThreadId } from '../core/events.js';
+import { appendEvent, parseThreadId, threadTsArg } from '../core/events.js';
 import { enqueue, QUEUE } from '../core/queues.js';
 import { redis } from '../core/redis.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
@@ -166,7 +166,7 @@ export async function postCard(cardId: number, reply?: ReplyRef | null): Promise
   const msg = renderCard(toState(card), runs);
   const res = await slackCall<any>(
     'chat.postMessage',
-    { channel: card.channelId, thread_ts: threadTs, text: msg.text, blocks: msg.blocks, unfurl_links: false },
+    { channel: card.channelId, ...threadTsArg(threadTs), text: msg.text, blocks: msg.blocks, unfurl_links: false },
     { idempotencyKey: `card:${cardId}` },
   );
   const ts = res.ts ?? res.message?.ts;

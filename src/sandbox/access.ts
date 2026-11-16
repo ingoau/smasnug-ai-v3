@@ -5,6 +5,7 @@
  * that it isn't available, never why (except for the non-personal `budget` and `disabled`).
  */
 import { limits } from '../config.js';
+import { threadTsArg } from '../core/events.js';
 import { redis } from '../core/redis.js';
 import { slackCall } from '../core/slack.js';
 import { sql } from '../db/index.js';
@@ -94,7 +95,7 @@ export async function notifyAccess(o: { userId: string; channelId: string; threa
     channel: o.channelId,
     user: o.userId,
     text: accessExplanation(o.reason),
-    ...(o.threadTs ? { thread_ts: o.threadTs } : {}),
+    ...threadTsArg(o.threadTs),
   }).catch((err) => log.warn({ err }, 'sandbox access ephemeral failed'));
 }
 
@@ -105,7 +106,7 @@ export const FIRST_USE_NOTE =
 export async function firstUseNotice(o: { userId: string; channelId: string; threadTs?: string }): Promise<void> {
   const [fresh] = await sql`insert into sandbox_first_use (user_id) values (${o.userId}) on conflict do nothing returning user_id`;
   if (!fresh) return;
-  await slackCall('chat.postEphemeral', { channel: o.channelId, user: o.userId, text: FIRST_USE_NOTE, ...(o.threadTs ? { thread_ts: o.threadTs } : {}) }).catch((err) =>
+  await slackCall('chat.postEphemeral', { channel: o.channelId, user: o.userId, text: FIRST_USE_NOTE, ...threadTsArg(o.threadTs) }).catch((err) =>
     log.warn({ err }, 'sandbox first-use note failed'),
   );
 }

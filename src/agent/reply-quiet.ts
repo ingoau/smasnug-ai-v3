@@ -17,7 +17,7 @@
  * row without a response for that button (older rows, prompt buttons) falls through to the normal press handler.
  */
 import type { ActionContext } from '../core/actions.js';
-import { appendEvent, parseThreadId } from '../core/events.js';
+import { appendEvent, parseThreadId, threadTsArg } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
@@ -36,7 +36,7 @@ import { settleWithOutcome } from '../features/outcome-turn.js';
 import { untrusted } from '../tools/util.js';
 
 async function ephemeral(ctx: ActionContext, channelId: string, threadTs: string, text: string) {
-  await slackCall('chat.postEphemeral', { channel: channelId, user: ctx.userId, thread_ts: threadTs, text }, { idempotencyKey: `reply-quiet:${channelId}:${ctx.userId}:${pressTs(ctx)}` }).catch((err) =>
+  await slackCall('chat.postEphemeral', { channel: channelId, user: ctx.userId, ...threadTsArg(threadTs), text }, { idempotencyKey: `reply-quiet:${channelId}:${ctx.userId}:${pressTs(ctx)}` }).catch((err) =>
     log.warn({ err }, 'reply-quiet ephemeral failed'),
   );
 }
@@ -120,7 +120,7 @@ export async function handleQuietChoice(ctx: ActionContext): Promise<void> {
 /** A code-written reply as a new message in the thread. */
 async function postText(row: ReplyButtonsRow, partnerId: string, text: string, key: string): Promise<void> {
   const { threadTs } = parseThreadId(row.threadId);
-  const res = await slackCall<any>('chat.postMessage', { channel: row.channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: key });
+  const res = await slackCall<any>('chat.postMessage', { channel: row.channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: key });
   await noteBotReply(row.threadId, { ts: typeof res?.ts === 'string' ? res.ts : null, partnerId, awaitsReply: false }).catch((err) => log.warn({ err }, 'noteBotReply failed'));
 }
 

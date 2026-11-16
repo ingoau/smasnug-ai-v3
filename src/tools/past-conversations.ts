@@ -5,6 +5,7 @@
  */
 import { tool } from 'ai';
 import { z } from 'zod';
+import { isCodeChannelRoot } from '../core/events.js';
 import { registerTool, type ToolContext } from '../core/tools.js';
 import type { StoredMessage } from '../core/types.js';
 import { sql } from '../db/index.js';
@@ -137,8 +138,10 @@ export function searchPastConversationsTool(ctx: ToolContext) {
           .map((r) => ({ ...fromStored(r), files: [] }));
         if (!msgs.length) continue;
         const env = await formatEnvFor(ctx.threadId, msgs, budget);
-        const link = `https://slack.com/archives/${c.channelId}/p${c.threadTs.replace('.', '')}`;
-        const header = `### ${where}, started ${threadDate(c.threadTs)}${openable ? `: ${link}` : ''}`;
+        // A code channel's conversation (root `0`) has no root message: link the channel, no start date.
+        const root = isCodeChannelRoot(c.threadTs);
+        const link = root ? `https://slack.com/archives/${c.channelId}` : `https://slack.com/archives/${c.channelId}/p${c.threadTs.replace('.', '')}`;
+        const header = `### ${where}${root ? '' : `, started ${threadDate(c.threadTs)}`}${openable ? `: ${link}` : ''}`;
         sections.push(`${header}\n${formatMessages(msgs, env)}`);
       }
       if (!sections.length) return 'No earlier conversation with the speaker matches.';

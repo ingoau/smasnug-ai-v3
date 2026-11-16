@@ -23,7 +23,7 @@
  * which Slack shows collapsed to its title once the stream is over) or none for a turn without lookups or subagents. One card per message. No task is ever left in progress
  * when a stream stops (Slack would show it as failed).
  */
-import { appendEvent } from '../core/events.js';
+import { appendEvent, threadTsArg } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import type { TurnTiming } from '../core/timing.js';
@@ -438,7 +438,7 @@ export class ReplyManager {
           'chat.startStream',
           {
             channel: this.t.channelId,
-            thread_ts: this.t.threadTs,
+            ...threadTsArg(this.t.threadTs),
             chunks,
             recipient_user_id: this.t.recipientUserId,
             ...(team ? { recipient_team_id: team } : {}),
@@ -759,7 +759,7 @@ export class ReplyManager {
       const msg = replyLayout(text, actions, card, extras);
       const res = await slackCall<any>(
         'chat.postMessage',
-        { channel: this.t.channelId, thread_ts: this.t.threadTs, text: msg.text, blocks: msg.blocks, unfurl_links: false },
+        { channel: this.t.channelId, ...threadTsArg(this.t.threadTs), text: msg.text, blocks: msg.blocks, unfurl_links: false },
         { idempotencyKey: this.key(e, suffix) },
       );
       this.t.timing?.mark('reply_posted');
@@ -1046,7 +1046,7 @@ export class ReplyManager {
       }
       const res = await slackCall<any>(
         'chat.postMessage',
-        { channel: this.t.channelId, thread_ts: this.t.threadTs, text: buttonsFallbackText(toButtonsState(row)), blocks: [actions] },
+        { channel: this.t.channelId, ...threadTsArg(this.t.threadTs), text: buttonsFallbackText(toButtonsState(row)), blocks: [actions] },
         { idempotencyKey: this.key(e, ':buttons') },
       );
       if (res?.ts) await setButtonsMessage(row.id, res.ts, null);

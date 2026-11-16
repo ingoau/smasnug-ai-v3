@@ -4,7 +4,7 @@ import { env, limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { filesCreatedByRuns } from '../files/store.js';
 import { fileListingLine } from '../files/format.js';
-import { appendEvent, parseThreadId } from '../core/events.js';
+import { appendEvent, parseThreadId, threadTsArg } from '../core/events.js';
 import { getBotIdentity, slackCall, userbotConfigured } from '../core/slack.js';
 import { getUserInfo, type UserInfo } from '../context/users.js';
 import { getConversationInfo, renderConversation } from '../context/conversation.js';
@@ -997,7 +997,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (!outcome?.fallback || replies.anyVisible || state.visible.has('reply')) return;
     // Code-written, but it can carry outside text (e.g. a HuddleFM track title): never a group ping.
     const text = neutralizeBroadcasts(outcome.fallback);
-    const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `outcome-fallback:${turnId}` });
+    const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: `outcome-fallback:${turnId}` });
     await noteCodeReply(res?.ts);
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, outcome: true, text });
   };
@@ -1021,7 +1021,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     const closed = await replies.abortOpenStreams(note);
     if (closed) return;
     if (replies.anyVisible) {
-      await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(note) }, { idempotencyKey: `error:${turnId}` });
+      await slackCall('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(note) }, { idempotencyKey: `error:${turnId}` });
       return;
     }
     if (outcome) return void (await postOutcomeFallback());
@@ -1039,7 +1039,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     const canvases = await turnCanvases(turnId).catch((err) => (log.warn({ err }, 'turnCanvases failed'), []));
     if (canvases.length) {
       const text = canvasLinkText(canvases);
-      const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `canvas-link:${turnId}` });
+      const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: `canvas-link:${turnId}` });
       await noteCodeReply(res?.ts);
       await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, canvasLink: true, text });
       return;
@@ -1051,7 +1051,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
-    const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `fallback:${turnId}` });
+    const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: `fallback:${turnId}` });
     await noteCodeReply(res?.ts);
     await appendEvent(turn.threadId, 'reply', 'bot', {
       turnId,

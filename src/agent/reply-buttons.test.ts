@@ -14,7 +14,7 @@ vi.mock('../core/slack.js', () => ({
   }),
   slackErrorCode: (err: any) => err?.data?.error,
 }));
-vi.mock('../core/events.js', () => ({ appendEvent: vi.fn(async () => {}) }));
+vi.mock('../core/events.js', async (orig) => ({ ...(await orig<typeof import('../core/events.js')>()), appendEvent: vi.fn(async () => {}) }));
 vi.mock('./files.js', () => ({ uploadFiles: vi.fn(async () => {}) }));
 const recorded: { id: number; ts: string; text: string | null }[] = [];
 let placedRow: any = null;

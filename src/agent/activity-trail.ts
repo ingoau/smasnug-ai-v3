@@ -32,6 +32,7 @@
  *   leaves nothing behind.
  * Best-effort: any failure only drops the activity text for the rest of the turn; nothing here throws.
  */
+import { threadTsArg } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 
@@ -301,7 +302,7 @@ export class ActivityTrail {
             'chat.startStream',
             {
               channel: this.t.channelId,
-              thread_ts: this.t.threadTs,
+              ...threadTsArg(this.t.threadTs),
               // Plan mode: the tasks render together in one plan block, the message's plan card (titled by plan_update).
               chunks: plan ? [{ type: 'plan_update', title: PLAN_TITLE }, ...chunks] : chunks,
               ...(plan ? { task_display_mode: 'plan' } : {}),
