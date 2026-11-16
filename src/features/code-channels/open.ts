@@ -20,7 +20,7 @@ import { appendEvent, codeChannelThreadId, parseThreadId, threadTsArg } from '..
 import { getBotIdentity, slackCall, slackErrorCode } from '../../core/slack.js';
 import { getConversationInfo, type ConversationInfo } from '../../context/conversation.js';
 import { log } from '../../log.js';
-import { acceptOwnParentPost } from '../../pipeline/code-channel-intake.js';
+import { acceptOwnParentPost, type ParentPostOutcome } from '../../pipeline/code-channel-intake.js';
 import { neutralizeBroadcasts } from '../../pipeline/guidelines.js';
 import { createCodeChannel } from './api.js';
 import { registerCodeChannelCommands } from './commands.js';
@@ -68,12 +68,23 @@ export async function inviteUsers(channelId: string, users: readonly string[], k
   }
 }
 
+/** What became of a parent post's turn (code-channel-intake.ts), or `error` when starting it threw. */
+export type ParentPostTurn = ParentPostOutcome | 'error';
+
 /**
  * Post as the bot for the parent thread's agent: custom username + the parent marker, then start the channel's turn
- * for the requester right away (acceptOwnParentPost; Slack's echo of the post is deduped). A failure to start the
- * turn is logged, not thrown: the post is there, and the echo may still start it.
+ * for the requester right away (acceptOwnParentPost; Slack's echo of the post is deduped). Throws if the post fails;
+ * a failure to start the turn is logged and returned as `turn: 'error'` (the post is there, and the echo may still
+ * start it).
  */
-export async function postParentMessage(o: { channelId: string; parentThreadId: string; requesterId: string; label: string; text: string; key: string }): Promise<string> {
+export async function postParentMessage(o: {
+  channelId: string;
+  parentThreadId: string;
+  requesterId: string;
+  label: string;
+  text: string;
+  key: string;
+}): Promise<{ ts: string; turn: ParentPostTurn }> {
   const text = neutralizeBroadcasts(o.text);
   const username = parentPostUsername(env.BOT_DISPLAY_NAME, o.label);
   const marker = { parentThreadId: o.parentThreadId, requesterId: o.requesterId };
@@ -86,8 +97,11 @@ export async function postParentMessage(o: { channelId: string; parentThreadId: 
   const bot = await getBotIdentity().catch(() => undefined);
   const echo = res.message && typeof res.message === 'object' ? res.message : {};
   const msg = { text, username, ...(bot ? { user: bot.userId, bot_id: bot.botId } : {}), ...echo, ts };
-  await acceptOwnParentPost(o.channelId, msg, marker).catch((err) => log.warn({ err, channelId: o.channelId, ts }, 'starting the parent post turn failed'));
-  return ts;
+  const turn = await acceptOwnParentPost(o.channelId, msg, marker).catch((err): ParentPostTurn => {
+    log.warn({ err, channelId: o.channelId, ts }, 'starting the parent post turn failed');
+    return 'error';
+  });
+  return { ts, turn };
 }
 
 export type OpenMode = 'fork' | 'task' | 'button';
@@ -125,6 +139,11 @@ export interface OpenResult {
   originIsDm: boolean;
   /** Steps after the channel existed that failed (reported to the agent; the channel stays). */
   problems: string[];
+  /**
+   * The first parent post's turn: task mode's brief, fork mode's hand-off of the latest message. `not_posted`: the
+   * post never went out (it failed, or the fork seed failed first); null when there is none (button, no hand-off).
+   */
+  firstTurn: ParentPostTurn | 'not_posted' | null;
 }
 
 /** Open (or, on a retry, finish opening) a code channel. Throws CodeChannelError when Slack refuses to create it. */
@@ -183,9 +202,10 @@ export async function openCodeChannel(i: OpenInput): Promise<OpenResult> {
   const label = parentLabel(info);
   const sourcePermalink = await permalinkOf(sourceChannelId, i.originTs);
   let seedTs: string | null = row.seedTs;
+  let firstTurn: OpenResult['firstTurn'] = i.mode === 'task' || (i.mode === 'fork' && i.handoff) ? 'not_posted' : null;
   try {
     if (i.mode === 'task') {
-      seedTs = await postParentMessage({
+      const posted = await postParentMessage({
         channelId,
         parentThreadId: i.sourceThreadId,
         requesterId: i.requesterId,
@@ -193,6 +213,8 @@ export async function openCodeChannel(i: OpenInput): Promise<OpenResult> {
         text: briefText({ requesterId: i.requesterId, brief: i.brief ?? '', ...(sourcePermalink ? { permalink: sourcePermalink } : {}) }),
         key: `cc-seed:${channelId}`,
       });
+      seedTs = posted.ts;
+      firstTurn = posted.turn;
     } else {
       const res = await slackCall<any>(
         'chat.postMessage',
@@ -215,14 +237,19 @@ export async function openCodeChannel(i: OpenInput): Promise<OpenResult> {
       label,
       text: forkHandoffText({ authorId: i.handoff.authorId, text: i.handoff.text, ...(sourcePermalink ? { permalink: sourcePermalink } : {}) }),
       key: `cc-handoff:${channelId}`,
-    }).catch((err) => {
-      log.warn({ err, channelId }, 'code channel hand-off post failed');
-      problems.push(`passing on the latest message failed (${slackErrorCode(err) ?? 'error'})`);
-    });
+    }).then(
+      (posted) => {
+        firstTurn = posted.turn;
+      },
+      (err) => {
+        log.warn({ err, channelId }, 'code channel hand-off post failed');
+        problems.push(`passing on the latest message failed (${slackErrorCode(err) ?? 'error'})`);
+      },
+    );
   }
 
   const seedPermalink = await permalinkOf(channelId, seedTs);
-  return { channel: { ...row, seedTs }, existed: !created, seedTs, ...(seedPermalink ? { seedPermalink } : {}), originIsDm, problems };
+  return { channel: { ...row, seedTs }, existed: !created, seedTs, ...(seedPermalink ? { seedPermalink } : {}), originIsDm, problems, firstTurn };
 }
 
 /** Post a line into a thread as the bot (the source thread's link, report_to_parent). */

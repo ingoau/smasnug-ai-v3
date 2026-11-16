@@ -142,7 +142,10 @@ async function handleNewMessage(ev: MessageEvent) {
   const parentPost = cc?.parent ?? null;
   // A parent-agent post: an instruction from the requester (the turn is theirs, parent-message.ts). Usually the bot's
   // own code already took it right after posting; this is Slack's echo, and acceptParentPost dedupes it.
-  if (parentPost) return acceptParentPost(channelId, ev, parentPost);
+  if (parentPost) {
+    await acceptParentPost(channelId, ev, parentPost);
+    return;
+  }
   const rootTs = conversationRootTs(ev, ccConversation);
   const threadId = threadIdOf(channelId, rootTs);
   if (cc && !isBot && ev.user) await noteCodeChannelActivity(channelId, ev.user);

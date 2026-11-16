@@ -194,7 +194,12 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
     - *Stage 4:* the turn no longer waits for Slack's echo: right after posting, `postParentMessage` hands the post
       to `acceptOwnParentPost` (src/pipeline/code-channel-intake.ts), which checks the marker against the row,
       stores the post, resets the idle clock and batches the requester's turn (read-only channel, entry guard and
-      consent as for any message; a requester who withdrew is dropped). The echo goes through the same
+      consent as for any message: a requester who hasn't agreed is held behind the usual consent prompt, shown in
+      the parent thread, and answered once they agree). It returns what became of the turn (`ParentPostOutcome`);
+      `open_code_channel` only says the fork's latest message "will be answered there" and ends the turn when the
+      hand-off was posted and its turn started, and otherwise tells the agent what happened (no consent yet, limits,
+      read-only, post failed) so it can tell the people in the thread; `message_code_channel` reports it the same
+      way. The echo goes through the same
       `acceptParentPost`; a per-post claim (`slack_events_seen`, `cc-parent:<channel>:<ts>`) makes the turn start
       once. An echo without metadata is an ordinary bot post. The marker stays for rendering and labels.
     - *Marker (stage 2):* message metadata `{ event_type: "smasnug_parent_message", event_payload: { parentThreadId,

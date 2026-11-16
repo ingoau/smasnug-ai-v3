@@ -139,7 +139,7 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     await makeCodeChannel({ parent: true });
     const ts = nextTs();
     const marker = { parentThreadId: PARENT, requesterId: 'U1' };
-    expect(await acceptOwnParentPost(C, { ts, text: 'please also add tests', bot_id: 'BBOT', user: 'UBOT', username: 'smasnug ai · from parent' }, marker)).toBe(true);
+    expect(await acceptOwnParentPost(C, { ts, text: 'please also add tests', bot_id: 'BBOT', user: 'UBOT', username: 'smasnug ai · from parent' }, marker)).toBe('accepted');
     expect(await debounceJobs()).toEqual([expect.objectContaining({ threadId: CONV, authorId: 'U1' })]);
     // Slack's echo: with the marker (deduped) and without it (an ordinary bot post).
     await processSlackEvent(messageEnvelope({ bot_id: 'BBOT', user: 'UBOT', username: 'smasnug ai · from parent', text: 'please also add tests', ts, metadata: parentMessageMetadata(marker) }));
@@ -149,7 +149,29 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     expect(await sql`select 1 from thread_events where thread_id = ${CONV} and type = 'parent_message'`).toHaveLength(1);
     expect((await sql`select thread_id, username from messages where channel_id = ${C} and ts = ${ts}`)[0]).toMatchObject({ threadId: CONV, username: 'smasnug ai · from parent' });
     // A marker for another parent thread is refused.
-    expect(await acceptOwnParentPost(C, { ts: nextTs(), text: 'x', bot_id: 'BBOT' }, { parentThreadId: 'C9:1.1', requesterId: 'U1' })).toBe(false);
+    expect(await acceptOwnParentPost(C, { ts: nextTs(), text: 'x', bot_id: 'BBOT' }, { parentThreadId: 'C9:1.1', requesterId: 'U1' })).toBe('not_verified');
+    // Its echo arriving after: a duplicate.
+    expect(await acceptOwnParentPost(C, { ts, text: 'please also add tests', bot_id: 'BBOT', user: 'UBOT' }, marker)).toBe('duplicate');
+  });
+
+  it('a parent post for someone who has not agreed to the privacy policy is held behind the prompt in the parent thread, then answered', async () => {
+    const { privacySettings } = await import('../features/privacy.js');
+    const { handlePrivacyAgree } = await import('./consent.js');
+    await makeCodeChannel({ parent: true });
+    const was = privacySettings.required;
+    privacySettings.required = true;
+    try {
+      const ts = nextTs();
+      const marker = { parentThreadId: PARENT, requesterId: 'U0NEW' };
+      expect(await acceptOwnParentPost(C, { ts, text: 'handed off', bot_id: 'BBOT', user: 'UBOT' }, marker)).toBe('held_for_consent');
+      expect(await debounceJobs()).toEqual([]);
+      const prompt = (await fakeCalls()).find((c) => c.method === 'chat.postEphemeral' && c.args.user === 'U0NEW')!;
+      expect(prompt.args).toMatchObject({ channel: 'C0PARENT', thread_ts: '1700000000.000001' });
+      await handlePrivacyAgree({ userId: 'U0NEW', actionId: 'privacy_agree', responseUrl: 'https://hooks.fake/x', body: {} });
+      expect(await takeBatch(CONV, 'U0NEW')).toEqual([{ ts, reason: 'parent' }]);
+    } finally {
+      privacySettings.required = was;
+    }
   });
 
   it('adopts a Slack-created agent channel on a mention; ordinary channels are left alone', async () => {

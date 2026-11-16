@@ -134,6 +134,37 @@ describe('code channels: opening and the agent tools', () => {
     expect(after.every((c) => c.args.session_id === row.sessionId)).toBe(true);
   });
 
+  it('fork: a hand-off that starts no turn there (no consent yet, or the post failed) is reported truthfully and the turn goes on', async () => {
+    const { privacySettings } = await import('../privacy.js');
+    const was = privacySettings.required;
+    privacySettings.required = true;
+    await sql`insert into privacy_consent (user_id, policy_version) values ('U0ASK', 'test') on conflict do nothing`;
+    try {
+      const src = await sourceThread({ author: `U0NC${rand()}` });
+      const { tools, state, turnId } = frontCtx(src.threadId);
+      const out = await exec(tools.open_code_channel, { name: 'consent fork', fork: true });
+      created.push((await getCodeChannelBySession(deriveSessionId({ via: 'tool', turnId: String(turnId), n: 0 })))!.channelId);
+      expect(out).toMatch(/hasn't agreed to the privacy policy/);
+      expect(out).not.toMatch(/do not reply/);
+      expect(state.endRequested).toBeFalsy();
+    } finally {
+      privacySettings.required = was;
+      await sql`delete from privacy_consent where user_id = 'U0ASK'`;
+    }
+
+    const src2 = await sourceThread();
+    const undo = addFakeHandler((method, args) => (method === 'chat.postMessage' && args.metadata ? Promise.reject(fakeSlackError('invalid_arguments')) : undefined));
+    try {
+      const { tools, state, turnId } = frontCtx(src2.threadId);
+      const out = await exec(tools.open_code_channel, { name: 'failed handoff', fork: true });
+      created.push((await getCodeChannelBySession(deriveSessionId({ via: 'tool', turnId: String(turnId), n: 0 })))!.channelId);
+      expect(out).toMatch(/Passing on the latest message failed/);
+      expect(state.endRequested).toBeFalsy();
+    } finally {
+      undo();
+    }
+  });
+
   it('a private source with no origin link: created private (never left to Slack default), the row says so', async () => {
     const src = await sourceThread();
     const undo = addFakeHandler((method, args) =>

@@ -12,7 +12,7 @@
  * - Any human message (or parent post) resets the idle clock; a message in a channel marked archived means someone
  *   reopened it, so it's live again.
  */
-import { appendEvent, codeChannelThreadId } from '../core/events.js';
+import { appendEvent, codeChannelThreadId, parseThreadId } from '../core/events.js';
 import { isChannelReadOnly } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
@@ -22,6 +22,7 @@ import { parseParentMessage, type ParentMessageMarker } from '../features/code-c
 import { codeChannelsEnabled } from '../features/code-channels/settings.js';
 import { getCodeChannel, isCodeChannel, touchCodeChannel, unarchiveCodeChannel } from '../features/code-channels/store.js';
 import { restoreSessionStatus } from './agent-session.js';
+import { holdForConsent } from './consent.js';
 import { addToBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { isTopLevel } from './rules.js';
@@ -89,43 +90,72 @@ async function claimParentPost(channelId: string, ts: string): Promise<boolean> 
 }
 
 /**
+ * What became of a parent post's turn:
+ * - `accepted`: batched for the requester (the turn runs); `duplicate`: the other path (our own call or Slack's echo)
+ *   took it first and ran the same checks;
+ * - `held_for_consent`: the requester hasn't agreed to the privacy policy: the post is held and they get the usual
+ *   consent prompt in the parent thread, and it is answered once they agree (consent.ts holdForConsent);
+ * - `refused` (entry guard: limits, suspension), `read_only` (the channel is), `deleted`, `not_verified` (feature off
+ *   or the marker doesn't match the row): no turn.
+ */
+export type ParentPostOutcome = 'accepted' | 'duplicate' | 'held_for_consent' | 'refused' | 'read_only' | 'deleted' | 'not_verified';
+
+/** The parent post will be (or already was) answered in the channel. Pure. */
+export function parentPostTurnStarts(o: ParentPostOutcome | (string & {}) | null): boolean {
+  return o === 'accepted' || o === 'duplicate';
+}
+
+/**
  * A verified parent post (`marker` already checked against the channel's row) in a code channel's conversation:
  * store it, reset the idle clock, and start a turn in `${channel}:0` for the requester (batch reason `parent`, no
  * gate), behind the same checks as any message there: read-only channel, the entry guard (limits, suspension) and
- * consent (a requester who withdrew is dropped, never held). Storage and bookkeeping are idempotent; the events and
- * the batch happen once per post (claimParentPost), whichever of the two paths gets there first.
+ * consent (a requester who hasn't agreed is held behind the consent prompt, shown in the parent thread where they
+ * are). Storage and bookkeeping are idempotent; the events and the batch happen once per post (claimParentPost),
+ * whichever of the two paths gets there first.
  */
-export async function acceptParentPost(channelId: string, msg: SlackMessage, marker: ParentMessageMarker): Promise<void> {
+export async function acceptParentPost(channelId: string, msg: SlackMessage, marker: ParentMessageMarker): Promise<ParentPostOutcome> {
   const threadId = codeChannelThreadId(channelId);
   await noteCodeChannelActivity(channelId, marker.requesterId);
   await upsertThread({ id: threadId, channelId, threadTs: '0', isDm: false });
   const { deleted } = await storeMessage(channelId, threadId, msg);
-  if (deleted) return;
+  if (deleted) return 'deleted';
   if (!(await claimParentPost(channelId, msg.ts))) {
     log.debug({ channelId, ts: msg.ts }, 'parent post already taken');
-    return;
+    return 'duplicate';
   }
   await appendEvent(threadId, 'message', msg.bot_id ? `bot:${msg.bot_id}` : null, { ts: msg.ts, bot: true });
   await appendEvent(threadId, 'parent_message', marker.requesterId, { ts: msg.ts, parentThreadId: marker.parentThreadId });
   // The conversation is always engaged (like a DM).
   await sql`update threads set engaged = true, last_addressed_at = now(), messages_since_addressed = 0, last_activity_at = now() where id = ${threadId}`;
-  if (await isChannelReadOnly(channelId)) return;
+  if (await isChannelReadOnly(channelId)) return 'read_only';
   const entry = await guardEntry(marker.requesterId, channelId);
-  if (!entry.ok) return;
-  if (!(await hasAgreed(marker.requesterId))) return;
+  if (!entry.ok) return 'refused';
+  if (!(await hasAgreed(marker.requesterId))) {
+    const parent = parseThreadId(marker.parentThreadId);
+    await holdForConsent({
+      userId: marker.requesterId,
+      channelId: parent.channelId,
+      // The prompt throttle is per conversation, like intake's (a DM is one conversation).
+      conversation: parent.channelId.startsWith('D') ? parent.channelId : marker.parentThreadId,
+      promptThreadTs: parent.threadTs,
+      messageTs: msg.ts,
+      item: { kind: 'batch', threadId, ts: msg.ts, reason: 'parent' },
+    });
+    return 'held_for_consent';
+  }
   showIntakeStatus(threadId, marker.requesterId, msg.ts);
   await addToBatch(threadId, marker.requesterId, msg.ts, 'parent');
+  return 'accepted';
 }
 
 /**
  * The bot just posted a parent post (open.ts postParentMessage): start its turn now rather than waiting for Slack's
  * echo (which may arrive without the metadata). Checks the marker against the channel's row like intake does.
  */
-export async function acceptOwnParentPost(channelId: string, msg: SlackMessage, marker: ParentMessageMarker): Promise<boolean> {
-  if (!(await codeChannelsEnabled())) return false;
-  if (!(await markerMatchesChannel({ channel: channelId, ts: msg.ts }, marker))) return false;
-  await acceptParentPost(channelId, msg, marker);
-  return true;
+export async function acceptOwnParentPost(channelId: string, msg: SlackMessage, marker: ParentMessageMarker): Promise<ParentPostOutcome> {
+  if (!(await codeChannelsEnabled())) return 'not_verified';
+  if (!(await markerMatchesChannel({ channel: channelId, ts: msg.ts }, marker))) return 'not_verified';
+  return acceptParentPost(channelId, msg, marker);
 }
 
 /**

@@ -47,7 +47,8 @@ import {
   sourceLinkText,
 } from './logic.js';
 import { closeCodeChannel, handleArchiveSlash, handleRenameSlash } from './lifecycle.js';
-import { inviteUsers, isDmConversation, openCodeChannel, parentLabel, postInThread, postParentMessage } from './open.js';
+import { inviteUsers, isDmConversation, openCodeChannel, parentLabel, postInThread, postParentMessage, type OpenResult } from './open.js';
+import { parentPostTurnStarts } from '../../pipeline/code-channel-intake.js';
 import { codeChannelsEnabled } from './settings.js';
 import { getCodeChannel, isCodeChannel, listChildCodeChannels, type CodeChannel } from './store.js';
 import { visibleChildren } from './turn-context.js';
@@ -108,6 +109,40 @@ async function resolveChild(threadId: string, ref: string, speakerId: string): P
 }
 
 // ---- open_code_channel ------------------------------------------------------------------------------------------
+
+/** Why the fork's hand-off of the latest message starts no turn in the channel (model-facing). */
+function handoffProblem(turn: OpenResult['firstTurn'], author: string): string {
+  switch (turn) {
+    case 'held_for_consent':
+      return `The latest message was passed on, but ${author} hasn't agreed to the privacy policy yet: they got a private prompt, and it is answered in the channel once they agree. Tell them in one short reply here, with the channel link.`;
+    case 'refused':
+      return `The latest message was passed on, but it won't be answered there: ${author} is over their usage limits or suspended. Tell them in one short reply.`;
+    case 'read_only':
+      return "The latest message was passed on, but the channel is read-only for me, so it won't be answered there. Tell the speaker in one short reply.";
+    case 'not_posted':
+    case null:
+      return "Passing on the latest message failed, so it won't be answered there. Answer it here yourself, or tell the speaker to ask again in the channel (with the link).";
+    default:
+      return "The latest message was posted there, but its turn didn't start, so it may not be answered. Tell the speaker in one short reply and ask them to repeat it in the channel if nothing happens.";
+  }
+}
+
+/** Why the brief starts no turn in the channel (model-facing). */
+function briefProblem(turn: OpenResult['firstTurn']): string {
+  switch (turn) {
+    case 'refused':
+      return "the brief won't be worked on there: the speaker is over their usage limits or suspended.";
+    case 'read_only':
+      return 'the channel is read-only for me, so I cannot work on the brief there.';
+    case 'held_for_consent':
+      return 'the brief waits for the speaker to agree to the privacy policy (they got a private prompt).';
+    case 'not_posted':
+    case null:
+      return "posting the brief failed, so the work hasn't started there. The speaker can post the task in the channel.";
+    default:
+      return 'the turn on the brief did not start, so it may not be worked on. The speaker can post the task in the channel.';
+  }
+}
 
 function openTool(ctx: ToolContext) {
   let n = 0;
@@ -181,13 +216,22 @@ function openTool(ctx: ToolContext) {
           return null;
         });
         if (ts) s.visible.add('code_channel');
-        s.endRequested = true;
-        return [`Forked into <#${ch}>: the summary and the latest message are posted there and will be answered there.${ts ? ' A link to it is posted in this thread.' : ''}`, ...notes, 'Your turn here is over: do not reply.'].join(' ');
+        const linked = ts ? ' A link to it is posted in this thread.' : '';
+        const author = latest ? `<@${latest.userId}>` : 'its author';
+        if (parentPostTurnStarts(opened.firstTurn)) {
+          s.endRequested = true;
+          return [`Forked into <#${ch}>: the summary and the latest message are posted there and will be answered there.${linked}`, ...notes, 'Your turn here is over: do not reply.'].join(' ');
+        }
+        // The hand-off didn't start a turn there: say so truthfully and let the agent tell the people here.
+        return [`Forked into <#${ch}> (the summary is there).${linked}`, handoffProblem(opened.firstTurn, author), ...notes].join(' ');
       }
+      const started = parentPostTurnStarts(opened.firstTurn);
       return [
-        `Opened <#${ch}> ${opened.seedPermalink ? `(${opened.seedPermalink}) ` : ''}with the brief as its first message; you will start on it there by yourself.`,
+        started
+          ? `Opened <#${ch}> ${opened.seedPermalink ? `(${opened.seedPermalink}) ` : ''}with the brief as its first message; you will start on it there by yourself.`
+          : `Opened <#${ch}> ${opened.seedPermalink ? `(${opened.seedPermalink}) ` : ''}, but ${briefProblem(opened.firstTurn)}`,
         ...notes,
-        'Tell the speaker in one short reply, with the channel link. Don\'t start the work here.',
+        started ? 'Tell the speaker in one short reply, with the channel link. Don\'t start the work here.' : 'Tell the speaker in one short reply, with the channel link.',
       ].join(' ');
     },
   });
@@ -414,7 +458,7 @@ export function registerCodeChannelTools(): void {
           const index = n++;
           const info = await getConversationInfo(ctx.channelId).catch(() => null);
           try {
-            await postParentMessage({
+            const posted = await postParentMessage({
               channelId: row.channelId,
               parentThreadId: ctx.threadId,
               requesterId: ctx.speakerId,
@@ -423,7 +467,8 @@ export function registerCodeChannelTools(): void {
               key: `cc-message:${ctx.turnId ?? hash(text)}:${index}`,
             });
             await appendEvent(ctx.threadId, 'code_channel_message', ctx.speakerId, { channelId: row.channelId, text }).catch(() => {});
-            return `Posted in <#${row.channelId}>; your turn there acts on it.`;
+            if (parentPostTurnStarts(posted.turn)) return `Posted in <#${row.channelId}>; your turn there acts on it.`;
+            return `Posted in <#${row.channelId}>, but no turn starts there for it (${posted.turn === 'refused' ? 'the speaker is over their limits or suspended' : posted.turn === 'read_only' ? 'the channel is read-only for me' : posted.turn === 'held_for_consent' ? 'the speaker has to agree to the privacy policy first' : 'starting it failed'}). Tell the speaker.`;
           } catch (err) {
             return `Couldn't post in <#${row.channelId}> (${errMsg(err)}).`;
           }
