@@ -226,6 +226,18 @@ describe('code channels: lifecycle', () => {
     expect(r.closingSummary).toBeNull();
   });
 
+  it('a close releases only its own lock (one that expired mid-close may be another attempt\'s)', async () => {
+    const row = await codeChannel();
+    const lockKey = `lock:code-channel-close:${row.channelId}`;
+    vi.mocked(generateText).mockImplementationOnce((async () => {
+      await redis.set(lockKey, 'other-attempt', 'PX', 60_000); // ours expired; another close took it
+      return { text: '- done', usage: { inputTokens: 1, outputTokens: 1 } };
+    }) as any);
+    expect(await closeCodeChannel({ channelId: row.channelId, actor: 'U0REQ', reason: 'agent', attemptKey: 'turn:lock' })).toMatchObject({ ok: true });
+    expect(await redis.get(lockKey)).toBe('other-attempt');
+    await redis.del(lockKey);
+  });
+
   it('sweep: a failing archive keeps its summary, backs off, and stops (at once for a refusal that will not change)', async () => {
     const row = await codeChannel();
     const idle = () => sql`update code_channels set last_activity_at = now() - interval '7 days 1 hour', warned_at = now() - interval '25 hours' where channel_id = ${row.channelId}`;

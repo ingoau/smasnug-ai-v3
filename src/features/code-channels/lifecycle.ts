@@ -147,6 +147,8 @@ async function parentThreadAlive(threadId: string): Promise<boolean> {
  * the summary's ts; the row is marked archived and the session `closed`. One close at a time per channel (a Redis
  * lock); an archived row is left alone. Never throws.
  */
+const RELEASE_LOCK = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end`;
+
 export async function closeCodeChannel(i: CloseInput): Promise<CloseResult> {
   const lockKey = `lock:code-channel-close:${i.channelId}`;
   let locked = false;
@@ -165,7 +167,8 @@ export async function closeCodeChannel(i: CloseInput): Promise<CloseResult> {
     if (i.reason === 'sweep') await backOffSweepClose(i.channelId, err).catch((e) => log.warn({ err: e, channelId: i.channelId }, 'recording a failed close failed'));
     return { ok: false, text: `Archiving failed: ${err instanceof CodeChannelError ? err.userMessage : `Slack error ${slackErrorCode(err) ?? 'unknown'}.`}` };
   } finally {
-    if (locked) await redis.del(lockKey).catch(() => {});
+    // Only our own lock: one that expired mid-close may be another attempt's by now.
+    if (locked) await redis.eval(RELEASE_LOCK, 1, lockKey, i.attemptKey).catch(() => {});
   }
 }
 
