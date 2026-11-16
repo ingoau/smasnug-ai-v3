@@ -32,3 +32,19 @@ export function parseParentMessage(msg: { metadata?: unknown }): ParentMessageMa
   if (typeof parentThreadId !== 'string' || !parentThreadId || typeof requesterId !== 'string' || !/^[UW][A-Z0-9]+$/.test(requesterId)) return null;
   return { parentThreadId, requesterId };
 }
+
+/** Between the bot's name and the parent conversation in a parent post's username. */
+export const PARENT_POST_USERNAME_SEP = ' · from ';
+/** Slack's limit for a custom `username`. */
+export const USERNAME_MAX = 80;
+
+/** The custom username of a parent post: "smasnug ai · from #general" (capped to Slack's 80 characters). Pure. */
+export function parentPostUsername(botName: string, parentLabel: string): string {
+  const full = `${botName}${PARENT_POST_USERNAME_SEP}${parentLabel.replace(/\s+/g, ' ').trim() || 'a thread'}`;
+  return [...full].length <= USERNAME_MAX ? full : [...full].slice(0, USERNAME_MAX - 1).join('') + '…';
+}
+
+/** Is this stored username a parent post's (posted by the bot under parentPostUsername)? Pure. */
+export function isParentPostUsername(username: string | null | undefined, botName: string): boolean {
+  return Boolean(username && username.startsWith(`${botName}${PARENT_POST_USERNAME_SEP}`));
+}
