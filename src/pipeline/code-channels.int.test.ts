@@ -150,6 +150,8 @@ describe.skipIf(!infra)('code channels (intake)', () => {
     expect((await sql`select thread_id, username from messages where channel_id = ${C} and ts = ${ts}`)[0]).toMatchObject({ threadId: CONV, username: 'smasnug ai · from parent' });
     // A marker for another parent thread is refused.
     expect(await acceptOwnParentPost(C, { ts: nextTs(), text: 'x', bot_id: 'BBOT' }, { parentThreadId: 'C9:1.1', requesterId: 'U1' })).toBe('not_verified');
+    // A hidden (`--` / `##`) text starts nothing, as its echo wouldn't.
+    expect(await acceptOwnParentPost(C, { ts: nextTs(), text: '-- not for the bot', bot_id: 'BBOT' }, marker)).toBe('not_verified');
     // Its echo arriving after: a duplicate.
     expect(await acceptOwnParentPost(C, { ts, text: 'please also add tests', bot_id: 'BBOT', user: 'UBOT' }, marker)).toBe('duplicate');
   });

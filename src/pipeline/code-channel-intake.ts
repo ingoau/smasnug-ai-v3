@@ -23,6 +23,7 @@ import { codeChannelsEnabled } from '../features/code-channels/settings.js';
 import { getCodeChannel, isCodeChannel, touchCodeChannel, unarchiveCodeChannel } from '../features/code-channels/store.js';
 import { restoreSessionStatus } from './agent-session.js';
 import { holdForConsent } from './consent.js';
+import { isHiddenMessage } from './guidelines.js';
 import { addToBatch } from './debounce.js';
 import { guardEntry } from './entry.js';
 import { isTopLevel } from './rules.js';
@@ -99,8 +100,8 @@ async function releaseParentPost(channelId: string, ts: string): Promise<void> {
  *   took it first and ran the same checks;
  * - `held_for_consent`: the requester hasn't agreed to the privacy policy: the post is held and they get the usual
  *   consent prompt in the parent thread, and it is answered once they agree (consent.ts holdForConsent);
- * - `refused` (entry guard: limits, suspension), `read_only` (the channel is), `deleted`, `not_verified` (feature off
- *   or the marker doesn't match the row): no turn.
+ * - `refused` (entry guard: limits, suspension), `read_only` (the channel is), `deleted`, `not_verified` (feature off,
+ *   the marker doesn't match the row, or the text is a hidden `##` / `--` message): no turn.
  */
 export type ParentPostOutcome = 'accepted' | 'duplicate' | 'held_for_consent' | 'refused' | 'read_only' | 'deleted' | 'not_verified';
 
@@ -118,6 +119,8 @@ export function parentPostTurnStarts(o: ParentPostOutcome | (string & {}) | null
  * whichever of the two paths gets there first.
  */
 export async function acceptParentPost(channelId: string, msg: SlackMessage, marker: ParentMessageMarker): Promise<ParentPostOutcome> {
+  // Like intake's echo: a `##` / `--` message is invisible (postParentMessage never sends one; belt and braces).
+  if (isHiddenMessage(msg.text)) return 'not_verified';
   const threadId = codeChannelThreadId(channelId);
   await noteCodeChannelActivity(channelId, marker.requesterId);
   await upsertThread({ id: threadId, channelId, threadTs: '0', isDm: false });

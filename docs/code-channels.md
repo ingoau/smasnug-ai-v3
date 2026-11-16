@@ -209,6 +209,8 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
       only from the bot's own bot_id, at the channel's top level, with `parentThreadId` equal to the row's
       `parent_thread_id`. It records a `parent_message` event and batches the post for the requester with reason
       `parent`, which skips the gate and counts as a mention. Every other bot post is stored and ignored.
+      A parent post's text never starts with `##` / `--` (`visibleParentText` puts a zero-width space in front), and
+      the direct path drops such a text like intake does for the echo.
   - `read_channel` also works on the channel.
   - A private child is only for its members: `ask_code_channel` / `message_code_channel` and the parent thread's
     `<code_channels>` list (and the tool gating) only include a private child when the speaker is a member of it

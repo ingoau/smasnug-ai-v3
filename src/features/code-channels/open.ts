@@ -21,7 +21,7 @@ import { getBotIdentity, slackCall, slackErrorCode } from '../../core/slack.js';
 import { getConversationInfo, type ConversationInfo } from '../../context/conversation.js';
 import { log } from '../../log.js';
 import { acceptOwnParentPost, type ParentPostOutcome } from '../../pipeline/code-channel-intake.js';
-import { neutralizeBroadcasts } from '../../pipeline/guidelines.js';
+import { isHiddenMessage, neutralizeBroadcasts } from '../../pipeline/guidelines.js';
 import { createCodeChannel } from './api.js';
 import { registerCodeChannelCommands } from './commands.js';
 import { codeChannelDisplayName } from './ids.js';
@@ -68,6 +68,14 @@ export async function inviteUsers(channelId: string, users: readonly string[], k
   }
 }
 
+/**
+ * A parent post's text never starts with `##` / `--` (the guidelines' invisible prefix): such a post would be
+ * dropped by intake's echo but taken by the direct path. A zero-width space in front keeps it visible. Pure.
+ */
+export function visibleParentText(text: string): string {
+  return isHiddenMessage(text) ? `\u200B${text.trimStart()}` : text;
+}
+
 /** What became of a parent post's turn (code-channel-intake.ts), or `error` when starting it threw. */
 export type ParentPostTurn = ParentPostOutcome | 'error';
 
@@ -85,7 +93,7 @@ export async function postParentMessage(o: {
   text: string;
   key: string;
 }): Promise<{ ts: string; turn: ParentPostTurn }> {
-  const text = neutralizeBroadcasts(o.text);
+  const text = visibleParentText(neutralizeBroadcasts(o.text));
   const username = parentPostUsername(env.BOT_DISPLAY_NAME, o.label);
   const marker = { parentThreadId: o.parentThreadId, requesterId: o.requesterId };
   const res = await slackCall<any>(

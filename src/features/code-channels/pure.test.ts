@@ -157,3 +157,15 @@ describe('parent-message marker', async () => {
     expect(parseParentMessage({ metadata: { event_type: PARENT_MESSAGE_EVENT_TYPE, event_payload: { parentThreadId: 'C1:1', requesterId: 'not a user' } } })).toBeNull();
   });
 });
+
+describe('parent post text', () => {
+  it('never starts with the invisible ## / -- prefix', async () => {
+    const { visibleParentText } = await import('./open.js');
+    const { isHiddenMessage } = await import('../../pipeline/guidelines.js');
+    for (const t of ['-- drop it', '## heading', '  --x']) {
+      expect(isHiddenMessage(visibleParentText(t))).toBe(false);
+      expect(visibleParentText(t)).toContain(t.trim());
+    }
+    expect(visibleParentText('<@U1>: go on')).toBe('<@U1>: go on');
+  });
+});
