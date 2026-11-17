@@ -80,7 +80,7 @@ describe('code channels: lifecycle', () => {
     await sql.end({ timeout: 2 });
   });
 
-  it('/archive: closing summary in the channel, then the parent thread, then archive with its ts; row archived, session closed', async () => {
+  it('/archive: closing summary in the channel (nothing in the parent thread), then archive with its ts; row archived, session closed', async () => {
     const row = await codeChannel({ parent: true });
     await slash('/archive', row.channelId);
     expect(generateText).toHaveBeenCalledOnce();
@@ -92,14 +92,12 @@ describe('code channels: lifecycle', () => {
     expect(posts[0]!.args.thread_ts).toBeUndefined();
 
     const [parentCh, parentTs] = row.parentThreadId!.split(':');
-    const parentPost = recorded.find((c) => c.method === 'chat.postMessage' && c.args.channel === parentCh)!;
-    expect(parentPost.args).toMatchObject({ thread_ts: parentTs, text: `<#${row.channelId}> finished: - fixed the login bug\n- tests added` });
+    expect(recorded.filter((c) => c.method === 'chat.postMessage' && c.args.channel === parentCh && c.args.thread_ts === parentTs)).toEqual([]);
 
     const archive = calls.find((c) => c.method === 'agents.conversations.archive')!;
     expect(archive.args.summary_message_ts).toBeTruthy();
     const order = recorded.map((c) => c);
-    expect(order.indexOf(posts[0]!)).toBeLessThan(order.indexOf(parentPost));
-    expect(order.indexOf(parentPost)).toBeLessThan(order.indexOf(archive));
+    expect(order.indexOf(posts[0]!)).toBeLessThan(order.indexOf(archive));
 
     expect((await getCodeChannel(row.channelId))!.archivedAt).not.toBeNull();
     const status = calls.filter((c) => c.method === 'agents.sessions.setStatus').map((c) => c.args);

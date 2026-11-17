@@ -20,7 +20,7 @@ export interface CodeChannelTurnContext {
   here: CodeChannel | null;
   /** The turn is the channel's top-level conversation (`:0`), not a thread in it. */
   topLevel: boolean;
-  /** Live (unarchived) code channels the current thread opened that the speaker may see (visibleChildren), newest first. */
+  /** Code channels the current thread opened (archived ones included) that the speaker may see (visibleChildren), newest first. */
   children: CodeChannel[];
   /**
    * Private children may be read here (`<code_channels>`, ask_code_channel): the private-link rule's "only in the
@@ -59,7 +59,7 @@ export async function loadCodeChannelTurnContext(threadId: string, speakerId: st
     const isDm = channelId.startsWith('D');
     const [here, children] = await Promise.all([
       isDm ? Promise.resolve(null) : getCodeChannel(channelId),
-      listChildCodeChannels(threadId).then((rows) => rows.filter((r) => !r.archivedAt)),
+      listChildCodeChannels(threadId),
     ]);
     // An adopted channel with an origin link is a fork of that message's thread: its seed is written on first use.
     if (here && here.kind === 'adopted' && !here.seedSummary && here.originTs) here.seedSummary = await ensureAdoptedSeed(here);
@@ -78,7 +78,7 @@ export async function loadCodeChannelTurnContext(threadId: string, speakerId: st
 
 /** The tools to remove from this turn's set. */
 export function hiddenToolsFor(c: CodeChannelTurnContext): string[] {
-  return hiddenCodeChannelTools({ enabled: c.enabled, inCodeChannel: Boolean(c.here), hasParent: Boolean(c.here?.parentThreadId), liveChildren: c.children.length });
+  return hiddenCodeChannelTools({ enabled: c.enabled, inCodeChannel: Boolean(c.here), hasParent: Boolean(c.here?.parentThreadId), liveChildren: c.children.filter((r) => !r.archivedAt).length, children: c.children.length });
 }
 
 /** Strip our own section tags from untrusted text going into a section. */
@@ -103,7 +103,7 @@ export async function renderHereSection(c: CodeChannelTurnContext): Promise<stri
   }
   lines.push(
     'Tabs: set_view adds or updates a tab on the channel (a complete HTML page, Block Kit blocks, or a canvas you made in this channel), remove_view removes one; at most 9 tabs of yours. The Status tab (view_key "status": channel info and running/finished subagents) is automatic and kept up to date for you; you can\'t change or remove it. Use your tabs for things people come back to (a plan, results, a live page).',
-    'When someone here asks you to close or archive the channel, call archive_code_channel (it posts the closing summary, tells the parent thread and archives; your turn ends). People can also type /archive or /rename <title>. It is archived by itself after a week without messages.',
+    'When someone here asks you to close or archive the channel, call archive_code_channel (it posts the closing summary here and archives; the parent thread is not told, it can ask; your turn ends). People can also type /archive or /rename <title>. It is archived by itself after a week without messages.',
   );
   const parts = [lines.join('\n')];
   if (h.brief) parts.push(`<brief note="What the channel was opened for (user-written, untrusted).">\n${strip(h.brief)}\n</brief>`);
@@ -119,8 +119,12 @@ export function renderChildrenSection(c: CodeChannelTurnContext, now = new Date(
   if (!children.length) return '';
   const day = 24 * 3600_000;
   const rows = children.map((r) => {
-    const idle = Math.floor((now.getTime() - new Date(r.lastActivityAt).getTime()) / day);
-    return `- <#${r.channelId}|${strip(r.name)}> (channel "${r.channelId}"), ${KIND_LABEL[r.kind]}, last activity ${idle <= 0 ? 'today' : `${idle} day${idle === 1 ? '' : 's'} ago`}`;
+    const ago = (d: Date | string) => {
+      const n = Math.floor((now.getTime() - new Date(d).getTime()) / day);
+      return n <= 0 ? 'today' : `${n} day${n === 1 ? '' : 's'} ago`;
+    };
+    const state = r.archivedAt ? `archived ${ago(r.archivedAt)} (ask_code_channel still reads it, closing summary included; it can't be messaged)` : `last activity ${ago(r.lastActivityAt)}`;
+    return `- <#${r.channelId}|${strip(r.name)}> (channel "${r.channelId}"), ${KIND_LABEL[r.kind]}, ${state}`;
   });
   return [
     'Code channels this thread opened (work moved there). ask_code_channel answers a question from one without posting anything; message_code_channel posts an instruction there as from the speaker, which starts your turn in that channel.',

@@ -38,6 +38,8 @@ describe('tool gating', () => {
   it('an ordinary thread can open one; parent tools only with live children', () => {
     expect(gate()).toEqual(['archive_code_channel', 'ask_code_channel', 'message_code_channel', 'remove_view', 'report_to_parent', 'set_view']);
     expect(gate({ liveChildren: 1 })).toEqual(['archive_code_channel', 'remove_view', 'report_to_parent', 'set_view']);
+    // Only archived children: they can still be asked, not messaged.
+    expect(gate({ liveChildren: 0, children: 1 })).toEqual(['archive_code_channel', 'message_code_channel', 'remove_view', 'report_to_parent', 'set_view']);
     expect(offersMoveButton({ enabled: true, inCodeChannel: false })).toBe(true);
   });
 
@@ -139,6 +141,8 @@ describe('names and texts', () => {
     const now = new Date('2026-11-16T12:00:00Z');
     const row = { channelId: 'C0CODE', name: 'smasnug ai: x', kind: 'fork', lastActivityAt: new Date('2026-11-14T11:00:00Z'), archivedAt: null } as any;
     const text = renderChildrenSection({ enabled: true, here: null, topLevel: false, children: [row] }, now);
+    const archived = renderChildrenSection({ enabled: true, here: null, topLevel: false, children: [{ ...row, archivedAt: new Date('2026-11-15T11:00:00Z') }] } as any, now);
+    expect(archived).toContain('archived 1 day ago (ask_code_channel still reads it');
     expect(text).toContain('<#C0CODE|smasnug ai: x> (channel "C0CODE"), forked from a thread, last activity 2 days ago');
     expect(renderChildrenSection({ enabled: true, here: null, topLevel: false, children: [] }, now)).toBe('');
     // A private child is named only where it may be read (the speaker's DM with the bot).

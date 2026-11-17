@@ -101,14 +101,17 @@ async function askInviteConfirmation(threadId: string, requesterId: string, chan
   );
 }
 
-/** A live child code channel of this thread, from the model's reference; or why not (`listPrivate`: name private ones in that answer). */
-async function resolveChild(threadId: string, ref: string, speakerId: string, listPrivate: boolean): Promise<CodeChannel | string> {
+/**
+ * A child code channel of this thread, from the model's reference; or why not (`listPrivate`: name private ones in that
+ * answer). `archivedOk`: an archived one resolves too (asking reads it; messaging needs a live one).
+ */
+async function resolveChild(threadId: string, ref: string, speakerId: string, listPrivate: boolean, archivedOk = false): Promise<CodeChannel | string> {
   const id = parseChannelRef(ref);
   // Private children the speaker isn't in are as good as absent (not named, not listed): no leak.
   const children = await visibleChildren(await listChildCodeChannels(threadId), speakerId);
   const row = id ? children.find((c) => c.channelId === id) : children.find((c) => c.name.toLowerCase().includes(ref.trim().toLowerCase()));
   if (!row) return `That isn't a code channel this thread opened. Channels: ${children.filter((c) => listPrivate || !c.isPrivate).map((c) => `<#${c.channelId}> ("${c.channelId}")`).join(', ') || 'none'}.`;
-  if (row.archivedAt) return `<#${row.channelId}> is archived.`;
+  if (row.archivedAt && !archivedOk) return `<#${row.channelId}> is archived: ask_code_channel can still read it, but it can't be messaged.`;
   return row;
 }
 
@@ -299,6 +302,7 @@ async function askChannel(ctx: ToolContext, row: CodeChannel, question: string, 
   const facts = [
     ...(row.brief ? [`[the channel's brief: ${row.brief}]`] : []),
     ...(row.seedSummary ? [`[summary of the thread it was forked from, written when it opened:\n${row.seedSummary}\n]`] : []),
+    ...(row.archivedAt ? [`[the channel is archived${row.closingSummary ? `; its closing summary:\n${row.closingSummary}\n` : ''}]`] : []),
     `[tabs: ${views.map((v) => `${v.name ?? v.view_key ?? '?'} (${v.type ?? '?'})`).join(', ') || 'none'}]`,
   ];
   const budget = limits.askThreadMaxTokens * 4 - facts.join('\n').length;
@@ -434,7 +438,7 @@ export function registerCodeChannelTools(): void {
         execute: async ({ channel, question }, options) => {
           if (calls >= ASK_MAX_CALLS) return `ask_code_channel already used ${ASK_MAX_CALLS} times this turn.`;
           calls++;
-          const row = await resolveChild(ctx.threadId, channel, ctx.speakerId, privateChildrenReadableIn(ctx.channelId));
+          const row = await resolveChild(ctx.threadId, channel, ctx.speakerId, privateChildrenReadableIn(ctx.channelId), true);
           if (typeof row === 'string') return row;
           // Reading a private child is the private-link rule: only in the speaker's DM with the bot.
           if (row.isPrivate && !privateChildrenReadableIn(ctx.channelId)) return askInDmMessage('channel');
@@ -529,7 +533,7 @@ export function registerCodeChannelTools(): void {
     build: (ctx) =>
       tool({
         description:
-          'Close this code channel: writes a closing summary, posts it here and in the parent thread, and archives the channel. Only when someone here asks for it to be closed or archived. Ends your turn.',
+          'Close this code channel: writes a closing summary, posts it here (not in the parent thread), and archives the channel. Only when someone here asks for it to be closed or archived. Ends your turn.',
         inputSchema: z.object({}),
         execute: async (_input, options) => {
           const row = await getCodeChannel(ctx.channelId);
@@ -546,7 +550,7 @@ export function registerCodeChannelTools(): void {
           const s = turnState(ctx);
           s.visible.add('code_channel');
           s.endRequested = true;
-          return 'Archived: the closing summary is posted here and in the parent thread. Your turn is over: do not reply.';
+          return 'Archived: the closing summary is posted here. Your turn is over: do not reply.';
         },
       }),
   });

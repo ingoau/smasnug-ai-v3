@@ -3,7 +3,7 @@ import '../../tools/test-env.js';
 import { describe, expect, it } from 'vitest';
 import { nativeStopDedupeKey } from '../../pipeline/stop.js';
 import { isOurAgentChannel } from './adopt.js';
-import { closingText, parentClosingText, sweepAction } from './lifecycle.js';
+import { closingText, sweepAction } from './lifecycle.js';
 
 const H = 60 * 60 * 1000;
 const D = 24 * H;
@@ -33,7 +33,6 @@ describe('closing texts', () => {
   it('posts the summary with who asked, or the sweep reason, and a fallback without one', () => {
     expect(closingText({ summary: '- done', reason: 'command', actor: 'U1' })).toBe('*Closing summary*\n- done\n\n_<@U1> asked to archive this channel. Unarchive it to pick up where it left off._');
     expect(closingText({ summary: null, reason: 'sweep', actor: null })).toMatch(/could not be written[\s\S]*after a week without messages/);
-    expect(parentClosingText({ channelId: 'C1', summary: '- done' })).toBe('<#C1> finished: - done');
   });
 });
 
