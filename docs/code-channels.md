@@ -168,7 +168,7 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
 - **Views** (`set_view`, code channels only): canvas, HTML and Block Kit tabs, keyed by `view_key`. A canvas tab
   takes a canvas from `bot_canvases`.
 - **Slash commands**, registered when the channel is created or adopted:
-  - `/archive` (any member): posts a closing summary, reports to the parent (tasks only), archives.
+  - `/archive` (any member): posts a closing summary, archives.
   - `/rename <title>`: calls `agents.sessions.rename`.
   - *Stage 4:* `setCommands` runs right after the row is recorded (open.ts) and on adoption (adopt.ts),
     `src/features/code-channels/commands.ts`. Invocations come through the ordinary slash path (ingress acks at once;
@@ -185,8 +185,8 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
 ### Parent link
 - **Ownership:** the thread that opened the channel is its parent. Its `code_channels` row links the two.
 - **Updates:**
-  - On archive, a task's closing summary is posted to the parent thread. A fork's isn't: it moved a derailing topic
-    out of that thread, so its summary would only bring it back (`closesIntoParent`).
+  - On archive, nothing is posted to the parent thread (a fork moved a derailing topic out of it; a task's outcome
+    goes back via `report_to_parent` when the agent judges it worth it). The parent can still `ask_code_channel`.
   - The channel's agent can post milestone updates there with `report_to_parent`.
 - **Parent tools:**
   - `ask_code_channel(channel, question)`: a side query answered from the channel's conversation, summary and
@@ -225,7 +225,7 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
 - **Auto-archive:**
   - Day 6 with no messages: the bot posts a warning and sets the status to `suspended`.
   - Day 7: it posts a closing summary and calls `agents.conversations.archive` with that message's ts. The
-    summary also goes to the parent thread for a task (not a fork).
+    summary stays in the channel.
   - Any message resets the clock.
 - **Who can archive:** any member, with `/archive` or by asking the bot.
 - **Reopening:** if someone reopens the channel and posts, the bot resumes with the stored context and the
@@ -238,7 +238,7 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   - One closing summary (children's model, over the `:0` conversation and its rolling summary;
     `seed.ts generateClosingSummary`) is posted top level ("*Closing summary* …", who asked or "after a week
     without messages", how to reopen); a failed model call posts a note instead of the summary.
-  - Then "<#channel> finished: <summary>" in the parent thread, unless it has no parent, its root was deleted, or it is a fork (button, `fork: true` or adopted).
+  - Nothing goes to the parent thread (it can `ask_code_channel`; the agent uses `report_to_parent` for outcomes).
   - Then `agents.conversations.archive` with the summary's ts; the row is marked archived, a `code_channel_archived`
     event is recorded and the session set `closed` (an archived conversation also rests `closed`).
   - Every post and the archive call are keyed by the attempt (the slash `trigger_id`, the turn, the sweep's

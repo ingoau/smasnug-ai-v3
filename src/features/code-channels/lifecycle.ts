@@ -1,6 +1,6 @@
 /**
  * A code channel's lifecycle (docs/code-channels.md, Slash commands / Lifecycle): its slash commands, the closing
- * flow (closing summary → parent thread → `agents.conversations.archive`), renaming, the idle sweep and reopening.
+ * flow (closing summary → `agents.conversations.archive`), renaming, the idle sweep and reopening.
  *
  * - `/archive` (any member), the `archive_code_channel` tool and the day-7 sweep share `closeCodeChannel`.
  * - `/rename <title>` renames the session and the channel ("<bot name>: <title>", like creation).
@@ -11,8 +11,8 @@
  */
 import { env } from '../../config.js';
 import type { ActionContext } from '../../core/actions.js';
-import { appendEvent, codeChannelThreadId, parseThreadId } from '../../core/events.js';
-import { isThreadGone, slackCall, slackErrorCode } from '../../core/slack.js';
+import { appendEvent, codeChannelThreadId } from '../../core/events.js';
+import { slackCall, slackErrorCode } from '../../core/slack.js';
 import { redis } from '../../core/redis.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
@@ -23,7 +23,6 @@ import { ephemeral } from '../util.js';
 import { archiveCodeChannel, renameCodeChannel } from './api.js';
 import { CodeChannelError } from './errors.js';
 import { codeChannelDisplayName } from './ids.js';
-import { postInThread } from './open.js';
 import { generateClosingSummary } from './seed.js';
 import { codeChannelsEnabled } from './settings.js';
 import {
@@ -53,7 +52,7 @@ async function slashRefusal(channelId: string | undefined): Promise<string | nul
   return null;
 }
 
-/** `/archive` (any member): closing summary, parent thread, archive. The ack was sent by ingress; this runs async. */
+/** `/archive` (any member): closing summary, then archive. The ack was sent by ingress; this runs async. */
 export async function handleArchiveSlash(ctx: ActionContext): Promise<void> {
   const refusal = await slashRefusal(ctx.channelId);
   if (refusal) return ephemeral(ctx, refusal);
@@ -123,36 +122,15 @@ export function closingText(o: { summary: string | null; reason: CloseReason; ac
   return `*Closing summary*\n${o.summary?.trim() || NO_SUMMARY}\n\n_${why} Unarchive it to pick up where it left off._`;
 }
 
-/** The parent thread's line. Pure. */
-export function parentClosingText(o: { channelId: string; summary: string | null }): string {
-  return `<#${o.channelId}> finished: ${o.summary?.trim() || NO_SUMMARY}`;
-}
-
-/**
- * Whether the closing summary goes back to the parent thread. Only a task reports back: a fork (button, tool or one
- * adopted from Slack's UI) moved a derailing topic out of the thread, so its summary would only derail it again. Pure.
- */
-export function closesIntoParent(kind: string): boolean {
-  return kind === 'task';
-}
-
 /** The day-6 warning. Pure. */
 export function warningText(): string {
   return "This channel has been quiet for 6 days. I'll post a closing summary and archive it tomorrow unless someone writes here. (`/archive` does it now.)";
 }
 
-/** The parent thread can still be posted in (not deleted). */
-async function parentThreadAlive(threadId: string): Promise<boolean> {
-  const { channelId, threadTs } = parseThreadId(threadId);
-  const [t] = await sql<{ rootDeletedAt: Date | null }[]>`select root_deleted_at from threads where id = ${threadId}`;
-  if (t?.rootDeletedAt) return false;
-  return !(await isThreadGone(channelId, threadTs).catch(() => false));
-}
-
 /**
  * Close a code channel: one closing summary (a model call over its conversation) posted top level in the channel,
- * then, for a task, into the parent thread (if it still exists) as "<channel> finished: …", then agents.conversations.archive with
- * the summary's ts; the row is marked archived and the session `closed`. One close at a time per channel (a Redis
+ * then agents.conversations.archive with the summary's ts. Nothing is sent to the parent thread (it can ask_code_channel).
+ * The row is marked archived and the session `closed`. One close at a time per channel (a Redis
  * lock); an archived row is left alone. Never throws.
  */
 const RELEASE_LOCK = `if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end`;
@@ -219,11 +197,6 @@ async function close(row: CodeChannel, i: CloseInput): Promise<CloseResult> {
     summaryTs = res?.ts ? String(res.ts) : null;
   } catch (err) {
     log.warn({ err, channelId: row.channelId }, 'closing summary post failed');
-  }
-  if (row.parentThreadId && closesIntoParent(row.kind) && (await parentThreadAlive(row.parentThreadId))) {
-    await postInThread(row.parentThreadId, parentClosingText({ channelId: row.channelId, summary: clean }), `${key}:parent`)
-      .then(() => appendEvent(row.parentThreadId!, 'code_channel_closed', i.actor, { channelId: row.channelId, reason: i.reason }))
-      .catch((err) => log.warn({ err, channelId: row.channelId }, 'closing summary to the parent thread failed'));
   }
   const { alreadyArchived } = await archiveCodeChannel({ channelId: row.channelId, ...(summaryTs ? { summaryMessageTs: summaryTs } : {}), idempotencyKey: `${row.channelId}:${i.attemptKey}` });
   await markArchived(row.channelId, i.actor, { reason: i.reason, summaryTs, alreadyArchived });

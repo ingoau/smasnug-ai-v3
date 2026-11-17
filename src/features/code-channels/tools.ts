@@ -523,7 +523,7 @@ export function registerCodeChannelTools(): void {
     build: (ctx) =>
       tool({
         description:
-          'Close this code channel: writes a closing summary, posts it here and in the parent thread, and archives the channel. Only when someone here asks for it to be closed or archived. Ends your turn.',
+          'Close this code channel: writes a closing summary, posts it here (not in the parent thread), and archives the channel. Only when someone here asks for it to be closed or archived. Ends your turn.',
         inputSchema: z.object({}),
         execute: async (_input, options) => {
           const row = await getCodeChannel(ctx.channelId);
@@ -540,7 +540,7 @@ export function registerCodeChannelTools(): void {
           const s = turnState(ctx);
           s.visible.add('code_channel');
           s.endRequested = true;
-          return 'Archived: the closing summary is posted here and in the parent thread. Your turn is over: do not reply.';
+          return 'Archived: the closing summary is posted here. Your turn is over: do not reply.';
         },
       }),
   });
