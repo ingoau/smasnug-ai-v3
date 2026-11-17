@@ -128,6 +128,14 @@ export function parentClosingText(o: { channelId: string; summary: string | null
   return `<#${o.channelId}> finished: ${o.summary?.trim() || NO_SUMMARY}`;
 }
 
+/**
+ * Whether the closing summary goes back to the parent thread. Only a task reports back: a fork (button, tool or one
+ * adopted from Slack's UI) moved a derailing topic out of the thread, so its summary would only derail it again. Pure.
+ */
+export function closesIntoParent(kind: string): boolean {
+  return kind === 'task';
+}
+
 /** The day-6 warning. Pure. */
 export function warningText(): string {
   return "This channel has been quiet for 6 days. I'll post a closing summary and archive it tomorrow unless someone writes here. (`/archive` does it now.)";
@@ -143,7 +151,7 @@ async function parentThreadAlive(threadId: string): Promise<boolean> {
 
 /**
  * Close a code channel: one closing summary (a model call over its conversation) posted top level in the channel,
- * then into the parent thread (if it still exists) as "<channel> finished: …", then agents.conversations.archive with
+ * then, for a task, into the parent thread (if it still exists) as "<channel> finished: …", then agents.conversations.archive with
  * the summary's ts; the row is marked archived and the session `closed`. One close at a time per channel (a Redis
  * lock); an archived row is left alone. Never throws.
  */
@@ -212,7 +220,7 @@ async function close(row: CodeChannel, i: CloseInput): Promise<CloseResult> {
   } catch (err) {
     log.warn({ err, channelId: row.channelId }, 'closing summary post failed');
   }
-  if (row.parentThreadId && (await parentThreadAlive(row.parentThreadId))) {
+  if (row.parentThreadId && closesIntoParent(row.kind) && (await parentThreadAlive(row.parentThreadId))) {
     await postInThread(row.parentThreadId, parentClosingText({ channelId: row.channelId, summary: clean }), `${key}:parent`)
       .then(() => appendEvent(row.parentThreadId!, 'code_channel_closed', i.actor, { channelId: row.channelId, reason: i.reason }))
       .catch((err) => log.warn({ err, channelId: row.channelId }, 'closing summary to the parent thread failed'));

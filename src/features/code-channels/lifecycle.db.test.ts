@@ -44,7 +44,7 @@ addFakeHandler((method, args) => {
 const callsFor = (channel: string) => recorded.filter((c) => c.args?.channel === channel || c.args?.channel_id === channel);
 const job = <D,>(data: D) => ({ data, id: 'test' }) as any;
 
-async function codeChannel(o: { parent?: boolean } = {}) {
+async function codeChannel(o: { parent?: boolean; kind?: 'task' | 'fork' | 'adopted' } = {}) {
   const channelId = `CLIFE${rand()}${rand()}`;
   created.push(channelId);
   let parentThreadId: string | null = null;
@@ -54,7 +54,7 @@ async function codeChannel(o: { parent?: boolean } = {}) {
     const [ch, ts] = parentThreadId.split(':') as [string, string];
     await sql`insert into threads (id, channel_id, thread_ts) values (${parentThreadId}, ${ch}, ${ts})`;
   }
-  const { row } = await createCodeChannelRow({ channelId, sessionId: `s-${channelId}`, kind: 'task', name: 'smasnug ai: login', parentThreadId, requesterId: 'U0REQ', createdBy: 'U0REQ' });
+  const { row } = await createCodeChannelRow({ channelId, sessionId: `s-${channelId}`, kind: o.kind ?? 'task', name: 'smasnug ai: login', parentThreadId, requesterId: 'U0REQ', createdBy: 'U0REQ' });
   await sql`insert into messages (channel_id, ts, thread_id, user_id, text) values
     (${channelId}, '1700000001.000100', ${row.threadId}, 'U0REQ', 'fix the login bug please'),
     (${channelId}, '1700000001.000200', ${row.threadId}, 'U0REQ', 'and add tests')`;
@@ -113,6 +113,15 @@ describe('code channels: lifecycle', () => {
     const after = recorded.slice(before);
     expect(after.filter((c) => c.method === 'chat.postMessage' || c.method === 'agents.conversations.archive')).toEqual([]);
     expect(after.find((c) => c.method === 'response_url')?.args.text).toMatch(/already archived/);
+  });
+
+  it('a forked channel archives without posting its summary back into the derailed parent thread', async () => {
+    const row = await codeChannel({ parent: true, kind: 'fork' });
+    await slash('/archive', row.channelId);
+    const [parentCh] = row.parentThreadId!.split(':');
+    expect(recorded.filter((c) => c.method === 'chat.postMessage' && c.args.channel === parentCh)).toEqual([]);
+    expect(callsFor(row.channelId).filter((c) => c.method === 'chat.postMessage')).toHaveLength(1);
+    expect(callsFor(row.channelId).find((c) => c.method === 'agents.conversations.archive')).toBeTruthy();
   });
 
   it('a retried attempt posts nothing twice; a deleted parent thread gets no post; archive errors are reported', async () => {
