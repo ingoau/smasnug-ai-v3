@@ -19,6 +19,9 @@ import {
   mentionText,
   shouldDisengage,
   threadRootTs,
+  batchIsCodeChannel,
+  conversationRootTs,
+  isTopLevel,
   type MessageFacts,
 } from './rules.js';
 
@@ -293,5 +296,47 @@ describe('threadRootTs', () => {
   it('uses thread_ts when present, else ts', () => {
     expect(threadRootTs({ ts: '2.0', thread_ts: '1.0' })).toBe('1.0');
     expect(threadRootTs({ ts: '2.0' })).toBe('2.0');
+  });
+});
+
+describe('code channels', () => {
+  it('maps top-level messages to the conversation root 0 and keeps thread replies in their thread', () => {
+    expect(conversationRootTs({ ts: '1.000001' }, true)).toBe('0');
+    expect(conversationRootTs({ ts: '1.000001', thread_ts: '1.000001' }, true)).toBe('0'); // a thread parent (edits)
+    expect(conversationRootTs({ ts: '1.000002', thread_ts: '1.000001' }, true)).toBe('1.000001');
+    expect(conversationRootTs({ ts: '1.000001' }, false)).toBe('1.000001');
+    expect(conversationRootTs({ ts: '1.000002', thread_ts: '1.000001' }, false)).toBe('1.000001');
+    expect(isTopLevel({ ts: '1.000002', thread_ts: '1.000001' })).toBe(false);
+  });
+
+  it('gates unmentioned top-level messages with the code-channel reason, even when engagement would ignore them', () => {
+    const cc = { ...base, codeChannel: true };
+    expect(decide(cc)).toEqual({ action: 'batch', reason: 'code_channel' });
+    expect(decide({ ...cc, engaged: false, disengageDue: true })).toEqual({ action: 'batch', reason: 'code_channel' });
+    expect(decide({ ...cc, mentionsOthers: true })).toEqual({ action: 'batch', reason: 'code_channel' });
+    expect(decide({ ...cc, mentionsBot: true })).toEqual({ action: 'batch', reason: 'mention' });
+    expect(decide({ ...cc, awaitedReply: true })).toEqual({ action: 'batch', reason: 'direct' });
+    expect(decide({ ...cc, quietPrefix: true })).toEqual({ action: 'ignore', reason: 'quiet' });
+    expect(decide({ ...cc, isBot: true })).toEqual({ action: 'ignore', reason: 'bot' });
+  });
+
+  it('runs a parent-agent post without the gate; other bot posts stay ignored', () => {
+    expect(decide({ ...base, isBot: true, codeChannel: true, parentPost: true })).toEqual({ action: 'batch', reason: 'parent' });
+    expect(batchNeedsGate(['parent'])).toBe(false);
+    expect(batchIsMention(['parent'])).toBe(true);
+  });
+
+  it('a code-channel batch is gated, framed as addressed, and flagged for the note', () => {
+    expect(batchNeedsGate(['code_channel'])).toBe(true);
+    expect(batchNeedsGate(['code_channel', 'mention'])).toBe(false);
+    expect(batchIsAddressed(['code_channel'])).toBe(true);
+    expect(batchIsCodeChannel(['code_channel'])).toBe(true);
+    expect(batchIsCodeChannel(['gate'])).toBe(false);
+    expect(batchIsMention(['code_channel'])).toBe(false);
+  });
+
+  it('thread replies in a code channel follow the ordinary rules: ignored until the bot is mentioned there', () => {
+    expect(decide({ ...base, engaged: false })).toEqual({ action: 'ignore', reason: 'not_engaged' });
+    expect(decide({ ...base, engaged: false, mentionsBot: true })).toEqual({ action: 'batch', reason: 'mention' });
   });
 });

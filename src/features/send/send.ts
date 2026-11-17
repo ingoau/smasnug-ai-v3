@@ -11,7 +11,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { env, limits } from '../../config.js';
 import type { ActionContext } from '../../core/actions.js';
-import { appendEvent } from '../../core/events.js';
+import { appendEvent, threadTsArg } from '../../core/events.js';
 import { slackCall, slackErrorCode } from '../../core/slack.js';
 import { registerTool, type ToolContext } from '../../core/tools.js';
 import { redis } from '../../core/redis.js';
@@ -87,7 +87,7 @@ async function prepareSend(ctx: ToolContext, destination: string, rawText: strin
     const key = `${ctx.turnId ?? ctx.threadId}:${hash(text + JSON.stringify(files))}`;
     await slackCall(
       'chat.postMessage',
-      { channel: ctx.channelId, thread_ts: ctx.threadTs, text: truncate(text, 3000), blocks: replyBlocks(text) },
+      { channel: ctx.channelId, ...threadTsArg(ctx.threadTs), text: truncate(text, 3000), blocks: replyBlocks(text) },
       { idempotencyKey: `send-thread:${key}` },
     );
     if (files.length) await uploadFiles({ channelId: ctx.channelId, threadTs: ctx.threadTs, files, idempotencyKey: `send-thread-files:${key}` });
@@ -136,7 +136,7 @@ async function prepareSend(ctx: ToolContext, destination: string, rawText: strin
     {
       channel: ctx.channelId,
       user: ctx.speakerId,
-      thread_ts: ctx.threadTs,
+      ...threadTsArg(ctx.threadTs),
       text: `Send this on your behalf to ${label}?`,
       blocks: previewBlocks({ pendingId: pending!.id, label, text, files, profile, requesterId: ctx.speakerId }),
     },

@@ -13,7 +13,7 @@
 import type { TransactionSql } from 'postgres';
 import { env, limits } from '../../config.js';
 import type { ActionContext } from '../../core/actions.js';
-import { appendEvent, parseThreadId } from '../../core/events.js';
+import { appendEvent, parseThreadId, threadTsArg } from '../../core/events.js';
 import { slackCall } from '../../core/slack.js';
 import type { TurnRow } from '../../core/types.js';
 import { sql } from '../../db/index.js';
@@ -82,7 +82,7 @@ export async function proposeCodingAgent(o: {
     {
       channel: o.channelId,
       user: o.ownerId,
-      thread_ts: o.threadTs,
+      ...threadTsArg(o.threadTs),
       text: `Launch a coding agent: ${title}?`,
       blocks: launchPreviewBlocks({ pendingId, title, instructions, repoUrl: cfg.repoUrl, ref: cfg.ref, ttlMin: ttlMin() }),
     },

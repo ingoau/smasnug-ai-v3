@@ -8,7 +8,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { env } from '../config.js';
 import type { ActionContext } from '../core/actions.js';
-import { appendEvent } from '../core/events.js';
+import { appendEvent, isCodeChannelRoot } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { registerTool, type ToolContext } from '../core/tools.js';
 import { sql } from '../db/index.js';
@@ -132,7 +132,7 @@ export async function fileBotReport(
   if (dupe || !botReportAllowed(await counts(userId, ctx.threadId))) return ALREADY_REPORTED;
 
   const messageLink = target ? await permalink(ctx.channelId, target.ts) : null;
-  const threadLink = target?.ts === ctx.threadTs ? null : await permalink(ctx.channelId, ctx.threadTs);
+  const threadLink = target?.ts === ctx.threadTs || isCodeChannelRoot(ctx.threadTs) ? null : await permalink(ctx.channelId, ctx.threadTs);
   const reason = truncate(input.reason.trim(), BOT_REPORT_LIMITS.reasonMax);
   const snapshot = target?.text != null ? truncate(target.text, BOT_REPORT_LIMITS.snapshotStoreMax) : null;
 

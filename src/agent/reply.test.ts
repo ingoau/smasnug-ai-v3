@@ -12,7 +12,7 @@ vi.mock('../core/slack.js', () => ({
   }),
   slackErrorCode: (err: any) => err?.data?.error,
 }));
-vi.mock('../core/events.js', () => ({ appendEvent: vi.fn(async () => {}) }));
+vi.mock('../core/events.js', async (orig) => ({ ...(await orig<typeof import('../core/events.js')>()), appendEvent: vi.fn(async () => {}) }));
 vi.mock('./files.js', () => ({ uploadFiles: vi.fn(async () => {}), uploadPrivateFiles: vi.fn(async (files: any[]) => files.map((f: any, i: number) => ({ slackFileId: `FPRIV${i + 1}`, filename: f.filename, ...(f.fileId ? { fileId: f.fileId } : {}) }))) }));
 vi.mock('../files/store.js', () => ({ recordFilePosts: vi.fn(async () => {}) }));
 vi.mock('./charts-store.js', () => ({ saveReplyExtras: vi.fn(async () => {}) }));

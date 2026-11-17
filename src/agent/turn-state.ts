@@ -3,7 +3,7 @@ import type { ToolContext } from '../core/tools.js';
 import type { ReplyManager } from './reply.js';
 
 /** Visible effects a turn can have; a mention turn with none of these gets a fallback message. */
-export type VisibleAction = 'reply' | 'react' | 'spawn' | 'steer' | 'resume' | 'cancel' | 'card' | 'send';
+export type VisibleAction = 'reply' | 'react' | 'spawn' | 'steer' | 'resume' | 'cancel' | 'card' | 'send' | 'code_channel';
 
 /** Per-turn state shared by the front agent's tools (ctx.extras.agentTurn). */
 export interface FrontTurnState {
@@ -25,6 +25,11 @@ export interface FrontTurnState {
   reaction: { ts: string; emoji: string } | null;
   /** The current step follows a step that only replied/reacted, with no new messages since: a reply now repeats. */
   afterReplyOnlyStep: boolean;
+  /**
+   * A tool finished the turn's work and posted for it (open_code_channel with `fork`: the conversation moved to the
+   * new channel and a link went into this thread): the turn ends after the current step.
+   */
+  endRequested?: boolean;
 }
 
 export function turnState(ctx: ToolContext): FrontTurnState {

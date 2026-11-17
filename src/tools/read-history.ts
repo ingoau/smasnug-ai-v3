@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { registerTool } from '../core/tools.js';
 import { renderRawMessages } from '../context/thread.js';
 import { fetchHistoryBefore, fetchReplies, fromSlack } from '../context/slack-messages.js';
+import { isCodeChannelRoot } from '../core/events.js';
 import { limits } from '../config.js';
 import { channelPageHeader, estimateRenderedChars, pageThread, takeWithinBudget, threadPageHeader } from './paging.js';
 import { fetchHistoryAfterClosest } from './public-channel.js';
@@ -40,6 +41,7 @@ registerTool({
         if (before_ts && !before) return badTs('before_ts', before_ts);
         const after = normalizeTs(after_ts);
         if (after_ts && !after) return badTs('after_ts', after_ts);
+        if (isCodeChannelRoot(ctx.threadTs)) return "This conversation is a code channel's top level, not a thread: use read_channel to read it.";
         try {
           const raws = await fetchReplies(ctx.channelId, ctx.threadTs, { maxMessages: 2000 });
           const page = pageThread(visible(raws), ctx.threadTs, { before, after, limit: limit ?? DEFAULT_LIMIT, maxChars: PAGE_CHARS, size });

@@ -103,6 +103,13 @@ Message lines look like \`[1790000000.000100 · 2026-09-21 14:13 UTC] <@U123|Ing
 }
 
 /**
+ * Appended to the system prompt when code channels are on and this turn isn't inside one (front.ts buildSystem,
+ * `offersMoveButton`): the move button, visible without loading the code-channels skill.
+ */
+export const MOVE_TO_CHANNEL_PROMPT = `# Moving a thread to its own channel
+When a thread drifts off its topic into a separate piece of work (a long debugging session, a build, a side project), you may offer to move it into a code channel (a Slack channel just for that session with you) with an action button on your reply: \`{ "label": "Move to channel", "type": "action", "action": { "tool": "move_to_code_channel", "args": { "name": "<short name for the work>" } } }\`. Anyone in the thread can press it; you may offer it again later in the same thread. When someone asks you to open one (or to fork this thread into one), call open_code_channel instead; load the code-channels skill for details.`;
+
+/**
  * Appended to the system prompt only in the admin's turns when coding agents are configured (front.ts buildSystem):
  * nobody else's turn pays for it or learns the tool exists. Appended after the stable base, so the base stays cacheable.
  */

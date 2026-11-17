@@ -43,6 +43,12 @@ const LABELS: Record<string, string> = {
   huddle_dj_mode: 'Asking for the aux…',
   huddle_dj: 'Working the decks…',
   huddle_dj_settings: 'Changing DJ settings…',
+  open_code_channel: 'Opening a code channel…',
+  set_view: 'Updating a tab…',
+  remove_view: 'Removing a tab…',
+  report_to_parent: 'Reporting back…',
+  ask_code_channel: 'Checking the code channel…',
+  message_code_channel: 'Passing it on…',
 };
 
 /** Tools that only respond; they never show or change the indicator. */

@@ -4,7 +4,7 @@ import { env, limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { filesCreatedByRuns } from '../files/store.js';
 import { fileListingLine } from '../files/format.js';
-import { appendEvent, parseThreadId } from '../core/events.js';
+import { appendEvent, parseThreadId, threadTsArg } from '../core/events.js';
 import { getBotIdentity, slackCall, userbotConfigured } from '../core/slack.js';
 import { getUserInfo, type UserInfo } from '../context/users.js';
 import { getConversationInfo, renderConversation } from '../context/conversation.js';
@@ -26,7 +26,7 @@ import { TurnTiming } from '../core/timing.js';
 import { freezeCard } from './cards.js';
 import { enqueueCardTitle, enqueueSessionTitle } from './titles.js';
 import { TurnCard } from './turn-card.js';
-import { CODING_AGENTS_PROMPT, frontSystemPrompt } from './prompts/front.js';
+import { CODING_AGENTS_PROMPT, frontSystemPrompt, MOVE_TO_CHANNEL_PROMPT } from './prompts/front.js';
 import { skillsPrompt } from './skills.js';
 import { placeTargetFor } from './reply-buttons-store.js';
 import { ReplyManager, markdownMessage } from './reply.js';
@@ -43,6 +43,8 @@ import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 import { saveTrace, TraceRecorder } from './trace.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
+import { offersMoveButton } from '../features/code-channels/logic.js';
+import { hiddenToolsFor, loadCodeChannelTurnContext, NO_CODE_CHANNELS, renderChildrenSection, renderHereSection, type CodeChannelTurnContext } from '../features/code-channels/turn-context.js';
 
 export interface TurnIO {
   /** Messages pushed to this turn's inbox since the last drain (same author). Call before every model step. */
@@ -135,13 +137,14 @@ function frontModelNames(): { model: string; fallbackModel?: string } {
   return { model: modelDisplayName(MODELS.front), ...(isClaude(MODELS.front) ? { fallbackModel: modelDisplayName(env.MODEL_LUNA) } : {}) };
 }
 
-async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
+async function buildSystem(opts: { codingAgents?: boolean; moveToChannel?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
   let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, privacyConsent: env.PRIVACY_CONSENT === 'on', ...frontModelNames() });
   // HuddleFM and sandbox instructions are skills (skills/huddle-dj, skills/code-sandboxes), listed only when configured.
   const skillIndex = skillsPrompt('front');
   if (skillIndex) system = `${system}\n\n${skillIndex}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
+  if (opts.moveToChannel) system = `${system}\n\n${MOVE_TO_CHANNEL_PROMPT}`;
   // Admin-only section last: the shared prefix stays the same for everyone.
   if (opts.codingAgents) system = `${system}\n\n${CODING_AGENTS_PROMPT}`;
   return system;
@@ -331,9 +334,16 @@ function section(tag: string, body: string, attrs = ''): string {
   return body.trim() ? `<${tag}${attrs}>\n${body.trim()}\n</${tag}>` : '';
 }
 
-async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelId?: string | null, timing = new TurnTiming(), session?: SessionInfo | null): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; outcome?: { fallback: string | null } }> {
+async function buildTurnMessage(
+  turn: TurnRow,
+  speaker: Speaker,
+  viewingChannelId?: string | null,
+  timing = new TurnTiming(),
+  session?: SessionInfo | null,
+  codeChannels: CodeChannelTurnContext = NO_CODE_CHANNELS,
+): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; outcome?: { fallback: string | null } }> {
   const { channelId } = parseThreadId(turn.threadId);
-  const [memory, snapshot, ctx, dj, self, conversation, pending, quotas] = await Promise.all([
+  const [memory, snapshot, ctx, dj, self, conversation, pending, quotas, codeChannelHere] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId, { threadId: turn.threadId })).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
     timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
     timing.span('ctx_thread', () => renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs, timing })),
@@ -342,6 +352,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     timing.span('ctx_conversation', () => getConversationInfo(channelId)).catch((err) => (log.warn({ err }, 'getConversationInfo failed'), null)),
     timing.span('ctx_pending', () => loadPendingActions(turn.authorId)).catch((err) => (log.warn({ err }, 'loadPendingActions failed'), null)),
     timing.span('ctx_quota', () => userQuotaStates(turn.authorId)).catch((err) => (log.debug({ err }, 'userQuotaStates failed'), [])),
+    renderHereSection(codeChannels).catch((err) => (log.warn({ err }, 'renderHereSection failed'), '')),
   ]);
   const participants = await timing
     .span('ctx_participants', () => renderParticipantsSection(ctx.participantIds, turn.authorId, self?.userId))
@@ -353,6 +364,8 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
   // summary updates), then the speaker / thread state, then the clock, then what this turn responds to. The
   // conversation itself (channel, topic, members) changes least, so it comes first.
   parts.push(section('conversation', conversation ? renderConversation(conversation) : '', ' note="Where this conversation happens. Topic and purpose are user-written."'));
+  // Code channels (docs/code-channels.md): what this channel is, when the turn is in one.
+  parts.push(section('code_channel', codeChannelHere));
   parts.push(
     section(
       'thread_summary',
@@ -399,6 +412,7 @@ async function buildTurnMessage(turn: TurnRow, speaker: Speaker, viewingChannelI
     );
   }
   parts.push(section('thread', ctx.threadFacts ?? ''));
+  parts.push(section('code_channels', renderChildrenSection(codeChannels, now)));
   parts.push(section('pending_actions', pending ? renderPendingActions(pending, now) : '', ' note="The speaker\'s own pending confirmations and running reminders / watches."'));
   parts.push(section('low_quota', lowQuotaLines(quotas), ' note="The speaker\'s limits that are nearly used up. Plan around them; if one runs out, tell them briefly."'));
   parts.push(section('current_time', renderNow(now, speaker.tz)));
@@ -698,7 +712,10 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     [EXTRAS.defaultReactTs]: latestTs(turn.messageTs),
     // EXTRAS.queueUserImage deliberately unset: Luna accepts images in tool results.
   };
+  // Code channels: which of their tools apply here (none when switched off; no nesting) and what the prompt says.
+  const codeChannels = await loadCodeChannelTurnContext(turn.threadId, turn.authorId);
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, abortSignal: stopAbort.signal, extras });
+  for (const name of hiddenToolsFor(codeChannels)) delete tools[name];
   recordReactVisibility(tools, state);
   // Coding agents change the bot's own code: only offered in the admin's own message turns when configured (not in
   // synthesis / scheduled turns, whose input is other content; re-checked on use).
@@ -710,7 +727,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     timing.span('ctx_speaker', () => speakerInfo(turn.authorId)),
     loadSessionInfo(turn.threadId).catch((err) => (log.warn({ err }, 'loadSessionInfo failed'), null)),
   ]);
-  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session)]);
+  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId), moveToChannel: offersMoveButton({ enabled: codeChannels.enabled, inCodeChannel: Boolean(codeChannels.here) }) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
   timing.mark('context_built');
   timing.set('prompt_chars', system.length + built.text.length);
   const messages: ModelMessage[] = [{ role: 'user', content: built.text }];
@@ -796,6 +813,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
         stopWhen: [
           stepCountIs(MAX_STEPS - earlierSteps),
           hasToolCall('end_turn'),
+          // A tool finished the turn's work itself (open_code_channel with fork moved the conversation).
+          () => state.endRequested === true,
           ({ steps }) => {
             const last = steps.at(-1);
             return Boolean(last && endsTurnAfterStep(last.toolCalls as StepCall[], last.toolResults as StepResultPart[]));
@@ -997,7 +1016,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (!outcome?.fallback || replies.anyVisible || state.visible.has('reply')) return;
     // Code-written, but it can carry outside text (e.g. a HuddleFM track title): never a group ping.
     const text = neutralizeBroadcasts(outcome.fallback);
-    const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `outcome-fallback:${turnId}` });
+    const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: `outcome-fallback:${turnId}` });
     await noteCodeReply(res?.ts);
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, outcome: true, text });
   };
@@ -1021,7 +1040,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     const closed = await replies.abortOpenStreams(note);
     if (closed) return;
     if (replies.anyVisible) {
-      await slackCall('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(note) }, { idempotencyKey: `error:${turnId}` });
+      await slackCall('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(note) }, { idempotencyKey: `error:${turnId}` });
       return;
     }
     if (outcome) return void (await postOutcomeFallback());
@@ -1039,7 +1058,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     const canvases = await turnCanvases(turnId).catch((err) => (log.warn({ err }, 'turnCanvases failed'), []));
     if (canvases.length) {
       const text = canvasLinkText(canvases);
-      const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `canvas-link:${turnId}` });
+      const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: `canvas-link:${turnId}` });
       await noteCodeReply(res?.ts);
       await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, canvasLink: true, text });
       return;
@@ -1051,7 +1070,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
-    const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, ...markdownMessage(text) }, { idempotencyKey: `fallback:${turnId}` });
+    const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: `fallback:${turnId}` });
     await noteCodeReply(res?.ts);
     await appendEvent(turn.threadId, 'reply', 'bot', {
       turnId,

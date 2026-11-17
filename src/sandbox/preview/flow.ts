@@ -6,7 +6,7 @@
  */
 import { env, limits } from '../../config.js';
 import type { ActionContext } from '../../core/actions.js';
-import { appendEvent, parseThreadId } from '../../core/events.js';
+import { appendEvent, parseThreadId, threadTsArg } from '../../core/events.js';
 import { enqueue, QUEUE } from '../../core/queues.js';
 import { slackCall } from '../../core/slack.js';
 import { sql } from '../../db/index.js';
@@ -36,7 +36,7 @@ const inThread = (row: PreviewRow) => ({ threadTs: threadOf(row).threadTs });
 
 async function tellRequester(row: PreviewRow, text: string, blocks?: unknown[]): Promise<void> {
   const { channelId, threadTs } = threadOf(row);
-  await slackCall('chat.postEphemeral', { channel: channelId, user: row.requesterId, thread_ts: threadTs, text, ...(blocks ? { blocks } : {}) }).catch((err) =>
+  await slackCall('chat.postEphemeral', { channel: channelId, user: row.requesterId, ...threadTsArg(threadTs), text, ...(blocks ? { blocks } : {}) }).catch((err) =>
     log.warn({ err, previewId: row.id }, 'preview ephemeral failed'),
   );
 }
@@ -202,7 +202,7 @@ export function previewMessage(row: PreviewRow): { text: string; blocks: unknown
 async function postPreviewMessage(row: PreviewRow): Promise<void> {
   const { channelId, threadTs } = threadOf(row);
   const m = previewMessage(row);
-  const res = await slackCall<any>('chat.postMessage', { channel: channelId, thread_ts: threadTs, text: m.text, blocks: m.blocks, unfurl_links: false, unfurl_media: false }, { idempotencyKey: `preview:${row.id}` });
+  const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), text: m.text, blocks: m.blocks, unfurl_links: false, unfurl_media: false }, { idempotencyKey: `preview:${row.id}` });
   if (res?.ts) await setMessageTs(row.id, res.ts);
 }
 

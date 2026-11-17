@@ -13,7 +13,7 @@ import { markMessage } from '../core/timing.js';
 import { isLatestSeq, releaseInflight, takeBatch, type DebounceJob } from './debounce.js';
 import { clearIntakeStatus } from './session-status.js';
 import { gateDecisionReason, runGate, type GateResult } from './gate.js';
-import { type BatchReason, batchIsAddressed, batchIsMention, batchIsRecentPartner, batchNeedsGate, batchPartnerKind, gateThreshold, isCooling } from './rules.js';
+import { type BatchReason, batchIsAddressed, batchIsCodeChannel, batchIsMention, batchIsRecentPartner, batchNeedsGate, batchPartnerKind, gateThreshold, isCooling } from './rules.js';
 import { pushToRunningTurn, scheduleMessages, wakeHeldTurn } from './scheduler.js';
 import { getThread, loadMessages, recentMessages } from './store.js';
 import { djGateNote } from '../features/huddlefm/render.js';
@@ -42,6 +42,14 @@ export function answerGateNote(botName: string): string {
  */
 export function runRequesterGateNote(botName: string): string {
   return `The newest message comes from the person who asked ${botName} for background work in this thread that is still running or just reported back: a question about its progress, or a follow-up on its result or on what ${botName} delivered, is most likely meant for ${botName}, unless it is clearly aimed at someone else or just an acknowledgement.`;
+}
+
+/**
+ * The gate's note for a code channel's conversation (rules.ts 'code_channel', docs/code-channels.md): the "thread" is
+ * a whole channel made for one session with the bot, so a message there is meant for it by default.
+ */
+export function codeChannelGateNote(botName: string): string {
+  return `This conversation is not an ordinary thread: it is a dedicated session channel with ${botName} (a code channel), and its top-level messages form one conversation with ${botName}. Assume a message is for ${botName} unless it's clearly side chatter or aimed at another person.`;
 }
 
 /** Swappable for tests. */
@@ -100,13 +108,15 @@ async function fireBatch(job: Job<DebounceJob>, batch: { ts: string; reason: Bat
   const runRequester = partnerKind === 'run_requester';
   // Intermediate threshold: the bot's recent partner, but someone else wrote since its reply ('recent_partner').
   const recentPartner = batchIsRecentPartner(reasons);
+  // A code channel's conversation: partner threshold, and its own note (rules.ts 'code_channel').
+  const codeChannel = batchIsCodeChannel(reasons);
   if (needsGate) {
     const thread = await getThread(threadId);
     if (!thread?.engaged) return; // disengaged while the window was open
     const bot = await getBotIdentity();
     const cooling = isCooling(thread, new Date(), limits.gateCoolingAfterMs);
     const threshold = gateThreshold(
-      { partner, recentPartner, cooling },
+      { partner: partner || codeChannel, recentPartner, cooling },
       { base: env.GATE_THRESHOLD, partner: env.GATE_PARTNER_THRESHOLD, recentPartner: env.GATE_RECENT_PARTNER_THRESHOLD, cooling: env.GATE_COOLING_THRESHOLD },
     );
     const [context, djNote] = await Promise.all([recentMessages(threadId, ts[0]!, limits.gateContextMessages), djGateNote({ channelId, threadId })]);
@@ -120,7 +130,7 @@ async function fireBatch(job: Job<DebounceJob>, batch: { ts: string; reason: Bat
           : recentPartner
             ? recentPartnerGateNote(env.BOT_DISPLAY_NAME)
             : '';
-    const note = [roleNote, djNote ?? ''].filter(Boolean).join(' ');
+    const note = [codeChannel ? codeChannelGateNote(env.BOT_DISPLAY_NAME) : '', roleNote, djNote ?? ''].filter(Boolean).join(' ');
     const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId, threshold, ...(note ? { note } : {}) });
     await appendEvent(threadId, 'gate_decision', 'system', {
       messageTs: ts,
@@ -136,6 +146,7 @@ async function fireBatch(job: Job<DebounceJob>, batch: { ts: string; reason: Bat
       ...(answersOther ? { answersOther: true } : {}),
       ...(runRequester ? { runRequester: true } : {}),
       ...(recentPartner ? { recentPartner: true } : {}),
+      ...(codeChannel ? { codeChannel: true } : {}),
       ...(cooling ? { cooling: true } : {}),
       ...(result.probability !== undefined ? { probability: result.probability } : {}),
       ...(result.fallback ? { fallback: result.fallback, fallbackKind: result.fallbackKind, fallbackAfterMs: result.fallbackAfterMs } : {}),

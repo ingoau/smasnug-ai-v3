@@ -17,6 +17,8 @@ import { handleFactAction } from './workspace.js';
 import { registerScheduleTools, scheduleMaintenance } from './schedule/register.js';
 import { handleScheduleAction } from './schedule/home.js';
 import { djMaintenance, processHuddleFm, registerDjTools } from './huddlefm/register.js';
+import { registerCodeChannelTools } from './code-channels/tools.js';
+import { sweepCodeChannels } from './code-channels/lifecycle.js';
 
 // Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user, report_failure
 registerMemoryTools();
@@ -27,6 +29,10 @@ registerReportFailureTool();
 registerScheduleTools();
 // HuddleFM DJ mode (only when HUDDLEFM_USER_ID is set): huddle_dj_mode, huddle_dj, huddle_dj_settings
 registerDjTools();
+// Code channels (docs/code-channels.md; gated per turn, off unless CODE_CHANNELS=1): open_code_channel, set_view,
+// remove_view, report_to_parent, archive_code_channel, ask_code_channel, message_code_channel, the
+// move_to_code_channel button action, the invite confirmation buttons and the /archive and /rename commands.
+registerCodeChannelTools();
 
 // Interactions
 registerAction('send:confirm', handleSendConfirm);
@@ -55,6 +61,8 @@ export const maintenance: Record<string, { everyMs: number; run: () => Promise<v
   'features:failure-review': { everyMs: 10 * 60 * 1000, run: runFailureReview },
   'features:pending-send-expiry': { everyMs: 60 * 1000, run: expirePendingSends },
   'features:retention': { everyMs: 24 * 60 * 60 * 1000, run: async () => void (await runRetention()) },
+  // Code channels: day-6 warning, day-7 closing summary + archive (inert unless enabled).
+  'features:code-channel-sweep': { everyMs: 60 * 60 * 1000, run: async () => void (await sweepCodeChannels()) },
   ...scheduleMaintenance,
   ...djMaintenance,
 };

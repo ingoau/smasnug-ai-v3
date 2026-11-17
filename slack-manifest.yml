@@ -20,6 +20,11 @@ features:
   agent_view:
     agent_description: agentic ai b2b saas
     suggested_prompts: []
+  # Code channels (docs/code-channels.md): agents.conversations.*; the bot becomes the agent of channels it creates.
+  # Their /archive and /rename are registered per channel at runtime (setCommands), not here. The code also needs
+  # CODE_CHANNELS=1.
+  code_channels:
+    enabled: true
   slash_commands:
     - command: /smasnug
       description: Turn the bot on or off in this channel
@@ -30,7 +35,7 @@ oauth_config:
     bot:
       - chat:write            # post, stream, update; agents.sessions.setStatus (status)
       - assistant:write       # Agents & AI Apps: app_context_changed, suggested prompts, session titles
-      - chat:write.customize  # "smasnug ai on behalf of <user>" username + avatar
+      - chat:write.customize  # "smasnug ai on behalf of <user>" username + avatar; code-channel parent posts ("smasnug ai · from #x")
       - chat:write.public     # send to public channels the bot hasn't joined
       - channels:history
       - groups:history
@@ -51,6 +56,11 @@ oauth_config:
       - emoji:read
       - canvases:read         # read_canvas: canvases.getContent (access rule enforced in code: own / this conversation / public)
       - canvases:write        # create_canvas / edit_canvas: canvases.create, canvases.edit, canvases.access.set (bot's own canvases only)
+      # Code channels (docs/code-channels.md)
+      - code_channels:manage  # agents.conversations.create / archive / setView / listViews / removeView / setCommands
+      - channels:manage       # conversations.invite into public code channels (includes code_channels:manage)
+      - groups:write          # conversations.invite into private code channels
+      - metadata.message:read # see the parent-post marker on Slack's echo (the turn starts without it)
     user:
       - search:read           # Slack search (user token, public channels only — enforced in code)
       - channels:history      # read_public_thread only: open public-channel threads found via search (verified public in code)
@@ -78,6 +88,11 @@ settings:
       - channel_archive
       - channel_unarchive
       - channel_deleted
+      # Code channels: private ones archived / reopened (public ones arrive as channel_archive / channel_unarchive).
+      - group_archive
+      - group_unarchive
+      # Not subscribed: agent_session_stopped (and its old name message_stream_stopped) would bring back Slack's
+      # native stop button everywhere (docs/design.md, "No native stop button"). The handler is ready if it is added.
   interactivity:
     is_enabled: true
   org_deploy_enabled: false

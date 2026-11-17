@@ -16,8 +16,12 @@
  * - 'recent_partner': the bot's latest conversation partner, a few minutes after its reply, but someone else wrote in
  *   between (isRecentPartner): through the gate at the intermediate recent-partner threshold.
  * - 'gate': through the gate at the normal (or cooling) threshold.
+ * - 'code_channel': an unmentioned top-level message in a code channel (docs/code-channels.md, Inside the channel):
+ *   through the gate at the partner threshold, with the code-channel note (assume it's for the bot).
+ * - 'parent': the parent thread's agent posted an instruction into the code channel (message_code_channel,
+ *   features/code-channels/parent-message.ts): runs without the gate, attributed to the requester, like a mention.
  */
-export type BatchReason = 'dm' | 'mention' | 'direct' | 'partner' | 'answer_other' | 'run_requester' | 'recent_partner' | 'gate';
+export type BatchReason = 'dm' | 'mention' | 'direct' | 'partner' | 'answer_other' | 'run_requester' | 'recent_partner' | 'gate' | 'code_channel' | 'parent';
 
 export type Decision =
   | { action: 'ignore'; reason: 'bot' | 'not_engaged' | 'mentions_other' | 'disengaged' | 'unsupported' | 'quiet' }
@@ -61,14 +65,25 @@ export interface MessageFacts {
   recentPartner?: boolean;
   /** Text starts with `<>` (guidelines rule 4): never answered unless the bot is @mentioned. */
   quietPrefix?: boolean;
+  /**
+   * A top-level message in a code channel: part of the channel's one conversation (`${channel}:0`), which is always
+   * engaged (like a DM) and never disengages; unmentioned messages go through the gate ('code_channel').
+   */
+  codeChannel?: boolean;
+  /** A marked parent-agent post in a code channel's top level (parent-message.ts): a bot post that starts a turn. */
+  parentPost?: boolean;
 }
 
 export function decide(f: MessageFacts): Decision {
+  if (f.parentPost) return { action: 'batch', reason: 'parent' };
   if (f.isBot) return { action: 'ignore', reason: 'bot' };
   if (f.quietPrefix && !f.mentionsBot) return { action: 'ignore', reason: 'quiet' };
   if (f.isDm) return { action: 'batch', reason: 'dm' };
   if (f.mentionsBot) return { action: 'batch', reason: 'mention' };
   if (f.awaitedReply && !f.mentionsOthers) return { action: 'batch', reason: 'direct' };
+  // A dedicated session channel: the gate (with the code-channel note) decides, also for messages naming someone
+  // else ("@sam and I want you to…"); it is told to stay out of side chatter and messages aimed at another person.
+  if (f.codeChannel) return { action: 'batch', reason: 'code_channel' };
   if (!f.engaged) return { action: 'ignore', reason: 'not_engaged' };
   if (f.disengageDue) return { action: 'ignore', reason: 'disengaged' };
   if (f.mentionsOthers) return { action: 'ignore', reason: 'mentions_other' };
@@ -111,7 +126,7 @@ export function answersOtherOffer(f: { awaitsReplyFrom: string | null | undefine
   return Boolean(f.awaitsReplyFrom) && f.awaitsReplyFrom !== f.authorId && !f.humansSinceReply;
 }
 
-const GATED = new Set<BatchReason>(['gate', 'partner', 'answer_other', 'run_requester', 'recent_partner']);
+const GATED = new Set<BatchReason>(['gate', 'partner', 'answer_other', 'run_requester', 'recent_partner', 'code_channel']);
 
 /** A batch runs the front agent without the gate if any of its messages had a deterministic reason. */
 export function batchNeedsGate(reasons: BatchReason[]): boolean {
@@ -124,7 +139,7 @@ export function batchNeedsGate(reasons: BatchReason[]): boolean {
  * passing the gate).
  */
 export function batchIsAddressed(reasons: BatchReason[]): boolean {
-  return reasons.some((r) => r === 'direct' || r === 'partner' || r === 'answer_other' || r === 'run_requester');
+  return reasons.some((r) => r === 'direct' || r === 'partner' || r === 'answer_other' || r === 'run_requester' || r === 'code_channel');
 }
 
 /**
@@ -149,9 +164,14 @@ export function batchIsRecentPartner(reasons: BatchReason[]): boolean {
   return !batchIsPartnerLike(reasons) && reasons.includes('recent_partner');
 }
 
-/** Mention/DM turns get the status indicator. */
+/** A gated batch in a code channel's conversation (gets the code-channel note and the partner threshold). */
+export function batchIsCodeChannel(reasons: BatchReason[]): boolean {
+  return reasons.includes('code_channel');
+}
+
+/** Mention/DM turns (and parent-agent instructions in a code channel) get the status indicator. */
 export function batchIsMention(reasons: BatchReason[]): boolean {
-  return reasons.some((r) => r === 'dm' || r === 'mention');
+  return reasons.some((r) => r === 'dm' || r === 'mention' || r === 'parent');
 }
 
 export interface EngagementState {
@@ -308,6 +328,20 @@ export function debounceWindowMs(hasActiveRuns: boolean, opts: { idleMs: number;
 /** Thread root for a message. DMs: each top-level message is its own thread. Channels: same rule. */
 export function threadRootTs(ev: { ts: string; thread_ts?: string }): string {
   return ev.thread_ts ?? ev.ts;
+}
+
+/** Top-level (not a thread reply): no thread_ts, or a thread's parent (thread_ts = its own ts). */
+export function isTopLevel(ev: { ts: string; thread_ts?: string }): boolean {
+  return !ev.thread_ts || ev.thread_ts === ev.ts;
+}
+
+/**
+ * The stored thread ts a message belongs to (docs/code-channels.md). In a code channel every top-level message
+ * belongs to the channel's conversation, root `0` (`${channel}:0`); a thread reply there keeps its own thread
+ * (`${channel}:${thread_ts}`). Elsewhere: threadRootTs.
+ */
+export function conversationRootTs(ev: { ts: string; thread_ts?: string }, codeChannel: boolean): string {
+  return codeChannel && isTopLevel(ev) ? '0' : threadRootTs(ev);
 }
 
 /** Order Slack timestamps ("1700000000.000100") exactly, without float rounding. */

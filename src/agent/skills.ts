@@ -47,6 +47,8 @@ export const SKILL_FEATURES: Record<string, () => boolean> = {
   sandbox: () => Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET),
   /** previewsConfigured: sandboxes plus the key that encrypts preview tokens. */
   previews: () => Boolean(process.env.MODAL_TOKEN_ID && process.env.MODAL_TOKEN_SECRET && process.env.PREVIEW_SECRET_KEY),
+  /** codeChannelsConfigured (the runtime kill switch only hides the tools, not the skill). */
+  code_channels: () => process.env.CODE_CHANNELS === '1',
 };
 
 /**

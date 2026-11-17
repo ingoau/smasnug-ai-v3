@@ -1,6 +1,7 @@
 /** Admin-approved workspace knowledge: proposals, moderation-channel approval, deletion. */
 import { env } from '../config.js';
 import type { ActionContext } from '../core/actions.js';
+import { isCodeChannelRoot } from '../core/events.js';
 import { slackCall } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
@@ -43,6 +44,8 @@ export async function proposeWorkspaceFact(proposerId: string, text: string, sou
 async function sourceLink(sourceThread: string | null): Promise<string> {
   if (!sourceThread) return '';
   const i = sourceThread.indexOf(':');
+  // A code channel's conversation (`…:0`) has no root message to link: point at the channel.
+  if (isCodeChannelRoot(sourceThread.slice(i + 1))) return ` · <#${sourceThread.slice(0, i)}>`;
   try {
     const res = await slackCall<any>('chat.getPermalink', { channel: sourceThread.slice(0, i), message_ts: sourceThread.slice(i + 1) });
     return res.permalink ? ` · <${res.permalink}|source thread>` : '';

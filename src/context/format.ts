@@ -14,6 +14,7 @@
 import type { MessageAttachment, MessageReaction, SlackFileRef } from '../core/types.js';
 import { contextFileLabel, type ContextFile } from '../files/format.js';
 import { parseSlackPermalink } from '../tools/util.js';
+import { isParentPostUsername } from '../features/code-channels/parent-message.js';
 
 export interface RenderMsg {
   ts: string;
@@ -90,7 +91,12 @@ export function personRef(userId: string, name?: string | null): string {
 
 export function authorLabel(m: RenderMsg, env: FormatEnv): string {
   const self = env.self;
-  if (self && ((m.botId && m.botId === self.botId) || (m.userId && m.userId === self.userId))) return `[bot] ${self.name} (you)`;
+  if (self && ((m.botId && m.botId === self.botId) || (m.userId && m.userId === self.userId))) {
+    // A code channel's parent posts (open_code_channel's brief / hand-off, message_code_channel) are the bot posting
+    // for the parent thread's agent under a custom username: an instruction from there, not something you said here.
+    if (isParentPostUsername(m.username, self.name)) return `[bot] ${m.username} (the parent thread's agent, passing on its requester's words; not you)`;
+    return `[bot] ${self.name} (you)`;
+  }
   if (isBotMessage(m)) return `[bot] ${m.username || (m.userId && env.names.get(m.userId)) || 'bot'}`;
   if (!m.userId) return m.username || 'unknown';
   return personRef(m.userId, env.names.get(m.userId));

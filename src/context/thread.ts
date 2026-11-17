@@ -10,7 +10,9 @@ import { parseButtonOutcome, parseButtonResponse } from '../agent/reply-buttons.
 import { limits, env } from '../config.js';
 import { sql } from '../db/index.js';
 import { getBotIdentity } from '../core/slack.js';
-import { parseThreadId } from '../core/events.js';
+import { isCodeChannelRoot, parseThreadId } from '../core/events.js';
+import { codeChannelsEnabled } from '../features/code-channels/settings.js';
+import { isCodeChannel } from '../features/code-channels/store.js';
 import type { StoredMessage } from '../core/types.js';
 import { log } from '../log.js';
 import type { TurnTiming } from '../core/timing.js';
@@ -20,7 +22,7 @@ import { loadThreadSummary, requestThreadSummary } from './summary.js';
 import { planHistoryWindow, type HistoryWindow } from './window.js';
 import { wantsChannelBackground } from './channel-background.js';
 import { registerSlackFiles } from '../files/store.js';
-import { fetchHistoryAfter, fetchHistoryBefore, fetchReplies, fromStored, storeMessages } from './slack-messages.js';
+import { fetchConversationHistory, fetchHistoryAfter, fetchHistoryBefore, fetchReplies, fromStored, storeMessages } from './slack-messages.js';
 import { getUserNames } from './users.js';
 
 export interface RenderedThreadContext {
@@ -60,7 +62,12 @@ export function tsToUtc(ts: string): string {
  * new DM conversation). Otherwise who started the thread, when, and how many replies it has against how many are
  * shown (<thread_history> + <new_messages>); `inThread`: the turn has new messages, all replies in the thread.
  */
-export function renderThreadFacts(f: { fresh: boolean; inThread?: boolean; starter?: string; startedTs: string; replies: number; shownReplies: number }): string {
+export function renderThreadFacts(f: { fresh: boolean; inThread?: boolean; starter?: string; startedTs: string; replies: number; shownReplies: number; codeChannel?: boolean }): string {
+  if (f.codeChannel) {
+    // A code channel's conversation (root `0`): the channel's top-level messages, no root message.
+    const shown = f.shownReplies < f.replies ? ` (only the newest ${f.shownReplies} are shown here)` : '';
+    return `This is a code channel: a Slack channel made for one session with you, whose top-level messages form this one conversation (threads under them are separate). ${f.replies} ${f.replies === 1 ? 'message' : 'messages'} so far${shown}.`;
+  }
   if (f.fresh) return 'The message you are responding to is a new top-level message: it starts this thread.';
   const by = f.starter ? `Started by ${f.starter} on ${tsToUtc(f.startedTs)}` : `Started on ${tsToUtc(f.startedTs)}`;
   const shown = f.shownReplies < f.replies ? ` (only the newest ${f.shownReplies} are shown here)` : '';
@@ -100,6 +107,7 @@ export async function ensureThread(threadId: string): Promise<ThreadRow> {
  */
 export async function backfillThread(thread: ThreadRow, opts: { rootIsNew?: boolean } = {}): Promise<void> {
   if (thread.backfilled) return;
+  if (isCodeChannelRoot(thread.threadTs)) return backfillCodeChannel(thread);
   const replies = opts.rootIsNew
     ? Promise.resolve()
     : fetchReplies(thread.channelId, thread.threadTs).then((r) => storeMessages(thread.channelId, thread.id, r));
@@ -116,6 +124,19 @@ export async function backfillThread(thread: ThreadRow, opts: { rootIsNew?: bool
   if (r.status === 'rejected') {
     // Transient failures retry on the next turn; the context still renders from whatever is stored.
     log.warn({ err: r.reason, threadId: thread.id }, 'thread backfill failed');
+    return;
+  }
+  await sql`update threads set backfilled = true where id = ${thread.id}`;
+  thread.backfilled = true;
+}
+
+/** A code channel's conversation: its recent top-level messages (conversations.history, thread replies excluded). */
+async function backfillCodeChannel(thread: ThreadRow): Promise<void> {
+  try {
+    const top = await fetchConversationHistory(thread.channelId, { maxMessages: limits.contextReplies + 50 });
+    await storeMessages(thread.channelId, thread.id, top);
+  } catch (err) {
+    log.warn({ err, threadId: thread.id }, 'code channel backfill failed');
     return;
   }
   await sql`update threads set backfilled = true where id = ${thread.id}`;
@@ -153,7 +174,10 @@ export async function withButtons(threadId: string, msgs: RenderMsg[]): Promise<
   });
 }
 
-/** Top-level channel messages near the parent (stored by backfill or by the pipeline). */
+/**
+ * Top-level channel messages near the parent (stored by backfill or by the pipeline). In a code channel those are
+ * stored under the channel's conversation (`${channel}:0`), so they count too.
+ */
 async function loadChannelContext(thread: ThreadRow): Promise<RenderMsg[]> {
   const parentS = Number(thread.threadTs.split('.')[0]);
   const lo = String(parentS - 86400);
@@ -161,7 +185,7 @@ async function loadChannelContext(thread: ThreadRow): Promise<RenderMsg[]> {
   const rows = await sql<StoredMessage[]>`
     select * from messages
     where channel_id = ${thread.channelId} and not deleted and ts <> ${thread.threadTs}
-      and (thread_id is null or thread_id = channel_id || ':' || ts)
+      and (thread_id is null or thread_id = channel_id || ':' || ts or thread_id = channel_id || ':0')
       and ts::numeric between ${lo}::numeric and ${hi}::numeric`;
   const msgs = rows.map(fromStored).sort((a, b) => compareTs(a.ts, b.ts));
   const before = msgs.filter((m) => compareTs(m.ts, thread.threadTs) < 0).slice(-CHANNEL_BEFORE);
@@ -209,13 +233,20 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
   });
   // Background summary update; never blocks the turn (the job is idempotent per target).
   if (win.compactTo) requestThreadSummary(threadId, win.compactTo).catch((err) => log.warn({ err, threadId }, 'thread summary enqueue failed'));
+  const codeChannelRoot = isCodeChannelRoot(thread.threadTs);
+  // A thread under a code channel's message: the channel conversation is always its background.
+  // Only while the feature is on (no lookup per turn otherwise; a switched-off feature changes nothing here).
+  const codeChannelThread =
+    !thread.isDm && !codeChannelRoot && (await codeChannelsEnabled()) && (await isCodeChannel(thread.channelId).catch(() => false));
   const background =
     !thread.isDm &&
+    !codeChannelRoot &&
+    (codeChannelThread ||
     wantsChannelBackground({
       priorReplies: history.filter((m) => m.ts !== thread.threadTs && !m.deleted).length,
       newMessages: newMsgs.filter((m) => !m.deleted).map((m) => ({ text: m.text ?? '', hasFiles: (m.files ?? []).length > 0 })),
       maxReplies: limits.channelBackgroundMaxReplies,
-    });
+    }));
   const channelMsgs = background ? await span('ctx_channel', () => loadChannelContext(thread)) : [];
 
   const shown = [...(win.parent ? [win.parent] : []), ...win.replies, ...newMsgs, ...channelMsgs];
@@ -230,6 +261,7 @@ export async function renderThreadContext(threadId: string, opts: { newMessageTs
     startedTs: thread.threadTs,
     replies,
     shownReplies: sel.replies.length + newMsgs.filter((m) => m.ts !== thread.threadTs && !m.deleted).length,
+    codeChannel: codeChannelRoot,
   });
   return {
     threadFacts,

@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
-import { threadIdOf } from '../core/events.js';
+import { threadIdOf, threadTsArg } from '../core/events.js';
 import { createFile, FileError, fileStore, loadFileBytes, recordFilePosts, resolveFile } from '../files/store.js';
 import { sanitizeFileName, slackSnippetType, uploadContentType } from '../files/format.js';
 import { urlImage } from './rich-blocks.js';
@@ -191,7 +191,7 @@ export async function uploadFiles(opts: { channelId: string; threadTs?: string; 
   const uploaded = await sendBytes(opts.files);
   const done = await slackCall<any>(
     'files.completeUploadExternal',
-    { files: uploaded.map(({ id, title }) => ({ id, title })), channel_id: opts.channelId, ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}) },
+    { files: uploaded.map(({ id, title }) => ({ id, title })), channel_id: opts.channelId, ...threadTsArg(opts.threadTs) },
     { idempotencyKey: opts.idempotencyKey },
   );
   // A replayed (idempotent) completion shared the files of the first attempt: map those, not this attempt's ids.

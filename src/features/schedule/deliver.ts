@@ -3,7 +3,7 @@
  * turn (the original thread, or a DM to the owner when the thread's root is gone), and the scheduled turn itself.
  */
 import type { TransactionSql } from 'postgres';
-import { appendEvent, parseThreadId, threadIdOf } from '../../core/events.js';
+import { appendEvent, isCodeChannelRoot, parseThreadId, threadIdOf } from '../../core/events.js';
 import { isThreadGone, slackCall, slackErrorCode } from '../../core/slack.js';
 import { getUserInfo } from '../../context/users.js';
 import { sql } from '../../db/index.js';
@@ -43,9 +43,11 @@ export async function scheduleEntryCheck(ownerId: string, channelId: string): Pr
 /**
  * Root message still there, for a thread whose row retention already deleted (no root_deleted_at / gone key left).
  * conversations.replies: `thread_not_found` or a tombstone/different first message means the root is gone.
+ * A code channel's conversation (`0`) has no root message: it is the channel itself, which the channel checks cover.
  * https://docs.slack.dev/reference/methods/conversations.replies
  */
 async function rootMissing(channelId: string, threadTs: string): Promise<boolean> {
+  if (isCodeChannelRoot(threadTs)) return false;
   try {
     const res = await slackCall<any>('conversations.replies', { channel: channelId, ts: threadTs, limit: 1 });
     const first = res.messages?.[0];

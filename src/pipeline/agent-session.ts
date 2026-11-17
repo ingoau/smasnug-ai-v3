@@ -21,7 +21,7 @@
  *   and will no longer respond on it" → leave_thread in a DM ends the turn `closed`; a later message in the thread
  *   sets `processing` again like any turn (the bot always answers DMs).
  */
-import { appendEvent, parseThreadId } from '../core/events.js';
+import { appendEvent, parseThreadId, threadTsArg } from '../core/events.js';
 import { getBotIdentity, slackCall, slackErrorCode } from '../core/slack.js';
 import { redis } from '../core/redis.js';
 import { sql } from '../db/index.js';
@@ -196,13 +196,13 @@ export async function setSessionTitle(o: { threadId: string; turnId: number; tit
 /** agents.sessions.rename; when the session doesn't exist yet, create it with the title (setStatus `title`). */
 async function renameSession(channelId: string, threadTs: string, title: string, key: string) {
   try {
-    await slackCall('agents.sessions.rename', { channel_id: channelId, thread_ts: threadTs, title }, { idempotencyKey: key });
+    await slackCall('agents.sessions.rename', { channel_id: channelId, ...threadTsArg(threadTs), title }, { idempotencyKey: key });
   } catch (err) {
     if (slackErrorCode(err) !== 'session_not_found') throw err;
     // No session yet, so no status was ever set: create it with the turn's current one (`processing` only while
     // the turn's indicator shows it; the turn's TurnStatus wouldn't clear a `processing` it never set).
     const status = turnIndicatorLive(`${channelId}:${threadTs}`) ? 'processing' : 'active';
-    await slackCall('agents.sessions.setStatus', { channel_id: channelId, thread_ts: threadTs, status, title }, { idempotencyKey: `${key}:create` });
+    await slackCall('agents.sessions.setStatus', { channel_id: channelId, ...threadTsArg(threadTs), status, title }, { idempotencyKey: `${key}:create` });
   }
 }
 
@@ -269,15 +269,23 @@ const AWAITING_USER = sql`(
 
 /**
  * The status a turn leaves its session in. DMs: `suspended` while a confirmation from this thread is pending
- * (the user has to act), `closed` after leave_thread in this turn, else `active`. Channel threads: always `active`.
+ * (the user has to act), `closed` after leave_thread in this turn, else `active`. Channel threads: always `active`,
+ * except a code channel's conversation, which rests `suspended` while waiting on a person and `closed` once archived.
  * Without `turnId` (side paths that clear a status outside a turn: intake, stop, a resolved confirmation): the
  * status the session rests in, i.e. `closed` if the latest turn that ran (or runs) is the one that closed it.
  */
 export async function finalSessionStatus(threadId: string, turnId?: number): Promise<FinalSessionStatus> {
-  const [row] = await sql<{ isDm: boolean; closeTurnId: number | null; pendingSend: boolean; lastTurnId: number | null }[]>`
+  const [row] = await sql<{ isDm: boolean; closeTurnId: number | null; pendingSend: boolean; lastTurnId: number | null; ccWaiting: boolean | null; ccArchived: boolean | null }[]>`
     select t.is_dm, s.close_turn_id, ${AWAITING_USER} as pending_send,
-      (select max(u.id) from turns u where u.thread_id = t.id and u.status <> 'pending') as last_turn_id
+      (select max(u.id) from turns u where u.thread_id = t.id and u.status <> 'pending') as last_turn_id,
+      (select c.archived_at is null and (c.warned_at is not null or t.awaits_reply_from is not null)
+         from code_channels c where c.thread_id = t.id) as cc_waiting,
+      (select c.archived_at is not null from code_channels c where c.thread_id = t.id) as cc_archived
     from threads t left join agent_sessions s on s.thread_id = t.id where t.id = ${threadId}`;
+  // A code channel's conversation (docs/code-channels.md, Status): `closed` once archived, `suspended` while the
+  // bot's latest reply asked someone something (threads.awaits_reply_from) or the archive warning is out.
+  if (row?.ccArchived) return 'closed';
+  if (row?.ccWaiting) return 'suspended';
   if (!row?.isDm) return 'active';
   if (row.pendingSend) return 'suspended';
   const turn = turnId ?? row.lastTurnId;
