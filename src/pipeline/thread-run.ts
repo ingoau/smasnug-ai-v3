@@ -23,6 +23,7 @@ import { nativeStopRequestedSince, stopRequestedSince } from './stop.js';
 import { hasPendingHumanInput } from './debounce.js';
 import { enqueue, QUEUE } from '../core/queues.js';
 import { currentlyViewing } from './view-context.js';
+import { requestCodeChannelStatus } from '../features/code-channels/status.js';
 
 export const ERROR_TEXT = 'Something broke, try again.';
 
@@ -165,6 +166,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
       ...(followUp ? { leftoverInboxTurnId: followUp } : {}),
     });
     timing.mark('turn_end');
+    await requestCodeChannelStatus(turn.threadId); // a code channel's Status tab (no-op elsewhere; never throws)
     await reportTiming(turn, timing).catch((err) => log.debug({ err }, 'turn timing report failed'));
   }
   return final;

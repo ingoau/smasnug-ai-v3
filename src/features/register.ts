@@ -19,6 +19,7 @@ import { handleScheduleAction } from './schedule/home.js';
 import { djMaintenance, processHuddleFm, registerDjTools } from './huddlefm/register.js';
 import { registerCodeChannelTools } from './code-channels/tools.js';
 import { sweepCodeChannels } from './code-channels/lifecycle.js';
+import { processCodeChannelStatus } from './code-channels/status.js';
 
 // Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user, report_failure
 registerMemoryTools();
@@ -52,6 +53,7 @@ registerAppHome(publishHome);
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
   [QUEUE.huddlefm]: processHuddleFm,
+  [QUEUE.codeChannelStatus]: processCodeChannelStatus,
 };
 
 /** Periodic tasks run via the `maintenance` queue: { [taskName]: { everyMs, run } }. */

@@ -51,12 +51,15 @@ import { closeCodeChannel, handleArchiveSlash, handleRenameSlash } from './lifec
 import { inviteUsers, isDmConversation, openCodeChannel, parentLabel, postInThread, postParentMessage, type OpenResult } from './open.js';
 import { parentPostTurnStarts } from '../../pipeline/code-channel-intake.js';
 import { codeChannelsEnabled } from './settings.js';
+import { STATUS_VIEW_KEY } from './status-view.js';
 import { getCodeChannel, isCodeChannel, listChildCodeChannels, type CodeChannel } from './store.js';
 import { privateChildrenReadableIn, visibleChildren } from './turn-context.js';
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
-/** Slack allows 10 tabs per channel. */
+/** Slack allows 10 tabs per channel; one of them is the automatic Status tab (status.ts), so the agent gets 9. */
 export const MAX_VIEWS = 10;
+export const MAX_AGENT_VIEWS = MAX_VIEWS - 1;
+const RESERVED_VIEW_TEXT = `The "${STATUS_VIEW_KEY}" tab is the automatic Status tab: it can't be changed or removed. Use another view_key.`;
 const ASK_MAX_CALLS = 3;
 const ASK_MAX_FETCH = 500;
 
@@ -352,16 +355,18 @@ export function registerCodeChannelTools(): void {
     roles: ['front'],
     build: (ctx) =>
       tool({
-        description: `Add or update a tab on this code channel (keyed by view_key): a complete HTML page, Block Kit blocks, or a canvas you made in this channel. At most ${MAX_VIEWS} tabs per channel. Use for things people come back to (a status page, a plan, results), not for answers (reply).`,
+        description: `Add or update a tab on this code channel (keyed by view_key): a complete HTML page, Block Kit blocks, or a canvas you made in this channel. At most ${MAX_AGENT_VIEWS} tabs of yours per channel, besides the automatic Status tab (view_key "${STATUS_VIEW_KEY}", reserved). Use for things people come back to (a plan, results, a live page), not for answers (reply).`,
         inputSchema: viewSchema,
         execute: async (input) => {
           const row = await getCodeChannel(ctx.channelId);
           if (!row) return 'Tabs only exist in code channels.';
+          if (input.view_key === STATUS_VIEW_KEY) return RESERVED_VIEW_TEXT;
           const view = await toView(ctx.channelId, input);
           if (typeof view === 'string') return view;
           try {
             const views = await listCodeChannelViews(ctx.channelId).catch(() => []);
-            if (!views.some((v) => v.view_key === input.view_key) && views.length >= MAX_VIEWS) return `This channel already has ${MAX_VIEWS} tabs: remove one first (remove_view).`;
+            const own = views.filter((v) => v.view_key !== STATUS_VIEW_KEY);
+            if (!own.some((v) => v.view_key === input.view_key) && own.length >= MAX_AGENT_VIEWS) return `This channel already has ${MAX_AGENT_VIEWS} tabs besides Status: remove one first (remove_view).`;
             await setCodeChannelView(ctx.channelId, view);
             await appendEvent(ctx.threadId, 'code_channel_view', ctx.speakerId, { viewKey: input.view_key, type: input.type, name: input.name }).catch(() => {});
             return `Tab "${input.name}" (${input.view_key}) is set.`;
@@ -381,6 +386,7 @@ export function registerCodeChannelTools(): void {
         inputSchema: z.object({ view_key: z.string().min(1).max(256) }),
         execute: async ({ view_key }) => {
           if (!(await getCodeChannel(ctx.channelId))) return 'Tabs only exist in code channels.';
+          if (view_key === STATUS_VIEW_KEY) return RESERVED_VIEW_TEXT;
           try {
             await removeCodeChannelView(ctx.channelId, view_key);
             return `Tab ${view_key} removed.`;

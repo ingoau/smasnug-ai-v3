@@ -28,6 +28,7 @@ import { codeChannelDisplayName } from './ids.js';
 import { briefText, createOptions, forkHandoffText, forkSeedText } from './logic.js';
 import { parentMessageMetadata, parentPostUsername } from './parent-message.js';
 import { generateSeedSummary } from './seed.js';
+import { refreshCodeChannelStatus } from './status.js';
 import { createCodeChannelRow, getCodeChannelBySession, setCodeChannelSeedTs, type CodeChannel } from './store.js';
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
@@ -200,6 +201,7 @@ export async function openCodeChannel(i: OpenInput): Promise<OpenResult> {
 
   const commandsErr = await registerCodeChannelCommands(channelId);
   if (commandsErr) problems.push(commandsErr);
+  await refreshCodeChannelStatus(channelId); // the automatic Status tab (never throws)
 
   // Slack invites the origin's author when there is an origin link; everyone else named here is invited by us.
   const bot = await getBotIdentity().catch(() => undefined);

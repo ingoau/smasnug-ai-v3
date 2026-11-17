@@ -167,6 +167,21 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
 - **`agent_session_stopped`:** stops the current turn, like `!stop`.
 - **Views** (`set_view`, code channels only): canvas, HTML and Block Kit tabs, keyed by `view_key`. A canvas tab
   takes a canvas from `bot_canvases`.
+- **Status tab** (automatic, `src/features/code-channels/status.ts` + the pure `status-view.ts`): every code channel
+  gets a Block Kit tab "Status" under the reserved `view_key` `status`, rendered from DB state by code (no model call).
+  - Shows: the kind (task with the brief's first line / forked from <origin permalink> / adopted), who opened it,
+    created, last activity; waiting-on-reply, pending send confirmations and the auto-archive date when relevant;
+    running and queued runs started from any conversation in the channel (`:0` or a thread there: title, subagent /
+    sandbox / coding agent, state, started) or "Nothing running."; the last 5 finished runs (done / failed / cancelled,
+    when). Times are Slack date tokens (`{ago}`, `{date_short_pretty}`), rendered by the client. Lists are capped (10
+    running, 5 finished, titles 80 chars, section text < 3000).
+  - Refreshed right after create / adoption (after setCommands, direct call), and via `requestCodeChannelStatus`
+    (Redis pending flag + one delayed `code-channel-status` job per channel, 3 s) whenever a plan card in the channel
+    re-renders (`renderCardNow`: run start, progress, finish, failure, cancel), at the end of every turn
+    (`thread-run.ts`) and on the sweep's warning. A refresh whose blocks hash the same as the last push makes no
+    Slack call. Skipped for archived channels and when the feature is off; failures are logged, never thrown.
+  - `set_view` / `remove_view` refuse the `status` key; the agent may have 9 tabs of its own (Slack's 10 minus
+    Status). Runs are found by `split_part(thread_id, ':', 1)` (index `runs_channel_idx`, migration 349).
 - **Slash commands**, registered when the channel is created or adopted:
   - `/archive` (any member): posts a closing summary, archives.
   - `/rename <title>`: calls `agents.sessions.rename`.
@@ -180,7 +195,7 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
 - *Stage 3, prompt:* a turn in a code channel gets a `<code_channel>` section (name, kind, brief or seed summary,
   parent thread link); a parent thread lists its live channels in `<code_channels>`. Parent posts render as
   "[bot] smasnug ai · from #x (the parent thread's agent …)", not "(you)". `set_view` checks the limits before
-  calling Slack (complete HTML documents, ≤ 1 MB, ≤ 20 https CSP origins, ≤ 10 tabs, canvases made in this channel).
+  calling Slack (complete HTML documents, ≤ 1 MB, ≤ 20 https CSP origins, ≤ 9 tabs besides the Status tab, canvases made in this channel).
 
 ### Parent link
 - **Ownership:** the thread that opened the channel is its parent. Its `code_channels` row links the two.

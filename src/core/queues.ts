@@ -16,6 +16,8 @@ export const QUEUE = {
   subagentRun: 'subagent-run',
   /** Coalesced plan-card re-render: { cardId } */
   cardRender: 'card-render',
+  /** Coalesced refresh of a code channel's Status tab (src/features/code-channels/status.ts): { channelId } */
+  codeChannelStatus: 'code-channel-status',
   /**
    * HuddleFM DJ mode (src/features/huddlefm): status sync + auto DJ top-up per huddle channel: { channelId, reason }.
    * Its own queue: these jobs wait on HuddleFM replies that arrive through slack-events.

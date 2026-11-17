@@ -102,7 +102,7 @@ export async function renderHereSection(c: CodeChannelTurnContext): Promise<stri
     );
   }
   lines.push(
-    'Tabs: set_view adds or updates a tab on the channel (a complete HTML page, Block Kit blocks, or a canvas you made in this channel), remove_view removes one; at most 10 tabs. Use them for things people come back to (a live status page, a plan, results).',
+    'Tabs: set_view adds or updates a tab on the channel (a complete HTML page, Block Kit blocks, or a canvas you made in this channel), remove_view removes one; at most 9 tabs of yours. The Status tab (view_key "status": channel info and running/finished subagents) is automatic and kept up to date for you; you can\'t change or remove it. Use your tabs for things people come back to (a plan, results, a live page).',
     'When someone here asks you to close or archive the channel, call archive_code_channel (it posts the closing summary here and archives; the parent thread is not told, it can ask; your turn ends). People can also type /archive or /rename <title>. It is archived by itself after a week without messages.',
   );
   const parts = [lines.join('\n')];
