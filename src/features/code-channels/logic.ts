@@ -21,6 +21,8 @@ export interface ToolGateInput {
   hasParent: boolean;
   /** Live code channels this thread opened. */
   liveChildren: number;
+  /** All code channels this thread opened, archived ones included (default: liveChildren). */
+  children?: number;
 }
 
 /** The code-channel tools a turn must not get (removed from the built tool set). */
@@ -31,7 +33,9 @@ export function hiddenCodeChannelTools(g: ToolGateInput): string[] {
   if (g.inCodeChannel) hidden.push(...OPEN_TOOLS, ...PARENT_TOOLS);
   else hidden.push(...IN_CHANNEL_TOOLS);
   if (g.inCodeChannel && !g.hasParent) hidden.push('report_to_parent');
-  if (!g.inCodeChannel && g.liveChildren === 0) hidden.push(...PARENT_TOOLS);
+  // An archived child can still be asked (its conversation and closing summary stay readable), not messaged.
+  if (!g.inCodeChannel && (g.children ?? g.liveChildren) === 0) hidden.push(...PARENT_TOOLS);
+  else if (!g.inCodeChannel && g.liveChildren === 0) hidden.push('message_code_channel');
   return hidden;
 }
 

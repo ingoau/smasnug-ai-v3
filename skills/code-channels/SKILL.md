@@ -30,6 +30,6 @@ A press opens the channel from your reply, invites the presser and the person yo
 - Closing: when anyone in the channel asks you to close or archive it, call `archive_code_channel()`: it writes the closing summary, posts it here (not in the parent thread; use `report_to_parent` first if it should hear the outcome), archives the channel and ends your turn (don't reply after it). Don't archive on your own initiative. People can also use `/archive` and `/rename <title>`. After 6 quiet days a warning is posted; after 7 it's archived the same way. Someone who unarchives it and writes picks up where it left off.
 
 ## From the parent thread
-The `<code_channels>` section lists the live channels this thread opened.
-- `ask_code_channel(channel, question)`: a short answer from that channel's conversation, its summary and its tabs; nothing is posted there.
-- `message_code_channel(channel, text)`: posts an instruction there as from the speaker; your turn there acts on it. Write it self-contained.
+The `<code_channels>` section lists the channels this thread opened, archived ones included. Their closing summaries are never sent here: ask when someone wants to know how it went.
+- `ask_code_channel(channel, question)`: a short answer from that channel's conversation, its summary and its tabs (an archived one's closing summary too); nothing is posted there.
+- `message_code_channel(channel, text)` (live channels only): posts an instruction there as from the speaker; your turn there acts on it. Write it self-contained.

@@ -186,7 +186,9 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
 - **Ownership:** the thread that opened the channel is its parent. Its `code_channels` row links the two.
 - **Updates:**
   - On archive, nothing is posted to the parent thread (a fork moved a derailing topic out of it; a task's outcome
-    goes back via `report_to_parent` when the agent judges it worth it). The parent can still `ask_code_channel`.
+    goes back via `report_to_parent` when the agent judges it worth it). The parent can still `ask_code_channel`: archived
+    children stay in `<code_channels>` (marked archived) and asking one reads its history and closing summary;
+    `message_code_channel` needs a live one.
   - The channel's agent can post milestone updates there with `report_to_parent`.
 - **Parent tools:**
   - `ask_code_channel(channel, question)`: a side query answered from the channel's conversation, summary and
