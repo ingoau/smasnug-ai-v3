@@ -35,7 +35,7 @@ export function hiddenCodeChannelTools(g: ToolGateInput): string[] {
   return hidden;
 }
 
-/** Whether the front prompt offers the "Move to a code channel" button (enabled, not already in one). */
+/** Whether the front prompt offers the "Move to channel" button (enabled, not already in one). */
 export function offersMoveButton(g: Pick<ToolGateInput, 'enabled' | 'inCodeChannel'>): boolean {
   return g.enabled && !g.inCodeChannel;
 }

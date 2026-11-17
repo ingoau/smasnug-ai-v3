@@ -1,6 +1,6 @@
 ---
 name: code-channels
-description: Opening a code channel (a Slack channel for one session with you) for a task or by forking this thread, the "Move to a code channel" button, invites, and working inside one (tabs, reporting to the parent thread) or from its parent thread. Load when someone asks for a code channel, to fork or move a thread, or before offering the button the first time.
+description: Opening a code channel (a Slack channel for one session with you) for a task or by forking this thread, the "Move to channel" button, invites, and working inside one (tabs, reporting to the parent thread) or from its parent thread. Load when someone asks for a code channel, to fork or move a thread, or before offering the button the first time.
 roles: [front]
 requires: [code_channels]
 ---
@@ -19,7 +19,7 @@ A code channel is a Slack channel made for one session with you: every top-level
 
 ## The button: `move_to_code_channel`
 When a thread drifts into a separate piece of work, offer the move with an action button on your reply (anyone may press it, and you may offer it again later):
-`{ "label": "Move to a code channel", "type": "action", "action": { "tool": "move_to_code_channel", "args": { "name": "login bug" } } }`
+`{ "label": "Move to channel", "type": "action", "action": { "tool": "move_to_code_channel", "args": { "name": "login bug" } } }`
 A press opens the channel from your reply, invites the presser and the person you were answering, posts the summary, and waits for them there (no turn). The button area then shows "Moved → <link>". Don't add `done_text`.
 
 ## Inside a code channel

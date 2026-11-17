@@ -22,7 +22,8 @@ import {
 import { codeChannelDisplayName } from './ids.js';
 import { isParentPostUsername, parentPostUsername, USERNAME_MAX } from './parent-message.js';
 import { tailLines } from './seed.js';
-import { MOVE_BUTTON_NOTE, privateChildrenReadableIn, renderChildrenSection } from './turn-context.js';
+import { MOVE_TO_CHANNEL_PROMPT } from '../../agent/prompts/front.js';
+import { privateChildrenReadableIn, renderChildrenSection } from './turn-context.js';
 
 const gate = (o: Partial<Parameters<typeof hiddenCodeChannelTools>[0]> = {}) =>
   hiddenCodeChannelTools({ enabled: true, inCodeChannel: false, hasParent: false, liveChildren: 0, ...o }).sort();
@@ -132,8 +133,9 @@ describe('names and texts', () => {
     expect(tailLines('aaaa\nbbbb\ncccc', 10)).toBe('[older messages left out]\nbbbb\ncccc');
   });
   it('the button note names the action; the children section lists channels', () => {
-    expect(MOVE_BUTTON_NOTE).toContain('"tool": "move_to_code_channel"');
-    expect(MOVE_BUTTON_NOTE).toMatch(/again/);
+    expect(MOVE_TO_CHANNEL_PROMPT).toContain('"label": "Move to channel"');
+    expect(MOVE_TO_CHANNEL_PROMPT).toContain('"tool": "move_to_code_channel"');
+    expect(MOVE_TO_CHANNEL_PROMPT).toMatch(/again/);
     const now = new Date('2026-11-16T12:00:00Z');
     const row = { channelId: 'C0CODE', name: 'smasnug ai: x', kind: 'fork', lastActivityAt: new Date('2026-11-14T11:00:00Z'), archivedAt: null } as any;
     const text = renderChildrenSection({ enabled: true, here: null, topLevel: false, children: [row] }, now);

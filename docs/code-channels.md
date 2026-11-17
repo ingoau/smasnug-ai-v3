@@ -116,8 +116,8 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   subagents or sandboxes), then waits for people.
   - *Stage 3:* the brief is that parent post (same mechanism as the fork hand-off); the current turn goes on and
     tells the speaker with the link.
-- **The button:** the front agent can add a "Move to a code channel" action button (`move_to_code_channel`)
-  to any reply when it judges the thread is drifting off topic, and may do so more than once per thread.
+- **The button:** the front agent can add a "Move to channel" action button (`move_to_code_channel`)
+  to any reply when it judges the thread is drifting off topic, and may do so more than once per thread. How to offer it lives in the front system prompt (`MOVE_TO_CHANNEL_PROMPT`, `src/agent/prompts/front.ts`), appended only when code channels are on and the turn is outside one.
   - Anyone in the thread can press it.
   - The origin is the reply carrying the button, so the presser and the original requester are invited explicitly.
   - The seed is posted and the bot waits without starting a turn.

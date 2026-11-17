@@ -8,7 +8,7 @@
 import { isChannelMember } from '../../context/conversation.js';
 import { isCodeChannelRoot, parseThreadId } from '../../core/events.js';
 import { log } from '../../log.js';
-import { hiddenCodeChannelTools, KIND_LABEL, offersMoveButton } from './logic.js';
+import { hiddenCodeChannelTools, KIND_LABEL } from './logic.js';
 import { permalinkOf } from './open.js';
 import { ensureAdoptedSeed } from './seed.js';
 import { codeChannelsEnabled } from './settings.js';
@@ -81,12 +81,6 @@ export function hiddenToolsFor(c: CodeChannelTurnContext): string[] {
   return hiddenCodeChannelTools({ enabled: c.enabled, inCodeChannel: Boolean(c.here), hasParent: Boolean(c.here?.parentThreadId), liveChildren: c.children.length });
 }
 
-/** The one line that tells the agent about the button (visible without loading the skill). Pure. */
-export const MOVE_BUTTON_NOTE =
-  'Code channels: when this thread drifts off its topic into a separate piece of work (a long debugging session, a build, a side project), you may offer to move it into a code channel (a Slack channel just for that session with you) with an action button on your reply: ' +
-  '{ "label": "Move to a code channel", "type": "action", "action": { "tool": "move_to_code_channel", "args": { "name": "<short name for the work>" } } }. ' +
-  'Anyone in the thread can press it; you may offer it again later in the same thread. When someone asks you to open one (or to fork this thread into one) call open_code_channel instead; load the code-channels skill for details.';
-
 /** Strip our own section tags from untrusted text going into a section. */
 const strip = (s: string) => s.replace(/<\/?(code_channel|code_channels|seed_summary|brief)\b[^>]*>/gi, '[tag removed]');
 
@@ -134,7 +128,3 @@ export function renderChildrenSection(c: CodeChannelTurnContext, now = new Date(
   ].join('\n');
 }
 
-/** The move-button note, when it applies. */
-export function moveButtonNote(c: CodeChannelTurnContext): string {
-  return offersMoveButton({ enabled: c.enabled, inCodeChannel: Boolean(c.here) }) ? MOVE_BUTTON_NOTE : '';
-}

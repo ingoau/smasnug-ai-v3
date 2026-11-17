@@ -26,7 +26,7 @@ import { TurnTiming } from '../core/timing.js';
 import { freezeCard } from './cards.js';
 import { enqueueCardTitle, enqueueSessionTitle } from './titles.js';
 import { TurnCard } from './turn-card.js';
-import { CODING_AGENTS_PROMPT, frontSystemPrompt } from './prompts/front.js';
+import { CODING_AGENTS_PROMPT, frontSystemPrompt, MOVE_TO_CHANNEL_PROMPT } from './prompts/front.js';
 import { skillsPrompt } from './skills.js';
 import { placeTargetFor } from './reply-buttons-store.js';
 import { ReplyManager, markdownMessage } from './reply.js';
@@ -43,7 +43,8 @@ import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 import { saveTrace, TraceRecorder } from './trace.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
-import { hiddenToolsFor, loadCodeChannelTurnContext, moveButtonNote, NO_CODE_CHANNELS, renderChildrenSection, renderHereSection, type CodeChannelTurnContext } from '../features/code-channels/turn-context.js';
+import { offersMoveButton } from '../features/code-channels/logic.js';
+import { hiddenToolsFor, loadCodeChannelTurnContext, NO_CODE_CHANNELS, renderChildrenSection, renderHereSection, type CodeChannelTurnContext } from '../features/code-channels/turn-context.js';
 
 export interface TurnIO {
   /** Messages pushed to this turn's inbox since the last drain (same author). Call before every model step. */
@@ -136,13 +137,14 @@ function frontModelNames(): { model: string; fallbackModel?: string } {
   return { model: modelDisplayName(MODELS.front), ...(isClaude(MODELS.front) ? { fallbackModel: modelDisplayName(env.MODEL_LUNA) } : {}) };
 }
 
-async function buildSystem(opts: { codingAgents?: boolean } = {}): Promise<string> {
+async function buildSystem(opts: { codingAgents?: boolean; moveToChannel?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
   let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, privacyConsent: env.PRIVACY_CONSENT === 'on', ...frontModelNames() });
   // HuddleFM and sandbox instructions are skills (skills/huddle-dj, skills/code-sandboxes), listed only when configured.
   const skillIndex = skillsPrompt('front');
   if (skillIndex) system = `${system}\n\n${skillIndex}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
+  if (opts.moveToChannel) system = `${system}\n\n${MOVE_TO_CHANNEL_PROMPT}`;
   // Admin-only section last: the shared prefix stays the same for everyone.
   if (opts.codingAgents) system = `${system}\n\n${CODING_AGENTS_PROMPT}`;
   return system;
@@ -411,8 +413,6 @@ async function buildTurnMessage(
   }
   parts.push(section('thread', ctx.threadFacts ?? ''));
   parts.push(section('code_channels', renderChildrenSection(codeChannels, now)));
-  const moveNote = moveButtonNote(codeChannels);
-  if (moveNote) parts.push(moveNote);
   parts.push(section('pending_actions', pending ? renderPendingActions(pending, now) : '', ' note="The speaker\'s own pending confirmations and running reminders / watches."'));
   parts.push(section('low_quota', lowQuotaLines(quotas), ' note="The speaker\'s limits that are nearly used up. Plan around them; if one runs out, tell them briefly."'));
   parts.push(section('current_time', renderNow(now, speaker.tz)));
@@ -727,7 +727,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     timing.span('ctx_speaker', () => speakerInfo(turn.authorId)),
     loadSessionInfo(turn.threadId).catch((err) => (log.warn({ err }, 'loadSessionInfo failed'), null)),
   ]);
-  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
+  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId), moveToChannel: offersMoveButton({ enabled: codeChannels.enabled, inCodeChannel: Boolean(codeChannels.here) }) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
   timing.mark('context_built');
   timing.set('prompt_chars', system.length + built.text.length);
   const messages: ModelMessage[] = [{ role: 'user', content: built.text }];
