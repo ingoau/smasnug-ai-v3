@@ -26,6 +26,7 @@ import { codeChannelDisplayName } from './ids.js';
 import { postInThread } from './open.js';
 import { generateClosingSummary } from './seed.js';
 import { codeChannelsEnabled } from './settings.js';
+import { requestCodeChannelStatus } from './status.js';
 import {
   getCodeChannel,
   invalidateCodeChannelCache,
@@ -260,6 +261,7 @@ export async function sweepCodeChannels(now = new Date()): Promise<{ warned: num
       if (!(await markCodeChannelWarned(row.channelId, WARN_AFTER_MS))) continue;
       await appendEvent(row.threadId, 'code_channel_warned', null, {}).catch(() => {});
       await setSessionStatus(row.channelId, '0', 'suspended').catch(() => {});
+      await requestCodeChannelStatus(row.channelId);
       out.warned++;
     } catch (err) {
       log.warn({ err, channelId: row.channelId }, 'code channel idle warning failed');

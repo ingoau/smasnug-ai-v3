@@ -309,11 +309,11 @@ describe('code channels: opening and the agent tools', () => {
     const report = (await callsFor(src.channelId)).filter((x) => x.method === 'chat.postMessage').at(-1)!.args;
     expect(report).toMatchObject({ thread_ts: src.ts });
     expect(report.text).toContain('login fixed');
-    expect(await exec(c.tools.set_view, { view_key: 'status', type: 'html', name: 'Status', content: '<div>x</div>' })).toMatch(/complete documents/);
+    expect(await exec(c.tools.set_view, { view_key: 'live', type: 'html', name: 'Live', content: '<div>x</div>' })).toMatch(/complete documents/);
     expect(await exec(c.tools.set_view, { view_key: 'plan', type: 'canvas', name: 'Plan', canvas_id: 'FNOPE' })).toMatch(/isn't one you made/);
-    expect(await exec(c.tools.set_view, { view_key: 'status', type: 'html', name: 'Status', content: '<!doctype html><html><body>ok</body></html>' })).toBe('Tab "Status" (status) is set.');
-    const set = (await callsFor(row.channelId)).find((x) => x.method === 'agents.conversations.setView')!;
-    expect(set.args).toMatchObject({ type: 'html', view_key: 'status', name: 'Status' });
+    expect(await exec(c.tools.set_view, { view_key: 'live', type: 'html', name: 'Live', content: '<!doctype html><html><body>ok</body></html>' })).toBe('Tab "Live" (live) is set.');
+    const set = (await callsFor(row.channelId)).find((x) => x.method === 'agents.conversations.setView' && x.args.view_key === 'live')!;
+    expect(set.args).toMatchObject({ type: 'html', view_key: 'live', name: 'Live' });
     expect((await getCodeChannel(row.channelId))?.archivedAt).toBeNull();
   });
 

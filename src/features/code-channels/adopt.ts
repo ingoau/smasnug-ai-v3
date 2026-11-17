@@ -4,8 +4,8 @@
  * also caches the negative answer for ordinary channels). Callers check `codeChannelsEnabled()` first.
  *
  * An adopted channel with an origin link is "treated as a fork of that message's thread": its seed summary is
- * written on its first turn (seed.ts ensureAdoptedSeed, from turn-context.ts). TODO(stage 4): register its slash
- * commands here.
+ * written on its first turn (seed.ts ensureAdoptedSeed, from turn-context.ts). Its slash commands and Status tab
+ * are set up here.
  */
 import { appendEvent, codeChannelThreadId, isCodeChannelRoot, parseThreadId, threadIdOf } from '../../core/events.js';
 import { getConversationInfo, type ConversationInfo } from '../../context/conversation.js';
@@ -14,6 +14,7 @@ import { getBotIdentity } from '../../core/slack.js';
 import { log } from '../../log.js';
 import { registerCodeChannelCommands } from './commands.js';
 import { deriveSessionId } from './ids.js';
+import { refreshCodeChannelStatus } from './status.js';
 import { createCodeChannelRow, isCodeChannel, type CodeChannel } from './store.js';
 
 /** The thread we know the origin message by: its own stored thread, or the thread it roots. Null if we never saw it. */
@@ -66,6 +67,7 @@ export async function adoptIfAgentChannel(channelId: string, requesterId: string
     await appendEvent(codeChannelThreadId(channelId), 'code_channel_adopted', requesterId ?? null, { origin, parentThreadId });
     log.info({ channelId, origin, parentThreadId }, 'code channel adopted');
     await registerCodeChannelCommands(channelId);
+    await refreshCodeChannelStatus(channelId);
   }
   return row;
 }

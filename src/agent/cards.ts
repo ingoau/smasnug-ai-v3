@@ -21,6 +21,7 @@ import { extrasForMessage } from './charts-store.js';
 import { extrasFallback, footerBlock, hasExtras, replyBody, type ReplyExtras } from './rich-blocks.js';
 import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS } from './slack-markdown.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
+import { requestCodeChannelStatus } from '../features/code-channels/status.js';
 
 export interface CardRow {
   id: number;
@@ -229,6 +230,8 @@ export async function renderCardNow(cardId: number): Promise<void> {
   try {
     await redis.set(lastKey(cardId), String(Date.now()), 'PX', 60_000);
     const loaded = await loadCard(cardId);
+    // Runs in a code channel also show on its Status tab (coalesced per channel; a no-op elsewhere).
+    if (loaded) void requestCodeChannelStatus(loaded.card.channelId);
     if (!loaded || !loaded.card.messageTs) return; // not posted yet: posting renders the latest state
     const msg = renderCard(toState(loaded.card), loaded.runs);
     await editCardMessage({ channel: loaded.card.channelId, ts: loaded.card.messageTs, text: msg.text, blocks: msg.blocks });
