@@ -14,7 +14,7 @@ import { isAdmin, mrkdwnEscape, requireAdmin, truncate } from './util.js';
 import { listWorkspaceFacts } from './workspace.js';
 import { scheduleHomeBlocks } from './schedule/home.js';
 import { hasAgreed, PRIVACY_READ_ACTION, withdrawButton } from './privacy.js';
-import { sandboxAdminBlocks, sandboxDisclosureBlocks } from '../sandbox/home.js';
+import { sandboxAdminBlocks, sandboxDisclosureBlocks, sandboxUserLimitLines } from '../sandbox/home.js';
 
 const MAX_BLOCKS = 100;
 const USER_FACTS_SHOWN = 25;
@@ -166,29 +166,29 @@ async function limitsBlocks(adminId: string): Promise<unknown[]> {
     }),
   ];
   if (!target) {
-    out.push(context("Pick someone to see what's left of their hourly limits."));
+    out.push(context("Pick someone to see what's left of their limits."));
     return out;
   }
-  const states = await userLimitStates(target);
-  const lines = states.map((q) => {
+  const [states, daily] = await Promise.all([userLimitStates(target), sandboxUserLimitLines(target)]);
+  const hourly = states.map((q) => {
     const used = q.max - q.remaining;
     const flag = q.remaining <= 0 ? ' :no_entry:' : '';
     return q.kind === 'subagent'
       ? `${q.noun}: ${used}/${q.max} running${flag}`
       : `${q.noun}: ${used}/${q.max} used this hour${flag}`;
   });
-  out.push(section(`<@${target}>\n${lines.join('\n')}`));
+  out.push(section(`<@${target}>\n${[...hourly, ...daily].join('\n')}`));
   out.push({
     type: 'actions',
     elements: [
-      btn('admin:limits_reset', 'Reset hourly limits', target, {
+      btn('admin:limits_reset', 'Reset limits', target, {
         style: 'danger',
-        confirm: confirmDialog('Reset limits?', 'Clears this user\'s hourly usage windows. Running subagents are not affected.', 'Reset'),
+        confirm: confirmDialog('Reset limits?', 'Clears this user\'s hourly usage windows and today\'s sandbox minutes and live previews. Running subagents and sandboxes are not affected.', 'Reset'),
       }),
       btn('admin:limits_refresh', 'Refresh', target),
     ],
   });
-  out.push(context('Rolling one-hour windows. Subagent slots free up as their runs finish.'));
+  out.push(context('Rolling one-hour windows; sandbox quotas are per UTC day. Subagent slots free up as their runs finish.'));
   return out;
 }
 

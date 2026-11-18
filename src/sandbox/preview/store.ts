@@ -6,6 +6,7 @@ import { limits } from '../../config.js';
 import { shortId } from '../../core/events.js';
 import { env } from '../../config.js';
 import { sql } from '../../db/index.js';
+import { dailyResetAt } from '../../features/guard.js';
 import { log } from '../../log.js';
 import type { DeployResult } from './deploy.js';
 import { decryptSecret, encryptSecret } from './crypto.js';
@@ -55,10 +56,14 @@ export async function upsertRequestedPreview(o: { runId: number; subagentId: str
   return { id, replacedBundle: null };
 }
 
-/** Previews counted against the daily caps: today's, except those that never got anywhere (cancelled before deploy). */
+/**
+ * Previews counted against the daily caps: today's, except those that never got anywhere (cancelled before deploy).
+ * The user's count starts at their last admin limit reset when that was today.
+ */
 export async function previewCountsToday(userId: string): Promise<{ user: number; global: number }> {
+  const resetAt = await dailyResetAt(userId);
   const [r] = await sql<{ user: number; global: number }[]>`
-    select count(*) filter (where requester_id = ${userId})::int as user, count(*)::int as global
+    select count(*) filter (where requester_id = ${userId} and created_at >= ${resetAt ?? new Date(0)})::int as user, count(*)::int as global
     from previews where created_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc' and status <> 'cancelled'`;
   return { user: r?.user ?? 0, global: r?.global ?? 0 };
 }

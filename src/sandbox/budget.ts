@@ -13,6 +13,7 @@
  */
 import { env, limits, sandboxPricing } from '../config.js';
 import { sql } from '../db/index.js';
+import { dailyResetAt, dailyWindowStart } from '../features/guard.js';
 import { log } from '../log.js';
 
 // ---------- pure ----------
@@ -92,10 +93,12 @@ export async function monthEstimateUsd(now = new Date()): Promise<number> {
 }
 
 /** A user's live sandbox minutes today (UTC), open segments included. */
+/** Counted from the user's last admin limit reset when that was today. */
 export async function userMinutesToday(userId: string, now = new Date()): Promise<number> {
+  const since = dailyWindowStart(dayStart(now), await dailyResetAt(userId));
   const [r] = await sql<{ s: number | null }[]>`
-    select sum(extract(epoch from (coalesce(ended_at, now()) - greatest(started_at, ${dayStart(now)}))))::float8 as s
-    from sandbox_usage where user_id = ${userId} and sandbox_id is not null and coalesce(ended_at, now()) > ${dayStart(now)}`;
+    select sum(extract(epoch from (coalesce(ended_at, now()) - greatest(started_at, ${since}))))::float8 as s
+    from sandbox_usage where user_id = ${userId} and sandbox_id is not null and coalesce(ended_at, now()) > ${since}`;
   return Number(r?.s ?? 0) / 60;
 }
 
