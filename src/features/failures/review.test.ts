@@ -5,8 +5,9 @@ vi.hoisted(() => {
 });
 vi.mock('../../db/index.js', () => ({ sql: {} }));
 vi.mock('../../core/redis.js', () => ({ redis: {} }));
+import { env } from '../../config.js';
 import { cleanCategories } from './categories.js';
-import { findingKey, renderReviewTranscript, reviewReason, validateFindings, type Finding, type Line } from './review.js';
+import { findingKey, renderReviewTranscript, reviewInstructions, reviewPrompt, reviewReason, validateFindings, type Finding, type Line } from './review.js';
 
 const base = { flags: [], selfReports: 0, gate: [], humanMessages: [], sampleRate: 0, rand: () => 0.5 };
 
@@ -44,10 +45,12 @@ describe('reviewReason', () => {
 });
 
 const lines: Line[] = [
-  { n: 1, ts: '1.1', userId: 'U1', isBot: false, name: 'Ann', text: 'what time is the event?', gate: { messageTs: '1.1', authorId: 'U1', decision: 'no', probability: 0.4 } },
-  { n: 2, ts: '1.2', userId: 'U1', isBot: false, name: 'Ann', text: '@bot hello??' },
-  { n: 3, ts: '1.3', userId: null, isBot: true, name: 'bot', text: 'It starts at 9.' },
-  { n: 4, ts: '1.4', userId: 'U1', isBot: false, name: 'Ann', text: 'no, it says 10', gate: { messageTs: '1.4', authorId: 'U1', decision: 'yes', probability: 0.95 } },
+  { n: 1, ts: '1.1', userId: 'U1', isBot: false, own: false, name: 'Ann', text: 'what time is the event?', gate: { messageTs: '1.1', authorId: 'U1', decision: 'no', probability: 0.4 } },
+  { n: 2, ts: '1.2', userId: 'U1', isBot: false, own: false, name: 'Ann', text: '@bot hello??' },
+  { n: 3, ts: '1.3', userId: 'UBOT', isBot: true, own: true, name: 'Smasnug', text: 'It starts at 9.' },
+  { n: 4, ts: '1.4', userId: 'U1', isBot: false, own: false, name: 'Ann', text: 'no, it says 10', gate: { messageTs: '1.4', authorId: 'U1', decision: 'yes', probability: 0.95 } },
+  { n: 5, ts: '1.5', userId: 'UKYTO', isBot: true, own: false, name: 'kyto', text: 'The event is on Mars.' },
+  { n: 6, ts: '1.6', userId: 'U1', isBot: false, own: false, name: 'Ann', text: 'kyto, that is wrong' },
 ];
 const finding = (f: Partial<Finding>): Finding => ({ categories: ['incorrect_info'], summary: 'wrong time', evidence_lines: [3, 4], bot_line: 3, signal: 'correction', ...f });
 
@@ -89,6 +92,17 @@ describe('validateFindings', () => {
     expect(findingKey('T', a!)).toBe('failure:review:T:1.3:incomplete,incorrect_info');
   });
 
+  it("drops another bot's mistakes, keeping a gate miss next to its message", () => {
+    expect(validateFindings([finding({ evidence_lines: [5, 6], bot_line: null })], lines)).toEqual([]);
+    // bot_line pointing at another bot's message doesn't count as ours.
+    expect(validateFindings([finding({ evidence_lines: [6], bot_line: 5 })], lines)).toEqual([]);
+    expect(validateFindings([finding({ categories: ['gate_false_negative', 'incorrect_info'], evidence_lines: [1, 5], bot_line: null })], lines)[0]!.categories).toEqual([
+      'gate_false_negative',
+    ]);
+    // Ours repeating it is ours.
+    expect(validateFindings([finding({ evidence_lines: [3, 5, 6], bot_line: 3 })], lines)).toHaveLength(1);
+  });
+
   it('keeps at most five', () => {
     expect(validateFindings(Array.from({ length: 8 }, () => finding({})), lines)).toHaveLength(5);
   });
@@ -98,7 +112,21 @@ describe('renderReviewTranscript', () => {
   it('numbers lines and marks gate decisions', () => {
     const out = renderReviewTranscript(lines);
     expect(out).toContain('[1] {gate: NOT answered, p=0.40} <@U1|Ann>: what time is the event?');
-    expect(out).toContain('[3] [bot] bot: It starts at 9.');
+    expect(out).toContain(`[3] [${env.BOT_DISPLAY_NAME}] (the bot under review): It starts at 9.`);
+    expect(out).toContain('[5] [other bot] kyto: The event is on Mars.');
     expect(out).toContain('[4] {gate: answer}');
+  });
+});
+
+describe('reviewPrompt / reviewInstructions', () => {
+  it('lists every report on file as already reported, and says other bots are not under review', () => {
+    const p = reviewPrompt('T', [], [{ id: 1, categories: ['incomplete'], summary: 'pending one' }], [
+      { id: 2, source: 'review', categories: ['incorrect_info'], summary: 'by review' },
+      { id: 3, source: 'self', reviewVerdict: 'confirmed', categories: ['too_slow'], summary: 'judged self' },
+    ]);
+    expect(p).toContain('- id 1 [incomplete] pending one');
+    expect(p).toContain('- [incorrect_info] by review (an earlier review)');
+    expect(p).toContain('- [too_slow] judged self (the bot itself, confirmed by a review)');
+    expect(reviewInstructions()).toMatch(/Other bots' and people's mistakes .* are never findings/);
   });
 });

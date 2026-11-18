@@ -69,11 +69,21 @@ trace-based ones need traces. Thresholds are in `THRESHOLDS`.
   old) once per new activity, like memory extraction. Only threads with a warning sign get a model call: a detector flag
   that a person saw (`WARNING_FLAGS`), a self report, a gate "no" whose author posted again within 30 min or a near miss
   (p ≥ 0.5); plus `failureReviewSampleRate` (10%) of the rest, and at most `failureReviewPerDay` calls per UTC day. The
-  reviewer sees the transcript with the gate decision on each gated message, the flags and the self reports; it
+  reviewer sees the transcript with the gate decision on each gated message, the flags and the self reports; our
+  own messages are marked as the bot under review (by the `auth.test` identity) and other bots' (kyto, gorkie …) as
+  `[other bot] <name>`: their mistakes are context, never findings (a finding that cites another bot's message and
+  none of ours is dropped, unless it's a gate miss). It
   returns findings that cite transcript lines (uncited ones are dropped, a gate category needs a matching gate
-  decision among them, and on a re-review a finding must cite a message newer than the last review; earlier review
-  findings are in the prompt and keyed by anchor message + categories, so none is filed twice) and confirms or disputes each self report (`review_verdict`). Quotes come from our stored copy,
+  decision among them, and on a re-review a finding must cite a message newer than the last review; every report
+  already on file is in the prompt, and findings are keyed by anchor message + categories, so none is filed twice) and confirms or disputes each self report (`review_verdict`). Quotes come from our stored copy,
   never from the model. It never posts.
+
+Reports about one incident are merged at insert time (`store.ts` `recordFailure`): a report on the same thread that
+is on the same turn or cites a message an earlier report cites folds into the oldest such report (not into a
+disputed one). Categories and evidence are unioned, the stronger signal (explicit_complaint > correction >
+self_noticed > hindsight) brings its summary, and a self report the review also found (either order) becomes a self
+report with `review_verdict` 'confirmed'. The folded-in key goes into `merged_keys` (migration 352), so a retry or
+re-review is still a no-op. A merge still appends a `failure_report` event (`merged: true`) for the turn.
 
 Each report also appends a `failure_report` event (categories only, no text) so the detectors see it; a disputed self
 report gets a `failure_verdict` event and stops counting. Reports are
