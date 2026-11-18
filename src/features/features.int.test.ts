@@ -611,6 +611,24 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       await workspace.handleFactAction(action({ userId: 'UADMIN', actionId: 'fact:delete', value: String(f.id) }), async () => {});
       expect(await render.renderWorkspaceFacts()).not.toContain(text);
     });
+
+    it('channel rules: the admin\'s apply at once, only in that channel; others wait for approval; no-ping preferences surface', async () => {
+      const { renderTurnRules } = await import('./memory/rules.js');
+      const rule = `reminder requests get only a ✅ reaction ${rand()}`;
+      expect(await exec(tools.proposeWorkspaceFactTool(toolCtx('UADMIN')), { fact: rule, scope: 'channel' })).toMatch(/Saved \(in this channel\)/);
+      expect(await renderTurnRules(channelId, [])).toContain(rule);
+      expect(await renderTurnRules(`COTHER${rand()}`, [])).not.toContain(rule);
+      expect(await render.renderWorkspaceFacts()).not.toContain(rule);
+      // Not the admin and not the channel's creator (the fake says UADMIN): goes to the admin.
+      const other = `no replies to standups ${rand()}`;
+      expect(await exec(tools.proposeWorkspaceFactTool(toolCtx(uid())), { fact: other, scope: 'channel' })).toMatch(/approval \(in this channel\)/);
+      expect(await renderTurnRules(channelId, [])).not.toContain(other);
+
+      const quiet = uid();
+      await exec(tools.rememberTool(toolCtx(quiet)), { fact: "doesn't want to be pinged", kind: 'preference' });
+      expect(await renderTurnRules(channelId, [quiet, uid()])).toContain(`Asked not to be @mentioned (write their plain name instead): <@${quiet}>`);
+      await sql`delete from workspace_facts where text in (${rule}, ${other})`;
+    });
   });
 
   describe.skipIf(process.env.LIVE !== '1')('live extraction end-to-end (LIVE=1)', () => {

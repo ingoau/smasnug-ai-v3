@@ -6,6 +6,8 @@ import { z } from 'zod';
 import { registerTool, type ToolContext } from '../../core/tools.js';
 import { appendEvent } from '../../core/events.js';
 import { log } from '../../log.js';
+import { channelCreator } from '../killswitch.js';
+import { isAdmin } from '../util.js';
 import { proposeWorkspaceFact, WS_FACT_MAX_CHARS } from '../workspace.js';
 import { formatFactLine } from './render.js';
 import {
@@ -42,7 +44,8 @@ export function rememberTool(ctx: ToolContext) {
   return tool({
     description:
       "Save a fact to the current speaker's private memory, right away. Call it whenever the speaker mentions something lasting " +
-      'about themselves (a project, their stack or tools, skills, role, interests, time zone, how they like answers) or asks you ' +
+      'about themselves (a project, their stack or tools, skills, role, interests, time zone, how they like answers or want you ' +
+      'to respond to them, e.g. "only react to my reminder requests", "don\'t ping me") or asks you ' +
       'to remember something, in the same step as your reply and without announcing it. Write it short, in third person ("prefers short answers", ' +
       '"is building a robot arm for Blueprint"). When it changes a fact you already have (shown with its id), pass that id as ' +
       'replaces; a near-duplicate of a saved fact updates that fact instead of adding a second one. Facts about other people must be ' +
@@ -51,7 +54,7 @@ export function rememberTool(ctx: ToolContext) {
       fact: z.string().min(1).max(FACT_MAX_CHARS),
       kind: z
         .enum(FACT_KINDS)
-        .describe('preference: how they want you to help (style, language, tools); about: who they are (role, skills, interests, time zone); project: what they are working on now'),
+        .describe('preference: how they want you to help or treat them (style, language, tools, "just react to my reminders", "don\'t ping me"); about: who they are (role, skills, interests, time zone); project: what they are working on now'),
       replaces: z.union([z.string(), z.number()]).optional().describe('id of the existing fact this one updates (e.g. "m_42"), if any'),
     }),
     // Usually called alongside the reply, which ends the turn, so the model rarely sees this result: every outcome
@@ -128,18 +131,38 @@ export function forgetTool(ctx: ToolContext) {
   });
 }
 
+/**
+ * Who may set a rule right away: the admin (any scope), or the channel's creator for a rule about their channel.
+ * Everyone else's proposals wait for the admin.
+ */
+export async function canSetRuleNow(speakerId: string, scope: 'workspace' | 'channel', channelId: string): Promise<boolean> {
+  if (isAdmin(speakerId)) return true;
+  if (scope !== 'channel') return false;
+  const { creator } = await channelCreator(channelId);
+  return !!creator && creator === speakerId;
+}
+
 export function proposeWorkspaceFactTool(ctx: ToolContext) {
   return tool({
     description:
-      'Propose a fact about this Slack workspace itself (what a channel is for, a recurring event, who runs something) for the ' +
-      'shared knowledge base. It goes to the admin for approval and is only used once approved. Not for personal facts — use ' +
-      'remember for those. Keep it short, neutral and self-contained.',
-    inputSchema: z.object({ fact: z.string().min(1).max(WS_FACT_MAX_CHARS) }),
-    execute: async ({ fact }) => {
+      'Save a fact about this Slack workspace (what a channel is for, a recurring event, who runs something) or a RULE for how ' +
+      'you behave, for everyone: workspace-wide or only in this channel (scope). Use it when the admin or the channel\'s owner ' +
+      'states how you should act ("reminder requests here just get a ✅, no reply", "don\'t answer questions in this channel"). ' +
+      "The admin's (and the channel creator's, for their channel) apply from the next turn; anyone else's go to the admin for " +
+      "approval. Not for one person's own preferences (\"don't ping me\", \"just react to my requests\"): remember those (kind " +
+      'preference). Keep it short, neutral and self-contained.',
+    inputSchema: z.object({
+      fact: z.string().min(1).max(WS_FACT_MAX_CHARS),
+      scope: z.enum(['workspace', 'channel']).default('workspace').describe('channel: applies only in the current channel'),
+    }),
+    execute: async ({ fact, scope = 'workspace' }) => {
       const text = cleanFactText(fact);
       if (!text) return 'Nothing to propose.';
-      const res = await proposeWorkspaceFact(ctx.speakerId, text, ctx.threadId);
-      await logEvent(ctx, 'workspace_fact_proposed', { text });
+      if (scope === 'channel' && /^[DG]/.test(ctx.channelId))
+        return "Channel rules are for channels; in a DM, remember the speaker's own preference instead.";
+      const autoApprove = await canSetRuleNow(ctx.speakerId, scope, ctx.channelId).catch(() => false);
+      const res = await proposeWorkspaceFact(ctx.speakerId, text, ctx.threadId, { channelId: scope === 'channel' ? ctx.channelId : null, autoApprove });
+      await logEvent(ctx, 'workspace_fact_proposed', { text, scope, autoApprove });
       return res;
     },
   });

@@ -181,5 +181,25 @@ describe('frontSystemPrompt answer quality rules (failure reports, Nov 2026)', (
     const work = (o: { sandbox?: boolean }) => frontSystemPrompt('smasnug ai', o).split('\n').find((l) => l.startsWith('**Work it out'))!;
     expect(work({})).not.toMatch(/sandbox/);
     expect(work({ sandbox: true })).toMatch(/sandbox subagent/);
+    // Time zones, dates and arithmetic go through the deterministic calculate tool either way.
+    for (const o of [{}, { sandbox: true }]) expect(work(o)).toMatch(/Time zone conversions, date maths .* go through calculate/);
+  });
+});
+
+describe('frontSystemPrompt: responding without words, and stated preferences', () => {
+  const p = frontSystemPrompt('smasnug ai');
+
+  it('a message that needs no words gets a reaction or nothing, never a confirmation message', () => {
+    expect(p).toMatch(/If a message doesn't need words, send none: react \(✅ done, 👍 noted\) or end_turn/);
+    expect(p).toMatch(/"i'll follow the steps"/);
+    expect(p).toMatch(/a reminder set, a reaction added\): a ✅, not a confirmation message/);
+    expect(p).not.toMatch(/reactions should be rare/);
+  });
+
+  it('stated rules and preferences about responding keep applying', () => {
+    expect(p).toMatch(/holds for every later message it covers, not just the next one/);
+    expect(p).toMatch(/How they want you to treat them \("just react to my reminders", "don't ping me"\) is a preference: save it and keep to it/);
+    expect(p).toMatch(/A rule the admin or the channel's creator sets for everyone .* goes to propose_workspace_fact \(scope channel or workspace\)/);
+    expect(p).toMatch(/<rules> \(this channel's rules, who asked not to be pinged\)/);
   });
 });

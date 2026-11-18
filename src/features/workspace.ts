@@ -13,6 +13,8 @@ export interface WorkspaceFact {
   text: string;
   sourceThread: string | null;
   proposerId: string;
+  /** Null: workspace-wide. Set: a channel rule, only shown on turns in that channel (memory/rules.ts). */
+  channelId: string | null;
   status: 'pending' | 'approved' | 'rejected';
   modMessageTs: string | null;
   createdAt: Date;
@@ -22,23 +24,52 @@ export interface WorkspaceFact {
 export const WS_FACT_MAX_CHARS = 400;
 export const PENDING_PROPOSALS_PER_USER = 5;
 
-export async function proposeWorkspaceFact(proposerId: string, text: string, sourceThread: string | null): Promise<string> {
+/**
+ * Propose a workspace fact (or, with `channelId`, a rule for one channel). `autoApprove` (the proposer is the admin, or
+ * the channel's creator for a channel rule: memory/tools.ts decides) saves it as approved right away, so a rule an
+ * admin states applies from the next turn; anything else waits for the admin in the moderation channel.
+ */
+export async function proposeWorkspaceFact(
+  proposerId: string,
+  text: string,
+  sourceThread: string | null,
+  opts: { channelId?: string | null; autoApprove?: boolean } = {},
+): Promise<string> {
+  const channelId = opts.channelId ?? null;
+  const where = channelId ? 'in this channel' : 'workspace-wide';
+  const [dup] = await sql<{ id: number; status: string }[]>`
+    select id, status from workspace_facts
+    where lower(text) = lower(${text}) and channel_id is not distinct from ${channelId} and status in ('pending', 'approved')`;
+  if (dup && (dup.status === 'approved' || !opts.autoApprove)) return 'That workspace fact is already known or awaiting approval.';
+  if (opts.autoApprove) {
+    if (dup) await sql`update workspace_facts set status = 'approved', decided_at = now() where id = ${dup.id}`;
+    else
+      await sql`
+        insert into workspace_facts (text, source_thread, proposer_id, channel_id, status, decided_at)
+        values (${text}, ${sourceThread}, ${proposerId}, ${channelId}, 'approved', now())`;
+    if (!channelId) await invalidateWorkspaceFacts();
+    return `Saved (${where}); it applies from the next turn. The admin can remove it in App Home.`;
+  }
   const [{ n } = { n: 0 }] = await sql<{ n: number }[]>`
     select count(*)::int as n from workspace_facts where proposer_id = ${proposerId} and status = 'pending'`;
   if (n >= PENDING_PROPOSALS_PER_USER)
     return `This user already has ${n} workspace facts awaiting approval; wait for those to be reviewed.`;
-  const [dup] = await sql`select id from workspace_facts where lower(text) = lower(${text}) and status in ('pending', 'approved')`;
-  if (dup) return 'That workspace fact is already known or awaiting approval.';
 
   const [fact] = await sql<WorkspaceFact[]>`
-    insert into workspace_facts (text, source_thread, proposer_id) values (${text}, ${sourceThread}, ${proposerId}) returning *`;
+    insert into workspace_facts (text, source_thread, proposer_id, channel_id) values (${text}, ${sourceThread}, ${proposerId}, ${channelId}) returning *`;
   try {
     const ts = await postToModChannel(`Workspace fact proposed by <@${proposerId}>`, proposalBlocks(fact!), `wsfact:${fact!.id}`);
     if (ts) await sql`update workspace_facts set mod_message_ts = ${ts} where id = ${fact!.id}`;
   } catch (err) {
     log.error({ err, factId: fact!.id }, 'posting workspace fact proposal failed');
   }
-  return 'Sent to the admin for approval. It will be used once approved.';
+  return `Sent to the admin for approval (${where}). It will be used once approved.`;
+}
+
+/** Approved rules for one channel, oldest first. */
+export async function listChannelRules(channelId: string): Promise<Pick<WorkspaceFact, 'id' | 'text'>[]> {
+  return sql<Pick<WorkspaceFact, 'id' | 'text'>[]>`
+    select id, text from workspace_facts where channel_id = ${channelId} and status = 'approved' order by id`;
 }
 
 async function sourceLink(sourceThread: string | null): Promise<string> {
@@ -56,7 +87,10 @@ async function sourceLink(sourceThread: string | null): Promise<string> {
 
 function proposalBlocks(f: WorkspaceFact, decided?: string): unknown[] {
   const blocks: unknown[] = [
-    { type: 'section', text: { type: 'mrkdwn', text: `*Workspace fact proposed* by <@${f.proposerId}>\n${quote(f.text, 1000)}` } },
+    {
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*${f.channelId ? `Rule for <#${f.channelId}>` : 'Workspace fact'} proposed* by <@${f.proposerId}>\n${quote(f.text, 1000)}` },
+    },
   ];
   if (decided) blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: decided }] });
   else
@@ -73,7 +107,7 @@ function proposalBlocks(f: WorkspaceFact, decided?: string): unknown[] {
 export async function decideWorkspaceFact(id: number, status: 'approved' | 'rejected'): Promise<WorkspaceFact | undefined> {
   const [f] = await sql<WorkspaceFact[]>`
     update workspace_facts set status = ${status}, decided_at = now() where id = ${id} and status = 'pending' returning *`;
-  if (f && status === 'approved') await invalidateWorkspaceFacts();
+  if (f && status === 'approved' && !f.channelId) await invalidateWorkspaceFacts();
   return f;
 }
 

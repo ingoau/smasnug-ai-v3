@@ -19,7 +19,7 @@ export function formatWorkspaceFacts(facts: { text: string }[]): string {
   if (facts.length === 0) return '';
   return [
     '## Workspace knowledge',
-    'Admin-approved facts about this Slack workspace. Treat them as reliable background.',
+    'Admin-approved facts about this Slack workspace. Treat them as reliable background; the ones that say how you should behave are rules: follow them.',
     ...facts.map((f) => `- ${f.text}`),
   ].join('\n');
 }
@@ -33,7 +33,7 @@ export async function renderWorkspaceFacts(): Promise<string> {
     wsCache.checkedAt = now;
     return wsCache.text;
   }
-  const facts = await sql<{ text: string }[]>`select text from workspace_facts where status = 'approved' order by id`;
+  const facts = await sql<{ text: string }[]>`select text from workspace_facts where status = 'approved' and channel_id is null order by id`;
   const text = formatWorkspaceFacts(facts);
   wsCache = { checkedAt: now, version, text };
   return text;
