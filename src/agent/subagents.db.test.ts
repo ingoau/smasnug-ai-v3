@@ -228,4 +228,21 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     await expect(sub.spawnSubagent({ threadId, turnId: turn, ownerId: 'U_E', title: 'one too many', instructions: 'x' })).rejects.toThrow(/thread/);
     for (const id of ids) await sub.cancelSubagent({ threadId, subagentId: id, actor: 'U_D' });
   });
+
+  it('a failed run shows in the open batch status and in the snapshot (never vanishes)', async () => {
+    const { renderOpenBatches } = await import('./batch-status.js');
+    const { renderSnapshot } = await import('./front.js');
+    const tid = `${channel}:${rootTs}9`;
+    await sql`insert into threads (id, channel_id, thread_ts) values (${tid}, ${channel}, ${rootTs + '9'}) on conflict do nothing`;
+    const [t] = await sql<{ id: number }[]>`insert into turns (thread_id, author_id, status) values (${tid}, 'U_F', 'running') returning id`;
+    const a = await sub.spawnSubagent({ threadId: tid, turnId: Number(t!.id), ownerId: 'U_F', title: 'Names 1-100', instructions: 'x' });
+    const b = await sub.spawnSubagent({ threadId: tid, turnId: Number(t!.id), ownerId: 'U_F', title: 'Names 101-200', instructions: 'y' });
+    await sub.failRuns({ runIds: [b.runId] }, 'Timed out after 10 min');
+    const line = await renderOpenBatches(tid);
+    expect(line).toContain('0 of 2 finished with results');
+    expect(line).toContain(`FAILED: ${b.subagentId} "Names 101-200" (Timed out after 10 min)`);
+    expect(line).toContain('1 still running');
+    expect(await renderSnapshot(tid)).toContain('last run FAILED: Timed out after 10 min');
+    await sub.cancelSubagent({ threadId: tid, subagentId: a.subagentId, actor: 'U_F' });
+  });
 });
