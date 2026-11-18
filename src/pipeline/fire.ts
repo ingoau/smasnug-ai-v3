@@ -149,6 +149,10 @@ async function fireBatch(job: Job<DebounceJob>, batch: { ts: string; reason: Bat
       ...(codeChannel ? { codeChannel: true } : {}),
       ...(cooling ? { cooling: true } : {}),
       ...(result.probability !== undefined ? { probability: result.probability } : {}),
+      // Deterministic nudges (gate-signals.ts): which signals fired, the delta, and the score compared with the threshold.
+      ...(result.adjustment ? { adjustment: result.adjustment.delta, signals: result.adjustment.signals } : {}),
+      ...(result.adjustedProbability !== undefined ? { adjustedProbability: result.adjustedProbability } : {}),
+      ...(result.overridden ? { overridden: true } : {}),
       ...(result.fallback ? { fallback: result.fallback, fallbackKind: result.fallbackKind, fallbackAfterMs: result.fallbackAfterMs } : {}),
       ...(result.error ? { error: result.error.slice(0, 300) } : {}),
     });

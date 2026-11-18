@@ -37,7 +37,32 @@ describe('relevance gate', () => {
 
   it('stays quiet below the threshold', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ answers: { should_respond: { noul: 0.75 } } }))));
-    expect(await runGate(opts)).toMatchObject({ respond: false, probability: 0.75 });
+    const r = await runGate({ ...opts, newMessages: [msg('i have one too')] });
+    expect(r).toMatchObject({ respond: false, probability: 0.75 });
+    expect(r.adjustment).toBeUndefined();
+  });
+
+  it('nudges the probability with thread-shape signals and reports them', async () => {
+    // 0.6 alone is below 0.65; a question right after the bot's answer gets +0.1.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ answers: { should_respond: { noul: 0.6 } } }))));
+    const r = await runGate({ ...opts, threshold: 0.65 });
+    expect(r).toMatchObject({ respond: true, probability: 0.6, adjustment: { delta: 0.1, signals: ['follows_bot'] } });
+    expect(r.adjustedProbability).toBeCloseTo(0.7);
+    expect(gateDecisionReason(r, 0.65)).toBe('p=0.600 +0.10 (follows_bot) = 0.700 >= threshold 0.65');
+  });
+
+  it('a message opening with another person\'s @mention is pulled under the threshold', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ answers: { should_respond: { noul: 0.85 } } }))));
+    const r = await runGate({ ...opts, newMessages: [msg('<@U2> can you update the schedule on the website')] });
+    expect(r).toMatchObject({ respond: false, probability: 0.85, adjustment: { signals: ['mentions_other_leading'] } });
+  });
+
+  it('the fallback chat model: a leading @mention of someone else overrides a yes', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+    generateText.mockResolvedValueOnce({ text: 'yes', usage: { inputTokens: 80, outputTokens: 1 } });
+    const r = await runGate({ ...opts, newMessages: [msg('<@U2> can you update the schedule')] });
+    expect(r).toMatchObject({ respond: false, overridden: true });
+    expect(gateDecisionReason(r, 0.8)).toMatch(/answered "yes"; overrode yes: mentions_other_leading$/);
   });
 
   it('falls back to the chat model when the decisions API fails', async () => {
