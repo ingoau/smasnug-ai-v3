@@ -5,7 +5,7 @@ import { sql } from '../db/index.js';
 import { redis } from '../core/redis.js';
 import { addFakeHandler, fakeSlackError } from '../core/slack-fake.js';
 import { fileStore } from '../files/store.js';
-import { fetchProfilePicture, isAvatarUrl, largestAvatarUrl, parseUserRef, type AvatarFetcher } from './profile-picture.js';
+import { avatarUrls, fetchProfilePicture, isAvatarUrl, parseUserRef, type AvatarFetcher } from './profile-picture.js';
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
 const channel = `C${Math.random().toString(36).slice(2, 10).toUpperCase()}`;
@@ -19,13 +19,17 @@ afterAll(async () => {
   redis.disconnect();
 });
 
-describe('largestAvatarUrl', () => {
-  it('prefers the original upload, then the biggest size', () => {
-    expect(largestAvatarUrl({ image_72: 'a72', image_original: 'orig', image_1024: 'a1024' })).toEqual({ url: 'orig', size: 'original' });
-    expect(largestAvatarUrl({ image_72: 'a72', image_512: 'a512', image_192: 'a192' })).toEqual({ url: 'a512', size: '512px' });
-    expect(largestAvatarUrl({ image_24: 'a24', image_original: '' })).toEqual({ url: 'a24', size: '24px' });
-    expect(largestAvatarUrl({})).toBeNull();
-    expect(largestAvatarUrl(undefined)).toBeNull();
+describe('avatarUrls', () => {
+  it('lists the original upload first, then the biggest sizes, without duplicates', () => {
+    expect(avatarUrls({ image_72: 'a72', image_original: 'orig', image_1024: 'a1024' })).toEqual([
+      { url: 'orig', size: 'original' },
+      { url: 'a1024', size: '1024px' },
+      { url: 'a72', size: '72px' },
+    ]);
+    expect(avatarUrls({ image_512: 'same', image_192: 'same' })).toEqual([{ url: 'same', size: '512px' }]);
+    expect(avatarUrls({ image_24: 'a24', image_original: '' })).toEqual([{ url: 'a24', size: '24px' }]);
+    expect(avatarUrls({})).toEqual([]);
+    expect(avatarUrls(undefined)).toEqual([]);
   });
 });
 
@@ -70,7 +74,8 @@ describe('fetchProfilePicture', () => {
     const fetched: string[] = [];
     const fetcher: AvatarFetcher = async (url) => (fetched.push(url), { status: 200, body: PNG, truncated: false });
     try {
-      const res = await fetchProfilePicture(ctx, '<@U0PIC1>', { fetch: fetcher });
+      const saved: string[] = [];
+      const res = await fetchProfilePicture(ctx, '<@U0PIC1>', { fetch: fetcher, onSaved: (f) => void saved.push(f.id) });
       if (typeof res === 'string') throw new Error(res);
       expect(fetched).toEqual(['https://avatars.slack-edge.com/1_original.png']);
       expect(res.file.name).toBe('ingo-profile-picture.png');
@@ -78,6 +83,7 @@ describe('fetchProfilePicture', () => {
       expect(res.header).toContain('<@U0PIC1|Ingo>');
       expect(res.header).toContain('original');
       expect(res.header).not.toContain('default avatar');
+      expect(saved).toEqual([res.file.id]);
       expect(res.image.width).toBe(1);
       expect((await fileStore.get(res.file.id))?.equals(PNG)).toBe(true);
       const [row] = await sql<{ description: string }[]>`select description from files where id = ${res.file.id}`;
@@ -96,15 +102,21 @@ describe('fetchProfilePicture', () => {
       if (method !== 'users.info') return undefined;
       if (args.user === 'U0DEF') return { ok: true, user: { id: 'U0DEF', name: 'bob', profile: { real_name: 'Bob', is_custom_image: false, image_512: 'https://secure.gravatar.com/avatar/x.png?s=512' } } };
       if (args.user === 'U0EVIL') return { ok: true, user: { id: 'U0EVIL', name: 'eve', profile: { image_512: 'https://evil.example.com/x.png' } } };
+      if (args.user === 'U0GONE') return { ok: true, user: { id: 'U0GONE', name: 'gone', deleted: true, profile: { image_512: 'https://avatars.slack-edge.com/g.png' } } };
+      if (args.user === 'U0BIG') return { ok: true, user: { id: 'U0BIG', name: 'big', profile: { image_original: 'https://avatars.slack-edge.com/big_original.png', image_1024: 'https://avatars.slack-edge.com/big_1024.png' } } };
       if (args.user === 'U0NONE') return { ok: true, user: { id: 'U0NONE', name: 'nobody', profile: {} } };
       if (args.user === 'U0HTML') return { ok: true, user: { id: 'U0HTML', name: 'h', profile: { image_512: 'https://avatars.slack-edge.com/h.png' } } };
       throw fakeSlackError('user_not_found');
     });
-    const fetcher: AvatarFetcher = async (url) => ({ status: 200, body: url.includes('/h.png') ? Buffer.from('<html></html>') : PNG, truncated: false });
+    const fetcher: AvatarFetcher = async (url) => ({ status: 200, body: url.includes('/h.png') ? Buffer.from('<html></html>') : PNG, truncated: url.includes('big_original') });
     try {
       const def = await fetchProfilePicture(ctx, 'U0DEF', { fetch: fetcher });
       if (typeof def === 'string') throw new Error(def);
-      expect(def.header).toContain('default avatar');
+      expect(def.header).toContain("haven't uploaded a picture to Slack");
+      const big = await fetchProfilePicture(ctx, 'U0BIG', { fetch: fetcher });
+      if (typeof big === 'string') throw new Error(big);
+      expect(big.header).toContain('1024px');
+      expect(await fetchProfilePicture(ctx, 'U0GONE', { fetch: fetcher })).toContain('deactivated');
       expect(await fetchProfilePicture(ctx, 'U0EVIL', { fetch: fetcher })).toContain("isn't on Slack's CDN");
       expect(await fetchProfilePicture(ctx, 'U0NONE', { fetch: fetcher })).toContain('has no profile picture');
       expect(await fetchProfilePicture(ctx, 'U0HTML', { fetch: fetcher })).toContain("isn't an image");

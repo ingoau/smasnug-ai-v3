@@ -29,13 +29,14 @@ const IMAGE_EXT: Record<string, string> = { 'image/png': 'png', 'image/gif': 'gi
 /** Largest first. `image_original` only exists for an uploaded picture. */
 const SIZE_KEYS = ['image_original', 'image_1024', 'image_512', 'image_192', 'image_72', 'image_48', 'image_32', 'image_24'] as const;
 
-/** The largest avatar URL in a users.info `profile` (pure). */
-export function largestAvatarUrl(profile: Record<string, unknown> | null | undefined): { url: string; size: string } | null {
+/** The avatar URLs in a users.info `profile`, largest first, duplicates dropped (pure). */
+export function avatarUrls(profile: Record<string, unknown> | null | undefined): { url: string; size: string }[] {
+  const out: { url: string; size: string }[] = [];
   for (const key of SIZE_KEYS) {
     const v = profile?.[key];
-    if (typeof v === 'string' && v) return { url: v, size: key === 'image_original' ? 'original' : `${key.slice('image_'.length)}px` };
+    if (typeof v === 'string' && v && !out.some((o) => o.url === v)) out.push({ url: v, size: key === 'image_original' ? 'original' : `${key.slice('image_'.length)}px` });
   }
-  return null;
+  return out;
 }
 
 /** Avatars live on Slack's CDN, or Gravatar for a default picture; nothing else is fetched. */
@@ -70,7 +71,12 @@ export interface ProfilePicture {
 }
 
 /** Look a user up, download their largest profile picture into the file store and load it for the model. */
-export async function fetchProfilePicture(ctx: PictureCtx, rawUser: string, opts: { fetch?: AvatarFetcher } = {}): Promise<ProfilePicture | string> {
+export async function fetchProfilePicture(
+  ctx: PictureCtx,
+  rawUser: string,
+  /** `onSaved` runs as soon as the file exists (the tool's per-turn file count), before the image is processed. */
+  opts: { fetch?: AvatarFetcher; onSaved?: (file: FileMeta) => void } = {},
+): Promise<ProfilePicture | string> {
   const userId = parseUserRef(rawUser);
   if (!userId) return `"${rawUser.slice(0, 80)}" isn't a Slack user id. Pass an id like U0123ABCD (find_people finds people by name).`;
   let user: any;
@@ -87,11 +93,21 @@ export async function fetchProfilePicture(ctx: PictureCtx, rawUser: string, opts
   const profile = user?.profile ?? {};
   const name = profileText(profile.display_name || profile.real_name || user?.real_name || user?.name) || userId;
   const who = personRef(userId, name);
-  const best = largestAvatarUrl(profile);
-  if (!best) return `${who} has no profile picture.`;
-  if (!isAvatarUrl(best.url)) return `${who}'s profile picture isn't on Slack's CDN, so it wasn't fetched.`;
+  // Like the directory, which keeps only names for a deactivated account.
+  if (user?.deleted) return `${who}'s account is deactivated; its profile picture isn't fetched.`;
+  const urls = avatarUrls(profile);
+  if (!urls.length) return `${who} has no profile picture.`;
+  if (!isAvatarUrl(urls[0]!.url)) return `${who}'s profile picture isn't on Slack's CDN, so it wasn't fetched.`;
   const custom = profile.is_custom_image !== false;
-  const res = await (opts.fetch ?? defaultFetcher)(best.url, ctx.abortSignal);
+  // The largest size that fits the file store (an original upload can be huge).
+  let best = urls[0]!;
+  let res = await (opts.fetch ?? defaultFetcher)(best.url, ctx.abortSignal);
+  for (const next of urls.slice(1)) {
+    if (!res.truncated || res.status >= 400) break;
+    if (!isAvatarUrl(next.url)) continue;
+    best = next;
+    res = await (opts.fetch ?? defaultFetcher)(best.url, ctx.abortSignal);
+  }
   if (res.status >= 400) return `Downloading ${who}'s profile picture failed (HTTP ${res.status}).`;
   if (res.truncated) return `${who}'s profile picture is larger than ${formatBytes(limits.fileMaxBytes)}.`;
   const mime = sniffMime(res.body);
@@ -105,16 +121,17 @@ export async function fetchProfilePicture(ctx: PictureCtx, rawUser: string, opts
     name: `${handle}-profile-picture.${ext}`,
     content: res.body,
     mime,
-    description: `Slack profile picture of ${name} (${userId}), ${best.size}${custom ? '' : ', default avatar'}`,
+    description: `Slack profile picture of ${name} (${userId}), ${best.size}${custom ? '' : ', not uploaded to Slack'}`,
     createdTurnId: ctx.runId ? null : (ctx.turnId ?? null),
     createdRunId: ctx.runId ?? null,
     createdSubagentId: ctx.subagentId ?? null,
     ...(scope ? { idempotencyKey: `${scope}:avatar:${createHash('sha256').update(userId).update('\0').update(res.body).digest('hex').slice(0, 32)}` } : {}),
   });
+  opts.onSaved?.(file);
   const image = await loadImageForModel(file);
   const post = ctx.role === 'front' ? `post it with reply(files: ["${file.id}"])` : 'it is listed with your result automatically';
   const header = `Profile picture of ${who}: ${file.id} (${file.name}, ${best.size}, ${formatBytes(file.size)})${
-    custom ? '' : '. This is Slack\'s default avatar: they haven\'t uploaded a picture'
+    custom ? '' : ". They haven't uploaded a picture to Slack: this is Slack's default avatar or their Gravatar"
   }. Saved as a file: ${post}.`;
   return { header, file, image };
 }
@@ -141,9 +158,8 @@ registerTool({
         try {
           const over = await takeLimit('fetch', ctx.speakerId, ctx.threadId);
           if (over) return over;
-          const res = await fetchProfilePicture(ctx, user);
+          const res = await fetchProfilePicture(ctx, user, { onSaved: () => void (kept = true) });
           if (typeof res === 'string') return res;
-          kept = true;
           if (queue) {
             await queue({ id: res.file.id, mediaType: res.image.mediaType, data: res.image.data });
             return `${res.header}\nImage loaded (${res.image.width}×${res.image.height}); it is attached below as a user message.`;
