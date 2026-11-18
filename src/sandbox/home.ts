@@ -3,14 +3,14 @@
  * the month's spend, live sandboxes, the kill switches, the allowlist and live previews (Take down). The admin sees
  * the allowlist, never anyone's HCA result.
  */
-import { env } from '../config.js';
 import type { ActionContext } from '../core/actions.js';
 import { sql } from '../db/index.js';
 import { confirmDialog } from '../features/reports.js';
 import { isAdmin, mrkdwnEscape, requireAdmin, truncate } from '../features/util.js';
-import { budgetStatus } from './budget.js';
+import { env, limits } from '../config.js';
+import { budgetStatus, userMinutesToday } from './budget.js';
 import { handleTakedown } from './preview/flow.js';
-import { livePreviews } from './preview/store.js';
+import { livePreviews, previewCountsToday } from './preview/store.js';
 import { previewsConfigured, sandboxConfigured, sandboxSettings, setSandboxSetting } from './settings.js';
 
 const ALLOWLIST_SHOWN = 15;
@@ -19,6 +19,17 @@ const PREVIEWS_SHOWN = 8;
 const btn = (action_id: string, text: string, value: string, extra: object = {}) => ({ type: 'button', action_id, text: { type: 'plain_text', text }, value, ...extra });
 const section = (text: string, accessory?: object) => ({ type: 'section', text: { type: 'mrkdwn', text }, ...(accessory ? { accessory } : {}) });
 const context = (text: string) => ({ type: 'context', elements: [{ type: 'mrkdwn', text }] });
+
+/** Lines for the admin "User limits" panel: the user's daily sandbox quotas (UTC day, or since their last reset). */
+export async function sandboxUserLimitLines(userId: string): Promise<string[]> {
+  if (!sandboxConfigured()) return [];
+  const [minutes, previews] = await Promise.all([userMinutesToday(userId), previewsConfigured() ? previewCountsToday(userId) : null]);
+  const used = Math.ceil(minutes);
+  const flag = (n: number, max: number) => (n >= max ? ' :no_entry:' : '');
+  const out = [`Sandbox minutes: ${used}/${limits.userSandboxMinutesPerDay} used today${flag(used, limits.userSandboxMinutesPerDay)}`];
+  if (previews) out.push(`Live previews: ${previews.user}/${limits.userPreviewsPerDay} today${flag(previews.user, limits.userPreviewsPerDay)}`);
+  return out;
+}
 
 /** One line for everyone: where sandbox and preview data goes. */
 export function sandboxDisclosureBlocks(): unknown[] {

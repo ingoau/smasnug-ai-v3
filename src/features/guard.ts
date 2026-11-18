@@ -143,9 +143,33 @@ export async function userLimitStates(userId: string): Promise<QuotaState[]> {
   return [{ kind: 'msg', noun: 'Messages', max, remaining: Math.max(0, max - msgUsed) }, ...rest];
 }
 
-/** Clears the user's hourly windows (messages and every HOURLY kind). Subagent slots free up as runs finish. */
+const dailyResetKey = (userId: string) => `limit:daily_reset:${userId}`;
+
+/**
+ * When an admin last reset this user's limits, if within the last day. Daily quotas computed from stored usage
+ * (sandbox minutes, live previews) only count usage after it, so the usage rows themselves stay for spend tracking.
+ */
+export async function dailyResetAt(userId: string): Promise<Date | null> {
+  const v = await redis.get(dailyResetKey(userId));
+  const ms = v ? Number(v) : NaN;
+  return Number.isFinite(ms) ? new Date(ms) : null;
+}
+
+/** Pure: the start of a daily window, moved forward to the user's last reset when that falls inside it. */
+export function dailyWindowStart(dayStart: Date, resetAt: Date | null): Date {
+  return resetAt && resetAt > dayStart ? resetAt : dayStart;
+}
+
+/**
+ * Clears the user's limits: the hourly windows (messages and every HOURLY kind) and today's daily quotas
+ * (sandbox minutes, live previews). Subagent and live-sandbox slots free up as runs finish.
+ */
 export async function resetUserLimits(userId: string): Promise<void> {
-  await redis.del(...['msg', ...Object.keys(HOURLY)].map((k) => `limit:${k}:${userId}`));
+  await redis
+    .multi()
+    .del(...['msg', ...Object.keys(HOURLY)].map((k) => `limit:${k}:${userId}`))
+    .set(dailyResetKey(userId), String(Date.now()), 'EX', 26 * 3600)
+    .exec();
 }
 
 /** Like takeLimit but never counts: used to fail early (e.g. before showing a send confirmation). */
