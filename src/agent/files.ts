@@ -5,7 +5,7 @@ import { log } from '../log.js';
 import { threadIdOf, threadTsArg } from '../core/events.js';
 import { createFile, FileError, fileStore, loadFileBytes, recordFilePosts, resolveFile, type FileMeta } from '../files/store.js';
 import { sanitizeFileName, slackSnippetType, uploadContentType } from '../files/format.js';
-import { copyLargeFileTo } from '../files/large.js';
+import { copyLargeFileTo, transferTimeoutMs } from '../files/large.js';
 import { urlImage } from './rich-blocks.js';
 import type { ImageArg } from './reply.js';
 
@@ -175,7 +175,8 @@ async function sendBytes(files: OutgoingFile[]): Promise<{ id: string; title: st
         method: 'POST',
         body: new Uint8Array(bytes),
         headers: { 'content-type': uploadContentType(f.filename) },
-        signal: AbortSignal.timeout(30_000),
+        // Store files go up to limits.fileMaxBytes: a fixed 30 s cut off big ones on a slow link.
+        signal: AbortSignal.timeout(transferTimeoutMs(bytes.byteLength)),
       });
       if (!up.ok) throw new Error(`file upload failed: HTTP ${up.status}`);
     }

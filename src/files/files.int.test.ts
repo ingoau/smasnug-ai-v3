@@ -155,7 +155,7 @@ describe.skipIf(!INTEGRATION)('file store', () => {
     expect(alice.files).toEqual([{ fileId: f.id, filename: 'secret.txt' }]);
     expect(await exec('front', ctxOf(chThread, 'U_ALICE'), 'read_file', { file_id: f.id })).toContain('private notes');
     // Too large: refused at creation.
-    expect(await exec('child', ctxOf(chThread, 'U_ALICE', { runId: 1 }), 'create_file', { name: 'big.txt', content: 'x'.repeat(50 * 1024 * 1024 + 1), description: 'big' })).toMatch(/too large.*save_url.*sandbox_export/);
+    expect(await exec('child', ctxOf(chThread, 'U_ALICE', { runId: 1 }), 'create_file', { name: 'big.txt', content: 'x'.repeat(20 * 1024 * 1024 + 1), description: 'big' })).toMatch(/too large.*save_url.*sandbox_export/);
   });
 
   it('uploads: registered with metadata only, fetched lazily once, paged by read_file, described once', async () => {

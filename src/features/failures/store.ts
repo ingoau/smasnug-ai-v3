@@ -2,8 +2,10 @@
  * failure_reports storage (migration 344). Each report also gets a `failure_report` event so the eval detectors see it.
  *
  * Reports about the same incident are merged at insert time (migration 352): a report on the same thread that is on the
- * same turn or cites an overlapping message folds into the oldest such report instead of adding a row (a self report
- * the review also found, or two review findings sharing evidence). See `mergeFailure` for how the fields combine.
+ * same turn or cites an overlapping message, and shares a category, folds into the oldest such report instead of adding
+ * a row (a self report the review also found, or two review findings sharing evidence). Distinct failures on one turn
+ * (a wrong fact and a missed question) have no category in common and stay apart. See `mergeFailure` for how the
+ * fields combine.
  */
 import { appendEvent } from '../../core/events.js';
 import { sql } from '../../db/index.js';
@@ -49,8 +51,15 @@ export async function evidenceFor(threadId: string, tss: string[]): Promise<Evid
 const SIGNAL_RANK: Record<string, number> = { explicit_complaint: 4, correction: 3, self_noticed: 2, hindsight: 1 };
 const signalRank = (s: string | null) => (s ? (SIGNAL_RANK[s] ?? 0) : 0);
 
-/** Pure: whether `f` is about the same incident as `r` (same turn, or an evidence message in common). */
-export function sameIncident(r: Pick<StoredFailure, 'turnId' | 'evidence'>, f: Pick<NewFailure, 'turnId' | 'evidence'>): boolean {
+/**
+ * Pure: whether `f` is about the same incident as `r` (same thread assumed): a category in common, and the same turn
+ * or an evidence message in common. Mirrors the merge-target query in `recordFailure`.
+ */
+export function sameIncident(
+  r: Pick<StoredFailure, 'turnId' | 'evidence' | 'categories'>,
+  f: Pick<NewFailure, 'turnId' | 'evidence' | 'categories'>,
+): boolean {
+  if (!f.categories.some((c) => r.categories.includes(c))) return false;
   if (r.turnId != null && f.turnId != null && r.turnId === f.turnId) return true;
   const tss = new Set(r.evidence.map((e) => e.ts));
   return f.evidence.some((e) => tss.has(e.ts));
@@ -102,7 +111,7 @@ export async function recordFailure(f: NewFailure): Promise<number | null> {
     // A disputed self report isn't a merge target: the review said it didn't happen, so this one stands on its own.
     const [prev] = await tx<(Omit<StoredFailure, 'turnId'> & { id: string; turnId: string | null })[]>`
       select id, turn_id, source, categories, summary, signal, evidence, speaker_id, review_verdict from failure_reports
-      where thread_id = ${f.threadId} and review_verdict is distinct from 'disputed'
+      where thread_id = ${f.threadId} and review_verdict is distinct from 'disputed' and categories && ${f.categories}::text[]
         and (${f.turnId != null ? tx`turn_id = ${f.turnId}` : tx`false`}
              or exists (select 1 from jsonb_array_elements(evidence) e where e->>'ts' = any(${tss}::text[])))
       order by id limit 1 for update`;

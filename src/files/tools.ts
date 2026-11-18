@@ -21,7 +21,7 @@ import { sql } from '../db/index.js';
 import { EXTRAS, getExtra } from '../tools/extras.js';
 import { errMsg, untrusted } from '../tools/util.js';
 import { BlockedUrlError } from '../tools/safe-fetch.js';
-import { createFileFromStaged, stageDownload, TooLargeError, tooLargeText } from './large.js';
+import { createFileFromStaged, LargeFileRefusedError, largeGate, stageDownload, TooLargeError, tooLargeText } from './large.js';
 import { takeLimit } from '../features/guard.js';
 import { requestDescription } from './describe.js';
 import { downloadFileName, fileKind, isSlackUrl, fileListingLine, formatBytes, isTextMime, looksLikeText, sanitizeFileName, textPage, textPageHeader, type FileKind } from './format.js';
@@ -376,8 +376,11 @@ registerTool({
           if (over) return over;
           let dl: Awaited<ReturnType<typeof stageDownload>>;
           try {
-            dl = await stageDownload(url, { maxBytes: limits.largeFileMaxBytes, timeoutMs: limits.saveUrlTimeoutMs, maxRedirects: 5, ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}) });
+            // Past the store's cap it is a large file: the user's hourly budget, the bot-wide transfer cap and free disk apply.
+            const gate = largeGate(ctx.speakerId, limits.fileMaxBytes, ctx.abortSignal ? { signal: ctx.abortSignal } : {});
+            dl = await stageDownload(url, { maxBytes: limits.largeFileMaxBytes, timeoutMs: limits.saveUrlTimeoutMs, maxRedirects: 5, gate, ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}) });
           } catch (err) {
+            if (err instanceof LargeFileRefusedError) return `Not saved: ${err.message}`;
             if (err instanceof TooLargeError) return `Not saved: ${tooLargeText('the file', null)}`;
             throw err;
           }

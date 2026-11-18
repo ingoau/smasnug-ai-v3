@@ -239,6 +239,7 @@ export class ModalProvider implements SandboxProvider {
     const reader = proc.stdout.getReader();
     const abort = () => void reader.cancel().catch(() => {});
     o.signal?.addEventListener('abort', abort, { once: true });
+    let drained = false;
     try {
       for (;;) {
         if (o.signal?.aborted) throw new Error('aborted');
@@ -246,6 +247,7 @@ export class ModalProvider implements SandboxProvider {
         if (done) break;
         if (value?.byteLength) yield value;
       }
+      drained = true;
       const code = await proc.wait();
       if (code !== 0) {
         const msg = (await errText).bytes.toString('utf8').trim().slice(0, 300);
@@ -256,6 +258,9 @@ export class ModalProvider implements SandboxProvider {
       throw err;
     } finally {
       o.signal?.removeEventListener('abort', abort);
+      // Stopped early (the consumer quit, a cap, an abort): cancel the stream so `cat` isn't left feeding a dead
+      // reader (the SDK can't kill an exec'd process; cancelling closes its stdout, and exec's timeout bounds the rest).
+      if (!drained) await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   }

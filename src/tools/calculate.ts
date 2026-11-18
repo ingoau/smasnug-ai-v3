@@ -59,6 +59,8 @@ const section = (f: () => string) => {
     return f();
   } catch (err) {
     if (err instanceof TimeError) return `error: ${err.message}`;
+    // Date / Intl throw RangeError for out-of-range instants; report it for this part only.
+    if (err instanceof RangeError) return 'error: a date or duration is out of range';
     throw err;
   }
 };
@@ -70,7 +72,14 @@ export function runCalculate(input: CalculateInput, nowMs = Date.now()): string 
     const vars = new Map<string, number>();
     for (const e of input.expressions) {
       const r = evaluate(e, vars);
-      out.push(r.ok ? `${e.trim()} = ${formatNumber(r.value)}` : `${e.trim()} → error: ${r.error}`);
+      if (!r.ok) {
+        out.push(`${e.trim()} → error: ${r.error}`);
+        continue;
+      }
+      const shown = formatNumber(r.value);
+      // "x = 5" echoes as "x = 5", not "x = 5 = 5"; "x = 3*4" as "x = 3*4 = 12".
+      const rhs = r.name ? e.slice(e.indexOf('=') + 1).trim() : undefined;
+      out.push(rhs !== undefined && Number(rhs) === r.value ? `${r.name} = ${shown}` : `${e.trim()} = ${shown}`);
     }
   }
   for (const c of input.convert ?? []) out.push(section(() => convert(c, nowMs)));

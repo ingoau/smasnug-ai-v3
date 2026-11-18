@@ -17,6 +17,25 @@ import { type BatchReason, batchIsAddressed, batchIsCodeChannel, batchIsMention,
 import { pushToRunningTurn, scheduleMessages, wakeHeldTurn } from './scheduler.js';
 import { getThread, loadMessages, recentMessages } from './store.js';
 import { djGateNote } from '../features/huddlefm/render.js';
+import { getPeople } from '../tools/directory/store.js';
+import { gateParticipantIds, nameKeys } from './gate-signals.js';
+import type { StoredMessage } from '../core/types.js';
+
+/**
+ * The names the batch could address someone by (gate-signals.ts addressed_by_name): the thread's other humans, from
+ * the workspace directory (a DB read, no Slack call). Empty on any failure: then no name counts.
+ */
+export async function gateParticipantNames(context: StoredMessage[], newMessages: StoredMessage[], botUserId: string, authorId: string | null): Promise<string[]> {
+  const ids = gateParticipantIds({ context, newMessages, botUserId, authorId });
+  if (!ids.length) return [];
+  try {
+    const people = await getPeople(ids);
+    return [...new Set([...people.values()].filter((p) => !p.isBot && !p.isAppUser).flatMap(nameKeys))];
+  } catch (err) {
+    log.warn({ err }, 'gate participant names failed');
+    return [];
+  }
+}
 
 /** The gate's note for a partner batch: who the author is to the bot (code-written, from thread state). */
 export function partnerGateNote(botName: string): string {
@@ -131,7 +150,8 @@ async function fireBatch(job: Job<DebounceJob>, batch: { ts: string; reason: Bat
             ? recentPartnerGateNote(env.BOT_DISPLAY_NAME)
             : '';
     const note = [codeChannel ? codeChannelGateNote(env.BOT_DISPLAY_NAME) : '', roleNote, djNote ?? ''].filter(Boolean).join(' ');
-    const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId, threshold, ...(note ? { note } : {}) });
+    const participantNames = await gateParticipantNames(context.slice(-limits.gateContextMessages), msgs, bot.userId, authorId);
+    const result: GateResult = await gateImpl.run({ context, newMessages: msgs, botUserId: bot.userId, botId: bot.botId, participantNames, threshold, ...(note ? { note } : {}) });
     await appendEvent(threadId, 'gate_decision', 'system', {
       messageTs: ts,
       authorId,

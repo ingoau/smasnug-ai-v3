@@ -164,10 +164,13 @@ export function findingKey(threadId: string, f: Pick<ValidFinding, 'categories' 
 export type ValidFinding = { categories: FailureCategory[]; summary: string; lines: Line[]; botLine: Line | null; signal: Finding['signal'] };
 
 const GATE_CATEGORIES: readonly FailureCategory[] = ['gate_false_negative', 'gate_false_positive'];
+/** Categories that judge what one of our messages said or did: without a message of ours cited, they're about another bot's. */
+const MESSAGE_CATEGORIES: readonly FailureCategory[] = ['incorrect_info', 'misunderstood_request', 'false_action_claim', 'wrong_action', 'format_or_tone'];
 
 /**
  * Pure: drop findings without real evidence, gate categories the gate marks don't back, findings about another bot
- * (citing another bot's message and none of ours, other than a gate miss), and (on a re-review, `since` set) findings
+ * (bot_line is theirs or only their messages are cited, other than a gate miss; with a person's message but none of
+ * ours cited, the categories that judge a message's content), and (on a re-review, `since` set) findings
  * that cite nothing newer than the last review: those were the last review's to file.
  */
 export function validateFindings(findings: Finding[], lines: Line[], since: Date | null = null): ValidFinding[] {
@@ -183,8 +186,13 @@ export function validateFindings(findings: Finding[], lines: Line[], since: Date
     let cats = cleanCategories(f.categories);
     if (!ev.some((l) => !l.isBot && l.gate?.decision === 'no')) cats = cats.filter((c) => c !== 'gate_false_negative');
     if (!ev.some((l) => !l.isBot && l.gate?.decision === 'yes')) cats = cats.filter((c) => c !== 'gate_false_positive');
-    // Another bot's mistake: it cites their message (or names it as bot_line) and nothing of ours. Only a gate miss needs no message of ours.
-    if (!ev.some((l) => l.own) && (ev.some((l) => l.isBot) || (bot?.isBot && !bot.own))) cats = cats.filter((c) => GATE_CATEGORIES.includes(c));
+    // Another bot's mistake: bot_line is their message, or every cited line is another bot's. Only a gate miss needs no
+    // message of ours. Citing another bot next to a person's message is not enough: when we stayed silent and another
+    // bot answered, our miss cites their reply (incomplete, gate miss, …); only a judgement of what a message said
+    // (wrong info, wrong tone, …) needs a message of ours.
+    const otherBot = (l: Line) => l.isBot && !l.own;
+    if ((bot && otherBot(bot)) || ev.every(otherBot)) cats = cats.filter((c) => GATE_CATEGORIES.includes(c));
+    else if (!ev.some((l) => l.own) && ev.some(otherBot)) cats = cats.filter((c) => !MESSAGE_CATEGORIES.includes(c));
     if (!cats.length) continue;
     out.push({ categories: cats, summary: f.summary, lines: ev.slice(0, FAILURE_LIMITS.evidenceMax), botLine, signal: f.signal });
     if (out.length >= FAILURE_LIMITS.reviewFindingsMax) break;
@@ -312,6 +320,21 @@ export async function reviewThread(threadId: string, since: Date | null, opts: {
   });
   await recordModelUsage({ threadId, model: MODELS.child, inputTokens: res.usage.inputTokens, outputTokens: res.usage.outputTokens });
 
+  // Verdicts first: a disputed self report is then no merge target for this pass's findings (a finding merging into
+  // it would confirm it, and the dispute would overwrite that and bury the finding).
+  const known = new Map(pendingSelf.map((r) => [Number(r.id), r]));
+  for (const v of res.output.self_reports) {
+    const r = known.get(v.id);
+    if (!r) continue;
+    known.delete(v.id);
+    const done = await sql`
+      update failure_reports set review_verdict = ${v.verdict} where id = ${v.id} and thread_id = ${threadId} and source = 'self' and review_verdict is null`;
+    if (!done.count) continue;
+    // The detectors read events: a disputed self report must stop counting as a failure.
+    await appendEvent(threadId, 'failure_verdict', 'system', { reportId: v.id, verdict: v.verdict, ...(r.turnId != null ? { turnId: Number(r.turnId) } : {}) }).catch(
+      (err) => log.warn({ err }, 'failure_verdict event append failed'),
+    );
+  }
   const findings = validateFindings(res.output.findings, lines, since);
   let stored = 0;
   for (const f of findings) {
@@ -330,17 +353,6 @@ export async function reviewThread(threadId: string, since: Date | null, opts: {
       idempotencyKey: findingKey(threadId, f),
     });
     if (id != null) stored++;
-  }
-  const known = new Map(pendingSelf.map((r) => [Number(r.id), r]));
-  for (const v of res.output.self_reports) {
-    const r = known.get(v.id);
-    if (!r) continue;
-    known.delete(v.id);
-    await sql`update failure_reports set review_verdict = ${v.verdict} where id = ${v.id} and thread_id = ${threadId} and source = 'self'`;
-    // The detectors read events: a disputed self report must stop counting as a failure.
-    await appendEvent(threadId, 'failure_verdict', 'system', { reportId: v.id, verdict: v.verdict, ...(r.turnId != null ? { turnId: Number(r.turnId) } : {}) }).catch(
-      (err) => log.warn({ err }, 'failure_verdict event append failed'),
-    );
   }
   log.info({ threadId, reason, proposed: res.output.findings.length, stored, verdicts: res.output.self_reports.length }, 'failure review pass');
   return stored;

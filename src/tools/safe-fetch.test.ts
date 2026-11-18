@@ -1,8 +1,9 @@
 import http from 'node:http';
 import zlib from 'node:zlib';
 import type { AddressInfo } from 'node:net';
+import { Writable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { BlockedUrlError, checkUrl, isBlockedIp, safeFetch } from './safe-fetch.js';
+import { BlockedUrlError, checkUrl, isBlockedIp, safeFetch, SINK_SKIPPED_MAX_BYTES } from './safe-fetch.js';
 
 const base = { maxBytes: 1024 * 1024, timeoutMs: 3000 };
 
@@ -41,6 +42,8 @@ beforeAll(async () => {
     }
     if (u.pathname === '/slow') return setTimeout(() => res.end('late'), 2000);
     if (u.pathname === '/auth') return res.end(req.headers.authorization ?? 'none');
+    if (u.pathname === '/bigerror') return void res.writeHead(500, { 'content-type': 'text/html' }).end('e'.repeat(200_000));
+    if (u.pathname === '/blob') return void res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(Buffer.alloc(200_000, 3));
     res.statusCode = 404;
     res.end();
   });
@@ -131,6 +134,63 @@ describe('safeFetch SSRF protection', () => {
     expect(same.body.toString()).toBe('Bearer x');
     const other = await safeFetch(`${origin}/auth`, { ...base, ...allow, headers: { authorization: 'Bearer x' }, authOrigin: 'https://files.slack.com' });
     expect(other.body.toString()).toBe('none');
+  });
+});
+
+describe('safeFetch with a sink', () => {
+  const allow = { allowIPAddressList: ['127.0.0.1'] };
+  const collector = () => {
+    const parts: Buffer[] = [];
+    const sink = new Writable({
+      write(chunk, _enc, cb) {
+        parts.push(chunk);
+        cb();
+      },
+    });
+    return { sink, got: () => Buffer.concat(parts) };
+  };
+
+  it('streams a 2xx body to the sink', async () => {
+    const c = collector();
+    const r = await safeFetch(`http://127.0.0.1:${port}/blob`, { ...base, ...allow, sink: c.sink });
+    expect(r).toMatchObject({ status: 200, sunk: true, streamedBytes: 200_000, truncated: false });
+    expect(r.body.length).toBe(0);
+    expect(c.got().length).toBe(200_000);
+  });
+
+  it('never sinks an error response: a short buffered body instead', async () => {
+    const c = collector();
+    const r = await safeFetch(`http://127.0.0.1:${port}/bigerror`, { ...base, ...allow, sink: c.sink });
+    expect(r).toMatchObject({ status: 500, sunk: false, streamedBytes: 0, truncated: true });
+    expect(r.body.length).toBe(SINK_SKIPPED_MAX_BYTES);
+    expect(c.got().length).toBe(0);
+  });
+
+  it('sinkIf sees the headers before any byte is written; a throw aborts', async () => {
+    const c = collector();
+    const seen: string[] = [];
+    const p = safeFetch(`http://127.0.0.1:${port}/blob`, {
+      ...base,
+      ...allow,
+      sink: c.sink,
+      sinkIf: ({ contentType }) => {
+        seen.push(contentType);
+        throw new Error('not this one');
+      },
+    });
+    await expect(p).rejects.toThrow('not this one');
+    expect(seen).toEqual(['application/octet-stream']);
+    expect(c.got().length).toBe(0);
+  });
+
+  it('a failing sink rejects the fetch (no hang, no unhandled error)', async () => {
+    const sink = new Writable({
+      highWaterMark: 1,
+      write(_chunk, _enc, cb) {
+        setTimeout(() => cb(Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })), 5);
+      },
+    });
+    await expect(safeFetch(`http://127.0.0.1:${port}/blob`, { ...base, ...allow, sink })).rejects.toThrow('ENOSPC');
   });
 });
 

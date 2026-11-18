@@ -14,7 +14,7 @@ import { sql } from '../db/index.js';
 import { takeLimit } from '../features/guard.js';
 import { fileKind, fileListingLine, formatBytes, looksLikeText, sniffMime } from '../files/format.js';
 import { createFile, FileError, fileStore, loadFileBytes, resolveFile } from '../files/store.js';
-import { createFileFromStaged, stageStream, storageTier, TooLargeError, tooLargeText, transferTimeoutMs } from '../files/large.js';
+import { createFileFromStaged, LargeFileRefusedError, largeGate, stageStream, storageTier, TooLargeError, tooLargeText, transferTimeoutMs } from '../files/large.js';
 import { log } from '../log.js';
 import { processImage } from '../tools/image-process.js';
 import { errMsg, untrusted } from '../tools/util.js';
@@ -255,7 +255,11 @@ reg('sandbox_export', (ctx) =>
  */
 async function exportLarge(ctx: ToolContext, h: Handle, abs: string, size: number, name: string | undefined, description: string): Promise<string> {
   if (storageTier(size, limits.sandboxExportMaxBytes) === 'too_large') return tooLargeText(abs, size);
-  const staged = await stageStream(p().streamFile(h, abs, { timeoutMs: transferTimeoutMs(size), ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}) }), limits.largeFileMaxBytes).catch((err) => {
+  // The user's hourly budget for large files, the bot-wide transfer cap and free disk are checked before reading.
+  const gate = largeGate(ctx.speakerId, limits.sandboxExportMaxBytes, ctx.abortSignal ? { signal: ctx.abortSignal } : {});
+  const signal = ctx.abortSignal ? { signal: ctx.abortSignal } : {};
+  const staged = await stageStream(p().streamFile(h, abs, { timeoutMs: transferTimeoutMs(size), ...signal }), limits.largeFileMaxBytes, { gate, expected: size }).catch((err) => {
+    if (err instanceof LargeFileRefusedError) return `Not exported: ${err.message}`;
     if (err instanceof TooLargeError) return tooLargeText(abs, null);
     throw err;
   });

@@ -56,32 +56,39 @@ export function rememberTool(ctx: ToolContext) {
         .enum(FACT_KINDS)
         .describe('preference: how they want you to help or treat them (style, language, tools, "just react to my reminders", "don\'t ping me"); about: who they are (role, skills, interests, time zone); project: what they are working on now'),
       replaces: z.union([z.string(), z.number()]).optional().describe('id of the existing fact this one updates (e.g. "m_42"), if any'),
+      no_ping: z
+        .boolean()
+        .optional()
+        .describe(
+          'true only when this preference is that they don\'t want to be @mentioned/pinged/tagged by you (then you write their plain name instead, also in other people\'s conversations). Not for anything else that mentions pinging, tags or mentions.',
+        ),
     }),
     // Usually called alongside the reply, which ends the turn, so the model rarely sees this result: every outcome
     // here must be right without a follow-up call.
-    execute: async ({ fact, kind, replaces }) => {
+    execute: async ({ fact, kind, replaces, no_ping }) => {
       const text = cleanFactText(fact);
       if (!text) return 'Nothing to remember.';
       if (isSensitive(text)) return `Not saved: memory never keeps ${NEVER_STORE}.`;
+      const noPing = kind === 'preference' && no_ping === true;
       const existing = await listFacts(ctx.speakerId);
       const replacedId = replaces != null && replaces !== '' ? parseFactId(replaces) : null;
       let target = existing.find((f) => f.id === replacedId);
       if (!target) {
         const dup = findDuplicate(text, existing, { strict: true });
-        if (dup && sameFact(dup.text, text) && dup.kind === kind) return `Already remembered as ${factLabel(dup.id)}.`;
+        if (dup && sameFact(dup.text, text) && dup.kind === kind && dup.noPing === noPing) return `Already remembered as ${factLabel(dup.id)}.`;
         target = dup;
       }
       if (target) {
         // One fact per thing: other facts the new text duplicates go.
         const merged = existing.filter((f) => f.id !== target.id && sameThing(text, f.text));
         for (const f of merged) await deleteFact(ctx.speakerId, f.id);
-        await updateFact(ctx.speakerId, target.id, text, ctx.threadId, kind);
+        await updateFact(ctx.speakerId, target.id, text, ctx.threadId, kind, noPing);
         await logEvent(ctx, 'memory_update', { factId: target.id, merged: merged.map((f) => f.id) });
         return `Updated ${factLabel(target.id)} (was: "${target.text}")${merged.length ? `, merged ${merged.map((f) => factLabel(f.id)).join(', ')}` : ''}.`;
       }
       if (existing.length >= FACTS_PER_USER_MAX)
         return `Memory is full (${FACTS_PER_USER_MAX} facts). Ask the speaker to forget something first (App Home lists everything).`;
-      const row = await addFact(ctx.speakerId, text, ctx.threadId, kind);
+      const row = await addFact(ctx.speakerId, text, ctx.threadId, kind, noPing);
       await logEvent(ctx, 'memory_add', { factId: row.id });
       return `Saved as ${factLabel(row.id)}.`;
     },
@@ -132,14 +139,15 @@ export function forgetTool(ctx: ToolContext) {
 }
 
 /**
- * Who may set a rule right away: the admin (any scope), or the channel's creator for a rule about their channel.
- * Everyone else's proposals wait for the admin.
+ * Who may set a rule right away: the admin (any scope), or the channel's creator ('owner') for a rule about their
+ * channel. Anyone can create a public channel, so an owner's rule is rendered as their preference, not a workspace rule,
+ * and still reported to the moderation channel (workspace.ts). Everyone else's proposals wait for the admin (null).
  */
-export async function canSetRuleNow(speakerId: string, scope: 'workspace' | 'channel', channelId: string): Promise<boolean> {
-  if (isAdmin(speakerId)) return true;
-  if (scope !== 'channel') return false;
+export async function ruleSetter(speakerId: string, scope: 'workspace' | 'channel', channelId: string): Promise<'admin' | 'owner' | null> {
+  if (isAdmin(speakerId)) return 'admin';
+  if (scope !== 'channel') return null;
   const { creator } = await channelCreator(channelId);
-  return !!creator && creator === speakerId;
+  return !!creator && creator === speakerId ? 'owner' : null;
 }
 
 export function proposeWorkspaceFactTool(ctx: ToolContext) {
@@ -148,7 +156,7 @@ export function proposeWorkspaceFactTool(ctx: ToolContext) {
       'Save a fact about this Slack workspace (what a channel is for, a recurring event, who runs something) or a RULE for how ' +
       'you behave, for everyone: workspace-wide or only in this channel (scope). Use it when the admin or the channel\'s owner ' +
       'states how you should act ("reminder requests here just get a ✅, no reply", "don\'t answer questions in this channel"). ' +
-      "The admin's (and the channel creator's, for their channel) apply from the next turn; anyone else's go to the admin for " +
+      "The admin's (and the channel creator's, for their channel, as the owner's preference) apply from the next turn; anyone else's go to the admin for " +
       "approval. Not for one person's own preferences (\"don't ping me\", \"just react to my requests\"): remember those (kind " +
       'preference). Keep it short, neutral and self-contained.',
     inputSchema: z.object({
@@ -160,9 +168,14 @@ export function proposeWorkspaceFactTool(ctx: ToolContext) {
       if (!text) return 'Nothing to propose.';
       if (scope === 'channel' && /^[DG]/.test(ctx.channelId))
         return "Channel rules are for channels; in a DM, remember the speaker's own preference instead.";
-      const autoApprove = await canSetRuleNow(ctx.speakerId, scope, ctx.channelId).catch(() => false);
-      const res = await proposeWorkspaceFact(ctx.speakerId, text, ctx.threadId, { channelId: scope === 'channel' ? ctx.channelId : null, autoApprove });
-      await logEvent(ctx, 'workspace_fact_proposed', { text, scope, autoApprove });
+      const setter = await ruleSetter(ctx.speakerId, scope, ctx.channelId).catch(() => null);
+      const autoApprove = setter != null;
+      const res = await proposeWorkspaceFact(ctx.speakerId, text, ctx.threadId, {
+        channelId: scope === 'channel' ? ctx.channelId : null,
+        autoApprove,
+        setByOwner: setter === 'owner',
+      });
+      await logEvent(ctx, 'workspace_fact_proposed', { text, scope, autoApprove, ...(setter === 'owner' ? { setByOwner: true } : {}) });
       return res;
     },
   });

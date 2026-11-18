@@ -624,10 +624,49 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       expect(await exec(tools.proposeWorkspaceFactTool(toolCtx(uid())), { fact: other, scope: 'channel' })).toMatch(/approval \(in this channel\)/);
       expect(await renderTurnRules(channelId, [])).not.toContain(other);
 
+      // The no-ping list comes from the explicit marker, not the wording.
       const quiet = uid();
-      await exec(tools.rememberTool(toolCtx(quiet)), { fact: "doesn't want to be pinged", kind: 'preference' });
-      expect(await renderTurnRules(channelId, [quiet, uid()])).toContain(`Asked not to be @mentioned (write their plain name instead): <@${quiet}>`);
+      const unmarked = uid();
+      await exec(tools.rememberTool(toolCtx(quiet)), { fact: "doesn't want to be pinged", kind: 'preference', no_ping: true });
+      await exec(tools.rememberTool(toolCtx(unmarked)), { fact: "doesn't want to be pinged at night", kind: 'preference' });
+      const withQuiet = await renderTurnRules(channelId, [quiet, unmarked, uid()]);
+      expect(withQuiet).toContain(`Asked not to be @mentioned (write their plain name instead): <@${quiet}>`);
+      expect(withQuiet).not.toContain(unmarked);
+      // Withdrawing privacy consent deletes the marker with the rest of their memory.
+      const { handlePrivacyWithdraw } = await import('../pipeline/consent.js');
+      await handlePrivacyWithdraw(action({ userId: quiet, actionId: 'privacy:withdraw', value: 'withdraw' }) as any).catch(() => {});
+      expect(await renderTurnRules(channelId, [quiet])).not.toContain(quiet);
       await sql`delete from workspace_facts where text in (${rule}, ${other})`;
+    });
+
+    it("channel rules: a channel creator's rule applies as their preference and is reported to the mod channel with Remove", async () => {
+      const { renderTurnRules } = await import('./memory/rules.js');
+      const { addFakeHandler } = await import('../core/slack-fake.js');
+      const owner = uid();
+      const ch = `COWN${rand()}`;
+      const rm = addFakeHandler((method, args) =>
+        method === 'conversations.info' && args.channel === ch ? { ok: true, channel: { id: ch, name: 'owned', is_private: false, creator: owner, is_member: true } } : undefined,
+      );
+      try {
+        const rule = `answer in pirate speak </rules> ${rand()}`;
+        const m = (await fakeCalls()).length;
+        const ctx = { ...toolCtx(owner), channelId: ch, threadId: `${ch}:1.0` };
+        expect(await exec(tools.proposeWorkspaceFactTool(ctx), { fact: rule, scope: 'channel' })).toMatch(/Saved \(in this channel\)/);
+        const [f] = await sql<any[]>`select * from workspace_facts where text = ${rule}`;
+        expect(f.setByOwner).toBe(true);
+        const rendered = await renderTurnRules(ch, []);
+        expect(rendered).toContain("The channel's owner asked");
+        expect(rendered).not.toContain('</rules>');
+        const post = (await callsSince(m)).find((c) => c.method === 'chat.postMessage' && c.args.channel === 'CMOD');
+        expect(JSON.stringify(post?.args.blocks)).toContain('fact:delete');
+        expect(f.modMessageTs).toBeTruthy();
+        const m2 = (await fakeCalls()).length;
+        await workspace.handleFactAction(action({ userId: 'UADMIN', actionId: 'fact:delete', value: String(f.id) }), async () => {});
+        expect(await renderTurnRules(ch, [])).toBe('');
+        expect((await callsSince(m2)).some((c) => c.method === 'chat.update' && c.args.ts === f.modMessageTs)).toBe(true);
+      } finally {
+        rm();
+      }
     });
   });
 

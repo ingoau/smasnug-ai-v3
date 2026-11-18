@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyAdjustment, gateAdjustment, leadingName, otherMentions } from './gate-signals.js';
+import { applyAdjustment, gateAdjustment, gateParticipantIds, leadingName, nameKeys, otherMentions } from './gate-signals.js';
 
 const BOT = 'UBOT';
 const msg = (text: string, userId: string | null = 'U1', botId: string | null = null) => ({
@@ -15,7 +15,10 @@ const msg = (text: string, userId: string | null = 'U1', botId: string | null = 
   deleted: false,
 });
 const bot = (text: string) => msg(text, BOT, 'B1');
-const adj = (context: ReturnType<typeof msg>[], text: string, author = 'U1') => gateAdjustment({ context, newMessages: [msg(text, author)], botUserId: BOT, botName: 'smasnug ai' });
+/** The thread's other humans' names (fire.ts looks them up in the directory). */
+const NAMES = [...nameKeys({ displayName: 'Sam', realName: 'Sam Smith', handle: 'sam.smith' }), ...nameKeys({ displayName: 'Thea' })];
+const adj = (context: ReturnType<typeof msg>[], text: string, author = 'U1') =>
+  gateAdjustment({ context, newMessages: [msg(text, author)], botUserId: BOT, botId: 'B1', botName: 'smasnug ai', participantNames: NAMES });
 
 describe('gate signals', () => {
   it('(a) boosts a follow-up question right after the bot answered', () => {
@@ -53,12 +56,57 @@ describe('gate signals', () => {
   });
 
   it('leading names skip interjections, adverbs and the bot\'s own name', () => {
-    expect(leadingName('ok, what about this?', 'smasnug ai')).toBeNull();
-    expect(leadingName('Honestly, no', 'smasnug ai')).toBeNull();
-    expect(leadingName('smasnug, what is this?', 'smasnug ai')).toBeNull();
-    expect(leadingName('Update: it shipped', 'smasnug ai')).toBeNull();
-    expect(leadingName('Sam: done?', 'smasnug ai')).toBe('Sam');
-    expect(leadingName('what about Sam, though', 'smasnug ai')).toBeNull();
+    const known = [...NAMES, 'honestly', 'update', 'smasnug'];
+    expect(leadingName('ok, what about this?', 'smasnug ai', known)).toBeNull();
+    expect(leadingName('Honestly, no', 'smasnug ai', known)).toBeNull();
+    expect(leadingName('smasnug, what is this?', 'smasnug ai', known)).toBeNull();
+    expect(leadingName('Update: it shipped', 'smasnug ai', known)).toBeNull();
+    expect(leadingName('Sam: done?', 'smasnug ai', NAMES)).toBe('Sam');
+    expect(leadingName('sam.smith: done?', 'smasnug ai', NAMES)).toBe('sam.smith');
+    expect(leadingName('hi Thea, got a sec?', 'smasnug ai', NAMES)).toBe('Thea');
+    expect(leadingName('what about Sam, though', 'smasnug ai', NAMES)).toBeNull();
+  });
+
+  it('only a known participant\'s name counts: common openers and the bot\'s handle are not names', () => {
+    const openers = [
+      'Error: Cannot find module \'x\'',
+      'TypeError: x is not a function',
+      'TLDR: it works now',
+      'However, the build still fails',
+      'Haha, that is wild',
+      'hi there, can you help?',
+      "hey I'm stuck on this",
+      'smasnug-ai, what is this?',
+      'Smasnug_AI: what is this?',
+    ];
+    for (const t of openers) {
+      expect(leadingName(t, 'smasnug ai', NAMES), t).toBeNull();
+      expect(adj([bot('done')], t).signals, t).not.toContain('addressed_by_name');
+    }
+    // Even when someone in the thread is called that, the bot's own (hyphenated) handle isn't someone else's name.
+    expect(leadingName('smasnug-ai, what is this?', 'smasnug ai', ['smasnug ai', 'smasnug'])).toBeNull();
+    // A follow-up starting like that after the bot's answer still gets the boost.
+    expect(adj([bot('a pico 2 w')], 'hey I\'m stuck, how do I flash it?').signals).toEqual(['follows_bot']);
+    expect(adj([bot('a pico 2 w')], 'Error: Cannot find module, what now?').signals).toEqual(['follows_bot']);
+    // Unknown names (nobody by that name in the thread) don't count either.
+    expect(gateAdjustment({ context: [], newMessages: [msg('Sam, did you book the room?')], botUserId: BOT, botName: 'smasnug ai' }).signals).toEqual([]);
+  });
+
+  it('participant ids: writers and mentions, minus the author, the bot and bot messages', () => {
+    const ids = gateParticipantIds({
+      context: [msg('hi <@U3|x>', 'U2'), bot('hello <@U1>'), msg('webhook', null, 'BHOOK')],
+      newMessages: [msg('ok <@UBOT>', 'U1')],
+      botUserId: BOT,
+      authorId: 'U1',
+    });
+    expect(ids.sort()).toEqual(['U2', 'U3']);
+  });
+
+  it("follows_bot only after this bot's own message, not a webhook's or another app's", () => {
+    expect(adj([msg('deploy finished', null, 'BHOOK')], 'why did it fail?').signals).toEqual([]);
+    expect(adj([msg('build red', 'UCI', 'BCI')], 'why did it fail?').signals).toEqual([]);
+    // Ours by bot id even without a user id.
+    expect(adj([msg('a pico 2 w', null, 'B1')], 'does it do bluetooth?').signals).toEqual(['follows_bot']);
   });
 
   it('clamps the adjusted probability', () => {

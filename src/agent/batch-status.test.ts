@@ -47,4 +47,23 @@ describe('renderBatchStatus', () => {
     ]);
     expect(renderBatchStatus(runs, { final: true })).toBe('Subagents for this request: all 2 finished with results.');
   });
+
+  it('a failed part that was itself a retry: no second retry advice, only disclosure', () => {
+    const s = renderBatchStatus([run(1, 'complete'), { ...run(2, 'error', 'boom'), retry: true }], { final: true });
+    expect(s).toContain('FAILED: sa_2');
+    expect(s).not.toContain('Retry each');
+    expect(s).toContain("already retried; don't retry again");
+    expect(s).toContain('tell the speaker exactly what is missing');
+  });
+
+  it('mixed: retry advice names the parts that already failed on a retry', () => {
+    const s = renderBatchStatus([run(1, 'error', 'boom'), { ...run(2, 'error', 'boom'), retry: true }], { final: true });
+    expect(s).toContain("Retry each failed part once (sa_2 already failed on a retry: don't retry it again)");
+  });
+
+  it('label: an open batch from an earlier request is labelled as such', () => {
+    expect(renderBatchStatus([run(1, 'complete'), run(2, 'running')], { final: false, label: 'Earlier request (<@U1>, 3 min ago)' })).toBe(
+      'Earlier request (<@U1>, 3 min ago): 1 of 2 finished with results; 1 still running.',
+    );
+  });
 });

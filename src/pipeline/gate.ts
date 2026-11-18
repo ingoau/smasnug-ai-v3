@@ -128,10 +128,12 @@ async function runDecisionsGate(model: string, context: string, newMessages: str
 export const GATE_PROVIDER_OPTIONS = modelOptions({ effort: 'none' });
 
 /** Compact plain rendering for the gate (the full context renderer belongs to the context module). */
-export function renderForGate(msgs: StoredMessage[], botUserId: string, botName = env.BOT_DISPLAY_NAME): string {
+export function renderForGate(msgs: StoredMessage[], botUserId: string, botName = env.BOT_DISPLAY_NAME, botId?: string | null): string {
   return msgs
     .map((m) => {
-      const who = m.botId ? (m.userId === botUserId || !m.userId ? `${botName} (bot)` : `${m.username ?? m.userId} (bot)`) : `<@${m.userId}>`;
+      // Ours by user id, or by bot id when known (else, as before, a bot message without a user). Webhooks / other apps are named.
+      const own = m.userId === botUserId || (botId ? m.botId === botId : !!m.botId && !m.userId);
+      const who = own ? `${botName} (bot)` : m.botId ? `${m.username ?? m.userId ?? 'app'} (bot)` : `<@${m.userId}>`;
       let text = m.text.replaceAll(`<@${botUserId}>`, `@${botName}`);
       if (text.length > 1200) text = `${text.slice(0, 1200)}…`;
       const files = m.files.length ? ` [${m.files.length} file(s)]` : '';
@@ -153,6 +155,10 @@ export async function runGate(opts: {
   context: StoredMessage[];
   newMessages: StoredMessage[];
   botUserId: string;
+  /** This bot's bot id (auth.test), so a webhook's or another app's message isn't taken for the bot's. */
+  botId?: string;
+  /** nameKeys of the thread's other humans (gate-signals.ts gateParticipantIds), for the addressed-by-name signal. */
+  participantNames?: string[];
   abortSignal?: AbortSignal;
   /** Extra situation from code (e.g. the bot is DJing the huddle here), not from thread content. */
   note?: string;
@@ -160,14 +166,21 @@ export async function runGate(opts: {
   threshold?: number;
 }): Promise<GateResult> {
   const started = Date.now();
-  const adjustment = gateAdjustment({ context: opts.context.slice(-limits.gateContextMessages), newMessages: opts.newMessages, botUserId: opts.botUserId, botName: env.BOT_DISPLAY_NAME });
+  const adjustment = gateAdjustment({
+    context: opts.context.slice(-limits.gateContextMessages),
+    newMessages: opts.newMessages,
+    botUserId: opts.botUserId,
+    botId: opts.botId,
+    botName: env.BOT_DISPLAY_NAME,
+    participantNames: opts.participantNames,
+  });
   let fallback: { fallback: string; fallbackKind: GateErrorKind; fallbackAfterMs: number } | undefined;
   if (env.GATE_MODEL !== 'luna') {
     try {
       return await runDecisionsGate(
         env.GATE_MODEL,
-        renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId),
-        renderForGate(opts.newMessages, opts.botUserId),
+        renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId, env.BOT_DISPLAY_NAME, opts.botId),
+        renderForGate(opts.newMessages, opts.botUserId, env.BOT_DISPLAY_NAME, opts.botId),
         started,
         opts.threshold ?? env.GATE_THRESHOLD,
         adjustment,
@@ -184,8 +197,8 @@ export async function runGate(opts: {
       model: chatModel(MODELS.gate),
       system: gateSystemPrompt(env.BOT_DISPLAY_NAME, opts.note),
       prompt: gateUserPrompt({
-        context: renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId),
-        newMessages: renderForGate(opts.newMessages, opts.botUserId),
+        context: renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId, env.BOT_DISPLAY_NAME, opts.botId),
+        newMessages: renderForGate(opts.newMessages, opts.botUserId, env.BOT_DISPLAY_NAME, opts.botId),
       }),
       providerOptions: GATE_PROVIDER_OPTIONS,
       maxOutputTokens: 16,

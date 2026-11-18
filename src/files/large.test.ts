@@ -1,12 +1,31 @@
 /** Large files, pure parts: tier decisions, limit texts, staging (stream + download) and the streamed upload POST. */
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { limits } from '../config.js';
 import { formatBytes } from './format.js';
-import { postFileTo, stageDownload, stageStream, storageTier, TooLargeError, tooLargeText, transferTimeoutMs } from './large.js';
+import { LargeFileRefusedError, postFileTo, removeStaleTempDirs, stageDownload, stageStream, storageTier, TooLargeError, tooLargeText, transferTimeoutMs, type LargeGate } from './large.js';
+
+/** A gate that records its calls (the real one needs Redis: large.int.test.ts). */
+function fakeGate(threshold: number, allowed: number | Error) {
+  const calls: { reserve: (number | null)[]; finish: number[] } = { reserve: [], finish: [] };
+  const gate: LargeGate = {
+    threshold,
+    async reserve(expected) {
+      calls.reserve.push(expected);
+      if (allowed instanceof Error) throw allowed;
+      return { allowed, overError: () => new LargeFileRefusedError('over the budget') };
+    },
+    async finish(n) {
+      calls.finish.push(n);
+    },
+  };
+  return { gate, calls };
+}
 
 const MB = 1024 * 1024;
 const sha = (b: Buffer) => createHash('sha256').update(b).digest('hex');
@@ -83,6 +102,60 @@ describe('staging', () => {
   });
 });
 
+describe('staging with a gate', () => {
+  async function* chunks(n: number, size: number) {
+    for (let i = 0; i < n; i++) yield new Uint8Array(size);
+  }
+
+  it('reserves once, on crossing the threshold, and charges what was staged', async () => {
+    const { gate, calls } = fakeGate(1000, 10_000);
+    const s = await stageStream(chunks(5, 600), 10_000, { gate });
+    expect(calls.reserve).toEqual([null]);
+    await s.cleanup();
+    expect(calls.finish).toEqual([3000]);
+  });
+
+  it('under the threshold: no reservation', async () => {
+    const { gate, calls } = fakeGate(1000, 10_000);
+    const s = await stageStream(chunks(1, 600), 10_000, { gate });
+    await s.cleanup();
+    expect(calls.reserve).toEqual([]);
+  });
+
+  it('a lower allowance cuts the staging with its own error', async () => {
+    const { gate } = fakeGate(1000, 2000);
+    await expect(stageStream(chunks(5, 600), 10_000, { gate })).rejects.toThrow('over the budget');
+  });
+
+  it('a known size past the threshold is checked before anything is read', async () => {
+    const { gate, calls } = fakeGate(1000, new LargeFileRefusedError('busy'));
+    let read = false;
+    async function* src() {
+      read = true;
+      yield new Uint8Array(10);
+    }
+    await expect(stageStream(src(), 10_000, { gate, expected: 5000 })).rejects.toThrow('busy');
+    expect(read).toBe(false);
+    expect(calls.reserve).toEqual([5000]);
+  });
+
+  it('removeStaleTempDirs removes only old staging dirs', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'large-test-'));
+    try {
+      await mkdir(join(dir, 'smasnug-file-old'));
+      await mkdir(join(dir, 'smasnug-file-new'));
+      await mkdir(join(dir, 'other-old'));
+      const old = new Date(Date.now() - 2 * 86_400_000);
+      await utimes(join(dir, 'smasnug-file-old'), old, old);
+      await utimes(join(dir, 'other-old'), old, old);
+      expect(await removeStaleTempDirs(86_400_000, dir)).toBe(1);
+      expect((await readdir(dir)).sort()).toEqual(['other-old', 'smasnug-file-new']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('over HTTP', () => {
   let server: http.Server;
   let base = '';
@@ -103,6 +176,8 @@ describe('over HTTP', () => {
       }
       if (req.url === '/file') return void res.writeHead(200, { 'content-type': 'application/octet-stream' }).end(body);
       if (req.url === '/missing') return void res.writeHead(404).end('nope');
+      if (req.url === '/sized') return void res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(body.length) }).end(body);
+      if (req.url === '/error-page') return void res.writeHead(500, { 'content-type': 'text/html' }).end('<html>' + 'x'.repeat(300_000));
       res.writeHead(404).end();
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
@@ -133,6 +208,24 @@ describe('over HTTP', () => {
     const { res, staged } = await dl('/missing', 1000);
     await staged.cleanup();
     expect(res.status).toBe(404);
+  });
+
+  it('stageDownload never writes an error response to disk', async () => {
+    const { res, staged } = await dl('/error-page', 10 * 1024 * 1024);
+    try {
+      expect(res.status).toBe(500);
+      expect(staged.size).toBe(0);
+      expect((await stat(staged.path)).size).toBe(0);
+    } finally {
+      await staged.cleanup();
+    }
+  });
+
+  it('stageDownload: a Content-Length past the threshold reserves before the body; one over the cap is refused', async () => {
+    const { gate, calls } = fakeGate(1000, new LargeFileRefusedError('no budget left'));
+    await expect(stageDownload(`${base}/sized`, { maxBytes: body.length, timeoutMs: 5000, allowIPAddressList: ['127.0.0.1'], gate })).rejects.toThrow('no budget left');
+    expect(calls.reserve).toEqual([body.length]);
+    await expect(dl('/sized', 1000)).rejects.toBeInstanceOf(TooLargeError);
   });
 
   it('postFileTo streams a file with its Content-Length; non-2xx throws', async () => {

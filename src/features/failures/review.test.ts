@@ -101,6 +101,17 @@ describe('validateFindings', () => {
     ]);
     // Ours repeating it is ours.
     expect(validateFindings([finding({ evidence_lines: [3, 5, 6], bot_line: 3 })], lines)).toHaveLength(1);
+    // Only other bots' lines cited: theirs, whatever the category.
+    expect(validateFindings([finding({ categories: ['incomplete'], evidence_lines: [5], bot_line: null })], lines)).toEqual([]);
+  });
+
+  it('keeps our miss when another bot answered instead (a person and the other bot cited, nothing of ours)', () => {
+    // We stayed silent on Ann's question and kyto answered: incomplete is ours; a content judgement is kyto's.
+    const [v] = validateFindings([finding({ categories: ['incomplete', 'incorrect_info'], evidence_lines: [2, 5], bot_line: null })], lines);
+    expect(v!.categories).toEqual(['incomplete']);
+    expect(v!.lines.map((l) => l.n)).toEqual([2, 5]);
+    // Naming the other bot's message as bot_line makes it theirs.
+    expect(validateFindings([finding({ categories: ['incomplete'], evidence_lines: [2, 5], bot_line: 5 })], lines)).toEqual([]);
   });
 
   it('keeps at most five', () => {

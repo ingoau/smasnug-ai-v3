@@ -36,9 +36,16 @@ export interface SafeFetchOptions {
   /**
    * Stream the body here instead of buffering it (big downloads, src/files/large.ts): `body` comes back empty and
    * `streamedBytes` says how much was written (still capped at maxBytes; `truncated` as usual). Backpressure is
-   * respected; the caller ends the sink.
+   * respected; the caller ends the sink. A sink error aborts the request and rejects with that error. Only a 2xx
+   * response (that `sinkIf` accepts) goes to the sink; any other is buffered instead, at most SINK_SKIPPED_MAX_BYTES
+   * (`sunk` false), so an error page is never written out in full.
    */
   sink?: NodeJS.WritableStream;
+  /**
+   * With `sink`: checked once the final response's headers are in, before any body byte is read. false → buffer the
+   * (short) body instead of sinking it; a throw aborts the request with that error.
+   */
+  sinkIf?: (res: { status: number; url: string; contentType: string; headers: http.IncomingHttpHeaders }) => boolean | Promise<boolean>;
   /** @internal tests only: custom DNS resolution (the agent still validates whatever it returns). */
   lookup?: LookupFunction;
   /** @internal tests only: exact IPs/CIDRs exempt from filtering (e.g. a 127.0.0.1 test server). */
@@ -56,7 +63,12 @@ export interface SafeFetchResult {
   truncated: boolean;
   /** With `sink`: bytes written to it. */
   streamedBytes?: number;
+  /** With `sink`: whether the body went to it (false: an error response, in `body`, ≤ SINK_SKIPPED_MAX_BYTES). */
+  sunk?: boolean;
 }
+
+/** With a sink, the most of a response that isn't sunk (an error status or page) that is kept. */
+export const SINK_SKIPPED_MAX_BYTES = 64 * 1024;
 
 // The agents deny every address ipaddr.js doesn't classify as 'unicast' — that covers loopback, private, link-local,
 // CGNAT, unspecified, ULA, IPv4-mapped etc. (A mixed v4/v6 denyIPAddressList only produces warnings, so none is set.)
@@ -154,55 +166,84 @@ function requestOnce(
           resolve({ redirect: res.headers.location });
           return;
         }
-        let stream: NodeJS.ReadableStream = res;
-        const enc = String(res.headers['content-encoding'] ?? '').toLowerCase();
-        if (enc === 'gzip' || enc === 'x-gzip') stream = res.pipe(zlib.createGunzip());
-        else if (enc === 'deflate') stream = res.pipe(zlib.createInflate());
-        else if (enc === 'br') stream = res.pipe(zlib.createBrotliDecompress());
-        const chunks: Buffer[] = [];
-        let size = 0;
-        let truncated = false;
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          done = true;
-          resolve({
-            result: {
-              status,
-              url: url.toString(),
-              contentType: String(res.headers['content-type'] ?? ''),
-              headers: res.headers,
-              body: Buffer.concat(chunks),
-              truncated,
-              ...(opts.sink ? { streamedBytes: size } : {}),
-            },
-          });
-        };
-        const sink = opts.sink;
-        const keep = (chunk: Buffer) => {
-          if (!sink) return chunks.push(chunk);
-          if (!sink.write(chunk)) {
-            stream.pause();
-            sink.once('drain', () => stream.resume());
-          }
-        };
-        stream.on('data', (chunk: Buffer) => {
-          if (done) return;
-          const room = opts.maxBytes - size;
-          if (chunk.length >= room) {
-            keep(chunk.subarray(0, room));
-            size += room;
-            truncated = true;
-            finish();
+        const contentType = String(res.headers['content-type'] ?? '');
+        res.on('error', (err) => reject(err));
+        if (!opts.sink) return void readBody(null, opts.maxBytes);
+        // Nothing is read until the response has been checked: an error page never reaches the sink.
+        res.pause();
+        const ok = status >= 200 && status < 300;
+        new Promise<boolean>((r) => r(ok && (opts.sinkIf ? opts.sinkIf({ status, url: url.toString(), contentType, headers: res.headers }) : true))).then(
+          (sinkIt) => (sinkIt ? readBody(opts.sink!, opts.maxBytes) : readBody(null, Math.min(opts.maxBytes, SINK_SKIPPED_MAX_BYTES))),
+          (err) => {
             res.destroy();
-            return;
-          }
-          keep(chunk);
-          size += chunk.length;
-        });
-        stream.on('end', finish);
-        stream.on('error', (err) => (done ? undefined : reject(err)));
-        res.on('error', (err) => (done ? undefined : reject(err)));
+            reject(err);
+          },
+        );
+
+        function readBody(sink: NodeJS.WritableStream | null, maxBytes: number) {
+          let stream: NodeJS.ReadableStream = res;
+          const enc = String(res.headers['content-encoding'] ?? '').toLowerCase();
+          if (enc === 'gzip' || enc === 'x-gzip') stream = res.pipe(zlib.createGunzip());
+          else if (enc === 'deflate') stream = res.pipe(zlib.createInflate());
+          else if (enc === 'br') stream = res.pipe(zlib.createBrotliDecompress());
+          const chunks: Buffer[] = [];
+          let size = 0;
+          let truncated = false;
+          let done = false;
+          const onSinkError = (err: unknown) => {
+            if (done) return;
+            done = true;
+            res.destroy();
+            reject(err);
+          };
+          sink?.on('error', onSinkError);
+          const finish = () => {
+            if (done) return;
+            done = true;
+            sink?.removeListener('error', onSinkError);
+            resolve({
+              result: {
+                status,
+                url: url.toString(),
+                contentType,
+                headers: res.headers,
+                body: Buffer.concat(chunks),
+                truncated,
+                ...(opts.sink ? { streamedBytes: sink ? size : 0, sunk: Boolean(sink) } : {}),
+              },
+            });
+          };
+          const fail = (err: unknown) => {
+            if (done) return;
+            done = true;
+            sink?.removeListener('error', onSinkError);
+            reject(err);
+          };
+          const keep = (chunk: Buffer) => {
+            if (!sink) return chunks.push(chunk);
+            if (!sink.write(chunk)) {
+              stream.pause();
+              sink.once('drain', () => stream.resume());
+            }
+          };
+          stream.on('data', (chunk: Buffer) => {
+            if (done) return;
+            const room = maxBytes - size;
+            if (chunk.length >= room) {
+              keep(chunk.subarray(0, room));
+              size += room;
+              truncated = true;
+              finish();
+              res.destroy();
+              return;
+            }
+            keep(chunk);
+            size += chunk.length;
+          });
+          stream.on('end', finish);
+          stream.on('error', fail);
+          res.resume();
+        }
       },
     );
     req.on('error', (err) => reject(classify(err)));

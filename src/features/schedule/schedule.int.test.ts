@@ -88,6 +88,11 @@ describe.skipIf(!INTEGRATION)('reminders and watches', () => {
       const exec = (tool: any, input: object) => tool.execute(input, { toolCallId: 'tc', messages: [] });
       const res: string = await exec(tools.set_reminder, { text: 'check the release', in: '2h' });
       expect(res).toMatch(/^Reminder set: r_\d+ for .*\(Europe\/Berlin\), in 2 hours/);
+      // Agrees with the front prompt: an exact time gets only a ✅, an interpreted one a one-line confirmation.
+      for (const text of [res, (tools.set_reminder as { description?: string }).description!]) {
+        expect(text).toMatch(/just react ✅/);
+        expect(text).toMatch(/vague or relative time \("later", "next week"/);
+      }
       const id = Number(/r_(\d+)/.exec(res)![1]);
       const row = await reminderRow(id);
       expect(row).toMatchObject({ ownerId: owner, threadId: t.threadId, channelId: t.channelId, status: 'pending', tz: 'Europe/Berlin' });

@@ -12,6 +12,7 @@ import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { retainCodeChannels } from './code-channels/store.js';
 import { expireFacts } from './memory/store.js';
+import { sweepLargeFiles } from '../files/large.js';
 
 export const SHORT_RETENTION_MS = 2 * 24 * 60 * 60 * 1000;
 export const IMAGE_CACHE_DIR = path.resolve(process.cwd(), '.cache/images');
@@ -90,6 +91,14 @@ export async function runRetention(now = Date.now()): Promise<Record<string, num
           select 1 from messages m where m.channel_id = coalesce(f.source_channel_id, f.channel_id) and m.ts = f.message_ts and m.deleted)
         returning f.id`,
   );
+  // Large files' Slack copies (src/files/large.ts) whose rows just went, and stale staging temp dirs.
+  try {
+    const lf = await sweepLargeFiles();
+    counts.large_file_blobs = lf.blobs;
+    counts.large_file_temp_dirs = lf.tempDirs;
+  } catch (err) {
+    log.error({ err, step: 'large_files' }, 'retention step failed');
+  }
   await run('usage', sql`delete from usage where created_at < ${older(long)} returning id`);
   // Failure reports (src/features/failures/) quote conversation content: same window as traces.
   await run('failure_reports', sql`delete from failure_reports where created_at < ${older(long)} returning id`);

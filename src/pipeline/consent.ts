@@ -18,6 +18,7 @@ import { ephemeral, respond } from '../features/util.js';
 import { publishHome } from '../features/home.js';
 import { forgetUserCodeChannelData } from '../features/code-channels/store.js';
 import { deleteAllFacts } from '../features/memory/store.js';
+import { deleteFilesOwnedBy } from '../files/large.js';
 import { applyDelete } from './store.js';
 import { removeFromBatch } from './debounce.js';
 import { removeMessageFromTurns } from './scheduler.js';
@@ -212,13 +213,18 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
       log.warn({ err, userId }, 'privacy withdraw: deleting a message failed');
     }
   }
+  // Files made for them or their uploads' stored copies, and the Slack copies of their large files, right away.
+  const files = await deleteFilesOwnedBy(userId).catch((err) => {
+    log.warn({ err, userId }, 'privacy withdraw: deleting their files failed');
+    return 0;
+  });
   // Again, for a failure review that loaded their messages before they were deleted and filed after the first pass.
   await sql`delete from failure_reports where speaker_id = ${userId} or evidence @> ${sql.json([{ userId }] as any)}`;
-  log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length, codeChannelSeeds }, 'privacy: consent withdrawn, data deleted');
+  log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length, files, codeChannelSeeds }, 'privacy: consent withdrawn, data deleted');
   await publishHome(userId);
   const text =
     (wasAgreed ? "Done: you've withdrawn your consent to my privacy policy. I won't answer you until you agree again. " : 'Done. ') +
-    `I deleted ${facts} remembered fact${facts === 1 ? '' : 's'}, ${deleted} stored message${deleted === 1 ? '' : 's'} of yours (with their files), our DMs, ` +
+    `I deleted ${facts} remembered fact${facts === 1 ? '' : 's'}, ${deleted} stored message${deleted === 1 ? '' : 's'} of yours (with their files), ${files} file${files === 1 ? '' : 's'} I made for you or stored from your uploads, our DMs, ` +
     'your reminders and watches, and the records of my answers in those conversations. Other copies go within 30 days. Messages in Slack itself are untouched.';
   await slackCall('chat.postMessage', { channel: userId, text }, { idempotencyKey: `privacy-withdraw:${userId}:${ctx.triggerId ?? ctx.messageTs ?? Date.now()}` }).catch((err) =>
     log.warn({ err }, 'privacy withdraw DM failed'),

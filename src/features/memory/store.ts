@@ -15,6 +15,8 @@ export interface Fact {
   /** When the fact was last stated (added or updated): its age in the prompt. */
   statedAt: Date;
   lastUsed: Date;
+  /** A preference not to be @mentioned, marked explicitly by the model (remember tool / extraction): the <rules> no-ping list (rules.ts). */
+  noPing: boolean;
 }
 
 export const FACT_MAX_CHARS = 300;
@@ -175,15 +177,17 @@ export async function countFacts(userId: string): Promise<number> {
   return r?.n ?? 0;
 }
 
-export async function addFact(userId: string, text: string, sourceThread: string | null, kind: FactKind = 'about'): Promise<Fact> {
+export async function addFact(userId: string, text: string, sourceThread: string | null, kind: FactKind = 'about', noPing = false): Promise<Fact> {
   const [row] = await sql<Fact[]>`
-    insert into user_memory (user_id, text, source_thread, kind) values (${userId}, ${text}, ${sourceThread}, ${kind}) returning *`;
+    insert into user_memory (user_id, text, source_thread, kind, no_ping) values (${userId}, ${text}, ${sourceThread}, ${kind}, ${noPing && kind === 'preference'}) returning *`;
   return norm(row!);
 }
 
-export async function updateFact(userId: string, id: number, text: string, sourceThread: string | null, kind?: FactKind | null): Promise<boolean> {
+/** `noPing`: the fact's new no-ping marker (null/undefined keeps it; only a preference keeps one). */
+export async function updateFact(userId: string, id: number, text: string, sourceThread: string | null, kind?: FactKind | null, noPing?: boolean | null): Promise<boolean> {
   const rows = await sql`
     update user_memory set text = ${text}, kind = coalesce(${kind ?? null}, kind), source_thread = coalesce(${sourceThread}, source_thread),
+      no_ping = coalesce(${noPing ?? null}, no_ping) and coalesce(${kind ?? null}, kind) = 'preference',
       stated_at = now(), last_used = now()
     where id = ${id} and user_id = ${userId} returning id`;
   return rows.length > 0;

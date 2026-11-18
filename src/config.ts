@@ -200,16 +200,22 @@ export const limits = {
   /**
    * Largest file whose bytes live in Postgres (created files, and uploads' content; bigger uploads: images are still
    * viewable, others not). bytea is read and written whole (postgres.js buffers it, hex-encoded on the wire: ~3x in
-   * memory), so this stays well below Postgres's 1 GB field limit. Bigger created files go to Slack instead
-   * (largeFileMaxBytes, src/files/large.ts).
+   * memory per operation, and the worker has no memory limit of its own), so this stays small. Bigger created files
+   * (save_url, sandbox_export) go to Slack instead (largeFileMaxBytes, src/files/large.ts); create_file refuses them.
    */
-  fileMaxBytes: 50 * 1024 * 1024,
+  fileMaxBytes: 20 * 1024 * 1024,
   /**
    * Largest file the bot can make and post at all (save_url, sandbox_export): Slack's 1 GB upload limit. Files over
    * fileMaxBytes are staged on local disk while they stream in, then kept as a private Slack upload (not in Postgres)
    * and copied into the thread when posted. They can be posted, not opened (read_file / ask_file / sandbox_import).
    */
   largeFileMaxBytes: 1000 * 1024 * 1024,
+  /** Bytes of large files (staged past fileMaxBytes) one user may make per hour (save_url, sandbox_export). */
+  largeFileBytesPerUserHour: 2000 * 1024 * 1024,
+  /** Large files being staged on local disk / moved at once, bot-wide (making and posting them). */
+  largeFileConcurrentTransfers: 2,
+  /** Free space a large-file staging leaves on the temp dir's disk (it's refused rather than going below). */
+  largeFileDiskMarginBytes: 2 * 1024 * 1024 * 1024,
   /** read_file: text page size (chars). */
   fileReadPageChars: 24_000,
   /** ask_file: the file text given to the answering model at most (≈tokens; the head, with a note). */
@@ -438,10 +444,10 @@ export const limits = {
   sandboxReadMaxBytes: 25 * 1024 * 1024,
   sandboxImportMaxBytes: 50 * 1024 * 1024,
   /**
-   * Sandbox exports (and preview bundles) kept in the file store's Postgres tier; bigger exports, up to
-   * largeFileMaxBytes, become large files (src/files/large.ts).
+   * Sandbox exports kept in the file store's Postgres tier (= fileMaxBytes); bigger exports, up
+   * to largeFileMaxBytes, become large files (src/files/large.ts).
    */
-  sandboxExportMaxBytes: 50 * 1024 * 1024,
+  sandboxExportMaxBytes: 20 * 1024 * 1024,
   userSandboxExecsPerHour: 200,
   userLiveSandboxes: 2,
   globalLiveSandboxes: 8,

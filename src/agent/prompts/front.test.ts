@@ -38,6 +38,7 @@ describe('frontSystemPrompt About you', () => {
     expect(line({})).not.toMatch(/custom emoji/);
     expect(line({ emojiUpload: true })).toMatch(/add a custom emoji from an image file when someone asks/);
     expect(line({})).toMatch(/Asked what you can do, cover all of these/);
+    expect(line({})).toMatch(/do exact maths and time zone conversions/);
     expect(line({ sandbox: true })).toMatch(/spawn background subagents for longer work; run code in a sandbox \(Python, Node, a headless browser\) to process data and files and build things\./);
     expect(line({ sandbox: true })).not.toMatch(/preview/);
     expect(line({ sandbox: true, previews: true })).toMatch(/; publish live web page previews \(a temporary public link\)\./);
@@ -192,7 +193,8 @@ describe('frontSystemPrompt: responding without words, and stated preferences', 
   it('a message that needs no words gets a reaction or nothing, never a confirmation message', () => {
     expect(p).toMatch(/If a message doesn't need words, send none: react \(✅ done, 👍 noted\) or end_turn/);
     expect(p).toMatch(/"i'll follow the steps"/);
-    expect(p).toMatch(/a reminder set, a reaction added\): a ✅, not a confirmation message/);
+    expect(p).toMatch(/a reminder set for a time they stated exactly, a reaction added\): a ✅, not a confirmation message/);
+    expect(p).toMatch(/A reminder whose time you had to interpret \("later", "next week", "after lunch"\) gets one short line with the resolved time/);
     expect(p).not.toMatch(/reactions should be rare/);
   });
 

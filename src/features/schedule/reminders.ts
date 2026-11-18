@@ -95,7 +95,7 @@ export async function setReminder(ctx: ToolContext, input: { text: string; at?: 
   return (
     `${dupe ? 'Already set' : 'Reminder set'}: ${reminderLabel(id)} for ${formatInZone(when.due, tz)}, in ${formatDuration(when.due.getTime() - now)}${zoneNote}. ` +
     `When it's due you'll get a turn ${where} to ping <@${ctx.speakerId}> (and do any lookup it asks for). ` +
-    'Confirm the resolved day and time briefly in your reply, in their local time (e.g. "ok, fri 9am").'
+    'If they stated the time exactly, just react ✅ (no confirmation message); if you interpreted a vague or relative time ("later", "next week"), confirm the resolved day and time in one short line, in their local time (e.g. "ok, fri 9am").'
   );
 }
 
@@ -132,7 +132,7 @@ export function reminderTools(ctx: ToolContext) {
     set_reminder: tool({
       description:
         'Set a reminder for the current speaker (only for themselves). When it is due you get a turn in this thread to ping them ' +
-        'and can do any work it asks for (e.g. "check the release"). Give exactly one of `at` or `in` (their local time is in <current_time>). Precision ~1 minute, max 1 year ahead. Confirm the resolved day and time from the result in your reply ("ok, fri 9am").',
+        'and can do any work it asks for (e.g. "check the release"). Give exactly one of `at` or `in` (their local time is in <current_time>). Precision ~1 minute, max 1 year ahead. If they stated the time exactly ("fri 9am", "at 15:00"), just react ✅, no confirmation message; if you had to interpret a vague or relative time ("later", "next week", "after lunch"), confirm the resolved day and time from the result in one short line ("ok, fri 9am").',
       inputSchema: z.object({
         text: z.string().min(1).max(limits.reminderTextMaxChars).describe('What to remind them about / what to do then, in their words'),
         at: z

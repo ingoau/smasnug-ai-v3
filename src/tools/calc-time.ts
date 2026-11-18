@@ -80,13 +80,74 @@ const ABBREVIATIONS: Record<string, [string, number | undefined, string?]> = {
   ART: ['America/Argentina/Buenos_Aires', -3 * H],
 };
 
+/**
+ * ICU still lists and resolves some zones under their old names (Asia/Calcutta, Europe/Kiev): the current IANA name
+ * for each, used for display and so the modern city names resolve.
+ */
+const MODERN_IANA: Record<string, string> = {
+  'Asia/Calcutta': 'Asia/Kolkata',
+  'Europe/Kiev': 'Europe/Kyiv',
+  'Asia/Saigon': 'Asia/Ho_Chi_Minh',
+  'Asia/Katmandu': 'Asia/Kathmandu',
+  'Asia/Rangoon': 'Asia/Yangon',
+  'America/Godthab': 'America/Nuuk',
+  'Africa/Asmera': 'Africa/Asmara',
+  'Atlantic/Faeroe': 'Atlantic/Faroe',
+  'Pacific/Enderbury': 'Pacific/Kanton',
+  'Pacific/Ponape': 'Pacific/Pohnpei',
+  'Pacific/Truk': 'Pacific/Chuuk',
+  'America/Buenos_Aires': 'America/Argentina/Buenos_Aires',
+  'America/Indianapolis': 'America/Indiana/Indianapolis',
+  'America/Louisville': 'America/Kentucky/Louisville',
+};
+const modernIana = (id: string) => (Object.hasOwn(MODERN_IANA, id) ? MODERN_IANA[id]! : id);
+
+/** Big cities people name that aren't a zone's own city (lowercase, spaces). */
+const CITY_ALIASES: Record<string, string> = {
+  mumbai: 'Asia/Kolkata',
+  bombay: 'Asia/Kolkata',
+  delhi: 'Asia/Kolkata',
+  'new delhi': 'Asia/Kolkata',
+  bangalore: 'Asia/Kolkata',
+  bengaluru: 'Asia/Kolkata',
+  chennai: 'Asia/Kolkata',
+  hyderabad: 'Asia/Kolkata',
+  pune: 'Asia/Kolkata',
+  'ho chi minh city': 'Asia/Ho_Chi_Minh',
+  hanoi: 'Asia/Bangkok',
+  beijing: 'Asia/Shanghai',
+  shenzhen: 'Asia/Shanghai',
+  osaka: 'Asia/Tokyo',
+  canberra: 'Australia/Sydney',
+  wellington: 'Pacific/Auckland',
+  'san francisco': 'America/Los_Angeles',
+  seattle: 'America/Los_Angeles',
+  boston: 'America/New_York',
+  washington: 'America/New_York',
+  'washington dc': 'America/New_York',
+  miami: 'America/New_York',
+  atlanta: 'America/New_York',
+  dallas: 'America/Chicago',
+  houston: 'America/Chicago',
+  austin: 'America/Chicago',
+  montreal: 'America/Toronto',
+  'rio de janeiro': 'America/Sao_Paulo',
+  munich: 'Europe/Berlin',
+  frankfurt: 'Europe/Berlin',
+  milan: 'Europe/Rome',
+  barcelona: 'Europe/Madrid',
+  'tel aviv': 'Asia/Jerusalem',
+  'abu dhabi': 'Asia/Dubai',
+};
+
 let ianaByCity: Map<string, string> | undefined;
 function cityIndex(): Map<string, string> {
   if (!ianaByCity) {
-    ianaByCity = new Map();
-    for (const id of Intl.supportedValuesOf('timeZone')) {
-      const city = id.split('/').pop()!.toLowerCase().replace(/_/g, ' ');
-      if (!ianaByCity.has(city)) ianaByCity.set(city, id);
+    ianaByCity = new Map(Object.entries(CITY_ALIASES));
+    const cityOf = (id: string) => id.split('/').pop()!.toLowerCase().replace(/_/g, ' ');
+    for (const listed of Intl.supportedValuesOf('timeZone')) {
+      const id = modernIana(listed);
+      for (const city of new Set([cityOf(id), cityOf(listed)])) if (!ianaByCity.has(city)) ianaByCity.set(city, id);
     }
   }
   return ianaByCity;
@@ -100,7 +161,7 @@ export function formatOffset(minutes: number): string {
 
 function validIana(name: string): string | undefined {
   try {
-    return new Intl.DateTimeFormat('en-US', { timeZone: name }).resolvedOptions().timeZone;
+    return modernIana(new Intl.DateTimeFormat('en-US', { timeZone: name }).resolvedOptions().timeZone);
   } catch {
     return undefined;
   }
@@ -186,9 +247,10 @@ const sameWall = (a: Wall, b: Wall) => a.year === b.year && a.month === b.month 
 
 /**
  * The instant a wall-clock time in `zone` names. A time skipped by a DST jump is moved forward by the jump (02:30 →
- * 03:30) with a note; a repeated time (clocks go back) takes the first occurrence, with a note.
+ * 03:30) with a note; a repeated time (clocks go back) takes the occurrence at `preferOffset` (the offset an
+ * abbreviation names: AEST → the second 02:30) or else the first one, with a note.
  */
-export function instantFor(w: Wall, zone: Zone): { ms: number; note?: string } {
+export function instantFor(w: Wall, zone: Zone, preferOffset?: number): { ms: number; note?: string } {
   const local = wallToUtcMs(w);
   if (zone.kind === 'fixed') return { ms: local - zone.minutes * 60_000 };
   const offsets = [...new Set([offsetAt(local - 86_400_000, zone), offsetAt(local, zone), offsetAt(local + 86_400_000, zone)])];
@@ -196,6 +258,11 @@ export function instantFor(w: Wall, zone: Zone): { ms: number; note?: string } {
   const hhmm = `${String(w.hour).padStart(2, '0')}:${String(w.minute).padStart(2, '0')}`;
   if (valid.length === 1) return { ms: valid[0]! };
   if (valid.length > 1) {
+    const preferred = preferOffset === undefined ? undefined : valid.find((ms) => offsetAt(ms, zone) === preferOffset);
+    if (preferred !== undefined) {
+      const others = valid.filter((ms) => ms !== preferred).map((ms) => `UTC${formatOffset(offsetAt(ms, zone))}`);
+      return { ms: preferred, note: `${hhmm} happens twice on that date in ${zone.id} (clocks go back); used the UTC${formatOffset(preferOffset!)} one the abbreviation names, the other is ${others.join(', ')}` };
+    }
     return { ms: valid[0]!, note: `${hhmm} happens twice on that date in ${zone.id} (clocks go back); used the first one (UTC${formatOffset(offsetAt(valid[0]!, zone))}), the second is UTC${formatOffset(offsetAt(valid[valid.length - 1]!, zone))}` };
   }
   // Skipped (clocks jumped forward): read it with the offset in effect just before the jump.
@@ -258,15 +325,17 @@ export interface ParsedTime {
 export function parseDateTime(input: string): ParsedTime {
   const s = input.trim();
   if (/^now$/i.test(s)) return { ms: Date.now(), dateOnly: false, timeOnly: false };
-  const m = /^(?:(\d{4})-(\d{1,2})-(\d{1,2}))?(?:(?:^|[T\s]+)(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/i.exec(s);
+  const m = /^(?:(\d{4})-(\d{1,2})-(\d{1,2}))?(?:(?:^|[T\s]+)(\d{1,2})(?::(\d{2}))?(?::(\d{2})(?:[.,](\d{1,9}))?)?\s*(am|pm|a\.m\.|p\.m\.)?)?\s*(Z|[+-]\d{2}:?\d{2})?$/i.exec(s);
   if (!m || (!m[1] && !m[4])) {
     throw new TimeError(`can't read "${input}" as a date/time: use YYYY-MM-DD, YYYY-MM-DD HH:MM (24h), YYYY-MM-DD 3:30pm, a time alone (15:00) or "now"`);
   }
-  if (m[4] !== undefined && m[5] === undefined && !m[7]) throw new TimeError(`can't read "${input}": write the time as HH:MM or with am/pm`);
+  if (m[4] !== undefined && m[5] === undefined && !m[8]) throw new TimeError(`can't read "${input}": write the time as HH:MM or with am/pm`);
   let hour = Number(m[4] ?? 0);
   const minute = Number(m[5] ?? 0);
   const second = Number(m[6] ?? 0);
-  const ampm = m[7]?.toLowerCase().replace(/\./g, '');
+  // Fractional seconds ("…T04:00:00.000Z") count for an explicit instant; wall times are whole seconds.
+  const fracMs = m[7] ? Math.floor(Number(`0.${m[7]}`) * 1000) : 0;
+  const ampm = m[8]?.toLowerCase().replace(/\./g, '');
   if (ampm) {
     if (hour < 1 || hour > 12) throw new TimeError(`"${input}": with am/pm the hour must be 1-12`);
     hour = (hour % 12) + (ampm === 'pm' ? 12 : 0);
@@ -280,10 +349,10 @@ export function parseDateTime(input: string): ParsedTime {
     if (month < 1 || month > 12 || check.getUTCMonth() !== month - 1 || (month === 2 && day === 29 && !isLeap(year))) throw new TimeError(`"${input}" isn't a real date`);
   }
   const wall = { year, month, day, hour, minute, second };
-  if (m[8]) {
+  if (m[9]) {
     if (!m[1]) throw new TimeError(`"${input}": an offset needs a full date`);
-    const off = m[8].toUpperCase() === 'Z' ? 0 : (m[8][0] === '-' ? -1 : 1) * (Number(m[8].slice(1, 3)) * 60 + Number(m[8].slice(-2)));
-    return { ms: wallToUtcMs(wall) - off * 60_000, dateOnly: false, timeOnly: false };
+    const off = m[9].toUpperCase() === 'Z' ? 0 : (m[9][0] === '-' ? -1 : 1) * (Number(m[9].slice(1, 3)) * 60 + Number(m[9].slice(-2)));
+    return { ms: wallToUtcMs(wall) + fracMs - off * 60_000, dateOnly: false, timeOnly: false };
   }
   return { wall, dateOnly: !m[4], timeOnly: !m[1] };
 }
@@ -300,7 +369,7 @@ export function toInstant(p: ParsedTime, rz: ResolvedZone, nowMs = Date.now()): 
     wall = { ...wall, year: today.year, month: today.month, day: today.day };
     notes.push(`no date given: used today in ${rz.label} (${formatWall(today).date})`);
   }
-  const r = instantFor(wall, rz.zone);
+  const r = instantFor(wall, rz.zone, rz.impliedOffset);
   if (r.note) notes.push(r.note);
   return { ms: r.ms, notes };
 }
@@ -334,17 +403,17 @@ export function convert(req: ConvertRequest, nowMs = Date.now()): string {
     try {
       const rz = resolveZone(t);
       lines.push(`  → ${t}: ${describeInstant(ms, rz, src)}`);
-      if (rz.note && rz.impliedOffset !== undefined) {
-        const tm = dstMismatchNote(ms, rz);
-        if (tm) notes.push(tm);
-      }
+      // Same notes as for the source: how an abbreviation was read (CST → Chicago, also China) and any DST mismatch.
+      if (rz.note) notes.push(rz.note);
+      const tm = dstMismatchNote(ms, rz);
+      if (tm) notes.push(tm);
     } catch (err) {
       if (!(err instanceof TimeError)) throw err;
       lines.push(`  → ${t}: error: ${err.message}`);
     }
   }
   lines.push(`  (UTC instant: ${new Date(ms).toISOString().replace('.000Z', 'Z')})`);
-  for (const n of [from.note, mismatch, ...notes].filter(Boolean)) lines.push(`  note: ${n}`);
+  for (const n of new Set([from.note, mismatch, ...notes].filter(Boolean))) lines.push(`  note: ${n}`);
   return lines.join('\n');
 }
 
@@ -392,6 +461,8 @@ export interface AddRequest {
   minutes?: number;
 }
 
+const MAX_ADD_DAYS = 3_660_000;
+
 /** Weeks / days move the calendar date (same local time across a DST change); hours / minutes add elapsed time. */
 export function dateAdd(req: AddRequest, nowMs = Date.now()): string {
   const rz = resolveZone(req.zone ?? 'UTC');
@@ -399,17 +470,23 @@ export function dateAdd(req: AddRequest, nowMs = Date.now()): string {
   const start = toInstant(p, rz, nowMs);
   const notes = [...start.notes];
   const calDays = (req.weeks ?? 0) * 7 + (req.days ?? 0);
+  const elapsedMin = (req.hours ?? 0) * 60 + (req.minutes ?? 0);
+  // ~10,000 years either way; beyond that Date can't represent the result.
+  if (!Number.isFinite(calDays) || !Number.isFinite(elapsedMin) || Math.abs(calDays) > MAX_ADD_DAYS || Math.abs(elapsedMin) > MAX_ADD_DAYS * 1440) {
+    throw new TimeError('duration is out of range (at most about 10,000 years)');
+  }
   if (!Number.isInteger(calDays)) throw new TimeError('weeks/days must add up to whole days (use hours for parts of a day)');
   let ms = start.ms;
   if (calDays) {
     const w = wallAt(ms, rz.zone);
     const d = new Date(wallToUtcMs(w) + calDays * 86_400_000);
+    if (Number.isNaN(d.getTime())) throw new TimeError('result is out of range');
     const moved = { ...w, year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
     const r = instantFor(moved, rz.zone);
     if (r.note) notes.push(r.note);
     ms = r.ms;
   }
-  ms += ((req.hours ?? 0) * 60 + (req.minutes ?? 0)) * 60_000;
+  ms += elapsedMin * 60_000;
   if (!Number.isFinite(ms) || Math.abs(ms) > 8.64e15) throw new TimeError('result is out of range');
   const added = [req.weeks && `${req.weeks} weeks`, req.days && `${req.days} days`, req.hours && `${req.hours} hours`, req.minutes && `${req.minutes} minutes`].filter(Boolean).join(' + ') || 'nothing';
   const lines = [`${describeInstant(start.ms, rz)} + ${added}`, `= ${describeInstant(ms, rz)}`];

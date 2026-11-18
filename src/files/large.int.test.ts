@@ -126,4 +126,55 @@ describe.skipIf(!INTEGRATION)('large files', () => {
       await staged.cleanup();
     }
   });
+
+  it('privacy withdrawal deletes the user\'s files and their Slack copies right away', async () => {
+    const user = `U_WD${rand()}`;
+    const staged = await stage(Buffer.alloc(3000, 1));
+    let meta: Awaited<ReturnType<typeof L.createFileFromStaged>>;
+    try {
+      meta = await L.createFileFromStaged({ ...input(`test-wd:${rand()}`), ownerId: user }, staged, { storeMax: 1000 });
+    } finally {
+      await staged.cleanup();
+    }
+    const n0 = (await fakeCalls()).length;
+    expect(await L.deleteFilesOwnedBy(user)).toBe(1);
+    expect(await S.fileStore.metadata(meta.id)).toBeNull();
+    expect((await fakeCalls()).slice(n0).some((c) => c.method === 'files.delete' && c.args.file === meta.blobSlackFileId)).toBe(true);
+    expect(await sql`select 1 from file_blobs where slack_file_id = ${meta.blobSlackFileId}`).toHaveLength(0);
+  });
+
+  it('largeGate: the hourly byte budget, the bot-wide transfer cap, and charging', async () => {
+    const { limits } = await import('../config.js');
+    const user = `U_GATE${rand()}`;
+    const key = `files:large-bytes:${user}:${Math.floor(Date.now() / 3600_000)}`;
+    // Budget nearly spent → refused with the reason.
+    await redis.set(key, String(limits.largeFileBytesPerUserHour - 10), 'EX', 3600);
+    await expect(L.largeGate(user, 1000).reserve(null)).rejects.toThrow(/per person per hour/);
+    await redis.del(key);
+    // A known size over what's left → refused before anything moves.
+    await redis.set(key, String(limits.largeFileBytesPerUserHour - 5000), 'EX', 3600);
+    await expect(L.largeGate(user, 1000).reserve(6000)).rejects.toBeInstanceOf(L.LargeFileRefusedError);
+    await redis.del(key);
+
+    // All transfer slots taken → busy.
+    const held = [];
+    for (let i = 0; i < limits.largeFileConcurrentTransfers; i++) held.push((await L.acquireTransferSlot())!);
+    expect(held.every(Boolean)).toBe(true);
+    try {
+      await expect(L.largeGate(user, 1000).reserve(null)).rejects.toThrow(/busy/);
+    } finally {
+      for (const r of held) await r();
+    }
+
+    // Reserved: allowed up to the budget left; finish charges what was staged and frees the slot.
+    const gate = L.largeGate(user, 1000);
+    const { allowed } = await gate.reserve(5000);
+    expect(allowed).toBeGreaterThanOrEqual(5000);
+    expect(allowed).toBeLessThanOrEqual(limits.largeFileMaxBytes);
+    await gate.finish(5000);
+    await gate.finish(5000);
+    expect(Number(await redis.get(key))).toBe(5000);
+    expect(await redis.zcard('files:large-transfers')).toBe(0);
+    await redis.del(key);
+  });
 });

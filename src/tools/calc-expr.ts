@@ -190,6 +190,13 @@ class Parser {
     let v = this.unary();
     while (this.isOp('*') || this.isOp('/') || this.isOp('%')) {
       const op = (this.tokens[this.i++] as { value: string }).value;
+      if (op === '%') {
+        // "200 * 10%" (nothing after the %): people mean percent, which this grammar doesn't have.
+        const next = this.peek();
+        if (next.kind === 'end' || (next.kind === 'op' && ')*/%^,='.includes(next.value))) {
+          throw new CalcError('"%" is the remainder operator, not percent: for 10% of 200 write 200 * 10 / 100; for what percent 30 is of 200 write percent(30, 200)');
+        }
+      }
       const r = this.unary();
       if (op === '*') v *= r;
       else {
@@ -286,10 +293,14 @@ export function evaluate(src: string, vars: Map<string, number> = new Map()): Ca
   }
 }
 
-/** A number as people write it: float noise trimmed (0.1 + 0.2 → 0.3), no exponent for ordinary magnitudes. */
+/**
+ * A number as people write it: float noise trimmed (0.1 + 0.2 → 0.3), no exponent for ordinary magnitudes. Integers
+ * print exactly (2^53 → 9007199254740992); other values keep 15 significant digits, all a double reliably holds.
+ */
 export function formatNumber(x: number): string {
   if (Object.is(x, -0)) x = 0;
-  const clean = Number(x.toPrecision(12));
+  if (Number.isInteger(x) && Math.abs(x) < 1e21) return BigInt(x).toString();
+  const clean = Number(x.toPrecision(15));
   const abs = Math.abs(clean);
   if (abs !== 0 && (abs >= 1e21 || abs < 1e-9)) return clean.toExponential().replace(/\.?0+e/, 'e');
   return clean.toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 20 });

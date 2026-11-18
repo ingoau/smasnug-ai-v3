@@ -133,7 +133,7 @@ export interface CreateFileInput {
   idempotencyKey?: string;
   internal?: boolean;
   /**
-   * Size cap for this file (default limits.fileMaxBytes, 50 MB; content lives in Postgres). The sandbox passes
+   * Size cap for this file (default limits.fileMaxBytes, 20 MB; content lives in Postgres). The sandbox passes
    * limits.sandboxExportMaxBytes for its exports and preview bundles. Bigger files: large.ts.
    */
   maxBytes?: number;

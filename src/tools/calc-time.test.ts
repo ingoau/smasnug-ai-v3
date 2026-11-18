@@ -23,6 +23,26 @@ describe('resolveZone', () => {
     expect(resolveZone('PST').zone).toEqual({ kind: 'iana', id: 'America/Los_Angeles' });
   });
 
+  it('knows current IANA names and big cities, and shows the modern name', () => {
+    const id = (z: string) => (resolveZone(z).zone as { id: string }).id;
+    expect(id('Kolkata')).toBe('Asia/Kolkata');
+    expect(id('Asia/Kolkata')).toBe('Asia/Kolkata');
+    expect(id('Asia/Calcutta')).toBe('Asia/Kolkata');
+    expect(id('Kyiv')).toBe('Europe/Kyiv');
+    expect(id('kiev')).toBe('Europe/Kyiv');
+    expect(id('Ho Chi Minh')).toBe('Asia/Ho_Chi_Minh');
+    expect(id('Kathmandu')).toBe('Asia/Kathmandu');
+    expect(id('Yangon')).toBe('Asia/Yangon');
+    expect(id('Nuuk')).toBe('America/Nuuk');
+    expect(id('Mumbai')).toBe('Asia/Kolkata');
+    expect(id('new delhi')).toBe('Asia/Kolkata');
+    expect(id('Bengaluru')).toBe('Asia/Kolkata');
+    expect(resolveZone('Asia/Kolkata').label).toBe('Asia/Kolkata');
+    const out = convert({ at: '2026-11-20 04:00', from: 'UTC', to: ['Kolkata'] }, NOW);
+    expect(out).toContain('Kolkata: Friday 20 November 2026, 09:30 (9:30 am) IST, UTC+05:30 [Asia/Kolkata]');
+    expect(out).not.toContain('Calcutta');
+  });
+
   it('rejects unknown zones and bad offsets', () => {
     expect(() => resolveZone('Mars/Olympus_Mons')).toThrow(TimeError);
     expect(() => resolveZone('XYZT')).toThrow(/unknown time zone/);
@@ -44,6 +64,14 @@ describe('parseDateTime', () => {
     expect(iso(parseDateTime('2026-11-20T15:00Z').ms!)).toBe('2026-11-20T15:00:00.000Z');
     expect(iso(parseDateTime('2026-11-20T15:00+11:00').ms!)).toBe('2026-11-20T04:00:00.000Z');
     expect(parseDateTime('2028-02-29').wall).toMatchObject({ month: 2, day: 29 });
+  });
+
+  it('accepts ISO instants with fractional seconds', () => {
+    expect(iso(parseDateTime('2026-11-20T04:00:00.000Z').ms!)).toBe('2026-11-20T04:00:00.000Z');
+    expect(iso(parseDateTime('2026-11-20T04:00:00.250+11:00').ms!)).toBe('2026-11-19T17:00:00.250Z');
+    expect(iso(parseDateTime('2026-11-20T04:00:00.123456Z').ms!)).toBe('2026-11-20T04:00:00.123Z');
+    expect(parseDateTime('2026-11-20T04:00:05.9').wall).toMatchObject({ hour: 4, minute: 0, second: 5 });
+    expect(convert({ at: '2026-11-20T04:00:00.000Z', from: 'UTC', to: ['Australia/Sydney'] }, NOW)).toContain('Friday 20 November 2026, 15:00 (3 pm) AEDT');
   });
 
   it('rejects bad dates and times', () => {
@@ -120,6 +148,30 @@ describe('convert', () => {
     expect(convert({ at: '2026-01-10 15:00', from: 'AEDT', to: ['UTC'] }, NOW)).not.toMatch(/isn't in effect/);
   });
 
+  it('picks the occurrence of a repeated wall time that the abbreviation names', () => {
+    // Sydney clocks go back 03:00 AEDT → 02:00 AEST on 5 April 2026, so 02:30 happens twice.
+    const aest = convert({ at: '2026-04-05 02:30', from: 'AEST', to: ['UTC'] }, NOW);
+    expect(aest).toContain('(UTC instant: 2026-04-04T16:30:00Z)');
+    expect(aest).not.toMatch(/isn't in effect/);
+    expect(aest).toMatch(/used the UTC\+10:00 one the abbreviation names/);
+    const aedt = convert({ at: '2026-04-05 02:30', from: 'AEDT', to: ['UTC'] }, NOW);
+    expect(aedt).toContain('(UTC instant: 2026-04-04T15:30:00Z)');
+    expect(aedt).not.toMatch(/isn't in effect/);
+    // A zone name (no implied offset) still takes the first occurrence.
+    expect(convert({ at: '2026-04-05 02:30', from: 'Australia/Sydney', to: ['UTC'] }, NOW)).toContain('(UTC instant: 2026-04-04T15:30:00Z)');
+  });
+
+  it('notes how a target abbreviation was read, like a source one', () => {
+    const out = convert({ at: '2026-11-20 04:00', from: 'UTC', to: ['CST', 'IST'] }, NOW);
+    expect(out).toMatch(/note: CST read as America\/Chicago local time; CST also means China Standard Time/);
+    expect(out).toMatch(/note: IST read as Asia\/Kolkata local time; IST also means Irish Standard Time/);
+    // A target abbreviation whose DST state doesn't match the date gets the mismatch note too.
+    expect(convert({ at: '2026-07-10 04:00', from: 'UTC', to: ['AEDT'] }, NOW)).toMatch(/AEDT \(UTC\+11:00\) isn't in effect/);
+    // Same abbreviation on both sides: the note appears once.
+    const twice = convert({ at: '2026-11-20 04:00', from: 'CST', to: ['CST'] }, NOW);
+    expect(twice.match(/CST read as/g)).toHaveLength(1);
+  });
+
   it('respects a fixed offset when one is asked for', () => {
     const out = convert({ at: '2026-07-10 15:00', from: 'UTC+11', to: ['Australia/Sydney'] }, NOW);
     expect(out).toContain('Australia/Sydney: Friday 10 July 2026, 14:00 (2 pm) AEST, UTC+10:00');
@@ -158,6 +210,13 @@ describe('dateDiff / dateAdd', () => {
     expect(dateAdd({ at: '2026-01-31 10:00', zone: 'UTC', minutes: -90 }, NOW)).toContain('= Saturday 31 January 2026, 08:30');
     expect(() => dateAdd({ at: '2026-01-31', days: 1.5 }, NOW)).toThrow(/whole days/);
   });
+
+  it('rejects durations too large to represent, as a TimeError', () => {
+    expect(() => dateAdd({ at: '2026-01-01', days: 1e9 }, NOW)).toThrow(TimeError);
+    expect(() => dateAdd({ at: '2026-01-01', hours: 1e15 }, NOW)).toThrow(/out of range/);
+    expect(() => dateAdd({ at: '2026-01-01', weeks: 1e12 }, NOW)).toThrow(/out of range/);
+    expect(dateAdd({ at: '2026-01-01', days: 365 }, NOW)).toContain('= Friday 1 January 2027');
+  });
 });
 
 describe('runCalculate', () => {
@@ -175,6 +234,21 @@ describe('runCalculate', () => {
     expect(out).toContain('1 / 0 → error: division by zero');
     expect(out).toMatch(/error: unknown time zone "Mars"/);
     expect(out).toContain('= 2 days');
+  });
+
+  it('an out-of-range date_add is a section error, not a failed call', () => {
+    const out = runCalculate({ expressions: ['1 + 1'], date_add: { at: '2026-01-01', days: 1e9 } }, NOW);
+    expect(out).toContain('1 + 1 = 2');
+    expect(out).toMatch(/error: duration is out of range/);
+  });
+
+  it('echoes an assignment once', () => {
+    const out = runCalculate({ expressions: ['x = 5', 'y = x * 2', 'z = -1.5'] }, NOW);
+    expect(out).toContain('x = 5\n');
+    expect(out).not.toContain('x = 5 = 5');
+    expect(out).toContain('y = x * 2 = 10');
+    expect(out).toContain('z = -1.5');
+    expect(out).not.toContain('z = -1.5 = -1.5');
   });
 
   it('says so when given nothing', () => {

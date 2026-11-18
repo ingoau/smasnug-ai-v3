@@ -32,11 +32,17 @@ const incoming = (o: Partial<NewFailure> = {}): NewFailure => ({
 });
 
 describe('sameIncident', () => {
-  it('matches the same turn or an evidence message in common', () => {
-    expect(sameIncident(stored(), incoming({ turnId: 7 }))).toBe(true);
-    expect(sameIncident(stored(), incoming())).toBe(false);
-    expect(sameIncident(stored(), incoming({ evidence: [{ ts: '1.3', userId: 'U1', quote: '' }] }))).toBe(true);
-    expect(sameIncident(stored({ turnId: null }), incoming({ turnId: null }))).toBe(false);
+  it('matches the same turn or an evidence message in common, with a category in common', () => {
+    const cat = { categories: ['incorrect_info' as const] };
+    expect(sameIncident(stored(), incoming({ turnId: 7, ...cat }))).toBe(true);
+    expect(sameIncident(stored(), incoming(cat))).toBe(false);
+    expect(sameIncident(stored(), incoming({ evidence: [{ ts: '1.3', userId: 'U1', quote: '' }], ...cat }))).toBe(true);
+    expect(sameIncident(stored({ turnId: null }), incoming({ turnId: null, ...cat }))).toBe(false);
+  });
+
+  it('keeps distinct failures on one turn or message apart (no category in common)', () => {
+    expect(sameIncident(stored(), incoming({ turnId: 7 }))).toBe(false);
+    expect(sameIncident(stored(), incoming({ evidence: [{ ts: '1.3', userId: 'U1', quote: '' }] }))).toBe(false);
   });
 });
 

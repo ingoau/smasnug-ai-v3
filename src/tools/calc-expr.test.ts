@@ -82,9 +82,25 @@ describe('evaluate', () => {
 
   it('formats numbers without float noise', () => {
     expect(formatNumber(val('0.1 + 0.2'))).toBe('0.3');
-    expect(formatNumber(1 / 3)).toBe('0.333333333333');
+    expect(formatNumber(1 / 3)).toBe('0.333333333333333');
+    expect(formatNumber(val('1.1 * 1.1'))).toBe('1.21');
     expect(formatNumber(123456789012)).toBe('123456789012');
     expect(formatNumber(-0)).toBe('0');
     expect(formatNumber(1e25)).toBe('1e+25');
+  });
+
+  it('never drops real digits', () => {
+    expect(formatNumber(val('2^53'))).toBe('9007199254740992');
+    expect(formatNumber(123456789012345)).toBe('123456789012345');
+    expect(formatNumber(-9007199254740991)).toBe('-9007199254740991');
+    expect(formatNumber(2 ** 60)).toBe('1152921504606846976');
+    expect(formatNumber(1234567.89012345)).toBe('1234567.89012345');
+  });
+
+  it('explains that % is not percent when used as one', () => {
+    expect(err('200*10%')).toMatch(/remainder operator, not percent.*200 \* 10 \/ 100.*percent\(30, 200\)/);
+    expect(err('(200 * 10%) + 1')).toMatch(/not percent/);
+    expect(val('10 % 3')).toBe(1);
+    expect(val('10 % -3')).toBe(1);
   });
 });

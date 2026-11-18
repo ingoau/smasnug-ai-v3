@@ -9,24 +9,28 @@
  *   copies it (download to a temp file, upload as a new Slack file into the thread: `copyLargeFileTo`), like any
  *   stored file is uploaded each time it is posted. It can't be opened (read_file / ask_file / sandbox_import).
  * - Every blob is also in `file_blobs` (no FK); `sweepLargeFileBlobs` deletes from Slack the blobs whose file row
- *   is gone (retention), run at most hourly after a new large file.
+ *   is gone (retention), run by the retention job and at most hourly after a new large file. A privacy withdrawal
+ *   deletes the user's files and their blobs at once (`deleteFilesOwnedBy`).
+ * - Abuse / resource guards (`LargeGate`): a per-user hourly byte budget, a bot-wide cap on transfers at once (Redis
+ *   semaphore with a TTL) and a free-disk check on the temp dir, all checked as soon as a staging is known to be
+ *   large (its size, a Content-Length, or crossing the store's cap mid-stream).
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, statfs } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Transform, type TransformCallback } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
+import { finished, pipeline } from 'node:stream/promises';
 import { limits } from '../config.js';
 import { redis } from '../core/redis.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
 import { safeFetch, type SafeFetchResult } from '../tools/safe-fetch.js';
-import { decideMime, formatBytes, sanitizeDescription, sanitizeFileName, uploadContentType } from './format.js';
+import { decideMime, formatBytes, sanitizeDescription, sanitizeFileName, transferTimeoutMs, uploadContentType } from './format.js';
 import { newFileId } from './ids.js';
 import { downloadSlackFileTo } from './slack-download.js';
 import { createFile, FileError, fileByIdempotencyKey, insertCreatedFile, type CreateFileInput, type FileMeta } from './store.js';
@@ -52,12 +56,133 @@ export function tooLargeText(what: string, size: number | null): string {
   return `${what} is ${s}; the most the bot can post to Slack is ${formatBytes(limits.largeFileMaxBytes)} (Slack's upload limit). Compress or split it, or share a link to it instead.`;
 }
 
-/** Time allowed to move `size` bytes to or from Slack (≥ 256 KB/s, at least a minute, at most 30 minutes). */
-export function transferTimeoutMs(size: number): number {
-  return Math.min(30 * 60_000, 60_000 + Math.ceil(size / (256 * 1024)) * 1000);
-}
+export { transferTimeoutMs };
 
 export class TooLargeError extends FileError {}
+/** A large file refused for now (the user's hourly budget, the bot busy with others, low disk): the message says why. */
+export class LargeFileRefusedError extends FileError {}
+
+// ---------- guards: budget, concurrency, disk ----------
+
+const TEMP_PREFIX = 'smasnug-file-';
+const SLOTS_KEY = 'files:large-transfers';
+/** A slot outlives the longest transfer (30 min each way) and is freed by a crashed worker only by expiring. */
+const SLOT_TTL_MS = 65 * 60_000;
+const HOUR_MS = 3600_000;
+const budgetKey = (userId: string, now = Date.now()) => `files:large-bytes:${userId}:${Math.floor(now / HOUR_MS)}`;
+
+/** Free bytes on the temp dir's filesystem (Infinity if unknown). */
+export async function freeTempBytes(): Promise<number> {
+  try {
+    const s = await statfs(tmpdir());
+    return Number(s.bavail) * Number(s.bsize);
+  } catch {
+    return Infinity;
+  }
+}
+
+const ACQUIRE = `redis.call('zremrangebyscore', KEYS[1], '-inf', ARGV[1])
+if redis.call('zcard', KEYS[1]) < tonumber(ARGV[2]) then
+  redis.call('zadd', KEYS[1], ARGV[3], ARGV[4])
+  redis.call('pexpire', KEYS[1], ARGV[5])
+  return 1
+end
+return 0`;
+
+/**
+ * Take one of the bot-wide large-transfer slots (limits.largeFileConcurrentTransfers), waiting up to `waitMs`.
+ * Returns its release function, or null if none came free.
+ */
+export async function acquireTransferSlot(waitMs = 0, signal?: AbortSignal): Promise<(() => Promise<void>) | null> {
+  const token = randomUUID();
+  const until = Date.now() + waitMs;
+  for (;;) {
+    const now = Date.now();
+    const got = await redis.eval(ACQUIRE, 1, SLOTS_KEY, String(now), String(limits.largeFileConcurrentTransfers), String(now + SLOT_TTL_MS), token, String(SLOT_TTL_MS));
+    if (Number(got) === 1) {
+      let released = false;
+      return async () => {
+        if (released) return;
+        released = true;
+        await redis.zrem(SLOTS_KEY, token).catch(() => {});
+      };
+    }
+    if (Date.now() >= until || signal?.aborted) return null;
+    await new Promise((r) => setTimeout(r, Math.min(2000, Math.max(0, until - Date.now()))));
+  }
+}
+
+const busyText = () => 'The bot is busy moving other large files right now. Try again in a few minutes.';
+const diskText = (need: number | null) =>
+  `There isn't enough free disk space to take ${need == null ? 'a file this large' : `a ${formatBytes(need)} file`} right now. Try again later, or share a link to it instead.`;
+
+/**
+ * Guards one large staging (see the header): `reserve` is called once the staging is known to be large (with its
+ * expected size, if known), takes a transfer slot and checks the user's budget and the disk, and returns how many
+ * bytes the staging may reach (with the error for going past that). `finish` charges what was staged to the user's
+ * budget and frees the slot; it is idempotent.
+ */
+export interface LargeGate {
+  /** Bytes a staging may reach before it counts as large (the store's cap). */
+  threshold: number;
+  reserve(expected: number | null): Promise<{ allowed: number; overError: () => Error }>;
+  finish(stagedBytes: number): Promise<void>;
+}
+
+export function largeGate(userId: string | null, threshold: number, opts: { signal?: AbortSignal } = {}): LargeGate {
+  let release: (() => Promise<void>) | null = null;
+  let attempted = false;
+  let reserved = false;
+  let done = false;
+  return {
+    threshold,
+    async reserve(expected) {
+      if (attempted) throw new Error('largeGate: reserved twice');
+      attempted = true;
+      if (expected != null && expected > limits.largeFileMaxBytes) throw new TooLargeError(tooLargeText('The file', expected));
+      const used = userId ? Number((await redis.get(budgetKey(userId))) ?? 0) : 0;
+      const budgetLeft = userId ? Math.max(0, limits.largeFileBytesPerUserHour - used) : Infinity;
+      const budgetErr = () => {
+        const mins = Math.ceil((HOUR_MS - (Date.now() % HOUR_MS)) / 60_000);
+        return new LargeFileRefusedError(
+          `Large files (over ${formatBytes(threshold)}) are limited to ${formatBytes(limits.largeFileBytesPerUserHour)} per person per hour, and ${formatBytes(used)} of that is used. Try again in ${mins} minute${mins === 1 ? '' : 's'}, or share a link instead.`,
+        );
+      };
+      if (budgetLeft <= threshold || (expected != null && expected > budgetLeft)) throw budgetErr();
+      const slot = await acquireTransferSlot(0, opts.signal);
+      if (!slot) throw new LargeFileRefusedError(busyText());
+      release = slot;
+      const disk = Math.max(0, (await freeTempBytes()) - limits.largeFileDiskMarginBytes);
+      if (disk <= threshold || (expected != null && expected > disk)) {
+        await release();
+        throw new LargeFileRefusedError(diskText(expected));
+      }
+      const allowed = Math.min(limits.largeFileMaxBytes, budgetLeft, disk);
+      const overError = () =>
+        allowed === limits.largeFileMaxBytes
+          ? new TooLargeError(`larger than ${formatBytes(allowed)}`)
+          : allowed === budgetLeft
+            ? budgetErr()
+            : new LargeFileRefusedError(diskText(null));
+      reserved = true;
+      return { allowed, overError };
+    },
+    async finish(stagedBytes) {
+      if (done) return;
+      done = true;
+      if (reserved && userId && stagedBytes > 0) {
+        const key = budgetKey(userId);
+        await redis
+          .multi()
+          .incrby(key, stagedBytes)
+          .pexpire(key, 2 * HOUR_MS)
+          .exec()
+          .catch((err) => log.warn({ err }, 'charging a large file to the hourly budget failed'));
+      }
+      await release?.();
+    },
+  };
+}
 
 // ---------- staging ----------
 
@@ -70,19 +195,46 @@ export interface StagedFile {
   cleanup(): Promise<void>;
 }
 
-/** Counts, hashes and keeps the head of what passes through; errors past `maxBytes`. */
+/**
+ * Counts, hashes and keeps the head of what passes through; errors past `maxBytes`. With a gate, crossing
+ * `gate.threshold` reserves the large-file guards first (or errors with their refusal), which may lower the cap.
+ */
 export class Meter extends Transform {
   size = 0;
   readonly hash = createHash('sha256');
   private headParts: Buffer[] = [];
   private headLen = 0;
-  constructor(private readonly maxBytes: number) {
+  private reservation: Promise<void> | null = null;
+  private overError: () => Error;
+  constructor(
+    private maxBytes: number,
+    private readonly gate?: LargeGate,
+  ) {
     super();
+    this.overError = () => new TooLargeError(`larger than ${formatBytes(this.maxBytes)}`);
+  }
+  /** Reserve the gate (once), e.g. up front when the size is known. */
+  reserve(expected: number | null): Promise<void> {
+    if (!this.gate) return Promise.resolve();
+    this.reservation ??= this.gate.reserve(expected).then(({ allowed, overError }) => {
+      if (allowed < this.maxBytes) {
+        this.maxBytes = allowed;
+        this.overError = overError;
+      }
+    });
+    return this.reservation;
   }
   override _transform(chunk: Buffer, _enc: BufferEncoding, cb: TransformCallback): void {
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    if (this.gate && !this.reservation && this.size + buf.length > this.gate.threshold) {
+      this.reserve(null).then(() => this.accept(buf, cb), (err: Error) => cb(err));
+      return;
+    }
+    this.accept(buf, cb);
+  }
+  private accept(buf: Buffer, cb: TransformCallback): void {
     this.size += buf.length;
-    if (this.size > this.maxBytes) return cb(new TooLargeError(`larger than ${formatBytes(this.maxBytes)}`));
+    if (this.size > this.maxBytes) return cb(this.overError());
     this.hash.update(buf);
     if (this.headLen < HEAD_BYTES) {
       const part = buf.subarray(0, HEAD_BYTES - this.headLen);
@@ -96,16 +248,30 @@ export class Meter extends Transform {
   }
 }
 
-async function tempFile(): Promise<{ path: string; cleanup: () => Promise<void> }> {
-  const dir = await mkdtemp(join(tmpdir(), 'smasnug-file-'));
-  return { path: join(dir, 'data'), cleanup: () => rm(dir, { recursive: true, force: true }).catch(() => {}) };
+async function tempFile(gate?: LargeGate, meter?: Meter): Promise<{ path: string; cleanup: () => Promise<void> }> {
+  const dir = await mkdtemp(join(tmpdir(), TEMP_PREFIX));
+  return {
+    path: join(dir, 'data'),
+    cleanup: async () => {
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
+      await gate?.finish(meter?.size ?? 0).catch(() => {});
+    },
+  };
 }
 
-/** Write a stream to a temp file (at most `maxBytes`, else TooLargeError). The caller cleans up. */
-export async function stageStream(source: AsyncIterable<Uint8Array> | NodeJS.ReadableStream, maxBytes: number): Promise<StagedFile> {
-  const tmp = await tempFile();
-  const meter = new Meter(maxBytes);
+/**
+ * Write a stream to a temp file (at most `maxBytes`, else TooLargeError). With a gate, a staging past its threshold
+ * (or `expected` past it: checked before reading anything) needs the large-file guards. The caller cleans up.
+ */
+export async function stageStream(
+  source: AsyncIterable<Uint8Array> | NodeJS.ReadableStream,
+  maxBytes: number,
+  opts: { gate?: LargeGate; expected?: number } = {},
+): Promise<StagedFile> {
+  const meter = new Meter(maxBytes, opts.gate);
+  const tmp = await tempFile(opts.gate, meter);
   try {
+    if (opts.gate && opts.expected != null && opts.expected > opts.gate.threshold) await meter.reserve(opts.expected);
     await pipeline(source, meter, createWriteStream(tmp.path));
   } catch (err) {
     await tmp.cleanup();
@@ -116,14 +282,16 @@ export async function stageStream(source: AsyncIterable<Uint8Array> | NodeJS.Rea
 
 /**
  * Download a URL to a temp file through safeFetch (SSRF filtering, redirects, deadline), at most `maxBytes`. Any HTTP
- * status comes back (the caller decides); over the cap → TooLargeError. The caller cleans up `staged`.
+ * status comes back (the caller decides), but only a 2xx body is written to disk (others: `staged` is empty). Over the
+ * cap → TooLargeError. With a gate, as stageStream (a Content-Length counts as `expected`). The caller cleans up
+ * `staged`.
  */
 export async function stageDownload(
   url: string,
-  opts: { maxBytes: number; timeoutMs: number; signal?: AbortSignal; maxRedirects?: number; allowIPAddressList?: string[] },
+  opts: { maxBytes: number; timeoutMs: number; signal?: AbortSignal; maxRedirects?: number; allowIPAddressList?: string[]; gate?: LargeGate },
 ): Promise<{ res: SafeFetchResult; staged: StagedFile }> {
-  const tmp = await tempFile();
-  const meter = new Meter(opts.maxBytes);
+  const meter = new Meter(opts.maxBytes, opts.gate);
+  const tmp = await tempFile(opts.gate, meter);
   const ac = new AbortController();
   let pipeErr: unknown = null;
   const piping = pipeline(meter, createWriteStream(tmp.path)).catch((err: unknown) => {
@@ -139,10 +307,19 @@ export async function stageDownload(
       timeoutMs: opts.timeoutMs,
       maxRedirects: opts.maxRedirects ?? 5,
       sink: meter,
+      // Before any byte is written: a declared size over the cap is refused, one past the store's is reserved.
+      sinkIf: async ({ headers }) => {
+        const len = Number(headers['content-length']);
+        if (Number.isFinite(len) && len > 0 && !headers['content-encoding']) {
+          if (len > opts.maxBytes) throw new TooLargeError(`larger than ${formatBytes(opts.maxBytes)}`);
+          if (opts.gate && len > opts.gate.threshold) await meter.reserve(len);
+        }
+        return true;
+      },
       signal: opts.signal ? AbortSignal.any([opts.signal, ac.signal]) : ac.signal,
       ...(opts.allowIPAddressList ? { allowIPAddressList: opts.allowIPAddressList } : {}),
     });
-    if (res.truncated) throw new TooLargeError(`larger than ${formatBytes(opts.maxBytes)}`);
+    if (res.truncated && res.sunk !== false) throw new TooLargeError(`larger than ${formatBytes(opts.maxBytes)}`);
     meter.end();
     await piping;
     return { res, staged: { path: tmp.path, size: meter.size, sha256: meter.hash.digest('hex'), head: meter.head(), cleanup: tmp.cleanup } };
@@ -203,20 +380,42 @@ export async function copyLargeFileTo(meta: FileMeta, uploadUrl: string, content
   });
   const src = info?.file?.url_private_download ?? info?.file?.url_private;
   if (typeof src !== 'string') throw new Error('files.info returned no download URL for a large file');
-  const tmp = await tempFile();
+  // A copy is staged on disk too: it takes a transfer slot (waiting a while for one) and needs the room.
+  const release = await acquireTransferSlot(2 * 60_000, signal);
+  if (!release) throw new LargeFileRefusedError(`${meta.id} couldn't be posted: ${busyText()}`);
   try {
-    const out = createWriteStream(tmp.path);
-    const written = await downloadSlackFileTo(src, out, {
-      maxBytes: meta.size + 1,
-      timeoutMs: transferTimeoutMs(meta.size),
-      expectHtml: (meta.mime ?? '').startsWith('text/html'),
-      ...(signal ? { signal } : {}),
-    }).finally(() => out.end());
-    await new Promise<void>((resolve, reject) => (out.writableFinished ? resolve() : out.once('finish', resolve).once('error', reject)));
-    if (written !== meta.size) throw new Error(`downloaded ${written} of ${meta.size} bytes of a large file`);
-    await postFileTo(uploadUrl, tmp.path, meta.size, contentType, { timeoutMs: transferTimeoutMs(meta.size), ...(signal ? { signal } : {}) });
+    if ((await freeTempBytes()) - limits.largeFileDiskMarginBytes < meta.size) throw new LargeFileRefusedError(`${meta.id} couldn't be posted: ${diskText(meta.size)}`);
+    const tmp = await tempFile();
+    try {
+      const out = createWriteStream(tmp.path);
+      // Listening before any byte is written: a disk error (ENOSPC) aborts the download instead of going unhandled.
+      const ac = new AbortController();
+      let outErr: unknown = null;
+      out.on('error', (err) => {
+        outErr ??= err;
+        ac.abort();
+      });
+      let written: number;
+      try {
+        written = await downloadSlackFileTo(src, out, {
+          maxBytes: meta.size + 1,
+          timeoutMs: transferTimeoutMs(meta.size),
+          expectHtml: (meta.mime ?? '').startsWith('text/html'),
+          signal: signal ? AbortSignal.any([signal, ac.signal]) : ac.signal,
+        });
+        out.end();
+        await finished(out);
+      } catch (err) {
+        out.destroy();
+        throw outErr ?? err;
+      }
+      if (written !== meta.size) throw new Error(`downloaded ${written} of ${meta.size} bytes of a large file`);
+      await postFileTo(uploadUrl, tmp.path, meta.size, contentType, { timeoutMs: transferTimeoutMs(meta.size), ...(signal ? { signal } : {}) });
+    } finally {
+      await tmp.cleanup();
+    }
   } finally {
-    await tmp.cleanup();
+    await release();
   }
 }
 
@@ -272,11 +471,39 @@ export async function createLargeFile(input: StagedFileInput, staged: StagedFile
 async function maybeSweep(): Promise<void> {
   try {
     if ((await redis.set('files:blob-sweep', '1', 'EX', 3600, 'NX')) !== 'OK') return;
-    const n = await sweepLargeFileBlobs();
-    if (n) log.info({ n }, 'deleted Slack copies of removed large files');
+    await sweepLargeFiles();
   } catch (err) {
     log.warn({ err }, 'large file blob sweep failed');
   }
+}
+
+/** The retention job's step (and the hourly one after a new large file): blobs of deleted files, stale temp dirs. */
+export async function sweepLargeFiles(): Promise<{ blobs: number; tempDirs: number }> {
+  let blobs = 0;
+  // Batches until a short one (a long backlog after retention), bounded per run.
+  for (let i = 0; i < 20; i++) {
+    const n = await sweepLargeFileBlobs(50);
+    blobs += n;
+    if (n < 50) break;
+  }
+  const tempDirs = await removeStaleTempDirs();
+  if (blobs || tempDirs) log.info({ blobs, tempDirs }, 'large files: deleted Slack copies of removed files / stale temp dirs');
+  return { blobs, tempDirs };
+}
+
+/** Delete one blob from Slack (gone already counts) and forget it. False if Slack refused. */
+async function deleteBlob(slackFileId: string): Promise<boolean> {
+  try {
+    await slackCall('files.delete', { file: slackFileId }, { idempotencyKey: `file-blob-delete:${slackFileId}` });
+  } catch (err) {
+    const code = slackErrorCode(err);
+    if (code !== 'file_not_found' && code !== 'file_deleted') {
+      log.warn({ err, slackFileId }, 'deleting a large file blob from Slack failed');
+      return false;
+    }
+  }
+  await sql`delete from file_blobs where slack_file_id = ${slackFileId}`;
+  return true;
 }
 
 /**
@@ -289,18 +516,46 @@ export async function sweepLargeFileBlobs(limit = 50): Promise<number> {
     where b.created_at < now() - interval '1 hour' and not exists (select 1 from files f where f.id = b.file_id)
     order by b.created_at limit ${limit}`;
   let n = 0;
-  for (const { slackFileId } of rows) {
+  for (const { slackFileId } of rows) if (await deleteBlob(slackFileId)) n++;
+  return n;
+}
+
+/**
+ * Privacy withdrawal: delete every file owned by `userId` (made for them, or their uploads' stored copies) and, right
+ * away, the Slack copies of their large files (no grace period). Returns how many files were deleted.
+ */
+export async function deleteFilesOwnedBy(userId: string): Promise<number> {
+  const rows = await sql<{ id: string }[]>`delete from files where owner_id = ${userId} returning id`;
+  if (rows.length) {
+    const blobs = await sql<{ slackFileId: string }[]>`
+      select slack_file_id from file_blobs b
+      where b.file_id in ${sql(rows.map((r) => r.id))} and not exists (select 1 from files f where f.id = b.file_id)`;
+    for (const { slackFileId } of blobs) await deleteBlob(slackFileId);
+  }
+  return rows.length;
+}
+
+/** Remove staging temp dirs (TEMP_PREFIX) older than `maxAgeMs`: left by a crashed or killed worker. */
+export async function removeStaleTempDirs(maxAgeMs = 24 * HOUR_MS, dir = tmpdir()): Promise<number> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return 0;
+  }
+  let n = 0;
+  const cutoff = Date.now() - maxAgeMs;
+  for (const name of names) {
+    if (!name.startsWith(TEMP_PREFIX)) continue;
+    const path = join(dir, name);
     try {
-      await slackCall('files.delete', { file: slackFileId }, { idempotencyKey: `file-blob-delete:${slackFileId}` });
-    } catch (err) {
-      const code = slackErrorCode(err);
-      if (code !== 'file_not_found' && code !== 'file_deleted') {
-        log.warn({ err, slackFileId }, 'deleting a large file blob from Slack failed');
-        continue;
-      }
+      const st = await stat(path);
+      if (!st.isDirectory() || st.mtimeMs >= cutoff) continue;
+      await rm(path, { recursive: true, force: true });
+      n++;
+    } catch {
+      // Gone already, or not ours to remove.
     }
-    await sql`delete from file_blobs where slack_file_id = ${slackFileId}`;
-    n++;
   }
   return n;
 }
