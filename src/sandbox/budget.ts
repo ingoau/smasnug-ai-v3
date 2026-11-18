@@ -92,8 +92,7 @@ export async function monthEstimateUsd(now = new Date()): Promise<number> {
   return Number(r?.usd ?? 0);
 }
 
-/** A user's live sandbox minutes today (UTC), open segments included. */
-/** Counted from the user's last admin limit reset when that was today. */
+/** A user's live sandbox minutes today (UTC), open segments included; counted from their last admin limit reset when that was today. */
 export async function userMinutesToday(userId: string, now = new Date()): Promise<number> {
   const since = dailyWindowStart(dayStart(now), await dailyResetAt(userId));
   const [r] = await sql<{ s: number | null }[]>`

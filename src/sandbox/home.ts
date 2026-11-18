@@ -20,7 +20,6 @@ const btn = (action_id: string, text: string, value: string, extra: object = {})
 const section = (text: string, accessory?: object) => ({ type: 'section', text: { type: 'mrkdwn', text }, ...(accessory ? { accessory } : {}) });
 const context = (text: string) => ({ type: 'context', elements: [{ type: 'mrkdwn', text }] });
 
-/** One line for everyone: where sandbox and preview data goes. */
 /** Lines for the admin "User limits" panel: the user's daily sandbox quotas (UTC day, or since their last reset). */
 export async function sandboxUserLimitLines(userId: string): Promise<string[]> {
   if (!sandboxConfigured()) return [];
@@ -32,6 +31,7 @@ export async function sandboxUserLimitLines(userId: string): Promise<string[]> {
   return out;
 }
 
+/** One line for everyone: where sandbox and preview data goes. */
 export function sandboxDisclosureBlocks(): unknown[] {
   if (!sandboxConfigured()) return [];
   return [
