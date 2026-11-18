@@ -155,7 +155,7 @@ describe.skipIf(!INTEGRATION)('file store', () => {
     expect(alice.files).toEqual([{ fileId: f.id, filename: 'secret.txt' }]);
     expect(await exec('front', ctxOf(chThread, 'U_ALICE'), 'read_file', { file_id: f.id })).toContain('private notes');
     // Too large: refused at creation.
-    expect(await exec('child', ctxOf(chThread, 'U_ALICE', { runId: 1 }), 'create_file', { name: 'big.txt', content: 'x'.repeat(5 * 1024 * 1024 + 1), description: 'big' })).toMatch(/too large/);
+    expect(await exec('child', ctxOf(chThread, 'U_ALICE', { runId: 1 }), 'create_file', { name: 'big.txt', content: 'x'.repeat(50 * 1024 * 1024 + 1), description: 'big' })).toMatch(/too large.*save_url.*sandbox_export/);
   });
 
   it('uploads: registered with metadata only, fetched lazily once, paged by read_file, described once', async () => {
@@ -197,9 +197,9 @@ describe.skipIf(!INTEGRATION)('file store', () => {
 
     // Too large to open (non-image): refused before any download.
     const big = await S.registerSlackFiles(threadId, [
-      { ts: '1790000101.000100', userId: 'U_ALICE', botId: null, username: null, text: '', files: [{ id: `FBIG${rand()}`, name: 'dump.csv', mimetype: 'text/csv', urlPrivate: 'https://files.slack.com/x', size: 9 * 1024 * 1024 }] },
+      { ts: '1790000101.000100', userId: 'U_ALICE', botId: null, username: null, text: '', files: [{ id: `FBIG${rand()}`, name: 'dump.csv', mimetype: 'text/csv', urlPrivate: 'https://files.slack.com/x', size: 60 * 1024 * 1024 }] },
     ]);
-    expect(await exec('front', ctx, 'read_file', { file_id: [...big.values()][0]!.id })).toMatch(/too large to open \(9\.0 MB/);
+    expect(await exec('front', ctx, 'read_file', { file_id: [...big.values()][0]!.id })).toMatch(/too large to open \(60\.0 MB/);
     // PDFs etc.: metadata only, no download.
     const pdf = await S.registerSlackFiles(threadId, [
       { ts: '1790000102.000100', userId: 'U_ALICE', botId: null, username: null, text: '', files: [{ id: `FPDF${rand()}`, name: 'spec.pdf', mimetype: 'application/pdf', urlPrivate: 'https://files.slack.com/y', size: 1000 }] },

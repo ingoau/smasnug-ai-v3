@@ -20,7 +20,8 @@ import { log } from '../log.js';
 import { sql } from '../db/index.js';
 import { EXTRAS, getExtra } from '../tools/extras.js';
 import { errMsg, untrusted } from '../tools/util.js';
-import { BlockedUrlError, safeFetch } from '../tools/safe-fetch.js';
+import { BlockedUrlError } from '../tools/safe-fetch.js';
+import { createFileFromStaged, stageDownload, TooLargeError, tooLargeText } from './large.js';
 import { takeLimit } from '../features/guard.js';
 import { requestDescription } from './describe.js';
 import { downloadFileName, fileKind, isSlackUrl, fileListingLine, formatBytes, isTextMime, looksLikeText, sanitizeFileName, textPage, textPageHeader, type FileKind } from './format.js';
@@ -346,8 +347,9 @@ registerTool({
 /**
  * save_url: download a public URL (an image, PDF, dataset…) into the file store as a created file, so it can be
  * posted with reply(files), opened with read_file / ask_file, or imported into a sandbox. Through safeFetch (SSRF
- * filtering, size and time caps), at most limits.fileMaxBytes; counts as a page fetch. Idempotent per turn / run +
- * URL + content.
+ * filtering, size and time caps), streamed to a temp file: ≤ limits.fileMaxBytes is stored as usual, bigger (≤
+ * limits.largeFileMaxBytes, Slack's limit) becomes a large file (large.ts: postable, not openable). Counts as a page
+ * fetch. Idempotent per turn / run + URL + content.
  */
 registerTool({
   name: 'save_url',
@@ -357,7 +359,7 @@ registerTool({
     return tool({
       description: `Download a file from a public URL (an image, PDF, CSV, zip…) into the file store and get its id: then ${
         ctx.role === 'front' ? 'post it with reply(files: [id]), ' : ''
-      }look at it with read_file / ask_file, or sandbox_import it. Use the direct file URL (e.g. raw.githubusercontent.com or ?raw=true for GitHub, the image's own URL), not the page showing it. Max ${formatBytes(limits.fileMaxBytes)}. Not for Slack files: those already have file_… ids. To read a web page's text, use fetch_url.`,
+      }look at it with read_file / ask_file, or sandbox_import it. Use the direct file URL (e.g. raw.githubusercontent.com or ?raw=true for GitHub, the image's own URL), not the page showing it. Up to ${formatBytes(limits.largeFileMaxBytes)} (Slack's limit); files over ${formatBytes(limits.fileMaxBytes)} can only be posted, not opened. Not for Slack files: those already have file_… ids. To read a web page's text, use fetch_url.`,
       inputSchema: z.object({
         url: z.string().describe('Absolute http(s) URL of the file'),
         name: z.string().max(200).optional().describe('File name with extension (default: from the URL)'),
@@ -372,32 +374,47 @@ registerTool({
         try {
           const over = await takeLimit('fetch', ctx.speakerId, ctx.threadId);
           if (over) return over;
-          const res = await safeFetch(url, { maxBytes: limits.fileMaxBytes, timeoutMs: limits.saveUrlTimeoutMs, maxRedirects: 5, signal: ctx.abortSignal });
-          if (res.status >= 400) return `Download failed: HTTP ${res.status} for ${res.url}`;
-          if (res.truncated) return `Not saved: the file is larger than ${formatBytes(limits.fileMaxBytes)}.`;
-          if (!res.body.byteLength) return `Not saved: ${res.url} returned an empty response.`;
-          const fileName = downloadFileName(res.url, res.body, res.contentType, name);
-          // A page instead of the file (e.g. GitHub's blob view, a login wall): refused unless an .html file was asked
-          // for, so a page is never stored under an image's name.
-          const html = res.contentType.toLowerCase().includes('text/html') || /^\s*<(!doctype html|html)/i.test(res.body.subarray(0, 200).toString('utf8'));
-          if (html && !/\.html?$/i.test(fileName)) {
-            return `Not saved: ${res.url} returned an HTML page, not a file. Use the file's direct URL (e.g. raw.githubusercontent.com or ?raw=true for GitHub, the image's own src; fetch_url shows a page's links). To save the page itself, name it something.html.`;
+          let dl: Awaited<ReturnType<typeof stageDownload>>;
+          try {
+            dl = await stageDownload(url, { maxBytes: limits.largeFileMaxBytes, timeoutMs: limits.saveUrlTimeoutMs, maxRedirects: 5, ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}) });
+          } catch (err) {
+            if (err instanceof TooLargeError) return `Not saved: ${tooLargeText('the file', null)}`;
+            throw err;
           }
-          const scope = ctx.runId ? `run:${ctx.runId}` : ctx.turnId ? `turn:${ctx.turnId}` : null;
-          const f = await createFile({
-            threadId: ctx.threadId,
-            ownerId: ctx.speakerId,
-            name: fileName,
-            content: res.body,
-            description,
-            createdTurnId: ctx.runId ? null : (ctx.turnId ?? null),
-            createdRunId: ctx.runId ?? null,
-            createdSubagentId: ctx.subagentId ?? null,
-            ...(scope ? { idempotencyKey: `${scope}:url:${createHash('sha256').update(url).update('\0').update(fileName).update('\0').update(res.body).digest('hex').slice(0, 32)}` } : {}),
-          });
+          const { res, staged } = dl;
+          let f: FileMeta;
+          try {
+            if (res.status >= 400) return `Download failed: HTTP ${res.status} for ${res.url}`;
+            if (!staged.size) return `Not saved: ${res.url} returned an empty response.`;
+            const fileName = downloadFileName(res.url, staged.head, res.contentType, name);
+            // A page instead of the file (e.g. GitHub's blob view, a login wall): refused unless an .html file was asked
+            // for, so a page is never stored under an image's name.
+            const html = res.contentType.toLowerCase().includes('text/html') || /^\s*<(!doctype html|html)/i.test(staged.head.subarray(0, 200).toString('utf8'));
+            if (html && !/\.html?$/i.test(fileName)) {
+              return `Not saved: ${res.url} returned an HTML page, not a file. Use the file's direct URL (e.g. raw.githubusercontent.com or ?raw=true for GitHub, the image's own src; fetch_url shows a page's links). To save the page itself, name it something.html.`;
+            }
+            const scope = ctx.runId ? `run:${ctx.runId}` : ctx.turnId ? `turn:${ctx.turnId}` : null;
+            f = await createFileFromStaged(
+              {
+                threadId: ctx.threadId,
+                ownerId: ctx.speakerId,
+                name: fileName,
+                description,
+                createdTurnId: ctx.runId ? null : (ctx.turnId ?? null),
+                createdRunId: ctx.runId ?? null,
+                createdSubagentId: ctx.subagentId ?? null,
+                ...(scope ? { idempotencyKey: `${scope}:url:${createHash('sha256').update(url).update('\0').update(fileName).update('\0').update(staged.sha256).digest('hex').slice(0, 32)}` } : {}),
+              },
+              staged,
+              ctx.abortSignal ? { signal: ctx.abortSignal } : {},
+            );
+          } finally {
+            await staged.cleanup();
+          }
           kept = true;
           const note = ctx.role === 'front' ? `Saved. Post it with reply(files: ["${f.id}"]).` : 'Saved. It is listed with your result automatically.';
-          return { file_id: f.id, name: f.name, mime: f.mime, size: f.size, kind: fileKind(f.mime, f.name), source: res.url, note };
+          const large = f.blobSlackFileId ? ` It is over ${formatBytes(limits.fileMaxBytes)}, so it can be posted but not opened (read_file / ask_file / sandbox_import).` : '';
+          return { file_id: f.id, name: f.name, mime: f.mime, size: f.size, kind: fileKind(f.mime, f.name), source: dl.res.url, note: note + large };
         } catch (err) {
           if (err instanceof BlockedUrlError) return `Blocked: ${err.message}`;
           if (err instanceof FileError) return err.message;

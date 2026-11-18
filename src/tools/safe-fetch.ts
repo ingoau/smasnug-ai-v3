@@ -33,6 +33,12 @@ export interface SafeFetchOptions {
   /** Headers only sent to this exact origin (e.g. Slack auth for file downloads); dropped on cross-origin redirects. */
   authOrigin?: string;
   signal?: AbortSignal;
+  /**
+   * Stream the body here instead of buffering it (big downloads, src/files/large.ts): `body` comes back empty and
+   * `streamedBytes` says how much was written (still capped at maxBytes; `truncated` as usual). Backpressure is
+   * respected; the caller ends the sink.
+   */
+  sink?: NodeJS.WritableStream;
   /** @internal tests only: custom DNS resolution (the agent still validates whatever it returns). */
   lookup?: LookupFunction;
   /** @internal tests only: exact IPs/CIDRs exempt from filtering (e.g. a 127.0.0.1 test server). */
@@ -48,6 +54,8 @@ export interface SafeFetchResult {
   body: Buffer;
   /** Body was cut at maxBytes. */
   truncated: boolean;
+  /** With `sink`: bytes written to it. */
+  streamedBytes?: number;
 }
 
 // The agents deny every address ipaddr.js doesn't classify as 'unicast' — that covers loopback, private, link-local,
@@ -166,21 +174,30 @@ function requestOnce(
               headers: res.headers,
               body: Buffer.concat(chunks),
               truncated,
+              ...(opts.sink ? { streamedBytes: size } : {}),
             },
           });
+        };
+        const sink = opts.sink;
+        const keep = (chunk: Buffer) => {
+          if (!sink) return chunks.push(chunk);
+          if (!sink.write(chunk)) {
+            stream.pause();
+            sink.once('drain', () => stream.resume());
+          }
         };
         stream.on('data', (chunk: Buffer) => {
           if (done) return;
           const room = opts.maxBytes - size;
           if (chunk.length >= room) {
-            chunks.push(chunk.subarray(0, room));
+            keep(chunk.subarray(0, room));
             size += room;
             truncated = true;
             finish();
             res.destroy();
             return;
           }
-          chunks.push(chunk);
+          keep(chunk);
           size += chunk.length;
         });
         stream.on('end', finish);

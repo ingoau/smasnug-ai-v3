@@ -42,19 +42,46 @@ export function slackDownloadUrl(urlPrivate: string): string {
  * `token`: which token to send ('user' only for files from verified-public channels, see downloadTokens).
  */
 export async function downloadSlackFile(urlPrivate: string, maxBytes: number, expectHtml = false, token: 'bot' | 'user' = 'bot'): Promise<Buffer> {
+  return (await fetchSlackFile(urlPrivate, { maxBytes, expectHtml, token })).body;
+}
+
+/**
+ * Stream a Slack file into `sink` (large files, src/files/large.ts) with the same checks as downloadSlackFile; the
+ * caller ends the sink. Returns the bytes written.
+ */
+export async function downloadSlackFileTo(
+  urlPrivate: string,
+  sink: NodeJS.WritableStream,
+  opts: { maxBytes: number; timeoutMs: number; expectHtml?: boolean; token?: 'bot' | 'user'; signal?: AbortSignal },
+): Promise<number> {
+  const res = await fetchSlackFile(urlPrivate, { maxBytes: opts.maxBytes, expectHtml: opts.expectHtml ?? false, token: opts.token ?? 'bot', timeoutMs: opts.timeoutMs, sink, ...(opts.signal ? { signal: opts.signal } : {}) });
+  return res.streamedBytes ?? 0;
+}
+
+async function fetchSlackFile(
+  urlPrivate: string,
+  o: { maxBytes: number; expectHtml: boolean; token: 'bot' | 'user'; timeoutMs?: number; sink?: NodeJS.WritableStream; signal?: AbortSignal },
+) {
   const fake = process.env.SLACK_FAKE === '1';
   const url = new URL(slackDownloadUrl(urlPrivate));
   if (!fake && url.origin !== SLACK_FILES_ORIGIN) throw new Error(`refusing to download from ${url.origin}`);
   const headers: Record<string, string> = { accept: '*/*' };
-  const secret = token === 'user' ? env.SLACK_USER_TOKEN : env.SLACK_BOT_TOKEN;
+  const secret = o.token === 'user' ? env.SLACK_USER_TOKEN : env.SLACK_BOT_TOKEN;
   if (!fake && secret) headers.authorization = `Bearer ${secret}`;
-  const res = await safeFetch(url.toString(), { maxBytes, timeoutMs: 30_000, headers, authOrigin: SLACK_FILES_ORIGIN });
+  const res = await safeFetch(url.toString(), {
+    maxBytes: o.maxBytes,
+    timeoutMs: o.timeoutMs ?? 30_000,
+    headers,
+    authOrigin: SLACK_FILES_ORIGIN,
+    ...(o.sink ? { sink: o.sink } : {}),
+    ...(o.signal ? { signal: o.signal } : {}),
+  });
   // Bounced off files.slack.com (e.g. to the login page): denied, also for an HTML file, whose body would be that page.
   if (!fake && new URL(res.url).origin !== SLACK_FILES_ORIGIN) throw new SlackDownloadDeniedError(`download redirected to ${new URL(res.url).origin}`);
   if (res.status >= 400 && res.status < 500 && res.status !== 429) throw new SlackDownloadDeniedError(`download failed: HTTP ${res.status}`);
   if (res.status >= 400) throw new Error(`download failed: HTTP ${res.status}`);
-  if (res.truncated) throw new Error(`the file is larger than ${formatBytes(maxBytes)}`);
+  if (res.truncated) throw new Error(`the file is larger than ${formatBytes(o.maxBytes)}`);
   // Slack serves an HTML login page (200) when auth is missing/invalid.
-  if (!expectHtml && res.contentType.includes('text/html')) throw new SlackDownloadDeniedError('download returned HTML (missing files:read scope or bad token?)');
-  return res.body;
+  if (!o.expectHtml && res.contentType.includes('text/html')) throw new SlackDownloadDeniedError('download returned HTML (missing files:read scope or bad token?)');
+  return res;
 }

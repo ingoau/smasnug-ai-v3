@@ -3,8 +3,9 @@ import { createHash } from 'node:crypto';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import { threadIdOf, threadTsArg } from '../core/events.js';
-import { createFile, FileError, fileStore, loadFileBytes, recordFilePosts, resolveFile } from '../files/store.js';
+import { createFile, FileError, fileStore, loadFileBytes, recordFilePosts, resolveFile, type FileMeta } from '../files/store.js';
 import { sanitizeFileName, slackSnippetType, uploadContentType } from '../files/format.js';
+import { copyLargeFileTo } from '../files/large.js';
 import { urlImage } from './rich-blocks.js';
 import type { ImageArg } from './reply.js';
 
@@ -122,13 +123,15 @@ export async function prepareImageArgs(
 
 const FAKE = () => process.env.SLACK_FAKE === '1';
 
-async function bytesOf(f: OutgoingFile): Promise<Buffer> {
+/** The bytes to upload, or a large file (src/files/large.ts), which is copied from its Slack copy instead. */
+async function sourceOf(f: OutgoingFile): Promise<{ bytes: Buffer } | { large: FileMeta & { size: number } }> {
   if (f.fileId) {
     const meta = await fileStore.metadata(f.fileId);
     if (!meta) throw new Error(`file ${f.fileId} no longer exists`);
-    return loadFileBytes(meta);
+    if (meta.blobSlackFileId && meta.size != null) return { large: { ...meta, size: meta.size } };
+    return { bytes: await loadFileBytes(meta) };
   }
-  return Buffer.from(f.content ?? '', 'utf8');
+  return { bytes: Buffer.from(f.content ?? '', 'utf8') };
 }
 
 /**
@@ -156,7 +159,15 @@ async function getUploadUrl(filename: string, length: number): Promise<any> {
 async function sendBytes(files: OutgoingFile[]): Promise<{ id: string; title: string; fileId?: string }[]> {
   const uploaded: { id: string; title: string; fileId?: string }[] = [];
   for (const f of files) {
-    const bytes = await bytesOf(f);
+    const src = await sourceOf(f);
+    if ('large' in src) {
+      const res = await slackCall<any>('files.getUploadURLExternal', { filename: f.filename, length: src.large.size });
+      if (!res.upload_url || !res.file_id) throw new Error('files.getUploadURLExternal returned no upload_url');
+      await copyLargeFileTo(src.large, res.upload_url, uploadContentType(f.filename));
+      uploaded.push({ id: res.file_id, title: f.filename, fileId: src.large.id });
+      continue;
+    }
+    const { bytes } = src;
     const res = await getUploadUrl(f.filename, bytes.byteLength);
     if (!res.upload_url || !res.file_id) throw new Error('files.getUploadURLExternal returned no upload_url');
     if (!FAKE()) {

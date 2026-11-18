@@ -14,6 +14,7 @@ import { sql } from '../db/index.js';
 import { takeLimit } from '../features/guard.js';
 import { fileKind, fileListingLine, formatBytes, looksLikeText, sniffMime } from '../files/format.js';
 import { createFile, FileError, fileStore, loadFileBytes, resolveFile } from '../files/store.js';
+import { createFileFromStaged, stageStream, storageTier, TooLargeError, tooLargeText, transferTimeoutMs } from '../files/large.js';
 import { log } from '../log.js';
 import { processImage } from '../tools/image-process.js';
 import { errMsg, untrusted } from '../tools/util.js';
@@ -218,7 +219,7 @@ reg('sandbox_import', (ctx) =>
 
 reg('sandbox_export', (ctx) =>
   tool({
-    description: `Save a file from your sandbox as a deliverable (≤ ${limits.sandboxExportMaxBytes / 1048576} MB). It gets a file_… id and is listed with your result automatically for the orchestrator to post; list the ids with one line each in your final message.`,
+    description: `Save a file from your sandbox as a deliverable (≤ ${formatBytes(limits.largeFileMaxBytes)}, Slack's upload limit; files over ${formatBytes(limits.sandboxExportMaxBytes)} can only be posted, not opened again with read_file / ask_file / sandbox_import). It gets a file_… id and is listed with your result automatically for the orchestrator to post; list the ids with one line each in your final message.`,
     inputSchema: z.object({
       path: z.string().describe('Path under /work, e.g. "out/chart.png"'),
       name: z.string().optional().describe('File name to show (default: the file name in the sandbox)'),
@@ -229,7 +230,7 @@ reg('sandbox_export', (ctx) =>
       if (!abs) return badPath(path);
       return run(ctx, 'sandbox_export', async (h) => {
         const { bytes, size } = await p().readFile(h, abs, { maxBytes: limits.sandboxExportMaxBytes });
-        if (size > limits.sandboxExportMaxBytes) return `${abs} is ${formatBytes(size)}; exports are limited to ${formatBytes(limits.sandboxExportMaxBytes)}. Compress or split it.`;
+        if (size > limits.sandboxExportMaxBytes) return exportLarge(ctx, h, abs, size, name, description);
         const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
         const meta = await createFile({
           threadId: ctx.threadId,
@@ -247,6 +248,38 @@ reg('sandbox_export', (ctx) =>
     },
   }),
 );
+
+/**
+ * An export over the store's cap (sandboxExportMaxBytes), up to Slack's limit: streamed out of the sandbox to a temp
+ * file, then kept as a large file (src/files/large.ts), postable like any other.
+ */
+async function exportLarge(ctx: ToolContext, h: Handle, abs: string, size: number, name: string | undefined, description: string): Promise<string> {
+  if (storageTier(size, limits.sandboxExportMaxBytes) === 'too_large') return tooLargeText(abs, size);
+  const staged = await stageStream(p().streamFile(h, abs, { timeoutMs: transferTimeoutMs(size), ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}) }), limits.largeFileMaxBytes).catch((err) => {
+    if (err instanceof TooLargeError) return tooLargeText(abs, null);
+    throw err;
+  });
+  if (typeof staged === 'string') return staged;
+  try {
+    const meta = await createFileFromStaged(
+      {
+        threadId: ctx.threadId,
+        ownerId: ctx.speakerId,
+        name: name || abs.split('/').pop() || 'file',
+        description,
+        createdRunId: ctx.runId ?? null,
+        createdSubagentId: ctx.subagentId ?? null,
+        idempotencyKey: `sbx-export:${ctx.runId ?? ctx.subagentId}:${abs}:${staged.sha256.slice(0, 16)}`,
+      },
+      staged,
+      { storeMax: limits.sandboxExportMaxBytes, ...(ctx.abortSignal ? { signal: ctx.abortSignal } : {}) },
+    );
+    const note = meta.blobSlackFileId ? ` It is over ${formatBytes(limits.sandboxExportMaxBytes)}: it can be posted with reply(files), but not opened again (read_file / ask_file / sandbox_import).` : '';
+    return `Exported ${abs} as ${fileListingLine(meta)}.${note}`;
+  } finally {
+    await staged.cleanup();
+  }
+}
 
 // ---------- request_preview ----------
 

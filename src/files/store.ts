@@ -3,8 +3,10 @@
  *
  * - `FileStore` is the storage seam: content + metadata by id (put/get/getRange/metadata/delete). Content lives in
  *   Postgres (bytea) for now; moving it (e.g. to object storage) only touches `PgFileStore`.
- * - Created files (`createFile`): the bot's own (create_file, reply's inline files; later sandbox exports). Content is
- *   stored right away; the creator gives the one-line description.
+ * - Created files (`createFile`): the bot's own (create_file, reply's inline files, save_url, sandbox exports). Content is
+ *   stored right away; the creator gives the one-line description. Over limits.fileMaxBytes (save_url, sandbox_export,
+ *   up to Slack's 1 GB): a large file (large.ts), whose bytes are a private Slack upload of the bot's
+ *   (`blobSlackFileId`), not in Postgres; it can be posted (copied into the thread) but not opened.
  * - Uploads (`registerSlackFiles`): Slack files on messages shown to a model are registered per thread with metadata
  *   only; the content is downloaded on first use (`loadFileBytes`) and kept when ≤ the size cap. Files on messages
  *   from elsewhere (public reads, search) are registered in the thread that saw them, with their source channel.
@@ -53,6 +55,8 @@ export interface FileMeta {
   legacyImageN: number | null;
   /** The content is stored (uploads: fetched). */
   hasContent: boolean;
+  /** Large files (large.ts): the bot's private Slack upload holding the bytes (no stored content). */
+  blobSlackFileId: string | null;
 }
 
 /** Storage seam: where file content (and its metadata row) lives. */
@@ -68,7 +72,7 @@ export interface FileStore {
 
 const META = () => sql`id, created_at, origin, internal, thread_id, channel_id, owner_id, created_turn_id, created_run_id,
   created_subagent_id, slack_file_id, slack_url, message_ts, source_channel_id, source_public, name, mime, size, description, description_source, sha256,
-  legacy_image_n, content is not null as has_content`;
+  legacy_image_n, content is not null as has_content, blob_slack_file_id`;
 
 function normalizeMeta(r: FileMeta): FileMeta {
   return {
@@ -129,8 +133,8 @@ export interface CreateFileInput {
   idempotencyKey?: string;
   internal?: boolean;
   /**
-   * Size cap for this file (default limits.fileMaxBytes, 5 MB). Only the sandbox raises it, for its exports and
-   * preview bundles (limits.sandboxExportMaxBytes, 25 MB); everything else keeps the general cap.
+   * Size cap for this file (default limits.fileMaxBytes, 50 MB; content lives in Postgres). The sandbox passes
+   * limits.sandboxExportMaxBytes for its exports and preview bundles. Bigger files: large.ts.
    */
   maxBytes?: number;
 }
@@ -138,31 +142,52 @@ export interface CreateFileInput {
 export async function createFile(input: CreateFileInput): Promise<FileMeta> {
   const maxBytes = input.maxBytes ?? limits.fileMaxBytes;
   if (input.content.byteLength > maxBytes) {
-    throw new FileError(`File too large: ${formatBytes(input.content.byteLength)} (the limit is ${formatBytes(maxBytes)}).`);
+    throw new FileError(
+      `File too large: ${formatBytes(input.content.byteLength)} (the limit is ${formatBytes(maxBytes)}). Bigger files, up to ${formatBytes(limits.largeFileMaxBytes)}, can only come from save_url (a download) or sandbox_export.`,
+    );
   }
   const name = sanitizeFileName(input.name);
   const mime = input.mime ?? decideMime(name, input.content);
   const description = sanitizeDescription(input.description) || null;
   const sha = createHash('sha256').update(input.content).digest('hex');
-  const { channelId } = parseThreadId(input.threadId);
   for (let attempt = 0; attempt < 5; attempt++) {
     const id = newFileId();
-    const rows = await sql<FileMeta[]>`
-      insert into files (id, origin, internal, thread_id, channel_id, owner_id, created_turn_id, created_run_id, created_subagent_id,
-                         idem_key, name, mime, size, description, description_source, content, sha256)
-      values (${id}, 'created', ${input.internal ?? false}, ${input.threadId}, ${channelId}, ${input.ownerId}, ${input.createdTurnId ?? null},
-              ${input.createdRunId ?? null}, ${input.createdSubagentId ?? null}, ${input.idempotencyKey ?? null}, ${name}, ${mime},
-              ${input.content.byteLength}, ${description}, ${description ? 'creator' : null}, ${input.content}, ${sha})
-      on conflict do nothing
-      returning ${META()}`;
-    if (rows[0]) return normalizeMeta(rows[0]);
+    const row = await insertCreatedFile(id, { ...input, name, description }, { content: input.content, size: input.content.byteLength, sha256: sha, mime });
+    if (row) return row;
     if (input.idempotencyKey) {
-      const [existing] = await sql<FileMeta[]>`select ${META()} from files where idem_key = ${input.idempotencyKey}`;
-      if (existing) return normalizeMeta(existing);
+      const existing = await fileByIdempotencyKey(input.idempotencyKey);
+      if (existing) return existing;
     }
     // Otherwise an id collision: draw again.
   }
   throw new Error('createFile: could not allocate a file id');
+}
+
+/** The created file made under this idempotency key, if any. */
+export async function fileByIdempotencyKey(key: string): Promise<FileMeta | null> {
+  const [existing] = await sql<FileMeta[]>`select ${META()} from files where idem_key = ${key}`;
+  return existing ? normalizeMeta(existing) : null;
+}
+
+/**
+ * Insert a created file's row (null: the id or the idempotency key is taken). `name` and `description` must already be
+ * sanitized. `content` null + `blobSlackFileId`: a large file (large.ts).
+ */
+export async function insertCreatedFile(
+  id: string,
+  input: Omit<CreateFileInput, 'content' | 'maxBytes' | 'mime' | 'description'> & { description: string | null },
+  data: { content: Buffer | null; size: number; sha256: string; mime: string; blobSlackFileId?: string },
+): Promise<FileMeta | null> {
+  const { channelId } = parseThreadId(input.threadId);
+  const rows = await sql<FileMeta[]>`
+    insert into files (id, origin, internal, thread_id, channel_id, owner_id, created_turn_id, created_run_id, created_subagent_id,
+                       idem_key, name, mime, size, description, description_source, content, sha256, blob_slack_file_id)
+    values (${id}, 'created', ${input.internal ?? false}, ${input.threadId}, ${channelId}, ${input.ownerId}, ${input.createdTurnId ?? null},
+            ${input.createdRunId ?? null}, ${input.createdSubagentId ?? null}, ${input.idempotencyKey ?? null}, ${input.name}, ${data.mime},
+            ${data.size}, ${input.description}, ${input.description ? 'creator' : null}, ${data.content}, ${data.sha256}, ${data.blobSlackFileId ?? null})
+    on conflict do nothing
+    returning ${META()}`;
+  return rows[0] ? normalizeMeta(rows[0]) : null;
 }
 
 // ---------- uploads ----------
@@ -433,9 +458,14 @@ export async function loadFileBytes(meta: FileMeta, opts: { download?: FileDownl
     const bytes = await fileStore.get(meta.id);
     if (bytes) return bytes;
   }
+  if (meta.blobSlackFileId) {
+    throw new FileError(
+      `it is too large to open (${formatBytes(meta.size)}; files over ${formatBytes(limits.fileMaxBytes)} can only be posted, with reply(files) or send_message(files))`,
+    );
+  }
   if (meta.origin !== 'upload') throw new FileError('this file has no content');
   const image = isImageMime(meta.mime, meta.name);
-  const max = Math.max(image ? MAX_IMAGE_DOWNLOAD_BYTES : limits.fileMaxBytes, opts.maxBytes ?? 0);
+  const max = Math.max(image ? MAX_IMAGE_DOWNLOAD_BYTES : 0, limits.fileMaxBytes, opts.maxBytes ?? 0);
   if (meta.size != null && meta.size > max) {
     throw new FileError(`it is too large to open (${formatBytes(meta.size)}; the limit is ${formatBytes(max)})`);
   }
