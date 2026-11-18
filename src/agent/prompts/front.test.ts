@@ -38,6 +38,7 @@ describe('frontSystemPrompt About you', () => {
     expect(line({})).not.toMatch(/custom emoji/);
     expect(line({ emojiUpload: true })).toMatch(/add a custom emoji from an image file when someone asks/);
     expect(line({})).toMatch(/Asked what you can do, cover all of these/);
+    expect(line({})).toMatch(/do exact maths and time zone conversions/);
     expect(line({ sandbox: true })).toMatch(/spawn background subagents for longer work; run code in a sandbox \(Python, Node, a headless browser\) to process data and files and build things\./);
     expect(line({ sandbox: true })).not.toMatch(/preview/);
     expect(line({ sandbox: true, previews: true })).toMatch(/; publish live web page previews \(a temporary public link\)\./);
@@ -160,5 +161,47 @@ describe('frontSystemPrompt rules from the prod trace review', () => {
     expect(p).toMatch(/Don't over-refuse or lecture/);
     expect(p).toMatch(/Never write restrictions or concerns the speaker didn't ask for into a subagent's instructions/);
     expect(p).toMatch(/\/j, \/hj, \/s, \/srs are tone tags/);
+  });
+});
+
+describe('frontSystemPrompt answer quality rules (failure reports, Nov 2026)', () => {
+  const p = frontSystemPrompt('smasnug ai');
+
+  it('covers checking facts, working things out first, complete answers and reply size', () => {
+    expect(p).toMatch(/come from a tool result in this turn, or are clearly marked as a guess/);
+    expect(p).toMatch(/Don't predict that something will fail/);
+    expect(p).toMatch(/at least two different angles/);
+    expect(p).toMatch(/\*\*Work it out, then write\.\*\*/);
+    expect(p).toMatch(/post only the best few/);
+    expect(p).toMatch(/\*\*Complete answers\.\*\*/);
+    expect(p).toMatch(/open it \(read_file \/ ask_file\)/);
+    expect(p).toMatch(/\*\*Size the reply to the message\.\*\*/);
+  });
+
+  it('suggests a sandbox for calculations only when sandboxes are on', () => {
+    const work = (o: { sandbox?: boolean }) => frontSystemPrompt('smasnug ai', o).split('\n').find((l) => l.startsWith('**Work it out'))!;
+    expect(work({})).not.toMatch(/sandbox/);
+    expect(work({ sandbox: true })).toMatch(/sandbox subagent/);
+    // Time zones, dates and arithmetic go through the deterministic calculate tool either way.
+    for (const o of [{}, { sandbox: true }]) expect(work(o)).toMatch(/Time zone conversions, date maths .* go through calculate/);
+  });
+});
+
+describe('frontSystemPrompt: responding without words, and stated preferences', () => {
+  const p = frontSystemPrompt('smasnug ai');
+
+  it('a message that needs no words gets a reaction or nothing, never a confirmation message', () => {
+    expect(p).toMatch(/If a message doesn't need words, send none: react \(✅ done, 👍 noted\) or end_turn/);
+    expect(p).toMatch(/"i'll follow the steps"/);
+    expect(p).toMatch(/a reminder set for a time they stated exactly, a reaction added\): a ✅, not a confirmation message/);
+    expect(p).toMatch(/A reminder whose time you had to interpret \("later", "next week", "after lunch"\) gets one short line with the resolved time/);
+    expect(p).not.toMatch(/reactions should be rare/);
+  });
+
+  it('stated rules and preferences about responding keep applying', () => {
+    expect(p).toMatch(/holds for every later message it covers, not just the next one/);
+    expect(p).toMatch(/How they want you to treat them \("just react to my reminders", "don't ping me"\) is a preference: save it and keep to it/);
+    expect(p).toMatch(/A rule the admin or the channel's creator sets for everyone .* goes to propose_workspace_fact \(scope channel or workspace\)/);
+    expect(p).toMatch(/<rules> \(this channel's rules, who asked not to be pinged\)/);
   });
 });

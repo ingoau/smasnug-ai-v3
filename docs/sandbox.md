@@ -34,9 +34,29 @@ Deviations from the plan below (all decided 2026-10-07 unless noted):
   metered cost for the environment); `SANDBOX_WORKSPACE_CREDIT_USD` (default 28) stops everything when Modal's
   whole-workspace cost (dev + prod) reaches it. Environment budgets aren't available on Starter (§9), and the
   workspace has a $0 spend limit beyond the credit.
-- **File store caps:** scoped, not raised globally. `createFile` and `loadFileBytes` take an optional `maxBytes`;
-  sandbox exports and preview bundles use 25 MB, imports read up to 50 MB (not stored when > 5 MB, like big images).
-  Everything else keeps `limits.fileMaxBytes` = 5 MB: Postgres holds the content, and nothing else needs more.
+- **File store caps:** Postgres holds file content up to `limits.fileMaxBytes` = 20 MB (bytea is read and written
+  whole, hex-encoded by postgres.js: ~3x in memory per operation, and the worker has no memory limit of its own, so not
+  more); sandbox exports use the same 20 MB (`sandboxExportMaxBytes`), imports read up to 50 MB (not stored). Bigger
+  deliverables are **large files** (below); `create_file` refuses them and says so.
+- **Large files** (`src/files/large.ts`, migration 351): a `sandbox_export` or `save_url` result over 20 MB, up to
+  `limits.largeFileMaxBytes` (1000 MB, Slack's 1 GB upload limit), is streamed to a temp file on local disk (never
+  whole in memory: `cat` over exec stdout for the sandbox, safeFetch's `sink` for URLs), then uploaded to Slack as a
+  private file of the bot's (getUploadURLExternal → streamed POST → completeUploadExternal without a channel).
+  That Slack file is the storage (`files.blob_slack_file_id`, no content). It is an ordinary `file_…` id, listed
+  with the run's result; `reply(files)` / `send_message(files)` copy it into the thread (download to a temp file,
+  upload as a new file). It can't be opened (read_file / ask_file / sandbox_import say so). `file_blobs` tracks
+  every Slack copy; once retention has deleted the row, `sweepLargeFileBlobs` deletes the Slack copy (from the
+  retention job, and at most hourly after a new large file); a privacy withdrawal deletes the user's files and their
+  Slack copies at once. Over 1000 MB: refused with the real limit ("compress or split it, or share a link").
+  - **Guards** (checked once a staging is known to be large: its size, a Content-Length, or crossing 20 MB
+    mid-stream; refusals say why): `largeFileBytesPerUserHour` (2000 MB of large files per user per hour, a Redis
+    counter), `largeFileConcurrentTransfers` (2 stagings / copies at once bot-wide, a Redis semaphore whose slots
+    expire after 65 min if a worker dies; posting waits up to 2 min for one), and free disk on the temp dir
+    (`statfs`, refused below the file's size + `largeFileDiskMarginBytes`, 2 GB).
+  - **Streams:** only a 2xx response (for Slack downloads: from files.slack.com, not HTML unless the file is) is
+    written to disk; error pages are buffered (≤ 64 KB) and refused. A disk error aborts the download (the sink's
+    errors reject safeFetch). Temp dirs (`smasnug-file-*`) left by a dead worker are removed after a day by the
+    retention sweep. Worker disk needs room for two staged files (up to 1 GB each, deleted right after).
 - **Egress:** IPv4 only. Modal's allowlist rejects IPv6 CIDRs, and with an allowlist set IPv6 is unreachable, so the
   IPv6 complement in `egress.ts` is tested but not sent. Documentation ranges (TEST-NET-*) stay allowed (nothing
   routes there; each would add ~15 CIDRs). Extra denies: `SANDBOX_EGRESS_DENY`.
@@ -240,13 +260,13 @@ Every tool:
 | `sandbox_read_file` | `path`, `offset?` | Text: 24k chars per call with paging. Images (png/jpg/gif/webp): resized like `read_image` and returned as an image, so the child can look at its own chart or Playwright screenshot. Other binaries: size + type only, plus "export it instead". |
 | `sandbox_write_file` | `path`, `content` | Text only, ≤ 200 KB per call; anything larger is made with `sandbox_exec`. Paths must stay under `/work`, normalized, no `..`. |
 | `sandbox_import` | `file_id`, `path?` | Copies a thread file from the file store to `/work/in/<safe name>`. Uses the file store's access rule (`resolveFile`: this thread's files, or the owner's own). ≤ `limits.sandboxImportMaxBytes` (50 MB). |
-| `sandbox_export` | `path`, `name?`, `description` | Reads the file (≤ `limits.sandboxExportMaxBytes`, 25 MB). It is stored as `createFile({ threadId, ownerId, name, content, description, createdRunId, createdSubagentId, idempotencyKey })`, which returns `file_…`. The name is sanitized; the MIME type comes from content sniffing, not the extension. Idempotent per (run, path, content hash). |
+| `sandbox_export` | `path`, `name?`, `description` | Reads the file (≤ `limits.sandboxExportMaxBytes`, 20 MB; bigger, up to 1000 MB: a large file, §0). It is stored as `createFile({ threadId, ownerId, name, content, description, createdRunId, createdSubagentId, idempotencyKey })`, which returns `file_…`. The name is sanitized; the MIME type comes from content sniffing, not the extension. Idempotent per (run, path, content hash). |
 | `request_preview` | `dir`, `title` | **Does not deploy.** Checks that `index.html` exists, ≤ 1,000 files, each ≤ 5 MiB and ≤ 25 MiB total, via one `find`/`stat` exec. Tars the dir, stores the tarball as an internal file-store file, and inserts a `previews` row (`requested`, one per run). Counts `takeLimit('preview')`. Returns: "Preview queued. After you finish, the system deploys it and posts the link in the thread. Mention in your result that a preview was requested." |
 
 **File store contract** (built in round 3, `src/files/store.ts`; design doc, "Files"):
 - export: `createFile({ threadId, ownerId, name, content, description, createdRunId, createdSubagentId, idempotencyKey })`
-  → `FileMeta` (`id` = `file_…`; name sanitised, MIME type sniffed, ≤ `limits.fileMaxBytes`, 5 MB for now: raise it
-  or add a sandbox-specific cap when exports need more). Files a run created are listed with its result automatically.
+  → `FileMeta` (`id` = `file_…`; name sanitised, MIME type sniffed, ≤ `limits.fileMaxBytes`, 20 MB; bigger exports
+  are large files, §0). Files a run created are listed with its result automatically.
 - import: `resolveFile(id, { threadId, speakerId })` (the shared access rule: this thread's files, files posted here,
   or the owner's own) → `loadFileBytes(meta)` (lazy Slack download for uploads).
 - preview bundles: `createFile({ …, internal: true })`; internal files never resolve through tools or show in listings.
@@ -472,7 +492,7 @@ without asking first (a single file is `create_file`; research needs no sandbox)
 | Concurrent live sandboxes | 2 per user, 8 global | `ensureSandbox`: counts sandboxes in active use (creating/resuming, or `running` for a subagent with a queued/running run). A finished subagent's sandbox stays live until the idle pause but doesn't count; if it would push the live total over a cap, the oldest idle ones get a pause job at once. |
 | Sandbox minutes per user per day | 30 | `budget.ts` (sum of today's segments) |
 | Previews | 5 per user per day, 30 global per day | daily counts of `previews` rows |
-| Import / export size | 50 MB / 25 MB | tools |
+| Import / export size | 50 MB / 1000 MB (over 20 MB: a large file, postable only) | tools |
 | Run duration for sandbox subagents | 30 min (`sandboxRunMaxDurationMs`); other runs keep 10 | child.ts |
 
 ### 4.3 Budget (`budget.ts`)

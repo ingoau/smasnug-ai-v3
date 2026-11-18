@@ -168,9 +168,12 @@ async function applyPruneOps(userId: string, facts: PruneFact[], ops: PruneOp[])
           }
           const keep = byId.get(op.fact_id)!;
           const others = op.merge_ids!.map((id) => byId.get(id)!);
-          // Keep the newest statement time of the group, so a merge doesn't make old project facts look fresh.
+          // Keep the newest statement time of the group, so a merge doesn't make old project facts look fresh. A no-ping
+          // marker on any merged fact carries over, so a merge never drops someone from the no-ping list.
           const statedAt = new Date(Math.max(keep.statedAt.getTime(), ...others.map((f) => f.statedAt.getTime())));
-          if (!(await sp`update user_memory set text = ${op.text!}, stated_at = ${statedAt} where ${unchanged(keep)} returning id`).length) throw new Stale();
+          if (!(await sp`update user_memory set text = ${op.text!}, stated_at = ${statedAt},
+            no_ping = no_ping or exists (select 1 from user_memory m where m.user_id = ${userId} and m.no_ping and m.id in ${sp(others.map((f) => f.id))})
+            where ${unchanged(keep)} returning id`).length) throw new Stale();
           await audit(keep, 'merged');
           for (const f of others) {
             if (!(await sp`delete from user_memory where ${unchanged(f)} returning id`).length) throw new Stale();

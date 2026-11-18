@@ -114,6 +114,12 @@ export class FakeProvider implements SandboxProvider {
     return { bytes: Buffer.from(d), size: d.length };
   }
 
+  async *streamFile(h: Handle, path: string): AsyncIterable<Uint8Array> {
+    const d = this.box(h).files.get(path);
+    if (!d) throw new Error(`No such file: ${path}`);
+    for (let i = 0; i < d.length; i += 64 * 1024) yield d.subarray(i, i + 64 * 1024);
+  }
+
   async writeFile(h: Handle, path: string, bytes: Buffer): Promise<void> {
     this.box(h).files.set(path, Buffer.from(bytes));
   }

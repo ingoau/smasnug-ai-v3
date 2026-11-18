@@ -22,7 +22,17 @@ vi.mock('../core/events.js', async (orig) => ({ ...(await orig<typeof import('..
 // save_url downloads through safeFetch; tests answer from here instead of the network.
 vi.mock('../tools/safe-fetch.js', async (orig) => {
   const real = await orig<typeof import('../tools/safe-fetch.js')>();
-  return { ...real, safeFetch: (url: string, opts: any) => (fetchOverride.fn ? fetchOverride.fn(url) : real.safeFetch(url, opts)) };
+  return {
+    ...real,
+    safeFetch: async (url: string, opts: any) => {
+      if (!fetchOverride.fn) return real.safeFetch(url, opts);
+      const r = await fetchOverride.fn(url);
+      if (!opts?.sink) return r;
+      // save_url streams to a temp file (src/files/large.ts).
+      opts.sink.write(r.body);
+      return { ...r, body: Buffer.alloc(0), streamedBytes: r.body.length };
+    },
+  };
 });
 
 const rand = () => Math.random().toString(36).slice(2, 8).toUpperCase();

@@ -4,6 +4,7 @@ import { env, limits } from '../config.js';
 import { chatModel, MODELS, modelOptions } from '../models.js';
 import type { StoredMessage } from '../core/types.js';
 import { gateSystemPrompt, gateUserPrompt } from './gate-prompt.js';
+import { applyAdjustment, gateAdjustment, type GateAdjustment } from './gate-signals.js';
 
 export interface GateResult {
   respond: boolean;
@@ -11,8 +12,12 @@ export interface GateResult {
   latencyMs: number;
   /** Model that made the decision. */
   model: string;
-  /** Decisions model: probability that the bot should respond. */
+  /** Decisions model: probability that the bot should respond (the model's own, before `adjustment`). */
   probability?: number;
+  /** Deterministic nudges from the thread's shape (gate-signals.ts), when any applied. */
+  adjustment?: GateAdjustment;
+  /** `probability` after the adjustment: what was compared with the threshold. */
+  adjustedProbability?: number;
   /** Why the decisions model wasn't used (error/timeout), when the chat model decided instead. */
   fallback?: string;
   /** The kind of that failure (describeGateError). */
@@ -23,6 +28,8 @@ export interface GateResult {
   outputTokens?: number;
   costUsd?: number;
   error?: string;
+  /** The fallback chat model said yes but a leading @mention of someone else turned it into no. */
+  overridden?: boolean;
 }
 
 export type GateErrorKind = 'timeout' | 'aborted' | 'http' | 'invalid' | 'network' | 'error';
@@ -53,8 +60,14 @@ export function gateDecisionReason(r: GateResult, threshold: number): string {
   const parts: string[] = [];
   if (r.fallback) parts.push(`decisions model failed (${r.fallbackKind ?? 'error'}): ${r.fallback}`);
   if (r.error) parts.push(`gate failed, staying quiet: ${r.error}`);
-  else if (r.probability !== undefined) parts.push(`p=${r.probability.toFixed(3)} ${r.probability >= threshold ? '>=' : '<'} threshold ${threshold}`);
-  else parts.push(`${r.model} answered ${JSON.stringify(r.raw.trim().slice(0, 40))}`);
+  else if (r.probability !== undefined) {
+    const p = r.adjustedProbability ?? r.probability;
+    const adj = r.adjustment?.delta ? ` ${r.adjustment.delta > 0 ? '+' : ''}${r.adjustment.delta.toFixed(2)} (${r.adjustment.signals.join(', ')}) = ${p.toFixed(3)}` : '';
+    parts.push(`p=${r.probability.toFixed(3)}${adj} ${p >= threshold ? '>=' : '<'} threshold ${threshold}`);
+  } else {
+    parts.push(`${r.model} answered ${JSON.stringify(r.raw.trim().slice(0, 40))}`);
+    if (r.overridden) parts.push(`overrode yes: ${r.adjustment?.signals.join(', ')}`);
+  }
   return parts.join('; ');
 }
 
@@ -78,15 +91,15 @@ export function decisionsRequest(opts: { model: string; context: string; newMess
         type: 'noul',
         instructions: `Should ${botName} respond to the newest message(s)?`,
         criteria: {
-          true: `The newest message is addressed to ${botName}: a question or request aimed at it, a follow-up to its last answer, or a reply that disputes, corrects or questions what it said (even without naming it); or people are explicitly looking for information or help ${botName} would clearly add.`,
-          false: `People are talking among themselves or to someone else (including other bots), reacting ("lol", "thanks", "nice", emoji), chatting socially or answering each other, talking about ${botName} in the third person to someone else ("it only replies when you ping it", "the bot is broken"), or a response from ${botName} would be unwelcome or redundant. When genuinely unclear while other people are talking with each other, false. A question or request from the person ${botName} was just talking with (when the situation says so) is meant for ${botName} unless clearly aimed at someone else.`,
+          true: `The newest message is addressed to ${botName}: a question or request aimed at it, a follow-up to its last answer (a question right after ${botName}'s own answer, in a thread where people are talking with ${botName}), or a reply that disputes, corrects or questions what it said (even without naming it); or people are explicitly looking for information or help ${botName} would clearly add.`,
+          false: `People are talking among themselves or to someone else (including other bots), reacting ("lol", "thanks", "nice", emoji), chatting socially or answering each other, talking about ${botName} in the third person to someone else ("it only replies when you ping it", "the bot is broken"), or a response from ${botName} would be unwelcome or redundant. When genuinely unclear while other people are talking with each other, false. A question or request from the person ${botName} was just talking with (when the situation says so) is meant for ${botName} unless clearly aimed at someone else. A message that @mentions or names another person ("@Sam can you update the schedule") is for them: false, even when ${botName} could do it. Two people talking with each other: false, even if ${botName} knows the answer. A remark or opinion about what ${botName} posted ("7 is the best one") is not a question: false.`,
         },
       },
     },
   };
 }
 
-async function runDecisionsGate(model: string, context: string, newMessages: string, started: number, threshold: number, note?: string): Promise<GateResult> {
+async function runDecisionsGate(model: string, context: string, newMessages: string, started: number, threshold: number, adjustment: GateAdjustment, note?: string): Promise<GateResult> {
   const res = await fetch(DECISIONS_URL, {
     method: 'POST',
     headers: { Authorization: `Bearer ${env.OPENROUTER_KEY}`, 'Content-Type': 'application/json' },
@@ -97,10 +110,12 @@ async function runDecisionsGate(model: string, context: string, newMessages: str
   if (!res.ok) throw new Error(`decisions ${res.status}: ${JSON.stringify(body?.error ?? body).slice(0, 200)}`);
   const p = Number(body?.answers?.should_respond?.noul);
   if (!Number.isFinite(p)) throw new Error('decisions: no probability in response');
+  const adjusted = applyAdjustment(p, adjustment);
   return {
-    respond: p >= threshold,
+    respond: adjusted >= threshold,
     raw: p.toFixed(3),
     probability: p,
+    ...(adjustment.signals.length ? { adjustment, adjustedProbability: adjusted } : {}),
     latencyMs: Date.now() - started,
     model: body.model ?? model,
     inputTokens: body.usage?.input_tokens,
@@ -113,10 +128,12 @@ async function runDecisionsGate(model: string, context: string, newMessages: str
 export const GATE_PROVIDER_OPTIONS = modelOptions({ effort: 'none' });
 
 /** Compact plain rendering for the gate (the full context renderer belongs to the context module). */
-export function renderForGate(msgs: StoredMessage[], botUserId: string, botName = env.BOT_DISPLAY_NAME): string {
+export function renderForGate(msgs: StoredMessage[], botUserId: string, botName = env.BOT_DISPLAY_NAME, botId?: string | null): string {
   return msgs
     .map((m) => {
-      const who = m.botId ? (m.userId === botUserId || !m.userId ? `${botName} (bot)` : `${m.username ?? m.userId} (bot)`) : `<@${m.userId}>`;
+      // Ours by user id, or by bot id when known (else, as before, a bot message without a user). Webhooks / other apps are named.
+      const own = m.userId === botUserId || (botId ? m.botId === botId : !!m.botId && !m.userId);
+      const who = own ? `${botName} (bot)` : m.botId ? `${m.username ?? m.userId ?? 'app'} (bot)` : `<@${m.userId}>`;
       let text = m.text.replaceAll(`<@${botUserId}>`, `@${botName}`);
       if (text.length > 1200) text = `${text.slice(0, 1200)}…`;
       const files = m.files.length ? ` [${m.files.length} file(s)]` : '';
@@ -138,6 +155,10 @@ export async function runGate(opts: {
   context: StoredMessage[];
   newMessages: StoredMessage[];
   botUserId: string;
+  /** This bot's bot id (auth.test), so a webhook's or another app's message isn't taken for the bot's. */
+  botId?: string;
+  /** nameKeys of the thread's other humans (gate-signals.ts gateParticipantIds), for the addressed-by-name signal. */
+  participantNames?: string[];
   abortSignal?: AbortSignal;
   /** Extra situation from code (e.g. the bot is DJing the huddle here), not from thread content. */
   note?: string;
@@ -145,15 +166,24 @@ export async function runGate(opts: {
   threshold?: number;
 }): Promise<GateResult> {
   const started = Date.now();
+  const adjustment = gateAdjustment({
+    context: opts.context.slice(-limits.gateContextMessages),
+    newMessages: opts.newMessages,
+    botUserId: opts.botUserId,
+    botId: opts.botId,
+    botName: env.BOT_DISPLAY_NAME,
+    participantNames: opts.participantNames,
+  });
   let fallback: { fallback: string; fallbackKind: GateErrorKind; fallbackAfterMs: number } | undefined;
   if (env.GATE_MODEL !== 'luna') {
     try {
       return await runDecisionsGate(
         env.GATE_MODEL,
-        renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId),
-        renderForGate(opts.newMessages, opts.botUserId),
+        renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId, env.BOT_DISPLAY_NAME, opts.botId),
+        renderForGate(opts.newMessages, opts.botUserId, env.BOT_DISPLAY_NAME, opts.botId),
         started,
         opts.threshold ?? env.GATE_THRESHOLD,
+        adjustment,
         opts.note,
       );
     } catch (err) {
@@ -167,8 +197,8 @@ export async function runGate(opts: {
       model: chatModel(MODELS.gate),
       system: gateSystemPrompt(env.BOT_DISPLAY_NAME, opts.note),
       prompt: gateUserPrompt({
-        context: renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId),
-        newMessages: renderForGate(opts.newMessages, opts.botUserId),
+        context: renderForGate(opts.context.slice(-limits.gateContextMessages), opts.botUserId, env.BOT_DISPLAY_NAME, opts.botId),
+        newMessages: renderForGate(opts.newMessages, opts.botUserId, env.BOT_DISPLAY_NAME, opts.botId),
       }),
       providerOptions: GATE_PROVIDER_OPTIONS,
       maxOutputTokens: 16,
@@ -176,9 +206,15 @@ export async function runGate(opts: {
       maxRetries: 1,
       abortSignal: opts.abortSignal ?? AbortSignal.timeout(15_000),
     });
+    // A yes/no has no score to nudge: only the strongest signal (the message opens by @mentioning someone else)
+    // turns a yes into a no. The others are logged.
+    const yes = parseGateAnswer(res.text);
+    const overridden = yes && adjustment.signals.includes('mentions_other_leading');
     return {
-      respond: parseGateAnswer(res.text),
+      respond: yes && !overridden,
       raw: res.text,
+      ...(adjustment.signals.length ? { adjustment } : {}),
+      ...(overridden ? { overridden } : {}),
       latencyMs: Date.now() - started,
       model: MODELS.gate,
       ...fallback,

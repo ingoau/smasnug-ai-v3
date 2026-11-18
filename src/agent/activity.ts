@@ -17,6 +17,7 @@ const LABELS: Record<string, string> = {
   read_file: 'Opening the file…',
   ask_file: 'Reading the file…',
   create_file: 'Writing a file…',
+  calculate: 'Crunching numbers…',
   save_url: 'Downloading a file…',
   download_emoji: 'Downloading emoji…',
   upload_emoji: 'Adding an emoji…',

@@ -353,7 +353,7 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
     expect(await call(ctxOf(tA, u, saA), 'sandbox_import', { file_id: upload.id })).toMatch(/to \/work\/in\/data\.csv/);
     expect(await call(ctxOf(tA, u, saA), 'sandbox_read_file', { path: 'in/data.csv' })).toContain('a,b');
     expect(await call(ctxOf(tB, u, saB), 'sandbox_import', { file_id: upload.id })).toMatch(/No file .* is available here/);
-    // Export: a 6 MB file is fine for sandbox exports (the general 5 MB cap is scoped), and it's idempotent.
+    // Export: a 6 MB file is stored, and it's idempotent.
     const big = randomBytes(6 * 1024 * 1024);
     const [row] = await sql<any[]>`select provider_id from sandboxes where subagent_id = ${saA.subagentId}`;
     fake.boxes.get(row.providerId)!.files.set('/work/out/big.bin', big);
@@ -363,8 +363,23 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
     expect(e2).toContain(id);
     const listed = await files.filesCreatedByRuns([saA.runId]);
     expect(listed.get(saA.runId)!.map((f) => f.id)).toContain(id);
-    fake.boxes.get(row.providerId)!.files.set('/work/out/huge.bin', Buffer.alloc(26 * 1024 * 1024));
-    expect(await call(ctxOf(tA, u, saA), 'sandbox_export', { path: 'out/huge.bin', description: 'x' })).toMatch(/limited to 25/);
+    // Over the store's cap: a large file (streamed out, kept as a private Slack upload); over Slack's limit: refused.
+    const { limits } = await import('../config.js');
+    const saved = { export: limits.sandboxExportMaxBytes, large: limits.largeFileMaxBytes };
+    try {
+      (limits as any).sandboxExportMaxBytes = 1024 * 1024;
+      fake.boxes.get(row.providerId)!.files.set('/work/out/huge.bin', Buffer.alloc(2 * 1024 * 1024, 1));
+      const e3 = await call(ctxOf(tA, u, saA), 'sandbox_export', { path: 'out/huge.bin', description: 'x' });
+      expect(e3).toMatch(/can be posted with reply\(files\), but not opened/);
+      const big3 = await files.fileStore.metadata(/file_[a-z0-9]{10}/.exec(e3)![0]);
+      expect(big3).toMatchObject({ hasContent: false, size: 2 * 1024 * 1024 });
+      expect(big3!.blobSlackFileId).toBeTruthy();
+      (limits as any).largeFileMaxBytes = 1.5 * 1024 * 1024;
+      expect(await call(ctxOf(tA, u, saA), 'sandbox_export', { path: 'out/huge.bin', description: 'x' })).toMatch(/2\.0 MB; the most the bot can post to Slack is 1\.5 MB/);
+    } finally {
+      (limits as any).sandboxExportMaxBytes = saved.export;
+      (limits as any).largeFileMaxBytes = saved.large;
+    }
   });
 
   it('budget: exhausted → refused for everyone, running sandboxes paused; last month does not count', async () => {

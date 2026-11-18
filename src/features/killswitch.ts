@@ -16,7 +16,7 @@ export function parseSlash(text: string | undefined): SlashVerb {
   return 'help';
 }
 
-async function channelCreator(channelId: string): Promise<{ creator?: string; isChannel: boolean }> {
+export async function channelCreator(channelId: string): Promise<{ creator?: string; isChannel: boolean }> {
   try {
     const res = await slackCall<any>('conversations.info', { channel: channelId });
     const c = res.channel ?? {};

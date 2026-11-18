@@ -315,11 +315,17 @@ export function sanitizeDescription(raw: string | null | undefined, max = MAX_DE
   return s;
 }
 
+/** Time allowed to move `size` bytes to or from Slack (≥ 256 KB/s, at least a minute, at most 30 minutes). */
+export function transferTimeoutMs(size: number): number {
+  return Math.min(30 * 60_000, 60_000 + Math.ceil(size / (256 * 1024)) * 1000);
+}
+
 export function formatBytes(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n)) return 'size unknown';
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10 * 1024 ? 1 : 0)} KB`;
-  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n < 1000 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
 export interface ContextFile {

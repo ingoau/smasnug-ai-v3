@@ -70,6 +70,11 @@ export interface SandboxProvider {
   /** argv runs as given (callers wrap shell commands as ['bash', '-lc', cmd]). */
   exec(h: Handle, argv: string[], o: ExecOptions): Promise<ExecResult>;
   readFile(h: Handle, path: string, o: { maxBytes: number }): Promise<{ bytes: Buffer; size: number }>;
+  /**
+   * Stream a file out (large exports, src/files/large.ts), read as the `sandbox` user; the iterable throws if the read
+   * fails. Nothing is buffered beyond the transport's chunks.
+   */
+  streamFile(h: Handle, path: string, o: { timeoutMs: number; signal?: AbortSignal }): AsyncIterable<Uint8Array>;
   /** Parent directories are created; the file is owned by the `sandbox` user. */
   writeFile(h: Handle, path: string, bytes: Buffer): Promise<void>;
   /** Terminate; idempotent (an already-gone sandbox is fine). */

@@ -115,7 +115,7 @@ async function adminBlocks(): Promise<unknown[]> {
   if (pending.length) {
     out.push(section('*Workspace facts awaiting approval*'));
     for (const f of pending.slice(0, PENDING_FACTS_SHOWN)) {
-      out.push(section(`${truncate(mrkdwnEscape(f.text), 2800)}\n_proposed by <@${f.proposerId}>_`));
+      out.push(section(`${truncate(mrkdwnEscape(f.text), 2800)}\n_proposed by <@${f.proposerId}>${f.channelId ? ` · only in <#${f.channelId}>` : ''}_`));
       out.push({
         type: 'actions',
         elements: [btn('fact:approve', 'Approve', String(f.id), { style: 'primary' }), btn('fact:reject', 'Reject', String(f.id))],
@@ -129,7 +129,7 @@ async function adminBlocks(): Promise<unknown[]> {
   for (const f of approved.slice(-APPROVED_FACTS_SHOWN)) {
     out.push(
       section(
-        truncate(mrkdwnEscape(f.text), 2800),
+        `${truncate(mrkdwnEscape(f.text), 2800)}${f.channelId ? `\n_only in <#${f.channelId}>_` : ''}`,
         btn('fact:delete', 'Delete', String(f.id), {
           confirm: confirmDialog('Delete workspace fact?', truncate(f.text, 280), 'Delete'),
         }),

@@ -197,8 +197,25 @@ export const limits = {
   /** ask_thread: the answering model call's timeout. */
   askThreadTimeoutMs: 90_000,
   // file store (src/files/)
-  /** Largest file stored (created files, and uploads' content; bigger uploads: images are still viewable, others not). */
-  fileMaxBytes: 5 * 1024 * 1024,
+  /**
+   * Largest file whose bytes live in Postgres (created files, and uploads' content; bigger uploads: images are still
+   * viewable, others not). bytea is read and written whole (postgres.js buffers it, hex-encoded on the wire: ~3x in
+   * memory per operation, and the worker has no memory limit of its own), so this stays small. Bigger created files
+   * (save_url, sandbox_export) go to Slack instead (largeFileMaxBytes, src/files/large.ts); create_file refuses them.
+   */
+  fileMaxBytes: 20 * 1024 * 1024,
+  /**
+   * Largest file the bot can make and post at all (save_url, sandbox_export): Slack's 1 GB upload limit. Files over
+   * fileMaxBytes are staged on local disk while they stream in, then kept as a private Slack upload (not in Postgres)
+   * and copied into the thread when posted. They can be posted, not opened (read_file / ask_file / sandbox_import).
+   */
+  largeFileMaxBytes: 1000 * 1024 * 1024,
+  /** Bytes of large files (staged past fileMaxBytes) one user may make per hour (save_url, sandbox_export). */
+  largeFileBytesPerUserHour: 2000 * 1024 * 1024,
+  /** Large files being staged on local disk / moved at once, bot-wide (making and posting them). */
+  largeFileConcurrentTransfers: 2,
+  /** Free space a large-file staging leaves on the temp dir's disk (it's refused rather than going below). */
+  largeFileDiskMarginBytes: 2 * 1024 * 1024 * 1024,
   /** read_file: text page size (chars). */
   fileReadPageChars: 24_000,
   /** ask_file: the file text given to the answering model at most (≈tokens; the head, with a note). */
@@ -310,8 +327,8 @@ export const limits = {
   autoSuspendReporters: 3,
   fetchMaxBytes: 3 * 1024 * 1024,
   fetchTimeoutMs: 10_000,
-  /** save_url: downloads up to fileMaxBytes, so a little longer than a page fetch. */
-  saveUrlTimeoutMs: 30_000,
+  /** save_url: downloads up to largeFileMaxBytes (1 GB), so much longer than a page fetch. */
+  saveUrlTimeoutMs: 10 * 60_000,
   webSearchDefaultResults: 5,
   webSearchMaxResults: 10,
   webSearchTimeoutMs: 10_000,
@@ -426,8 +443,11 @@ export const limits = {
   /** Largest file sandbox_read_file pulls out of the sandbox to show (images are resized afterwards). */
   sandboxReadMaxBytes: 25 * 1024 * 1024,
   sandboxImportMaxBytes: 50 * 1024 * 1024,
-  /** Sandbox exports into the file store (the store's general cap, fileMaxBytes, stays 5 MB for everything else). */
-  sandboxExportMaxBytes: 25 * 1024 * 1024,
+  /**
+   * Sandbox exports kept in the file store's Postgres tier (= fileMaxBytes); bigger exports, up
+   * to largeFileMaxBytes, become large files (src/files/large.ts).
+   */
+  sandboxExportMaxBytes: 20 * 1024 * 1024,
   userSandboxExecsPerHour: 200,
   userLiveSandboxes: 2,
   globalLiveSandboxes: 8,

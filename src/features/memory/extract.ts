@@ -43,6 +43,10 @@ export const MemoryOpSchema = z.object({
     .enum(FACT_KINDS)
     .nullable()
     .describe('add/update: preference (how they want to be helped), about (who they are), project (long-running work of their own, never the current request). null for remove.'),
+  no_ping: z
+    .boolean()
+    .nullable()
+    .describe('add/update: true only for a preference not to be @mentioned/pinged/tagged by the bot; otherwise false. null for remove.'),
   evidence: z
     .string()
     .nullable()
@@ -211,10 +215,11 @@ Rules:
 - The test for every fact: would knowing it help the bot in a DIFFERENT conversation weeks from now? Most conversations contain nothing like that, and an empty ops list is the normal result. The bot can search its past conversations, so the memory never needs to record what happened in one.
 - What they asked the bot to do in this conversation is a task, not a fact. Never save requests, errands or one-off jobs ("make an emoji", "fix this bug", "upload it", "draft an email", "look up X"), nor details of the task (file names, emoji names, PR numbers, prices, purchases). Asking the bot to make cheese emojis does not mean they are "adding cheese emojis to the workspace".
 - A project is ongoing work of their own that lasts weeks and that they described as theirs ("I'm building…", "I run…", "I'm organising…"), not the current request. Save the project at the level it will be useful later ("organises Haven Canberra"), not each step or feature of it ("is fixing the status indicator in X", "is making X faster" are steps of one project).
-- Useful and lasting only: preferences about how to be helped (answer style, languages, tools, how the bot should handle their requests), long-running projects, skills, interests, role in the community, time zone.
+- Useful and lasting only: preferences about how to be helped (answer style, languages, tools, how the bot should handle or respond to their requests, e.g. "wants only a ✅ reaction, no reply, when the bot sets a reminder for them", "doesn't want to be @mentioned"), long-running projects, skills, interests, role in the community, time zone.
 - Never store: ${NEVER_STORE}. Nothing at all about other people.
 - Each fact is a short third-person phrase without the name, e.g. "prefers TypeScript over Python", "is building a robot arm for Blueprint".
-- kind: preference = how they want to be helped (answer style, languages, tools they want used); about = who they are (role, skills, interests, time zone, stack); project = long-running work of their own.
+- kind: preference = how they want to be helped or treated (answer style, languages, tools they want used, react instead of replying, not being pinged); about = who they are (role, skills, interests, time zone, stack); project = long-running work of their own.
+- no_ping: true only when the fact is that they don't want the bot to @mention / ping / tag them; false for everything else (including "don't hesitate to ping me" or preferences about git tags).
 - evidence: copy a verbatim snippet (at least a few words) from ONE PARTICIPANT message that states the fact.
 - Prefer update over add: when a new fact is about the same thing as an existing one (the same project, tool or preference, even worded differently), update that fact (with fact_id) instead of adding a second one. Also update when they refined or contradicted a fact (e.g. a project they finished: "built a weather station"); remove (with fact_id) when they said it is no longer true or asked the bot to forget it.
 - Keep the memory tidy: if two existing facts say the same thing, remove the one with the lower fact_id (evidence null).
@@ -273,9 +278,9 @@ export async function applyOps(participantId: string, threadId: string, ops: Mem
   for (const op of ops) {
     if (op.op === 'add') {
       if (count >= FACTS_PER_USER_MAX) continue;
-      await addFact(participantId, cleanFactText(op.text!), threadId, asKind(op.kind));
+      await addFact(participantId, cleanFactText(op.text!), threadId, asKind(op.kind), op.no_ping === true);
       count++;
-    } else if (op.op === 'update') await updateFact(participantId, op.fact_id!, cleanFactText(op.text!), threadId, op.kind ? asKind(op.kind) : null);
+    } else if (op.op === 'update') await updateFact(participantId, op.fact_id!, cleanFactText(op.text!), threadId, op.kind ? asKind(op.kind) : null, op.no_ping === true);
     else if (await deleteFact(participantId, op.fact_id!)) count--;
   }
 }

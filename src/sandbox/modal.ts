@@ -224,6 +224,47 @@ export class ModalProvider implements SandboxProvider {
     }
   }
 
+  /** `cat` as the sandbox user, stdout streamed (the SDK's readBytes has a size limit and buffers the whole file). */
+  async *streamFile(h: Handle, path: string, o: { timeoutMs: number; signal?: AbortSignal }): AsyncIterable<Uint8Array> {
+    const sb = await this.sandbox(h);
+    let proc: Awaited<ReturnType<Sandbox['exec']>> & { stdout: ReadableStream<Uint8Array>; stderr: ReadableStream<Uint8Array> };
+    try {
+      proc = (await sb.exec([...AS_USER, 'env', `PATH=${BASE_ENV.PATH}`, 'cat', '--', path], { mode: 'binary', timeoutMs: o.timeoutMs })) as any;
+    } catch (err) {
+      if (isGone(err)) throw new SandboxGoneError();
+      throw err;
+    }
+    await proc.stdin.close().catch(() => {});
+    const errText = readCapped(proc.stderr, 4096).catch(() => ({ bytes: Buffer.alloc(0), truncated: false }));
+    const reader = proc.stdout.getReader();
+    const abort = () => void reader.cancel().catch(() => {});
+    o.signal?.addEventListener('abort', abort, { once: true });
+    let drained = false;
+    try {
+      for (;;) {
+        if (o.signal?.aborted) throw new Error('aborted');
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value?.byteLength) yield value;
+      }
+      drained = true;
+      const code = await proc.wait();
+      if (code !== 0) {
+        const msg = (await errText).bytes.toString('utf8').trim().slice(0, 300);
+        throw new Error(/No such file/i.test(msg) ? `No such file: ${path}` : `reading ${path} failed: ${msg || `exit ${code}`}`);
+      }
+    } catch (err) {
+      if (isGone(err)) throw new SandboxGoneError();
+      throw err;
+    } finally {
+      o.signal?.removeEventListener('abort', abort);
+      // Stopped early (the consumer quit, a cap, an abort): cancel the stream so `cat` isn't left feeding a dead
+      // reader (the SDK can't kill an exec'd process; cancelling closes its stdout, and exec's timeout bounds the rest).
+      if (!drained) await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  }
+
   async writeFile(h: Handle, path: string, bytes: Buffer): Promise<void> {
     const dir = path.slice(0, path.lastIndexOf('/')) || '/';
     const r = await this.exec(h, ['bash', '-c', `mkdir -p ${shq(dir)} && cat > ${shq(path)}`], { stdin: bytes, timeoutMs: 120_000, maxOutputBytes: 4096 });

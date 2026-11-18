@@ -228,4 +228,47 @@ describe.skipIf(!LIVE)('subagent lifecycle (DB)', () => {
     await expect(sub.spawnSubagent({ threadId, turnId: turn, ownerId: 'U_E', title: 'one too many', instructions: 'x' })).rejects.toThrow(/thread/);
     for (const id of ids) await sub.cancelSubagent({ threadId, subagentId: id, actor: 'U_D' });
   });
+
+  it('a failed run shows in the open batch status and in the snapshot (never vanishes)', async () => {
+    const { renderOpenBatches } = await import('./batch-status.js');
+    const { renderSnapshot } = await import('./front.js');
+    const tid = `${channel}:${rootTs}9`;
+    await sql`insert into threads (id, channel_id, thread_ts) values (${tid}, ${channel}, ${rootTs + '9'}) on conflict do nothing`;
+    const [t] = await sql<{ id: number }[]>`insert into turns (thread_id, author_id, status) values (${tid}, 'U_F', 'running') returning id`;
+    const a = await sub.spawnSubagent({ threadId: tid, turnId: Number(t!.id), ownerId: 'U_F', title: 'Names 1-100', instructions: 'x' });
+    const b = await sub.spawnSubagent({ threadId: tid, turnId: Number(t!.id), ownerId: 'U_F', title: 'Names 101-200', instructions: 'y' });
+    await sub.failRuns({ runIds: [b.runId] }, 'Timed out after 10 min');
+    const line = await renderOpenBatches(tid);
+    expect(line).toContain('0 of 2 finished with results');
+    expect(line).toContain(`FAILED: ${b.subagentId} "Names 101-200" (Timed out after 10 min)`);
+    expect(line).toContain('1 still running');
+    expect(await renderSnapshot(tid)).toContain('last run FAILED: Timed out after 10 min');
+    // An open batch may belong to another request than this turn's: labelled as an earlier one.
+    expect(line).toMatch(/^Earlier request \(<@U_F>, \d+ min ago\): 0 of 2/);
+    await sub.cancelSubagent({ threadId: tid, subagentId: a.subagentId, actor: 'U_F' });
+  });
+
+  it('open batches skip a lone running subagent; a failed retry gets no second retry advice', async () => {
+    const { renderOpenBatches } = await import('./batch-status.js');
+    const { renderCardResults } = await import('./front.js');
+    const { ensureTurnCard } = await import('./cards.js');
+    const tid = `${channel}:${rootTs}8`;
+    await sql`insert into threads (id, channel_id, thread_ts) values (${tid}, ${channel}, ${rootTs + '8'}) on conflict do nothing`;
+    const newTurn = async () => Number((await sql<{ id: number }[]>`insert into turns (thread_id, author_id, status) values (${tid}, 'U_G', 'running') returning id`)[0]!.id);
+    const t1 = await newTurn();
+    const a = await sub.spawnSubagent({ threadId: tid, turnId: t1, ownerId: 'U_G', title: 'Lone part', instructions: 'x' });
+    expect(await renderOpenBatches(tid)).toBe('');
+    await sub.failRuns({ runIds: [a.runId] }, 'Timed out');
+    // The retry (a follow-up run on a new card) fails too.
+    const t2 = await newTurn();
+    const card = await ensureTurnCard({ threadId: tid, turnId: t2 });
+    const [r] = await sql<{ id: number }[]>`
+      insert into runs (subagent_id, thread_id, card_id, turn_id, instructions, is_resume, status, model)
+      values (${a.subagentId}, ${tid}, ${card}, ${t2}, 'retry', true, 'queued', 'm') returning id`;
+    await sub.failRuns({ runIds: [Number(r!.id)] }, 'Timed out again');
+    const res = await renderCardResults(card);
+    expect(res.text).toContain('FAILED');
+    expect(res.text).not.toContain('Retry each');
+    expect(res.text).toContain("already retried; don't retry again");
+  });
 });
