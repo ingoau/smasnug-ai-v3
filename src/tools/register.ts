@@ -18,6 +18,7 @@ import './emoji-files.js';
 import './emoji-download.js';
 import './canvases.js';
 import './directory/tools.js';
+import './calculate.js';
 import { pruneImageCache } from '../files/images.js';
 import { ensureDirectoryCrawl, processCrawlPage, type CrawlPageJob } from './directory/crawl.js';
 import { log } from '../log.js';
