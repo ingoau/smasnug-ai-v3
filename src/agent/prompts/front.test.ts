@@ -162,3 +162,24 @@ describe('frontSystemPrompt rules from the prod trace review', () => {
     expect(p).toMatch(/\/j, \/hj, \/s, \/srs are tone tags/);
   });
 });
+
+describe('frontSystemPrompt answer quality rules (failure reports, Nov 2026)', () => {
+  const p = frontSystemPrompt('smasnug ai');
+
+  it('covers checking facts, working things out first, complete answers and reply size', () => {
+    expect(p).toMatch(/come from a tool result in this turn, or are clearly marked as a guess/);
+    expect(p).toMatch(/Don't predict that something will fail/);
+    expect(p).toMatch(/at least two different angles/);
+    expect(p).toMatch(/\*\*Work it out, then write\.\*\*/);
+    expect(p).toMatch(/post only the best few/);
+    expect(p).toMatch(/\*\*Complete answers\.\*\*/);
+    expect(p).toMatch(/open it \(read_file \/ ask_file\)/);
+    expect(p).toMatch(/\*\*Size the reply to the message\.\*\*/);
+  });
+
+  it('suggests a sandbox for calculations only when sandboxes are on', () => {
+    const work = (o: { sandbox?: boolean }) => frontSystemPrompt('smasnug ai', o).split('\n').find((l) => l.startsWith('**Work it out'))!;
+    expect(work({})).not.toMatch(/sandbox/);
+    expect(work({ sandbox: true })).toMatch(/sandbox subagent/);
+  });
+});
