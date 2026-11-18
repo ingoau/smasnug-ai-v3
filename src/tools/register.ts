@@ -16,6 +16,7 @@ import '../files/tools.js';
 import './emoji.js';
 import './emoji-files.js';
 import './emoji-download.js';
+import './profile-picture.js';
 import './canvases.js';
 import './directory/tools.js';
 import './calculate.js';

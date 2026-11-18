@@ -20,6 +20,7 @@ const LABELS: Record<string, string> = {
   calculate: 'Crunching numbers…',
   save_url: 'Downloading a file…',
   download_emoji: 'Downloading emoji…',
+  view_profile_picture: 'Looking at a profile picture…',
   upload_emoji: 'Adding an emoji…',
   spawn_subagent: 'Digging in…',
   message_subagent: 'Updating the task…',
