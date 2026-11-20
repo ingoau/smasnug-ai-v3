@@ -657,14 +657,21 @@ function latestTs(ts: string[]): string | undefined {
 
 /**
  * The user message that started a card's subagents (for a results turn's response time): the latest message of the
- * user turn that spawned them, this round's runs (not yet reported) first, then the earliest. Undefined if none.
+ * card's turn, or, when a results turn started them (a later round), of the first user turn up the parent_card_id
+ * chain. Undefined if none.
  */
 export async function spawnTriggerTs(cardId: number): Promise<string | undefined> {
   try {
     const rows = await sql<{ messageTs: string[] }[]>`
-      select t.message_ts from runs r join turns t on t.id = r.turn_id
-      where r.card_id = ${cardId} and t.kind = 'user' and cardinality(t.message_ts) > 0
-      order by r.reported asc, r.id asc limit 1`;
+      with recursive up(id, depth) as (
+        select ${cardId}::bigint, 0
+        union all
+        select c.parent_card_id, up.depth + 1 from cards c join up on c.id = up.id
+        where c.parent_card_id is not null and up.depth < 20
+      )
+      select t.message_ts from up join cards c on c.id = up.id join turns t on t.id = c.turn_id
+      where t.kind = 'user' and cardinality(t.message_ts) > 0
+      order by up.depth asc limit 1`;
     return rows[0] ? latestTs(rows[0].messageTs) : undefined;
   } catch (err) {
     log.warn({ err, cardId }, 'spawnTriggerTs failed');
