@@ -51,9 +51,12 @@ function checkStreamMode(method: string, args: Record<string, unknown>) {
   if (method === 'chat.startStream') return; // the mode is recorded once the ts is known (below)
   const mode = streamModes.get(String(args.ts));
   if (mode && ((mode === 'chunks' && hasText) || (mode === 'text' && hasChunks))) throw fakeSlackError('streaming_mode_mismatch');
+  // A stream started empty takes the mode of the first content sent (as Slack's SDKs assume: they start streams empty).
+  if (!mode && (hasText || hasChunks)) streamModes.set(String(args.ts), hasChunks ? 'chunks' : 'text');
 }
 function recordStreamMode(args: Record<string, unknown>, ts: string) {
   if (streamModes.size > 10_000) streamModes.clear();
+  if (args.chunks === undefined && args.markdown_text === undefined) return; // started empty: mode not fixed yet
   streamModes.set(ts, args.chunks !== undefined ? 'chunks' : 'text');
 }
 

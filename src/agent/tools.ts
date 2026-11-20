@@ -120,7 +120,7 @@ registerTool({
         continue_turn: continueTurnSchema,
       }),
       onInputStart: ({ toolCallId }) => {
-        turnState(ctx).replies.start(toolCallId);
+        turnState(ctx).replies.open(toolCallId); // opens the Slack stream while the model writes the text
       },
       onInputDelta: ({ toolCallId, inputTextDelta }) => {
         turnState(ctx).replies.delta(toolCallId, inputTextDelta);
