@@ -27,6 +27,7 @@ import { handleHuddleFmMessage, isFromHuddleFm } from '../features/huddlefm/inbo
 import { showIntakeStatus } from './session-status.js';
 import { fetchHistoryBefore, fetchReplies } from '../context/slack-messages.js';
 import { compareTs } from '../context/format.js';
+import { prefetchConversationInfo } from '../context/conversation.js';
 import {
   applyDelete,
   applyEdit,
@@ -279,6 +280,8 @@ async function handleNewMessage(ev: MessageEvent) {
 
   // DMs and mentions get the status indicator right away, before the debounce window (fire-and-forget).
   if (decision.reason === 'dm' || decision.reason === 'mention') showIntakeStatus(threadId, authorId, ev.ts);
+  // The turn's context needs conversations.info: fetch it during the debounce window (cached for the turn).
+  prefetchConversationInfo(channelId);
   await addToBatch(threadId, authorId, ev.ts, decision.reason);
   markMessage(channelId, ev.ts, { debounce_scheduled: Date.now() });
 }

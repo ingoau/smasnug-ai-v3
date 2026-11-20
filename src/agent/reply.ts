@@ -107,6 +107,18 @@ export type CardBlock = { type: 'plan'; block_id?: string };
  * a frozen stream must never be rewritten (there is no native stop button any more, but a stream Slack halted for any
  * reason stays as it is).
  */
+/**
+ * Open the reply's stream when the reply call begins, before its text exists (ReplyManager.open). Switched off for
+ * the process when Slack refuses an empty chat.startStream, or a stream started empty then refuses chunks (its
+ * documentation leaves both open): replies then open their stream with the first text, as before.
+ */
+export const earlyStream = { enabled: true };
+/**
+ * Codes meaning Slack refuses a stream started without content (not a problem with this channel, e.g. is_archived /
+ * not_in_channel, which must not switch early streams off for every channel).
+ */
+const EMPTY_START_REFUSED = new Set(['no_text', 'invalid_arguments', 'missing_argument', 'invalid_chunks', 'markdown_text_or_chunks_required', 'markdown_text_required']);
+
 export const HALTED_STREAM = /stream|not_in_streaming_state|stopped_by_user/;
 const isHalted = (code: string | undefined) => Boolean(code && code !== 'streaming_mode_mismatch' && HALTED_STREAM.test(code));
 const STOPPED_RESULT = 'Not delivered: the user pressed stop. Do not retry; call end_turn.';
@@ -136,6 +148,11 @@ interface ReplyEntry {
   /** The rest doesn't fit into the stream (Slack limits): it is posted as its own message. */
   overflow: boolean;
   streamTs: string | null;
+  /**
+   * An empty stream opened when the reply call began (open()): its ts, or null if it wasn't opened. The first flush
+   * takes it (takeEarly); a reply that doesn't stream into it removes it (discardEarly). Unset once taken / removed.
+   */
+  early?: Promise<string | null>;
   stopped: boolean;
   chain: Promise<void>;
   timer: NodeJS.Timeout | null;
@@ -273,7 +290,8 @@ export class ReplyManager {
    * Not once a reply is visible: a new activity message would appear below the reply (and flash away again).
    */
   activity(text: string, toolCallId?: string): void {
-    if (this.anyVisible) return;
+    // A reply's stream is (being) opened early: the activity message would appear above the reply and stay empty.
+    if (this.anyVisible || [...this.entries.values()].some((e) => e.early)) return;
     this.trail?.activity(text, toolCallId);
   }
 
@@ -335,6 +353,103 @@ export class ReplyManager {
     };
     this.entries.set(toolCallId, e);
     return e;
+  }
+
+  /**
+   * The reply tool call began (its input is still streaming): open its Slack stream now, empty, so chat.startStream's
+   * round trip (~365ms in prod) overlaps the model writing the first words; the first flush then appends to it (the
+   * first-flush coalescing is unchanged). Only for a reply that would open a fresh stream anyway: stream delivery, no
+   * activity message to adopt. Never blocks or throws.
+   */
+  open(toolCallId: string): void {
+    const e = this.start(toolCallId);
+    // An earlier reply call that never got to stream (failed input, the model retrying): its empty stream goes, so it
+    // doesn't sit above this one or hold back activity cards.
+    for (const o of this.entries.values()) if (o !== e && o.early && !o.finished && !o.streamTs) void this.discardEarly(o);
+    if (!earlyStream.enabled || e.early || e.streamTs || e.keyBase || e.finished || this.trail?.isOpen) return;
+    const early: Promise<string | null> = this.openEarly(e)
+      .catch((err) => {
+        const code = slackErrorCode(err);
+        // Slack refused an empty stream: stop trying for this process.
+        if (code && EMPTY_START_REFUSED.has(code)) earlyStream.enabled = false;
+        log.warn({ err, code, turnId: this.t.turnId }, 'opening the reply stream early failed; it opens with the first text');
+        return null;
+      })
+      .then((ts) => {
+        if (!ts && e.early === early) e.early = undefined; // nothing opened: nothing to take or hold activity for
+        return ts;
+      });
+    e.early = early;
+  }
+
+  private async openEarly(e: ReplyEntry): Promise<string | null> {
+    if ((await e.mode) !== 'stream') return null;
+    if (e.finished || e.dropped || e.failed || e.streamTs || this.trail?.isOpen || (await this.isStopped())) return null;
+    const team = await teamId();
+    this.t.timing?.mark('early_stream_open_call');
+    // No content: the stream's chunks mode is set by the first chunks sent (Slack's SDKs start streams this way too).
+    const res = await slackCall<any>(
+      'chat.startStream',
+      { channel: this.t.channelId, ...threadTsArg(this.t.threadTs), recipient_user_id: this.t.recipientUserId, ...(team ? { recipient_team_id: team } : {}) },
+      { idempotencyKey: this.key(e, ':early') },
+    );
+    if (!res?.ts) return null;
+    this.t.timing?.mark('early_stream_open');
+    return res.ts;
+  }
+
+  /**
+   * The early stream for the first chunks (its ts), or null. Claimed synchronously: one caller gets it (no flush
+   * appending to a stream a concurrent close deletes); it's no longer the entry's to discard.
+   */
+  private async takeEarly(e: ReplyEntry): Promise<string | null> {
+    const p = e.early;
+    if (!p) return null;
+    e.early = undefined;
+    return p;
+  }
+
+  /**
+   * The reply won't stream into its early stream (posted whole, dropped, stopped, never executed): stop and delete
+   * it, so no empty message is left behind. Never throws.
+   */
+  private async discardEarly(e: ReplyEntry): Promise<void> {
+    const ts = await this.takeEarly(e);
+    if (ts) await this.removeEmptyStream(e, ts);
+  }
+
+  private async removeEmptyStream(e: ReplyEntry, ts: string): Promise<void> {
+    await slackCall('chat.stopStream', { channel: this.t.channelId, ts }, { idempotencyKey: this.key(e, ':early-stop') })
+      .then(() => this.t.onSessionReleased?.())
+      .catch((err) => log.debug({ err, code: slackErrorCode(err) }, 'stopping an empty early stream failed'));
+    await editMessage('chat.delete', { channel: this.t.channelId, ts }).catch((err) => log.warn({ err, code: slackErrorCode(err), index: e.index }, 'deleting an empty early stream failed'));
+  }
+
+  /**
+   * The first chunks into the early stream: 'ok', or 'fallback' when it can't take them (e.g. Slack ended the idle
+   * stream, or refused chunks after an empty start): it is removed (in the background) and the reply opens a stream
+   * as usual. 'stopped': the user stopped meanwhile, nothing more is sent.
+   */
+  private async appendEarly(e: ReplyEntry, ts: string, chunks: unknown[]): Promise<'ok' | 'fallback' | 'stopped'> {
+    this.t.timing?.mark('stream_open_call');
+    try {
+      await slackCall('chat.appendStream', { channel: this.t.channelId, ts, chunks });
+    } catch (err) {
+      const code = slackErrorCode(err);
+      // Refused (not transient, not a stream Slack ended): an empty start doesn't work here, so every reply would pay
+      // for it. Stop trying for this process.
+      if (code && !RETRYABLE_EDIT.has(code) && !isHalted(code)) earlyStream.enabled = false;
+      log.warn({ err, code, turnId: this.t.turnId }, 'the early reply stream cannot take the reply; opening a fresh one');
+      void this.removeEmptyStream(e, ts); // nothing visible in it; the fresh stream needn't wait
+      if (await this.isStopped()) {
+        e.failed = true;
+        return 'stopped';
+      }
+      return 'fallback';
+    }
+    e.streamTs = ts;
+    this.t.timing?.mark('stream_started');
+    return 'ok';
   }
 
   delta(toolCallId: string, d: string) {
@@ -425,6 +540,15 @@ export class ReplyManager {
         // Native stop: Slack halted (or will halt) the stream; send nothing more.
         e.halted = Boolean(e.streamTs);
         e.failed = true;
+        return;
+      }
+      // An early stream (open()) takes the first chunks; no activity message opened since (activity() holds off).
+      const early = e.streamTs ? null : await this.takeEarly(e);
+      const took = early ? await this.appendEarly(e, early, chunks) : null;
+      if (took === 'stopped') return;
+      if (took === 'ok') {
+        Object.assign(e, st);
+        e.streamed = base.slice(0, e.rawSent);
         return;
       }
       let adopted = !e.streamTs && this.trail ? await this.trail.adopt() : null;
@@ -548,6 +672,7 @@ export class ReplyManager {
     await e.chain.catch(() => {});
     if (e.halted || (await this.isStopped())) {
       // Close our side quietly (Slack may already have stopped it) and deliver nothing else.
+      await this.discardEarly(e);
       if (e.streamTs) await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after stop failed'));
       await this.dropActivityCards(e, e.streamed);
       await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, stopped: true, streamed: e.streamed });
@@ -560,11 +685,13 @@ export class ReplyManager {
       const reason = blank && !files?.length && !charts.length ? (chartNotes.length ? `Not posted: ${chartNotes.join(' ')}` : EMPTY_RESULT) : null;
       if (reason) {
         e.dropped = reason;
+        await this.discardEarly(e);
         await appendEvent(this.t.threadId, 'reply_dropped', 'bot', { turnId: this.t.turnId, index: e.index, reason, text });
         return reason;
       }
       if (blank && !charts.length && files?.length) {
         // Just files: shared into the thread as a message of their own (there is no text to attach them to).
+        await this.discardEarly(e);
         await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
         try {
           await uploadFiles({ channelId: this.t.channelId, threadTs: this.t.threadTs, files, idempotencyKey: this.key(e, ':files') });
@@ -618,7 +745,8 @@ export class ReplyManager {
     if (mode === 'stream' && !e.failed) {
       try {
         // Nothing streamed yet but an activity message is open: stream into it (same result as posting whole).
-        if (!e.streamTs && this.trail?.isOpen) await this.flush(e, text);
+        // Likewise into a stream opened early (its first text then goes out with the whole reply).
+        if (!e.streamTs && (this.trail?.isOpen || (e.early && (await e.early)))) await this.flush(e, text);
         if (e.streamTs) {
           if (!text.startsWith(e.streamed)) {
             log.warn({ index: e.index }, 'streamed prefix diverged from final reply text');
@@ -677,6 +805,8 @@ export class ReplyManager {
       last = { ts: await this.postWhole(e, text, actions, extras), text };
       buttonsTs = last.ts;
     }
+    // Safety net: an early stream no path took (each one above takes or removes it) never stays behind empty.
+    await this.discardEarly(e);
     // Written into a button's message: that message now carries the earlier text plus this reply (appended).
     if (e.placedText != null && last.ts === e.place?.ts) last = { ts: last.ts, text: e.placedText };
     // Posted as a message of its own: postWhole removed the activity message first; one a tool running alongside
@@ -866,6 +996,8 @@ export class ReplyManager {
    */
   private async postWhole(e: ReplyEntry, text: string, actions?: ButtonsActionsBlock, extras?: ReplyExtras): Promise<string | null> {
     e.posting = true;
+    // Posted, not streamed: an early stream goes first (else the reply would land below an empty message).
+    await this.discardEarly(e);
     try {
       // The first reply delivered this turn takes the place (if any): into the pressed button's message.
       if (this.t.placeTarget && !this.placeUsed && !e.noPlace) {
@@ -1072,12 +1204,15 @@ export class ReplyManager {
    */
   async closeUnfinished(): Promise<void> {
     for (const e of this.entries.values()) {
+      // finish() threw before taking or removing its early stream: still never left behind empty.
+      if (e.finished && !e.streamTs) await this.discardEarly(e);
       if (e.finished) continue;
       e.finished = true;
       if (e.timer) clearTimeout(e.timer);
       e.timer = null;
       e.dropped ??= 'the reply tool call never executed';
       await e.chain.catch(() => {});
+      await this.discardEarly(e);
       if (!e.streamTs) continue;
       log.info({ index: e.index, turnId: this.t.turnId }, 'closing a reply stream whose tool call never executed');
       await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream of an unfinished reply failed'));
@@ -1096,11 +1231,13 @@ export class ReplyManager {
    */
   async closeStopped(): Promise<void> {
     for (const e of this.entries.values()) {
+      if (e.finished && !e.streamTs) await this.discardEarly(e);
       if (e.finished) continue;
       e.finished = true;
       if (e.timer) clearTimeout(e.timer);
       e.timer = null;
       await e.chain.catch(() => {});
+      await this.discardEarly(e);
       if (!e.streamTs) continue;
       await this.stopStream(e).catch((err) => log.debug({ err }, 'stopStream after stop failed'));
       await this.dropActivityCards(e, e.streamed);
@@ -1114,6 +1251,7 @@ export class ReplyManager {
     for (const e of this.entries.values()) {
       if (e.timer) clearTimeout(e.timer);
       await e.chain.catch(() => {});
+      await this.discardEarly(e); // empty: nothing visible to close
       if (e.halted) {
         any = true; // visible, and Slack already stopped it
         await this.dropActivityCards(e, e.streamed);
