@@ -7,6 +7,7 @@ vi.hoisted(() => {
 
 const {
   withFallback,
+  servedBy,
   resetProviderCooldown,
   adaptCall,
   modelOptions,
@@ -343,5 +344,15 @@ describe('modelDisplayName', () => {
     expect(modelDisplayName('claude-opus-5')).toBe('Claude Opus 5');
     expect(modelDisplayName('openai/gpt-6-luna')).toBe('GPT-6 Luna');
     expect(modelDisplayName('mock')).toBe('mock');
+  });
+});
+
+describe('servedBy', () => {
+  it('reports the last tier asked: the fallback when the primary fails', async () => {
+    const served: string[] = [];
+    const primary = servedBy(fake('hc', { doStream: async () => { throw Object.assign(new Error('x'), { statusCode: 500 }); } }), 'claude-haiku-5-5', (m) => served.push(m));
+    const fb = servedBy(fake('or', { doStream: async () => ok('or') as any }), 'openai/gpt-6-luna', (m) => served.push(m));
+    await read((await withFallback(primary, fb).doStream(opts)).stream);
+    expect(served).toEqual(['claude-haiku-5-5', 'openai/gpt-6-luna']);
   });
 });

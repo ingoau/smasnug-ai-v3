@@ -151,10 +151,11 @@ const proseMarkdown = (md: string) => escapeAffectedTags(boldSingleStars(md));
 // ---------- Placement markers ----------
 
 /**
- * A line that is only `[[kind]]` / `[[kind:n]]` places one of the reply's extra blocks (chart, image, table, cards)
- * there instead of below the text. Normalised ref: `kind:n` (n defaults to 1).
+ * A line that is only `[[kind]]` / `[[kind:n]]` places one of the reply's extra blocks (chart, image, table, cards,
+ * fields, links, container) there instead of below the text; `[[divider]]` is a divider line, `[[buttons]]` the reply's
+ * quick-reply buttons. Normalised ref: `kind:n` (n defaults to 1).
  */
-const MARKER_LINE = /^[ \t]*\[\[[ \t]*(chart|image|table|cards)s?(?:[ \t]*[: #][ \t]*(\d{1,2}))?[ \t]*\]\][ \t]*$/i;
+const MARKER_LINE = /^[ \t]*\[\[[ \t]*(chart|image|table|cards|fields|links|container|divider|buttons)s?(?:[ \t]*[: #][ \t]*(\d{1,2}))?[ \t]*\]\][ \t]*$/i;
 /** A partial last line that may still become a marker (held back while streaming). */
 const MARKER_PREFIX = /^[ \t]*\[(?:\[[ \t]*[a-z]*(?:[ \t]*[: #][ \t]*\d{0,2})?[ \t]*\]{0,2}[ \t]*)?\r?$/i;
 

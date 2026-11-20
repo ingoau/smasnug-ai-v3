@@ -655,6 +655,30 @@ function latestTs(ts: string[]): string | undefined {
   return [...ts].sort((a, b) => Number(a) - Number(b)).at(-1);
 }
 
+/**
+ * The user message that started a card's subagents (for a results turn's response time): the latest message of the
+ * card's turn, or, when a results turn started them (a later round), of the first user turn up the parent_card_id
+ * chain. Undefined if none.
+ */
+export async function spawnTriggerTs(cardId: number): Promise<string | undefined> {
+  try {
+    const rows = await sql<{ messageTs: string[] }[]>`
+      with recursive up(id, depth) as (
+        select ${cardId}::bigint, 0
+        union all
+        select c.parent_card_id, up.depth + 1 from cards c join up on c.id = up.id
+        where c.parent_card_id is not null and up.depth < 20
+      )
+      select t.message_ts from up join cards c on c.id = up.id join turns t on t.id = c.turn_id
+      where t.kind = 'user' and cardinality(t.message_ts) > 0
+      order by up.depth asc limit 1`;
+    return rows[0] ? latestTs(rows[0].messageTs) : undefined;
+  } catch (err) {
+    log.warn({ err, cardId }, 'spawnTriggerTs failed');
+    return undefined;
+  }
+}
+
 // ---------- The turn ----------
 
 /** Run one front-agent turn. Called by the pipeline under the thread lock; exactly one speaker per turn. */
@@ -681,6 +705,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   // Started by a prompt button whose response goes into its own message (append / replace): the first reply goes there.
   const placeTarget =
     turn.kind === 'user' ? await placeTargetFor(turn.threadId, turn.messageTs ?? []).catch((err) => (log.warn({ err }, 'placeTargetFor failed'), null)) : null;
+  /** The model that answered the latest model call (chatModel's onServed): a fallback shows in the reply footer. */
+  let servedModel: string | null = null;
   const replies = new ReplyManager({
     placeTarget,
     threadId: turn.threadId,
@@ -693,7 +719,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     stopRequested: checkStop,
     timing: io.timing,
     // Replies to a user's message say how long they took from it (a context block at the bottom).
-    triggerTs: turn.kind === 'user' ? latestTs(turn.messageTs ?? []) : undefined,
+    // A results (synthesis) turn's replies count from the message that started its subagents.
+    triggerTs: turn.kind === 'user' ? latestTs(turn.messageTs ?? []) : turn.kind === 'synthesis' && turn.cardId ? await spawnTriggerTs(turn.cardId) : undefined,
+    fallbackModel: () => (servedModel && isClaude(MODELS.front) && !isClaude(servedModel) ? modelDisplayName(servedModel) : null),
     activityCards,
     card: { block: () => turnCard.block(), attached: (ts, text) => turnCard.attached(ts, text) },
     // A reply only streams into the activity message if nothing was posted below it meanwhile.
@@ -821,7 +849,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     for (;;) {
       const earlierSteps = doneSteps.length;
       const result = streamText({
-        model: chatModel(MODELS.front),
+        model: chatModel(MODELS.front, { onServed: (m) => (servedModel = m) }),
         // parallel_tool_calls is the provider default; set explicitly because the prompt relies on several calls per step
         // (the AI SDK runs a step's tool calls concurrently).
         providerOptions: modelOptions({ effort: env.FRONT_REASONING_EFFORT, parallelToolCalls: true }),

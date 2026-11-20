@@ -267,7 +267,8 @@ export async function rerenderButtonsMessage(row: ReplyButtonsRow): Promise<void
   }
   const state = toButtonsState(row);
   const extras = await extrasForMessage(row.channelId, row.messageTs);
-  const body = row.replyText != null ? replyBody(row.replyText, extras, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - footerBlock(extras).length, idPrefix: '' }) : [];
+  const buttons = buttonsBlock(state);
+  const body = row.replyText != null ? replyBody(row.replyText, extras, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - footerBlock(extras).length, idPrefix: '', buttons }) : [buttons];
   const text = row.replyText != null ? neutralizeBroadcasts(extrasFallback(row.replyText, extras, MAX_FALLBACK_TEXT)) : buttonsFallbackText(state);
-  await slackCall('chat.update', { channel: row.channelId, ts: row.messageTs, text, blocks: [...body, buttonsBlock(state), ...(row.replyText != null ? footerBlock(extras) : [])] });
+  await slackCall('chat.update', { channel: row.channelId, ts: row.messageTs, text, blocks: [...body, ...(row.replyText != null ? footerBlock(extras) : [])] });
 }

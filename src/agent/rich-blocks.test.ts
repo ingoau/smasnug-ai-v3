@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildExtras, cardExtras, degradedFileIds, extrasFallback, imageExtras, parseExtras, replyBody, serializeExtras, tableExtras, urlImage } from './rich-blocks.js';
+import { buildExtras, cardExtras, cardsSchema, clipMrkdwn, containerExtras, containersSchema, degradedFileIds, extrasFallback, fieldExtras, fieldsSchema, imageExtras, linkExtras, linksSchema, mrkdwn, parseExtras, replyBody, responseTimeFooter, serializeExtras, tableExtras, urlImage } from './rich-blocks.js';
 
 describe('tableExtras', () => {
   it('pads short rows, names missing headers, numbers sort as numbers, empty cells get a dash', () => {
@@ -138,5 +138,172 @@ describe('response time footer', () => {
     expect(hasExtras(back)).toBe(true);
     expect(hasExtras({ items: [] })).toBe(false);
     expect(footerBlock(back, 'card_1_')).toEqual([{ type: 'context', block_id: 'card_1_reply_footer', elements: [{ type: 'mrkdwn', text: 'Responded in 3.0s' }] }]);
+  });
+});
+
+describe('mrkdwn', () => {
+  it('converts bold, strike and links, escapes &<>, keeps Slack links and mentions', () => {
+    expect(mrkdwn('**a** ~~b~~ [x](https://e.com/a) <https://s.com|s> <@U1> 1 < 2 & 3')).toBe('*a* ~b~ <https://e.com/a|x> <https://s.com|s> <@U1> 1 &lt; 2 &amp; 3');
+  });
+});
+
+describe('responseTimeFooter', () => {
+  it('names a fallback model', () => {
+    expect(responseTimeFooter(1500)).toBe('Responded in 1.5s');
+    expect(responseTimeFooter(1500, 'GPT-6 Luna')).toBe('Responded in 1.5s · via GPT-6 Luna (fallback)');
+  });
+});
+
+describe('cardExtras: icon and buttons', () => {
+  it('adds an icon and up to 3 link buttons; the older url/button pair still works', () => {
+    const { items, notes } = cardExtras([
+      { title: 'A', icon_url: 'https://e.com/i.png', buttons: [{ label: 'One', url: 'https://e.com/1' }, { label: 'Two', url: 'https://e.com/2', style: 'primary' }, { label: 'Bad' }, { label: 'Three', url: 'https://e.com/3' }, { label: 'Four', url: 'https://e.com/4' }] },
+      { title: 'B', url: 'https://e.com/b', button: 'Go' },
+    ]);
+    const [a, b] = (items[0]!.block as any).elements;
+    expect(a.icon).toEqual({ type: 'image', image_url: 'https://e.com/i.png', alt_text: 'A icon' });
+    expect(a.actions.map((x: any) => [x.text.text, x.action_id])).toEqual([
+      ['One', 'link:card_1'],
+      ['Two', 'link:card_1_2'],
+      ['Three', 'link:card_1_3'],
+    ]);
+    expect(a.actions[1].style).toBe('primary');
+    expect(b.actions).toEqual([{ type: 'button', text: { type: 'plain_text', text: 'Go' }, url: 'https://e.com/b', action_id: 'link:card_2' }]);
+    expect(notes.join(' ')).toMatch(/Bad.*url/);
+    expect(notes.join(' ')).toMatch(/Only 3 buttons/);
+    expect(items[0]!.fallback).toContain('[Two](https://e.com/2)');
+  });
+});
+
+describe('fieldExtras', () => {
+  it('makes a section with two-column fields and a bold title', () => {
+    const { items } = fieldExtras([{ title: 'Status', items: [{ label: 'Owner', value: '**Ana**' }, { label: 'Due', value: 'Friday' }, {}] }]);
+    expect(items[0]!.ref).toBe('fields:1');
+    expect(items[0]!.block).toEqual({
+      type: 'section',
+      text: { type: 'mrkdwn', text: '*Status*' },
+      fields: [
+        { type: 'mrkdwn', text: '*Owner*\n*Ana*' },
+        { type: 'mrkdwn', text: '*Due*\nFriday' },
+      ],
+    });
+    expect(items[0]!.fallback).toBe('**Status**\n- **Owner:** **Ana**\n- **Due:** Friday');
+  });
+  it('drops an empty group with a note', () => {
+    const { items, notes } = fieldExtras([{ title: 'x', items: [] }]);
+    expect(items).toEqual([]);
+    expect(notes[0]).toMatch(/no items/);
+  });
+});
+
+describe('linkExtras', () => {
+  it('makes one actions block per row; a flat list is one row', () => {
+    const rows = linkExtras([[{ label: 'Docs', url: 'https://d.com' }], [{ label: 'x' }]]);
+    expect(rows.items.map((i) => i.ref)).toEqual(['links:1']);
+    expect(rows.items[0]!.block).toEqual({ type: 'actions', elements: [{ type: 'button', text: { type: 'plain_text', text: 'Docs' }, url: 'https://d.com/', action_id: 'link:links_1_1' }] });
+    const flat = linkExtras([{ label: 'A', url: 'https://a.com' }, { label: 'B', url: 'https://b.com' }]);
+    expect(flat.items).toHaveLength(1);
+    expect((flat.items[0]!.block as any).elements).toHaveLength(2);
+    expect(flat.items[0]!.fallback).toBe('[A](https://a.com/) · [B](https://b.com/)');
+  });
+});
+
+describe('containerExtras', () => {
+  it('collapsible by default, collapsed, box and plain styles', () => {
+    const { items } = containerExtras([
+      { title: 'Details', body: 'long **text**' },
+      { style: 'collapsed', title: 'Logs', body: 'x' },
+      { style: 'box', title: 'Box', body: 'y', width: 'wide' },
+      { style: 'plain', title: 'Plain', fields: [{ label: 'k', value: 'v' }], buttons: [{ label: 'Open', url: 'https://o.com' }] },
+    ]);
+    const [a, b, c, d] = items.map((i) => i.block as any);
+    expect(a).toMatchObject({ type: 'container', title: { type: 'plain_text', text: 'Details' }, is_collapsible: true, child_blocks: [{ type: 'section', text: { type: 'mrkdwn', text: 'long *text*' } }] });
+    expect(a.default_collapsed).toBeUndefined();
+    expect(b).toMatchObject({ is_collapsible: true, default_collapsed: true });
+    expect(c).toMatchObject({ has_header_divider: true, width: 'wide' });
+    expect(c.is_collapsible).toBeUndefined();
+    expect(d.is_collapsible).toBeUndefined();
+    expect(d.has_header_divider).toBeUndefined();
+    expect(d.child_blocks.map((x: any) => x.type)).toEqual(['section', 'actions']);
+    expect(items.map((i) => i.ref)).toEqual(['container:1', 'container:2', 'container:3', 'container:4']);
+  });
+  it('alert styles become alert blocks', () => {
+    const { items } = containerExtras([{ style: 'warning', title: 'Heads up', body: 'it **breaks**' }]);
+    expect(items[0]!.block).toEqual({ type: 'alert', level: 'warning', text: { type: 'mrkdwn', text: '*Heads up*\nit *breaks*' } });
+    expect(items[0]!.fallback).toBe('> **Heads up**\n> it **breaks**');
+  });
+  it('needs a title (non-alerts) and content; long bodies are split into sections', () => {
+    const { items, notes } = containerExtras([{ body: 'x' }, { title: 'Empty' }, { title: 'Long', body: `${'a'.repeat(2900)}\n\n${'b'.repeat(2900)}` }]);
+    expect(items).toHaveLength(1);
+    expect((items[0]!.block as any).child_blocks).toHaveLength(2);
+    expect(notes.join(' ')).toMatch(/needs a title/);
+    expect(notes.join(' ')).toMatch(/no content/);
+  });
+});
+
+describe('replyBody: dividers and placed buttons', () => {
+  const buttons = { type: 'actions', block_id: 'reply_1_buttons', elements: [] };
+  it('puts the buttons where [[buttons]] is, dividers at [[divider]]', () => {
+    const blocks = replyBody('Pick one?\n[[buttons]]\n[[divider]]\nMore\n[[divider]]\nEnd', null, { maxBlocks: 10, idPrefix: 'p_', buttons }) as any[];
+    expect(blocks.map((b) => b.type)).toEqual(['markdown', 'actions', 'divider', 'markdown', 'divider', 'markdown']);
+    expect(blocks[1]).toBe(buttons);
+    expect(blocks[2].block_id).toBe('p_divider_1');
+    expect(blocks[4].block_id).toBe('p_divider_2');
+  });
+  it('buttons go last when not placed, and a [[buttons]] line without buttons shows nothing', () => {
+    const extras = buildExtras({ fields: [{ items: [{ label: 'a', value: 'b' }] }] }).extras;
+    const blocks = replyBody('Hi', extras, { maxBlocks: 10, idPrefix: '', buttons }) as any[];
+    expect(blocks.map((b) => b.type)).toEqual(['markdown', 'section', 'actions']);
+    expect((replyBody('Hi\n[[buttons]]', null, { maxBlocks: 10, idPrefix: '' }) as any[]).map((b) => b.type)).toEqual(['markdown']);
+  });
+  it('keeps placed buttons in a degraded render', () => {
+    const extras = { ...buildExtras({ containers: [{ title: 'T', body: 'b' }] }).extras, degraded: true };
+    const blocks = replyBody('Q?\n[[buttons]]\nrest', extras, { maxBlocks: 10, idPrefix: '', buttons }) as any[];
+    expect(blocks.map((b) => b.type)).toEqual(['markdown', 'actions', 'markdown']);
+    expect(blocks[2].text).toContain('**T**');
+  });
+  it('places fields, links and containers by marker', () => {
+    const extras = buildExtras({ fields: [{ items: [{ label: 'a', value: 'b' }] }], links: [[{ label: 'L', url: 'https://l.com' }]], containers: [{ title: 'C', body: 'c' }] }).extras;
+    const blocks = replyBody('A\n[[links:1]]\nB\n[[fields:1]]\n[[container:1]]\nZ', extras, { maxBlocks: 10, idPrefix: '' }) as any[];
+    expect(blocks.map((b) => b.type)).toEqual(['markdown', 'actions', 'markdown', 'section', 'container', 'markdown']);
+  });
+});
+
+describe('review fixes', () => {
+  it('schemas take a single object, nulls, the flat links form and alias keys', () => {
+    const c = containersSchema.parse({ title: 'D', text: 'body', kind: 'collapsed', style: null, width: null });
+    const ci = containerExtras(c).items;
+    expect(ci).toHaveLength(1);
+    expect(ci[0]!.block).toMatchObject({ default_collapsed: true, child_blocks: [{ text: { text: 'body' } }] });
+    expect(fieldExtras(fieldsSchema.parse({ fields: [{ key: 'k', value: 'v' }] })).items).toHaveLength(1);
+    expect(cardExtras(cardsSchema.parse([{ title: 'X', url: 'https://x.com', icon_url: null }])).items).toHaveLength(1);
+    const flat = linkExtras(linksSchema.parse([{ label: 'Docs', url: 'https://x.com' }]));
+    expect(flat.items).toHaveLength(1);
+    expect(linksSchema.parse('nope')).toEqual(['nope']);
+    expect(linkExtras(linksSchema.parse([{ buttons: [{ label: 'A', url: 'https://a.com', style: null }] }])).items).toHaveLength(1);
+  });
+  it('mrkdwn leaves code alone and keeps parenthesised URLs', () => {
+    expect(mrkdwn('`obj.__init__()` and ```a**2 + b**2```')).toBe('`obj.__init__()` and ```a**2 + b**2```');
+    expect(mrkdwn('[wiki](https://en.wikipedia.org/wiki/Foo_(bar))')).toBe('<https://en.wikipedia.org/wiki/Foo_(bar)|wiki>');
+    expect(mrkdwn('`a<b`')).toBe('`a&lt;b`');
+  });
+  it('clipMrkdwn never splits an entity or a link', () => {
+    expect(clipMrkdwn('abc &amp; def', 7)).toBe('abc…');
+    expect(clipMrkdwn('x <https://a.com|a> y', 10)).toBe('x…');
+  });
+  const buttons = { type: 'actions', block_id: 'reply_1_buttons', elements: [] };
+  const long = Array.from({ length: 30 }, (_, i) => `para ${i}\n\n\`\`\`\ncode ${i}\n\`\`\``).join('\n\n');
+  it('a placed [[buttons]] that folds away keeps every bit of text and the row', () => {
+    const blocks = replyBody(`${long}\n\n[[buttons]]\n\nLAST LINE`, null, { maxBlocks: 47, idPrefix: '', buttons }) as any[];
+    expect(blocks.length).toBeLessThanOrEqual(48);
+    expect(blocks.filter((b) => b === buttons)).toHaveLength(1);
+    expect(JSON.stringify(blocks)).toContain('LAST LINE');
+    expect(JSON.stringify(blocks)).toContain('para 29');
+  });
+  it('degraded with buttons stays within maxBlocks + the row', () => {
+    const extras = { items: [], degraded: true };
+    const blocks = replyBody(long, extras, { maxBlocks: 47, idPrefix: '', buttons }) as any[];
+    expect(blocks.length).toBeLessThanOrEqual(48);
+    expect(blocks.at(-1)).toBe(buttons);
   });
 });

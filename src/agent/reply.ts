@@ -34,7 +34,7 @@ import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guideline
 import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsBlock, buttonsFallbackText, normalizeButtonLabels, normalizeButtons, placeText, type ButtonsActionsBlock, type ContextBlock } from './reply-buttons.js';
 import { saveReplyExtras } from './charts-store.js';
-import { buildExtras, degradedFileIds, extrasFallback, footerBlock, hasExtras, imageExtras, replyBody, responseTimeFooter, slackTsMs, withoutMarkers, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
+import { buildExtras, degradedFileIds, hasLayoutMarkers, extrasFallback, footerBlock, hasExtras, imageExtras, replyBody, responseTimeFooter, slackTsMs, withoutMarkers, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { prepareButtonActions } from './button-actions.js';
 import { createReplyButtons, detachMessageCards, loadReplyButtons, messageHasLiveCard, postedBefore, reattachMessageCards, setReplyText, setButtonsMessage, type PlaceTarget, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
@@ -72,6 +72,11 @@ export interface ReplyTarget {
    * it took from that message to the reply (`responseTimeFooter`). Unset: no footer.
    */
   triggerTs?: string;
+  /**
+   * The model that answered, when it was a fallback (e.g. "GPT-6 Luna" after every Claude tier failed): the footer then
+   * says so next to the response time. Null/unset: the configured model answered.
+   */
+  fallbackModel?: () => string | null;
   /** Clock for the response time (tests). */
   now?: () => number;
   /** Show tool activity as transient task cards in the reply message (STATUS_ACTIVITY_MODE=tasks). */
@@ -194,13 +199,13 @@ export function markdownMessage(text: string) {
   return replyMessage(text, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 });
 }
 
-/** A reply message's final layout: [plan card, reply with its extras, buttons, footer] (each part when given). */
+/** A reply message's final layout: [plan card, reply with its extras and buttons (inline at `[[buttons]]`, else last), footer]. */
 function replyLayout(text: string, actions?: ButtonsActionsBlock | ContextBlock, card?: CardBlock | null, extras?: ReplyExtras | null): { text: string; blocks: unknown[] } {
   const footer = footerBlock(extras);
   const maxBlocks = MAX_MESSAGE_BLOCKS - 1 - (card ? 1 : 0) - footer.length;
   // An empty markdown block is invalid: an extras-only reply is their blocks plus a text fallback.
-  const body = replyBody(text, extras, { maxBlocks, idPrefix: '' });
-  return { text: extrasFallback(text, extras), blocks: [...(card ? [card] : []), ...body, ...(actions ? [actions] : []), ...footer] };
+  const body = replyBody(text, extras, { maxBlocks, idPrefix: '', buttons: actions ?? null });
+  return { text: extrasFallback(text, extras), blocks: [...(card ? [card] : []), ...body, ...footer] };
 }
 
 /** Files one message may carry (Slack). */
@@ -225,6 +230,9 @@ export interface ReplyRich {
   images?: readonly ImageArg[];
   tables?: unknown;
   cards?: unknown;
+  fields?: unknown;
+  links?: unknown;
+  containers?: unknown;
 }
 
 export class ReplyManager {
@@ -520,7 +528,7 @@ export class ReplyManager {
     const e = this.start(toolCallId);
     e.finished = true;
     const text = neutralizeBroadcasts(rawText);
-    const built = buildExtras({ charts: chartsRaw ?? rich.charts, tables: rich.tables, cards: rich.cards });
+    const built = buildExtras({ charts: chartsRaw ?? rich.charts, tables: rich.tables, cards: rich.cards, fields: rich.fields, links: rich.links, containers: rich.containers });
     const extras = built.extras;
     const chartNotes = built.notes;
     if (rich.images?.length) {
@@ -602,7 +610,7 @@ export class ReplyManager {
     // The response time: from the triggering message to now, when the complete reply goes out (after the stream
     // caught up, images were uploaded and buttons created).
     const triggerMs = this.t.triggerTs ? slackTsMs(this.t.triggerTs) : null;
-    if (triggerMs != null) extras.footer = responseTimeFooter((this.t.now ?? Date.now)() - triggerMs);
+    if (triggerMs != null) extras.footer = responseTimeFooter((this.t.now ?? Date.now)() - triggerMs, this.t.fallbackModel?.() ?? null);
     /** The message that ended up carrying the buttons (set when they went out with it). */
     let buttonsTs: string | null = null;
     let delivered: 'streamed' | 'posted' = 'posted';
@@ -636,7 +644,8 @@ export class ReplyManager {
             if (actions && tailSent) buttonsTs = e.streamTs;
             // The final layout keeps the turn's plan card above the reply (the live plan's tasks become the card).
             const card = await this.cardBlock();
-            if (card || e.blocksChunks > 0 || e.activityCards > 0 || charts.length || (footer.length && !tailSent)) {
+            // Dividers and a placed buttons row only exist in the final layout (nothing is streamed for a marker).
+            if (card || e.blocksChunks > 0 || e.activityCards > 0 || charts.length || (footer.length && !tailSent) || hasLayoutMarkers(text)) {
               if (await this.finalLayout(e, text, actions, card, extras)) {
                 if (actions) buttonsTs = e.streamTs;
                 await this.rememberExtras(e.streamTs, extras);

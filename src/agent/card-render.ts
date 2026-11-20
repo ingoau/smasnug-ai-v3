@@ -327,18 +327,18 @@ export function renderCard(card: CardState, runs: CardRun[]): RenderedCard {
     const footer = footerBlock(card.extras, `card_${card.id}_`);
     const room = MAX_MESSAGE_BLOCKS - Math.max(blocks.length, 1) - (card.buttons ? 1 : 0) - footer.length;
     const prefix = `card_${card.id}_`;
-    const parts = replyBody(reply, card.extras, { maxBlocks: room, idPrefix: prefix });
+    // The reply's buttons (or the note that replaced them) go where the text placed them, else under the text and extras.
+    const buttons = card.buttons ? buttonsBlock(card.buttons) : null;
+    const parts = replyBody(reply, card.extras, { maxBlocks: room, idPrefix: prefix, buttons });
     let n = 0;
     for (const b of parts) {
       const own = (b as { block_id?: string }).block_id;
-      if (own?.startsWith(prefix)) blocks.push(b);
+      if ((b as unknown) === buttons || own?.startsWith(prefix)) blocks.push(b);
       else {
         blocks.push({ ...b, block_id: n === 0 ? `card_${card.id}_reply` : `card_${card.id}_reply_${n}` });
         n++;
       }
     }
-    // The reply's buttons (or the note that replaced them) stay under the text and extras.
-    if (card.buttons) blocks.push(buttonsBlock(card.buttons));
     // The response time sits at the very bottom.
     blocks.push(...footer);
   }

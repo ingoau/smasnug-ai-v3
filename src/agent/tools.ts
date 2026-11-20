@@ -14,7 +14,7 @@ import { chartsSchema } from './charts.js';
 import { turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
 import { prepareImageArgs, prepareOutgoingFiles } from './files.js';
-import { cardsSchema, imagesSchema, MAX_IMAGES, tablesSchema } from './rich-blocks.js';
+import { cardsSchema, containersSchema, fieldsSchema, imagesSchema, linksSchema, MAX_IMAGES, tablesSchema } from './rich-blocks.js';
 import { accessModelText, canUseSandbox, notifyAccess } from '../sandbox/access.js';
 import { sandboxConfigured } from '../sandbox/settings.js';
 import { readSkill } from './skills.js';
@@ -80,7 +80,7 @@ export const buttonsSchema = z
   )
   .optional()
   .describe(
-    `Optional quick-reply buttons under the message. Use them whenever the message asks a question with a few clear answers (options like "price, size or wireless?", a "which one?", a yes/no). And when there's a logical next step the user would likely want (dig deeper, draft or write it, run it, set a reminder, send it), end with one short offer plus buttons, e.g. "want me to draft it?" → ["Yes, draft it", { "label": "No thanks", "type": "text", "text": "no worries 👍" }]. When you couldn't find what was asked, say so and offer to dig deeper: ["Dig deeper", { "label": "No thanks", "type": "text", "text": "all good 👍" }]. At most one offer per message, only when genuinely useful: never on bare greetings or thanks, or while the user is mid-task giving you instructions. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars); a plain label is a prompt button: exactly what the user would type back, and a press posts it as their message and starts your turn. Decline / dismiss buttons that need nothing from you ("No thanks", "Never mind", "All good") are always type "text" with a short static answer, never plain labels. When the next step is a single fixed tool call (e.g. upload the emoji you just showed), use an "action" button instead of a prompt one. Omit for open questions and when there's no clear next step.`,
+    `Optional quick-reply buttons under the message (or where a line [[buttons]] is in the text). Use them whenever the message asks a question with a few clear answers (options like "price, size or wireless?", a "which one?", a yes/no). And when there's a logical next step the user would likely want (dig deeper, draft or write it, run it, set a reminder, send it), end with one short offer plus buttons, e.g. "want me to draft it?" → ["Yes, draft it", { "label": "No thanks", "type": "text", "text": "no worries 👍" }]. When you couldn't find what was asked, say so and offer to dig deeper: ["Dig deeper", { "label": "No thanks", "type": "text", "text": "all good 👍" }]. At most one offer per message, only when genuinely useful: never on bare greetings or thanks, or while the user is mid-task giving you instructions. 1-${MAX_BUTTONS} short plain-text labels (≤ ${MAX_LABEL_CHARS} chars); a plain label is a prompt button: exactly what the user would type back, and a press posts it as their message and starts your turn. Decline / dismiss buttons that need nothing from you ("No thanks", "Never mind", "All good") are always type "text" with a short static answer, never plain labels. When the next step is a single fixed tool call (e.g. upload the emoji you just showed), use an "action" button instead of a prompt one. Omit for open questions and when there's no clear next step.`,
   );
 
 registerTool({
@@ -101,17 +101,20 @@ registerTool({
   build: (ctx) =>
     tool({
       description:
-        'Post a message in the current Slack thread (markdown; optional files, inline images, data tables, link cards, charts). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction instead). A reply ends your turn unless continue_turn is true (calls in the same step that need their results, like searches, still run and come back to you). Usually one reply per turn; never send two replies that say the same thing.',
+        'Post a message in the current Slack thread (markdown; optional files, inline images, data tables, key/value fields, containers (collapsible sections, boxes, alerts), link cards, link buttons, charts). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction instead). A reply ends your turn unless continue_turn is true (calls in the same step that need their results, like searches, still run and come back to you). Usually one reply per turn; never send two replies that say the same thing.',
       inputSchema: z.object({
         text: z
           .string()
           .describe(
-            'Message text in Slack-flavoured markdown. Keep it concise. State the takeaway even when you also send a chart or table. Images, tables, cards and charts go below the text; to put one inside it instead, write a line that is only its marker: [[image:N]], [[table:N]], [[chart:N]] or [[cards]] (N = its position in that list, from 1).',
+            'Message text in Slack-flavoured markdown. Keep it concise. State the takeaway even when you also send a chart or table. Images, tables, fields, containers, cards, link rows and charts go below the text; to put one inside it instead, write a line that is only its marker: [[image:N]], [[table:N]], [[chart:N]], [[fields:N]], [[container:N]], [[links:N]] or [[cards]] (N = its position in that list, from 1). A line [[divider]] draws a divider; a line [[buttons]] puts the quick-reply buttons there instead of at the bottom (e.g. right under the question they answer). Use # headings to break up a long answer.',
           ),
         files: replyFilesSchema,
         images: imagesSchema,
         tables: tablesSchema,
         cards: cardsSchema,
+        fields: fieldsSchema,
+        containers: containersSchema,
+        links: linksSchema,
         buttons: buttonsSchema,
         charts: chartsSchema,
         continue_turn: continueTurnSchema,
@@ -122,7 +125,7 @@ registerTool({
       onInputDelta: ({ toolCallId, inputTextDelta }) => {
         turnState(ctx).replies.delta(toolCallId, inputTextDelta);
       },
-      execute: async ({ text, files, images, tables, cards, buttons, charts }, { toolCallId }) => {
+      execute: async ({ text, files, images, tables, cards, fields, containers, links, buttons, charts }, { toolCallId }) => {
         const s = turnState(ctx);
         // At most 10 files per message (Slack); access is checked per id (this thread, or the speaker's own files).
         const prepared = await prepareOutgoingFiles({ threadId: ctx.threadId, speakerId: ctx.speakerId, turnId: ctx.turnId }, files?.slice(0, 10));
@@ -131,7 +134,7 @@ registerTool({
         const inline = new Set(imgs.images.flatMap((i) => (i.file?.fileId ? [i.file.fileId] : [])));
         const all = [...prepared.files.filter((f) => !f.fileId || !inline.has(f.fileId)), ...imgs.attach.filter((a) => !prepared.files.some((f) => f.fileId === a.fileId))];
         const attach = all.slice(0, 10);
-        const res = await s.replies.finish(toolCallId, text, attach, buttons, charts, { images: imgs.images, tables, cards });
+        const res = await s.replies.finish(toolCallId, text, attach, buttons, charts, { images: imgs.images, tables, cards, fields, containers, links });
         const notes = [...prepared.errors, ...imgs.errors, ...((files?.length ?? 0) > 10 || all.length > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
         const fileNote = notes.length ? ` File problems: ${notes.join(' ')}` : '';
         if (res.startsWith('Replied')) {
