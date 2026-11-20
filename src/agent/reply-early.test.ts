@@ -173,7 +173,85 @@ describe('reply stream opened early', () => {
     expect(await rm.finish('tc1', text)).toBe('Replied (posted).');
     const i = methods();
     expect(i.indexOf('chat.delete')).toBeLessThan(i.indexOf('chat.postMessage'));
-    expect(earlyStream.enabled).toBe(true); // invalid_chunks is about the content, not the empty start
+    // Refused chunks after an empty start: every reply would pay for it, so early streams switch off.
+    expect(earlyStream.enabled).toBe(false);
+  });
+
+  it('a channel-specific refusal of the empty start does not switch early streams off', async () => {
+    failOn = (m, a) => (m === 'chat.startStream' && !a.chunks ? 'not_in_channel' : null);
+    const rm = new ReplyManager(target());
+    rm.open('tc1');
+    await sleep(10);
+    expect(earlyStream.enabled).toBe(true);
+    expect(rm.anyVisible).toBe(false);
+  });
+
+  it('a Slack-ended (idle) early stream: removed, a fresh stream opens, early streams stay on', async () => {
+    failOn = (m, a) => (m === 'chat.appendStream' && a.ts === '1700000000.000001' ? 'message_not_in_streaming_state' : null);
+    const rm = new ReplyManager(target());
+    rm.open('tc1');
+    const text = 'Still delivered after the idle stream ended.';
+    await streamIn(rm, text);
+    expect(await rm.finish('tc1', text)).toBe('Replied (streamed).');
+    expect(calls.filter((c) => c.method === 'chat.startStream')).toHaveLength(2);
+    expect(calls.find((c) => c.method === 'chat.delete')!.args.ts).toBe('1700000000.000001');
+    expect(earlyStream.enabled).toBe(true);
+  });
+
+  it('a stop landing during the first append opens no fresh stream', async () => {
+    let stopped = false;
+    failOn = (m) => {
+      if (m !== 'chat.appendStream') return null;
+      stopped = true;
+      return 'message_not_in_streaming_state';
+    };
+    const rm = new ReplyManager(target({ stopRequested: async () => stopped }));
+    rm.open('tc1');
+    const text = 'Stopped while this was going out.';
+    await streamIn(rm, text);
+    expect(await rm.finish('tc1', text)).toMatch(/^Not delivered: the user pressed stop/);
+    expect(calls.filter((c) => c.method === 'chat.startStream')).toHaveLength(1);
+    expect(methods()).toContain('chat.delete');
+  });
+
+  it('only one caller takes the early stream: an abort racing finish() never deletes the delivered reply', async () => {
+    latency = { 'chat.startStream': 60 };
+    const rm = new ReplyManager(target());
+    rm.open('tc1');
+    const text = 'Racing an abort.';
+    const fin = rm.finish('tc1', text);
+    const abort = rm.abortOpenStreams();
+    await sleep(5);
+    await Promise.all([fin, abort]);
+    const deleted = calls.filter((c) => c.method === 'chat.delete').map((c) => c.args.ts);
+    const appended = calls.filter((c) => c.method === 'chat.appendStream').map((c) => c.args.ts);
+    expect(appended.filter((ts) => deleted.includes(ts))).toEqual([]);
+  });
+
+  it('finish() throwing before it removed the early stream: closeUnfinished still deletes it', async () => {
+    const rm = new ReplyManager(target());
+    rm.open('tc1');
+    await sleep(10);
+    const bad = { n: 1, alt: 'x', get url(): string { throw new Error('boom'); } };
+    await expect(rm.finish('tc1', 'With a broken image.', undefined, undefined, undefined, { images: [bad as any] })).rejects.toThrow('boom');
+    await rm.closeUnfinished();
+    expect(methods().slice(-2)).toEqual(['chat.stopStream', 'chat.delete']);
+  });
+
+  it('a retried reply call removes the earlier call\'s unused early stream and opens its own', async () => {
+    const rm = new ReplyManager(target({ activityCards: true }));
+    rm.open('tc1'); // the model's call fails (invalid input) before any text
+    await sleep(10);
+    rm.open('tc2');
+    await sleep(10);
+    const starts = calls.filter((c) => c.method === 'chat.startStream');
+    expect(starts).toHaveLength(2);
+    expect(calls.find((c) => c.method === 'chat.delete')!.args.ts).toBe('1700000000.000001');
+    const json = JSON.stringify({ text: 'The retry goes through.' });
+    rm.delta('tc2', json);
+    await sleep(300);
+    expect(await rm.finish('tc2', 'The retry goes through.')).toBe('Replied (streamed).');
+    expect(calls.filter((c) => c.method === 'chat.appendStream').every((c) => c.args.ts === '1700000000.000002')).toBe(true);
   });
 
   it('chunks refused after an empty start: early streams are switched off, the reply opens a fresh stream', async () => {
