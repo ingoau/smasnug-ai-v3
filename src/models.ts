@@ -406,15 +406,34 @@ export function adapted(model: LanguageModelV4, flavor: Flavor): LanguageModelV4
  * OpenRouter (paid, so the cheaper model). Other ids: Hack Club → OpenRouter, same model. Unconfigured tiers are
  * skipped. Pass settings via `providerOptions: modelOptions({...})`.
  */
-export function chatModel(modelId: string): LanguageModelV4 {
+export function chatModel(modelId: string, opts: ChatModelOptions = {}): LanguageModelV4 {
+  const tier = (m: LanguageModelV4, served: string) => (opts.onServed ? servedBy(m, served, opts.onServed) : m);
   if (!isClaude(modelId)) {
     const fallback = adapted(openrouter(modelId), 'openrouter');
     return hackclub ? withFallback(adapted(hackclub(modelId), 'openrouter'), fallback, hackclubCooldown) : fallback;
   }
-  let model = adapted(openrouter(env.MODEL_LUNA), 'openrouter');
-  if (anthropic) model = withFallback(adapted(anthropic(anthropicClaudeId(modelId)), 'anthropic'), model, anthropicCooldown);
-  if (hackclub) model = withFallback(adapted(hackclub(openrouterClaudeId(modelId)), 'openrouter-claude'), model, hackclubCooldown);
+  let model = tier(adapted(openrouter(env.MODEL_LUNA), 'openrouter'), env.MODEL_LUNA);
+  if (anthropic) model = withFallback(tier(adapted(anthropic(anthropicClaudeId(modelId)), 'anthropic'), modelId), model, anthropicCooldown);
+  if (hackclub) model = withFallback(tier(adapted(hackclub(openrouterClaudeId(modelId)), 'openrouter-claude'), modelId), model, hackclubCooldown);
   return model;
+}
+
+export interface ChatModelOptions {
+  /**
+   * Called with the model id each time a tier is asked for a response (Claude tiers: `modelId`; the last tier:
+   * MODEL_LUNA). The last call of a step is the model that answered it: a Claude tier that failed is followed by the
+   * next one's call.
+   */
+  onServed?: (modelId: string) => void;
+}
+
+/** `model`, reporting each call to `onServed` (before it starts). */
+export function servedBy(model: LanguageModelV4, served: string, onServed: (modelId: string) => void): LanguageModelV4 {
+  return {
+    ...model,
+    doGenerate: (options) => (onServed(served), model.doGenerate(options)),
+    doStream: (options) => (onServed(served), model.doStream(options)),
+  };
 }
 
 /** Test hook. */
