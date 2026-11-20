@@ -17,7 +17,8 @@ ms after the user's message (its Slack `ts`):
 | `status_done` | turn-start status call returned |
 | `context_start`, `context_built` (+ spans `ctx_*`) | front turn context (backfill, users.info, history, memory, facts, snapshot) |
 | `model_request`, `first_chunk`, `first_tool_input`, `first_reply_delta` | model stream |
-| `stream_started` / `reply_posted`, `stream_stopped` | reply delivery |
+| `early_stream_open_call`, `early_stream_open` | the reply's empty stream opened when the reply call begins (`ReplyManager.open`) |
+| `stream_open_call`, `stream_started` / `reply_posted`, `stream_stopped` | reply delivery (`stream_started` = first text visible, also with an early stream) |
 | `stepN_end`, `loop_done`, `turn_end` | model steps, end of loop, end of turn (status cleared) |
 
 Counters: model steps, input / output / reasoning / cached tokens, prompt chars; notes: tool names per step.
@@ -106,8 +107,22 @@ thread's first text is within ~0.1s of the single-thread number; subagent runs s
 | A delivered `reply` / `react` ends the turn by code (`src/agent/turn-end.ts`) unless `continue_turn` or a non-terminal call in the same step: prod showed 154/154 turns as `[["reply"],["end_turn"]]`, i.e. the model did not call `end_turn` in the reply step | turn end −~1.9 s (one model step) |
 | First stream flush as soon as ~8 chars are there (80ms cap), then 250ms coalescing | first text −0.2–0.4s |
 | Redundant inbox-push transaction skipped in debounce fire | −~10ms |
+| `conversations.info` prefetched at intake (fire-and-forget, during the debounce window; one in-flight lookup per channel) | prod: −~250ms context on a cache miss (first message after 10 quiet minutes; `ctx_conversation` p90 was ~250ms) |
+| Reply stream opened (empty `chat.startStream`) when the `reply` call begins; the first text is appended | see below; bench `hi` first text 1980 → 1950 |
 | Per-channel Slack limiter only counts message-creating calls; Postgres pool 10 → 20 | headroom for many threads in one DM channel |
 | Subagents: card shows "Researching…" and elapsed time for long steps; Luna subagents at reasoning effort low (since raised to medium for accuracy, see below) | lookup run 15s → 6s; broad research 84s → 36s (one run 186s with more fetch steps) |
+
+### Early reply stream (2026-11-20)
+
+`chat.startStream` used to wait for the first reply text. Now the reply tool's input start opens an empty stream
+(no chunks; Slack's own SDKs start streams empty too, but its docs don't say which mode an empty start locks), and the
+first flush sends its text with `chat.appendStream`. One Slack round trip still follows the first text either way, so
+the gain is `min(text gap, startStream) − appendStream`, where the text gap is `first_tool_input → first_reply_text`.
+Prod (7 days): startStream p50 384ms / p90 451ms; appendStream (into an adopted activity message) p50 255ms / p90
+392ms; text gap median ~270ms, sometimes ~600ms. So first text comes ~15ms earlier at the median gap and ~130ms
+earlier for slow first words. Bench `hi` (5 runs, every fake call 150ms): first text 1980 → 1950, turn end unchanged.
+If Slack refuses an empty start or chunks after one, early streams switch off for the process
+(`earlyStream.enabled`), and a reply that ends up posted, dropped, stopped or never executed deletes the empty stream.
 
 ### Evaluated, not changed
 
@@ -133,5 +148,5 @@ thread's first text is within ~0.1s of the single-thread number; subagent runs s
 - Model TTFT (~1.2s per step on OpenRouter → gpt-6-luna), and one more full step per tool round trip
   (slack_search answers need two steps: ~3.5s to first text).
 - Slack network: the bench assumes 150ms per call; on the critical path are the intake status (1 RTT, parallel),
-  `chat.startStream` (1 RTT) and at the end `chat.stopStream` + two serial status-clear calls (3 RTT).
+  the first text's stream call (1 RTT: `chat.appendStream` into the early stream, else `chat.startStream`) and at the end `chat.stopStream` + two serial status-clear calls (3 RTT).
 - Slack event delivery before ingress (outside our control; not in the bench).
