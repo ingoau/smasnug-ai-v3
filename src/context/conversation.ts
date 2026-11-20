@@ -77,6 +77,26 @@ export function agentChannelFromSlack(props: any): Pick<ConversationInfo, 'agent
 export async function getConversationInfo(channelId: string): Promise<ConversationInfo | null> {
   const cached = await redis.get(key(channelId)).catch(() => null);
   if (cached) return cached === 'null' ? null : (JSON.parse(cached) as ConversationInfo);
+  // One lookup per channel at a time in this process: a turn starting while the intake prefetch is still running
+  // waits for it instead of calling Slack again.
+  const pending = inFlight.get(channelId);
+  if (pending) return pending;
+  const p = fetchConversationInfo(channelId).finally(() => inFlight.delete(channelId));
+  inFlight.set(channelId, p);
+  return p;
+}
+
+const inFlight = new Map<string, Promise<ConversationInfo | null>>();
+
+/**
+ * Warm the cache for a turn that is likely to start (pipeline intake, during the debounce window): the turn's context
+ * then finds it cached (a miss costs a Slack round trip, ~250ms). Fire-and-forget, never throws.
+ */
+export function prefetchConversationInfo(channelId: string): void {
+  void getConversationInfo(channelId).catch((err) => log.debug({ err, channelId }, 'conversations.info prefetch failed'));
+}
+
+async function fetchConversationInfo(channelId: string): Promise<ConversationInfo | null> {
   try {
     const res = await slackCall<any>('conversations.info', { channel: channelId, include_num_members: true });
     const info = res?.ok === false ? null : conversationInfoFromSlack(res?.channel);
