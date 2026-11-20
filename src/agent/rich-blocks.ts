@@ -97,6 +97,8 @@ export const MAX_FIELD_GROUPS = 5;
 const MAX_FIELDS = 10;
 const MAX_FIELD_LABEL = 100;
 const MAX_FIELD_VALUE = 500;
+/** Characters in one field's text (Slack: 2000). */
+const MAX_FIELD_TEXT = 2000;
 export const MAX_LINK_ROWS = 5;
 const MAX_LINK_BUTTONS = 5;
 export const MAX_CONTAINERS = 5;
@@ -140,11 +142,27 @@ const clipBlock = (s: string, max: number) => sliceUnits(neutralizeBroadcasts(s)
 export function mrkdwn(md: string): string {
   const keep: string[] = [];
   const held = (v: string) => `\u0000${keep.push(v) - 1}\u0000`;
-  let s = md.replace(/<(?:https?:\/\/[^|>\s]+(?:\|[^>]*)?|[@#!][^>\s]+)>/g, (m) => held(m));
-  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, (_m, t: string, u: string) => held(`<${u}|${t.replace(/[<>|]/g, '')}>`));
-  s = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  s = s.replace(/\*\*([^*\n]+)\*\*/g, '*$1*').replace(/__([^_\n]+)__/g, '*$1*').replace(/~~([^~\n]+)~~/g, '~$1~');
+  const esc = (v: string) => v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  // Code (fenced, then inline) is left as written, only escaped.
+  let s = md.replace(/```[\s\S]*?```|`[^`\n]+`/g, (m) => held(esc(m)));
+  s = s.replace(/<(?:https?:\/\/[^|>\s]+(?:\|[^>]*)?|[@#!][^>\s]+)>/g, (m) => held(m));
+  // URLs may hold balanced parentheses (Wikipedia's `Foo_(bar)`).
+  s = s.replace(/\[([^\]\n]+)\]\((https?:\/\/(?:[^()\s]|\([^()\s]*\))+)\)/g, (_m, t: string, u: string) => held(`<${u.replace(/[<>|]/g, encodeURIComponent)}|${esc(t.replace(/[<>|]/g, ''))}>`));
+  s = esc(s);
+  s = s.replace(/\*\*(?=\S)([^*\n]+?)\*\*/g, '*$1*').replace(/__(?=\S)([^_\n]+?)__/g, '*$1*').replace(/~~(?=\S)([^~\n]+?)~~/g, '~$1~');
   return s.replace(/\u0000(\d+)\u0000/g, (_m, i: string) => keep[Number(i)]!);
+}
+
+/** Where to cut mrkdwn at `at` (or before) without splitting an entity (`&amp;`) or a `<…>` link. */
+function safeCut(s: string, at: number): number {
+  const m = /(?:&[a-z#0-9]*|<[^>\n]*)$/i.exec(s.slice(0, at));
+  return m && m.index > 0 ? m.index : at;
+}
+
+/** mrkdwn clipped to `max` characters (Slack's limit for that field), never mid-entity or mid-link. */
+export function clipMrkdwn(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, safeCut(s, max - 1)).trimEnd()}…`;
 }
 
 /** A link button (action_id under the `link:` prefix: Slack opens the URL; the click needs no handling). */
@@ -217,51 +235,52 @@ export const tablesSchema = z
     `Optional data tables in the message (sortable, paged), up to ${MAX_TABLES}: [{caption, columns: [..], rows: [[..], ..]}]. Use for data with several columns or more than a handful of rows (comparisons, lists of results, specs), instead of a markdown table. Numbers as numbers sort numerically. ≤ 20 columns, ≤ 200 rows. Placement: below the text, or where a line [[table:N]] is.`,
   );
 
+/** An optional string the model may also send as null. */
+const optStr = z.string().nullish();
+/** A list, or one item alone (taken as a list of one); null/absent → nothing. Never fails: items `.catch` on their own. */
+const listOf = <T extends z.ZodTypeAny>(item: T) => z.union([z.array(item), item.transform((v) => [v])]).nullish();
+
+const linkButtonSchema = z
+  .object({ label: textish, url: optStr, style: optStr.describe('"primary" or "danger" (optional)') })
+  .passthrough()
+  .catch({});
+
 const cardInputSchema = z
   .object({
     title: textish.describe('≤ 150 characters'),
     subtitle: textish.describe('Optional, ≤ 150'),
     body: textish.describe('Optional, ≤ 200, markdown links allowed'),
-    image_url: z.string().optional().describe('Optional public https image URL (hero image)'),
-    icon_url: z.string().optional().describe('Optional public https URL of a small icon shown next to the title (a logo, favicon, avatar)'),
-    url: z.string().optional().describe('Optional link: adds a button that opens it'),
+    image_url: optStr.describe('Optional public https image URL (hero image)'),
+    icon_url: optStr.describe('Optional public https URL of a small icon shown next to the title (a logo, favicon, avatar)'),
+    url: optStr.describe('Optional link: adds a button that opens it'),
     button: textish.describe('Optional label for that button (default "Open")'),
-    buttons: z
-      .array(z.object({ label: textish, url: z.string().optional(), style: z.string().optional().describe('"primary" or "danger" (optional)') }).catch({}))
-      .optional()
-      .describe(`Optional link buttons, up to ${MAX_CARD_BUTTONS} (instead of url/button): [{label, url}]`),
+    buttons: listOf(linkButtonSchema).describe(`Optional link buttons, up to ${MAX_CARD_BUTTONS} (instead of url/button): [{label, url}]`),
   })
   .catch({});
 
-export const cardsSchema = z
-  .array(cardInputSchema)
-  .nullish()
-  .describe(
-    `Optional link cards, shown as a horizontally scrolling carousel (one card alone if just one), up to ${MAX_CARDS}: [{title, subtitle?, body?, image_url?, icon_url?, buttons?: [{label, url}] (≤ ${MAX_CARD_BUTTONS})}]. Use for a few options or results the user picks between (products, places, articles, repos), each with its link. Not for plain data (use tables). Placement: below the text, or where a line [[cards]] is.`,
-  );
+export const cardsSchema = listOf(cardInputSchema).describe(
+  `Optional link cards, shown as a horizontally scrolling carousel (one card alone if just one), up to ${MAX_CARDS}: [{title, subtitle?, body?, image_url?, icon_url?, buttons?: [{label, url}] (≤ ${MAX_CARD_BUTTONS})}]. Use for a few options or results the user picks between (products, places, articles, repos), each with its link. Not for plain data (use tables). Placement: below the text, or where a line [[cards]] is.`,
+);
 
-const fieldItemSchema = z.object({ label: textish.describe('Key, ≤ 100 characters'), value: textish.describe('Value, ≤ 500, markdown allowed') }).catch({});
+const fieldItemSchema = z
+  .object({ label: textish.describe('Key, ≤ 100 characters'), value: textish.describe('Value, ≤ 500, markdown allowed') })
+  .passthrough()
+  .catch({});
 const fieldGroupSchema = z
   .object({
     title: textish.describe('Optional bold heading above the fields'),
-    items: z.array(fieldItemSchema).optional().describe(`The key/value pairs, up to ${MAX_FIELDS} (shown two per row)`),
+    items: listOf(fieldItemSchema).describe(`The key/value pairs, up to ${MAX_FIELDS} (shown two per row)`),
   })
+  .passthrough()
   .catch({});
 
-export const fieldsSchema = z
-  .array(fieldGroupSchema)
-  .nullish()
-  .describe(
-    `Optional key/value sections in a two-column layout, up to ${MAX_FIELD_GROUPS}: [{title?, items: [{label, value}]}] (≤ ${MAX_FIELDS} items each). Use for a handful of facts about one thing (specs, status, dates, owner, price) instead of a bulleted "Key: value" list. Placement: below the text, or where a line [[fields:N]] is. A line [[divider]] draws a divider anywhere in the text.`,
-  );
+export const fieldsSchema = listOf(fieldGroupSchema).describe(
+  `Optional key/value sections in a two-column layout, up to ${MAX_FIELD_GROUPS}: [{title?, items: [{label, value}]}] (≤ ${MAX_FIELDS} items each). Use for a handful of facts about one thing (specs, status, dates, owner, price) instead of a bulleted "Key: value" list. Placement: below the text, or where a line [[fields:N]] is. A line [[divider]] draws a divider anywhere in the text.`,
+);
 
-const linkRowSchema = z.union([
-  z.array(z.object({ label: textish, url: z.string().optional(), style: z.string().optional() }).catch({})),
-  z.object({ buttons: z.array(z.object({ label: textish, url: z.string().optional(), style: z.string().optional() }).catch({})).optional() }).transform((o) => o.buttons ?? []),
-]);
-
+// Loose on purpose (rows of buttons, one flat row, {buttons: [...]}): linkExtras sorts it out.
 export const linksSchema = z
-  .array(linkRowSchema.catch([]))
+  .union([z.array(z.unknown()), z.unknown().transform((v) => [v])])
   .nullish()
   .describe(
     `Optional rows of link buttons placed next to the content they belong to, up to ${MAX_LINK_ROWS} rows of ≤ ${MAX_LINK_BUTTONS}: [[{label, url, style?: "primary"|"danger"}], …]. Put a line [[links:N]] (N = row, from 1) right under the paragraph it belongs to; unplaced rows go below the text. Buttons only open their URL (for answers the user picks, use \`buttons\`).`,
@@ -269,28 +288,23 @@ export const linksSchema = z
 
 const containerSchema = z
   .object({
-    style: z
-      .string()
-      .optional()
-      .describe(
-        '"collapsible" (folds away, starts open), "collapsed" (folds away, starts folded), "box" (a titled group with a line under the title), "plain" (a titled group, no line), or an alert: "info", "success", "warning", "error" (a coloured callout). Default "collapsible"',
-      ),
+    style: optStr.describe(
+      '"collapsible" (folds away, starts open), "collapsed" (folds away, starts folded), "box" (a titled group with a line under the title), "plain" (a titled group, no line), or an alert: "info", "success", "warning", "error" (a coloured callout). Default "collapsible"',
+    ),
     title: textish.describe('Title (required), ≤ 150 characters'),
     subtitle: textish.describe('Optional, ≤ 150 (not on alerts)'),
     body: textish.describe('The content, markdown'),
-    fields: z.array(fieldItemSchema).optional().describe(`Optional key/value pairs under the body (≤ ${MAX_FIELDS}, not on alerts)`),
-    buttons: z.array(z.object({ label: textish, url: z.string().optional(), style: z.string().optional() }).catch({})).optional().describe(`Optional link buttons at the bottom (≤ ${MAX_LINK_BUTTONS}, not on alerts)`),
-    icon_url: z.string().optional().describe('Optional public https icon next to the title (not on alerts)'),
-    width: z.string().optional().describe('"narrow", "standard" (default), "wide" or "full" (not on alerts)'),
+    fields: listOf(fieldItemSchema).describe(`Optional key/value pairs under the body (≤ ${MAX_FIELDS}, not on alerts)`),
+    buttons: listOf(linkButtonSchema).describe(`Optional link buttons at the bottom (≤ ${MAX_LINK_BUTTONS}, not on alerts)`),
+    icon_url: optStr.describe('Optional public https icon next to the title (not on alerts)'),
+    width: optStr.describe('"narrow", "standard" (default), "wide" or "full" (not on alerts)'),
   })
+  .passthrough()
   .catch({});
 
-export const containersSchema = z
-  .array(containerSchema)
-  .nullish()
-  .describe(
-    `Optional containers: titled groups of content, up to ${MAX_CONTAINERS}: [{style?, title, subtitle?, body, fields?, buttons?}]. "collapsible"/"collapsed" keep long answers tidy (details, full logs, step-by-step, sources, the long version); "box"/"plain" group related content; alert styles call out a warning, tip or result. Keep the main answer in the text; containers hold the parts people may skip. Placement: below the text, or where a line [[container:N]] is.`,
-  );
+export const containersSchema = listOf(containerSchema).describe(
+  `Optional containers: titled groups of content, up to ${MAX_CONTAINERS}: [{style?, title, subtitle?, body, fields?, buttons?}]. "collapsible"/"collapsed" keep long answers tidy (details, full logs, step-by-step, sources, the long version); "box"/"plain" group related content; alert styles call out a warning, tip or result. Keep the main answer in the text; containers hold the parts people may skip. Placement: below the text, or where a line [[container:N]] is.`,
+);
 
 // ---------- Images ----------
 
@@ -469,7 +483,7 @@ function fieldItems(raw: unknown, notes: string[], where: string): { fields: { t
       notes.push(`Only ${MAX_FIELDS} fields fit in ${where}.`);
       break;
     }
-    fields.push({ type: 'mrkdwn', text: [label && `*${mrkdwn(label)}*`, value && mrkdwn(value)].filter(Boolean).join('\n') });
+    fields.push({ type: 'mrkdwn', text: clipMrkdwn([label && `*${mrkdwn(label)}*`, value && mrkdwn(value)].filter(Boolean).join('\n'), MAX_FIELD_TEXT) });
     md.push(`- ${label ? `**${mdLine(label)}:** ` : ''}${mdLine(value)}`);
   }
   return { fields, md };
@@ -540,7 +554,7 @@ function chunks(text: string, max: number): string[] {
   let rest = text;
   while (rest.length > max) {
     const cut = Math.max(rest.lastIndexOf('\n\n', max), rest.lastIndexOf('\n', max));
-    const at = cut > max / 2 ? cut : max;
+    const at = cut > max / 2 ? cut : safeCut(rest, max);
     out.push(rest.slice(0, at).trim());
     rest = rest.slice(at).trim();
   }
@@ -571,7 +585,7 @@ export function containerExtras(raw: unknown): { items: ReplyExtra[]; notes: str
         continue;
       }
       const level = style === 'alert' ? 'info' : style;
-      const text = sliceUnits([title && `*${mrkdwn(title)}*`, body && mrkdwn(body)].filter(Boolean).join('\n'), MAX_ALERT_TEXT);
+      const text = clipMrkdwn([title && `*${mrkdwn(title)}*`, body && mrkdwn(body)].filter(Boolean).join('\n'), MAX_ALERT_TEXT);
       items.push({
         ref: `container:${n}`,
         block: { type: 'alert', level, text: { type: 'mrkdwn', text } },
@@ -612,7 +626,7 @@ export function containerExtras(raw: unknown): { items: ReplyExtra[]; notes: str
       block: {
         type: 'container',
         title: { type: 'plain_text', text: title },
-        ...(subtitle ? { subtitle: { type: 'mrkdwn', text: mrkdwn(subtitle) } } : {}),
+        ...(subtitle ? { subtitle: { type: 'mrkdwn', text: clipMrkdwn(mrkdwn(subtitle), MAX_CONTAINER_SUBTITLE) } } : {}),
         ...(icon ? { icon: { type: 'image', image_url: icon, alt_text: `${sliceUnits(title, 140)} icon` } } : {}),
         ...(WIDTHS.has(width) ? { width } : {}),
         ...(kind === 'collapsible' || kind === 'collapsed' ? { is_collapsible: true } : {}),
@@ -673,6 +687,7 @@ export function replyBody(text: string, extras: ReplyExtras | null | undefined, 
   const byRef = new Map(items.map((it) => [it.ref, it]));
   const used = new Set<string>();
   const buttons = (opts.buttons ?? null) as ReplyBlock | null;
+  const placed = placedRefs(text);
   let dividers = 0;
   /** Markers that aren't extras: dividers and the quick-reply buttons (once). Undefined: not one of them. */
   const layoutMarker = (ref: string): { block: unknown } | null | undefined => {
@@ -682,66 +697,71 @@ export function replyBody(text: string, extras: ReplyExtras | null | undefined, 
     used.add(ref);
     return { block: buttons };
   };
+  /**
+   * The text's blocks within `budget` (not counting the buttons): a placed buttons row gets one block on top, but if
+   * the text folded past the limit and the row fell into the folded part, it is rendered again without that block
+   * (the row then goes last), so the text never takes more than `budget`.
+   */
+  const renderText = (src: string, budget: number, resolveExtra: (ref: string) => { block: unknown } | { markdown: string } | null) => {
+    const once = (bonus: number) => {
+      used.clear();
+      dividers = 0;
+      return replyBlocks(src, {
+        maxBlocks: Math.max(1, budget) + bonus,
+        resolve: (ref) => {
+          const lm = layoutMarker(ref);
+          return lm !== undefined ? lm : resolveExtra(ref);
+        },
+      });
+    };
+    const withBonus = buttons && placed.has(BUTTONS_REF);
+    const first = once(withBonus ? 1 : 0);
+    return withBonus && !first.includes(buttons!) ? once(0) : first;
+  };
+  /** The buttons row last when the text didn't place it. */
   const withButtons = (blocks: ReplyBlock[]) => (buttons && !blocks.includes(buttons) ? [...blocks, buttons] : blocks);
   if (extras?.degraded) {
-    const placed = placedRefs(text);
     const rest = items.filter((it) => !placed.has(it.ref) && it.fallback).map((it) => it.fallback);
     const full = [text.trimEnd(), ...rest].filter((s) => s.trim()).join('\n\n');
     if (!full.trim()) return withButtons([]);
     return withButtons(
-      replyBlocks(full, {
-        maxBlocks: opts.maxBlocks + (buttons ? 1 : 0),
-        resolve: (ref) => {
-          const lm = layoutMarker(ref);
-          if (lm !== undefined) return lm;
-          const it = byRef.get(ref);
-          if (!it || used.has(ref)) return null;
-          used.add(ref);
-          return it.fallback ? { markdown: it.fallback } : null;
-        },
+      renderText(full, opts.maxBlocks, (ref) => {
+        const it = byRef.get(ref);
+        if (!it || used.has(ref)) return null;
+        used.add(ref);
+        return it.fallback ? { markdown: it.fallback } : null;
       }),
     );
   }
   const idOf = (it: ReplyExtra) => `${opts.idPrefix}${it.ref.replace(':', '_')}`;
   const blockOf = (it: ReplyExtra) => ({ ...it.block, block_id: idOf(it) }) as unknown as ReplyBlock;
   // Room for the extras below the text; placed ones count inside the text's own budget.
-  const placed = placedRefs(text);
-  const render = (reserve: number) => {
-    used.clear();
-    dividers = 0;
-    return withoutMarkers(text).trim()
-      ? replyBlocks(text, {
-          // A placed buttons row counts inside the text's budget too (it is outside `maxBlocks`).
-          maxBlocks: Math.max(1, opts.maxBlocks - reserve) + (buttons && placed.has(BUTTONS_REF) ? 1 : 0),
-          resolve: (ref) => {
-            const lm = layoutMarker(ref);
-            if (lm !== undefined) return lm;
-            const it = byRef.get(ref);
-            if (!it || used.has(ref)) return null;
-            used.add(ref);
-            return { block: blockOf(it) };
-          },
+  const render = (reserve: number) =>
+    withoutMarkers(text).trim()
+      ? renderText(text, opts.maxBlocks - reserve, (ref) => {
+          const it = byRef.get(ref);
+          if (!it || used.has(ref)) return null;
+          used.add(ref);
+          return { block: blockOf(it) };
         })
       : [];
-  };
   const shownIn = (blocks: ReplyBlock[]) => new Set(blocks.map((b) => (b as { block_id?: string }).block_id).filter(Boolean));
+  const own = (blocks: ReplyBlock[]) => blocks.filter((b) => b !== buttons);
   let body = render(items.filter((it) => !placed.has(it.ref)).length);
   // A placed extra that didn't fit (the text was folded into one block past the limit) goes below instead, with
   // room made for it.
   let shown = shownIn(body);
   const missing = items.filter((it) => !shown.has(idOf(it))).length;
-  const own = (blocks: ReplyBlock[]) => blocks.length - (buttons && blocks.includes(buttons) ? 1 : 0);
-  if (missing + own(body) > opts.maxBlocks) {
+  if (missing + own(body).length > opts.maxBlocks) {
     // Room for every extra below: whatever the text keeps inline, the rest always fits.
     body = render(items.length);
     shown = shownIn(body);
   }
   const rest = items.filter((it) => !shown.has(idOf(it))).map(blockOf);
-  const inline = body.includes(buttons as ReplyBlock);
-  const all = [...body, ...rest];
-  // Cut to the limit without losing a placed buttons row.
-  const cut = all.slice(0, opts.maxBlocks + (inline ? 1 : 0));
-  return withButtons(inline && !cut.includes(buttons!) ? [...cut.filter((b) => b !== buttons).slice(0, opts.maxBlocks), buttons!] : cut);
+  // Within the limit by construction; the cut is a safety net that never drops the buttons row.
+  let room = opts.maxBlocks;
+  const out = [...body, ...rest].filter((b) => b === buttons || room-- > 0);
+  return withButtons(out);
 }
 
 /**

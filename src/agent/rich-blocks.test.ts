@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildExtras, cardExtras, containerExtras, degradedFileIds, extrasFallback, fieldExtras, imageExtras, linkExtras, mrkdwn, parseExtras, replyBody, responseTimeFooter, serializeExtras, tableExtras, urlImage } from './rich-blocks.js';
+import { buildExtras, cardExtras, cardsSchema, clipMrkdwn, containerExtras, containersSchema, degradedFileIds, extrasFallback, fieldExtras, fieldsSchema, imageExtras, linkExtras, linksSchema, mrkdwn, parseExtras, replyBody, responseTimeFooter, serializeExtras, tableExtras, urlImage } from './rich-blocks.js';
 
 describe('tableExtras', () => {
   it('pads short rows, names missing headers, numbers sort as numbers, empty cells get a dash', () => {
@@ -266,5 +266,44 @@ describe('replyBody: dividers and placed buttons', () => {
     const extras = buildExtras({ fields: [{ items: [{ label: 'a', value: 'b' }] }], links: [[{ label: 'L', url: 'https://l.com' }]], containers: [{ title: 'C', body: 'c' }] }).extras;
     const blocks = replyBody('A\n[[links:1]]\nB\n[[fields:1]]\n[[container:1]]\nZ', extras, { maxBlocks: 10, idPrefix: '' }) as any[];
     expect(blocks.map((b) => b.type)).toEqual(['markdown', 'actions', 'markdown', 'section', 'container', 'markdown']);
+  });
+});
+
+describe('review fixes', () => {
+  it('schemas take a single object, nulls, the flat links form and alias keys', () => {
+    const c = containersSchema.parse({ title: 'D', text: 'body', kind: 'collapsed', style: null, width: null });
+    const ci = containerExtras(c).items;
+    expect(ci).toHaveLength(1);
+    expect(ci[0]!.block).toMatchObject({ default_collapsed: true, child_blocks: [{ text: { text: 'body' } }] });
+    expect(fieldExtras(fieldsSchema.parse({ fields: [{ key: 'k', value: 'v' }] })).items).toHaveLength(1);
+    expect(cardExtras(cardsSchema.parse([{ title: 'X', url: 'https://x.com', icon_url: null }])).items).toHaveLength(1);
+    const flat = linkExtras(linksSchema.parse([{ label: 'Docs', url: 'https://x.com' }]));
+    expect(flat.items).toHaveLength(1);
+    expect(linksSchema.parse('nope')).toEqual(['nope']);
+    expect(linkExtras(linksSchema.parse([{ buttons: [{ label: 'A', url: 'https://a.com', style: null }] }])).items).toHaveLength(1);
+  });
+  it('mrkdwn leaves code alone and keeps parenthesised URLs', () => {
+    expect(mrkdwn('`obj.__init__()` and ```a**2 + b**2```')).toBe('`obj.__init__()` and ```a**2 + b**2```');
+    expect(mrkdwn('[wiki](https://en.wikipedia.org/wiki/Foo_(bar))')).toBe('<https://en.wikipedia.org/wiki/Foo_(bar)|wiki>');
+    expect(mrkdwn('`a<b`')).toBe('`a&lt;b`');
+  });
+  it('clipMrkdwn never splits an entity or a link', () => {
+    expect(clipMrkdwn('abc &amp; def', 7)).toBe('abc…');
+    expect(clipMrkdwn('x <https://a.com|a> y', 10)).toBe('x…');
+  });
+  const buttons = { type: 'actions', block_id: 'reply_1_buttons', elements: [] };
+  const long = Array.from({ length: 30 }, (_, i) => `para ${i}\n\n\`\`\`\ncode ${i}\n\`\`\``).join('\n\n');
+  it('a placed [[buttons]] that folds away keeps every bit of text and the row', () => {
+    const blocks = replyBody(`${long}\n\n[[buttons]]\n\nLAST LINE`, null, { maxBlocks: 47, idPrefix: '', buttons }) as any[];
+    expect(blocks.length).toBeLessThanOrEqual(48);
+    expect(blocks.filter((b) => b === buttons)).toHaveLength(1);
+    expect(JSON.stringify(blocks)).toContain('LAST LINE');
+    expect(JSON.stringify(blocks)).toContain('para 29');
+  });
+  it('degraded with buttons stays within maxBlocks + the row', () => {
+    const extras = { items: [], degraded: true };
+    const blocks = replyBody(long, extras, { maxBlocks: 47, idPrefix: '', buttons }) as any[];
+    expect(blocks.length).toBeLessThanOrEqual(48);
+    expect(blocks.at(-1)).toBe(buttons);
   });
 });
