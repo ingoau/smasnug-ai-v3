@@ -1012,8 +1012,10 @@ describe('runFrontTurn: native stop', () => {
     const text = 'This is a long streamed answer that the user will stop halfway through, sorry.';
     h.model = mockModel([replyStep(text, 4), textStep('')], 30);
     let stop = false;
+    let appends = 0;
     h.slackHook = (method) => {
-      if (method === 'chat.appendStream') {
+      // The first append carries the first text into the (early-opened) stream: halted once something is visible.
+      if (method === 'chat.appendStream' && ++appends > 1) {
         stop = true;
         throw slackError('message_not_in_streaming_state');
       }
