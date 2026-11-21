@@ -205,3 +205,14 @@ describe('frontSystemPrompt: responding without words, and stated preferences', 
     expect(p).toMatch(/<rules> \(this channel's rules, who asked not to be pinged\)/);
   });
 });
+
+describe('frontSystemPrompt: cheese button', () => {
+  const p = frontSystemPrompt('smasnug ai');
+
+  it('requires a cheese button on every reply', () => {
+    expect(p).toMatch(/# Response format/);
+    expect(p).toMatch(/\{ "label": "cheese" \}/);
+    expect(p).toMatch(/buttons` field of every reply/);
+    expect(p).toMatch(/button label is always exactly "cheese"/);
+  });
+});
