@@ -34,7 +34,7 @@ import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guideline
 import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsBlock, buttonsFallbackText, normalizeButtonLabels, normalizeButtons, placeText, type ButtonsActionsBlock, type ContextBlock } from './reply-buttons.js';
 import { saveReplyExtras } from './charts-store.js';
-import { buildExtras, degradedFileIds, hasLayoutMarkers, extrasFallback, footerBlock, hasExtras, imageExtras, replyBody, responseTimeFooter, slackTsMs, withoutMarkers, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
+import { buildExtras, degradedFileIds, hasLayoutMarkers, extrasFallback, footerBlock, hasExtras, imageExtras, replyBody, responseTimeFooter, slackTsMs, withoutMarkers, type PreparedImage, type ReplyExtra, type ReplyExtras } from './rich-blocks.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { prepareButtonActions } from './button-actions.js';
 import { createReplyButtons, detachMessageCards, loadReplyButtons, messageHasLiveCard, postedBefore, reattachMessageCards, setReplyText, setButtonsMessage, type PlaceTarget, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
@@ -250,6 +250,8 @@ export interface ReplyRich {
   fields?: unknown;
   links?: unknown;
   containers?: unknown;
+  /** Ready-made extras added last (e.g. a live preview's claim buttons, src/sandbox/preview/reply-blocks.ts). */
+  extraItems?: readonly ReplyExtra[];
 }
 
 export class ReplyManager {
@@ -663,6 +665,7 @@ export class ReplyManager {
       const at = extras.items.findIndex((it) => !it.ref.startsWith('chart:'));
       extras.items.splice(at < 0 ? extras.items.length : at, 0, ...imageExtras(imgs));
     }
+    if (rich.extraItems?.length) extras.items.push(...rich.extraItems);
     const chartSuffix = () => (chartNotes.length ? ` ${chartNotes.join(' ')}` : '');
     const charts = extras.items;
     if (e.timer) {
