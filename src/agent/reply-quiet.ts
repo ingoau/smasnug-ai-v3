@@ -95,7 +95,11 @@ export async function handleQuietChoice(ctx: ActionContext): Promise<void> {
 
   const ts = pressTs(ctx);
   let claimed = await claimPress({ id, index, userId: ctx.userId, pressedMessageTs: ts });
-  if (!claimed) return ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
+  if (!claimed) {
+    // Lost to a press, or the buttons were retired meanwhile.
+    const now = await loadReplyButtons(id);
+    return ephemeral(ctx, row.channelId, threadTs, now?.expiredAt && !now.pressedAt ? EXPIRED_BUTTONS_TEXT : ALREADY_ANSWERED_TEXT);
+  }
   const label = neutralizeBroadcasts(claimed.pressedLabel ?? '');
   const place = buttonPlace(response);
 

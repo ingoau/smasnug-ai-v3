@@ -187,5 +187,11 @@ describe.skipIf(!INTEGRATION)('reply buttons: press flow', () => {
     expect(row.pressedAt).toBeNull();
     expect(await turnsOf()).toHaveLength(turns);
     expect(await store.claimPress({ id: old.id, index: 0, userId: 'UBTND', pressedMessageTs: '1700000500.000002' })).toBeUndefined();
+
+    // The model is told they're retired.
+    const { renderThreadContext } = await import('../context/thread.js');
+    const ctx = await renderThreadContext(threadId, { newMessageTs: [] });
+    expect(ctx.history).toContain('still keen? [buttons (retired, no longer shown): Yes | No]');
+    expect(ctx.history).toContain('and this? [buttons: Now | Later]');
   });
 });

@@ -108,7 +108,9 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
   const ts = pressTs(ctx);
   const claimed = await claimPress({ id, index, userId: ctx.userId, pressedMessageTs: ts });
   if (!claimed) {
-    await ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
+    // Lost to a press, or the buttons were retired meanwhile.
+    const now = await loadReplyButtons(id);
+    await ephemeral(ctx, row.channelId, threadTs, now?.expiredAt && !now.pressedAt ? EXPIRED_BUTTONS_TEXT : ALREADY_ANSWERED_TEXT);
     return;
   }
   await noticePolicyUpdate({ userId: ctx.userId, channelId: row.channelId, ...(threadTs ? { threadTs } : {}), messageTs: pressTs(ctx) });
