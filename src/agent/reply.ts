@@ -35,7 +35,7 @@ import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsBlock, buttonsFallbackText, normalizeButtonLabels, normalizeButtons, placeText, type ButtonsActionsBlock, type ContextBlock } from './reply-buttons.js';
 import { saveReplyExtras } from './charts-store.js';
 import { buildExtras, degradedFileIds, hasLayoutMarkers, extrasFallback, footerBlock, hasExtras, imageExtras, replyBody, responseTimeFooter, slackTsMs, withoutMarkers, type PreparedImage, type ReplyExtra, type ReplyExtras } from './rich-blocks.js';
-import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
+import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamHold, streamUnits } from './slack-markdown.js';
 import { prepareButtonActions } from './button-actions.js';
 import { createReplyButtons, detachMessageCards, loadReplyButtons, messageHasLiveCard, postedBefore, reattachMessageCards, setReplyText, setButtonsMessage, type PlaceTarget, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
@@ -48,6 +48,9 @@ const FIRST_FLUSH_CHARS = 8;
 /** …or after this long, whichever comes first. */
 const FIRST_FLUSH_MS = 80;
 const MAX_MD = 11_500; // markdown limit: 12k chars cumulative per message / per stream call
+/** The reply's arguments so far set `"stream": false` (a top-level key; quotes inside a string value are escaped). */
+const streamOff = (buf: string) => /(?:^|[{,])\s*"stream"\s*:\s*false\b/.test(buf);
+
 /** Blocks a stream may carry (50 per message, one kept free for the buttons at stopStream). */
 const MAX_STREAM_BLOCKS = MAX_MESSAGE_BLOCKS - 1;
 /** A later reply in a turn is held back until this many chars arrived, so it can be checked for duplication first. */
@@ -250,6 +253,8 @@ export interface ReplyRich {
   fields?: unknown;
   links?: unknown;
   containers?: unknown;
+  /** The model's `stream` flag: false = post the reply whole (never streamed), if nothing is shown yet. */
+  stream?: boolean;
   /** Ready-made extras added last (e.g. a live preview's claim buttons, src/sandbox/preview/reply-blocks.ts). */
   extraItems?: readonly ReplyExtra[];
 }
@@ -492,6 +497,17 @@ export class ReplyManager {
     if (e.failed || e.stopped || e.halted || e.dropped || e.overflow) return;
     this.t.timing?.mark('first_flush');
     if ((await e.mode) !== 'stream') return;
+    if (!e.streamTs && e.rawSent === 0) {
+      // Nothing shown yet: a reply that asked not to stream, or whose opening layout would jump once the final layout
+      // goes in (it opens with a marker, or a heading then one), is posted whole instead (finish() → postWhole).
+      const hold = streamOff(e.buf) ? 'post' : streamHold(finalText ?? extractPartialString(e.buf, 'text')?.value ?? '', finalText !== undefined);
+      if (hold === 'wait') return;
+      if (hold === 'post') {
+        // Its early stream stays until postWhole removes it (holding back an activity message meanwhile).
+        e.mode = Promise.resolve('post');
+        return;
+      }
+    }
     // Group pings (@channel/@here/@everyone, user groups) are neutralised: the bot never notifies a group.
     const base = finalText ?? broadcastSafePrefix(extractPartialString(e.buf, 'text')?.value ?? '');
     const units = streamUnits(base, finalText !== undefined);
@@ -680,6 +696,10 @@ export class ReplyManager {
       e.timer = null;
     }
     await e.chain.catch(() => {});
+    if (rich.stream === false && !e.streamTs && e.rawSent === 0 && (await e.mode) === 'stream') {
+      // Asked not to stream and nothing is shown yet: posted whole (postWhole removes the empty early stream).
+      e.mode = Promise.resolve('post');
+    }
     if (e.halted || (await this.isStopped())) {
       // Close our side quietly (Slack may already have stopped it) and deliver nothing else.
       await this.discardEarly(e);
