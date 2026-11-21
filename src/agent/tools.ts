@@ -92,7 +92,14 @@ registerTool({
     tool({
       description:
         'End your turn without posting anything (a silent turn). Not needed after reply / react: those end the turn by themselves unless you pass continue_turn. Nothing is shown to anyone.',
-      inputSchema: z.object({}),
+      inputSchema: z.object({
+        no_reply_requested: z
+          .boolean()
+          .optional()
+          .describe(
+            'true only when the speaker explicitly asked you not to respond ("don\'t respond to this", "no need to reply", "ignore this"). A mention or DM you leave unanswered otherwise gets a "couldn\'t come up with a reply" notice; this skips it.',
+          ),
+      }),
       execute: async () => 'Turn ended.',
     }),
 });

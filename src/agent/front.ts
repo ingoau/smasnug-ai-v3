@@ -864,6 +864,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
    * posted instead of the generic fallback when the turn ends with nothing visible.
    */
   let fallbackText: string | null = null;
+  // end_turn({ no_reply_requested: true }): the speaker asked for no reply ("don't respond to this"), so a silent
+  // mention gets no fallback.
+  let silenceRequested = false;
   /** The latest step ended in a content-filter refusal (every provider tier refused): explain instead of apologising. */
   let lastStepFiltered = false;
   /** This step was refused: with toolChoice 'required' the SDK reports finishReason 'error' and keeps the real one on its ToolChoiceViolationError. */
@@ -969,6 +972,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             announce(part.toolCallId, part.toolName);
             stepTools.push(part.toolName);
             stepCalls.push({ toolCallId: part.toolCallId, toolName: part.toolName, input: part.input });
+            if (part.toolName === 'end_turn' && (part.input as { no_reply_requested?: unknown } | undefined)?.no_reply_requested === true) silenceRequested = true;
             turnCalls.push({ tool: part.toolName, args: part.input });
             break;
           case 'tool-result': {
@@ -1174,7 +1178,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   }
 
   if (state.visible.size === 0 && outcome) await postOutcomeFallback();
-  else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
+  else if (state.visible.size === 0 && !previewPosted && !silenceRequested && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
