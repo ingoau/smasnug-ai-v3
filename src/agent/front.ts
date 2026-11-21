@@ -351,7 +351,7 @@ async function buildTurnMessage(
   timing = new TurnTiming(),
   session?: SessionInfo | null,
   codeChannels: CodeChannelTurnContext = NO_CODE_CHANNELS,
-): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; outcome?: { fallback: string | null } }> {
+): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; peopleSpoke?: boolean; outcome?: { fallback: string | null } }> {
   const { channelId } = parseThreadId(turn.threadId);
   const [memory, snapshot, ctx, dj, self, conversation, pending, quotas, codeChannelHere] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId, { threadId: turn.threadId })).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
@@ -443,6 +443,7 @@ async function buildTurnMessage(
   parts.push(section('current_time', renderNow(now, speaker.tz)));
   let synthesisRunIds: number[] = [];
   let anyCancelled = false;
+  let peopleSpoke = false;
   let outcome: { fallback: string | null } | undefined;
   // Non-user turns (subagent results, reminders, outcomes): people's messages already waiting for their own turn.
   const queued = turn.kind !== 'user' ? await renderQueuedTurns(turn.threadId).catch((err) => (log.warn({ err }, 'renderQueuedTurns failed'), '')) : '';
@@ -453,9 +454,11 @@ async function buildTurnMessage(
     const earlier = await renderEarlierRounds(turn.cardId).catch((err) => (log.warn({ err }, 'renderEarlierRounds failed'), ''));
     if (earlier) parts.push(section('earlier_rounds', earlier));
     parts.push(section('finished_subagents', res.text));
-    const since = await loadSinceRound(turn.cardId, self)
-      .then((items) => renderSinceRound(items))
-      .catch((err) => (log.warn({ err }, 'loadSinceRound failed'), ''));
+    const sinceItems = await loadSinceRound(turn.cardId, self).catch((err) => (log.warn({ err }, 'loadSinceRound failed'), null));
+    const since = sinceItems ? renderSinceRound(sinceItems) : '';
+    // Someone wrote in the thread after the round started (or is waiting for their own turn): the results may be
+    // stale ("nvm, works"), so ending silently is allowed (needsFallback).
+    peopleSpoke = Boolean(sinceItems?.some((i) => i.kind === 'message' && !i.self) || ctx.newMessages.trim() || queued);
     parts.push(section('since_round_start', since, ' note="What happened in this thread after the turn that started this round."'));
     if (ctx.newMessages.trim()) parts.push(section('new_messages', clipTokens(ctx.newMessages, BUDGET.newMessages)));
     parts.push(SYNTHESIS_INSTRUCTION);
@@ -486,7 +489,7 @@ async function buildTurnMessage(
     );    const ahead = await resultsAheadNote(turn).catch((err) => (log.warn({ err }, 'resultsAheadNote failed'), ''));
     if (ahead) parts.push(ahead);
   }
-  return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, anyCancelled, ...(outcome ? { outcome } : {}) };
+  return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, anyCancelled, peopleSpoke, ...(outcome ? { outcome } : {}) };
 }
 
 /**
@@ -1119,7 +1122,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   }
 
   if (state.visible.size === 0 && outcome) await postOutcomeFallback();
-  else if (state.visible.size === 0 && needsFallback(turn, io, built.anyCancelled)) {
+  else if (state.visible.size === 0 && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
@@ -1149,11 +1152,11 @@ export function canvasLinkText(canvases: { title: string; permalink: string }[])
 }
 
 /**
- * Whether a turn that showed nothing gets the generic fallback. A results (synthesis) turn does, unless a task on its
- * card was cancelled: then the request changed since the round started (someone stopped part of it), and ending
- * silently (end_turn) may be the right answer.
+ * Whether a turn that showed nothing gets the generic fallback. A results (synthesis) turn does, unless the request
+ * may have changed since the round started: a task on its card was cancelled (someone stopped part of it), or
+ * someone wrote in the thread since ("nvm, it works"). Then ending silently (end_turn) may be the right answer.
  */
-export function needsFallback(turn: Pick<TurnRow, 'kind'>, io: Pick<TurnIO, 'isMention'>, anyCancelled: boolean): boolean {
-  if (turn.kind === 'synthesis') return !anyCancelled;
+export function needsFallback(turn: Pick<TurnRow, 'kind'>, io: Pick<TurnIO, 'isMention'>, anyCancelled: boolean, peopleSpoke = false): boolean {
+  if (turn.kind === 'synthesis') return !anyCancelled && !peopleSpoke;
   return io.isMention;
 }

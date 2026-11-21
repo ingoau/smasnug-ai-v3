@@ -1450,15 +1450,26 @@ describe('synthesis turns after a cancellation', () => {
     expect(turnText()).not.toContain('<since_round_start note');
   });
 
-  it('a silent synthesis with nothing cancelled still gets the fallback', async () => {
-    h.sqlHook = rows([runRow(1, 'complete'), runRow(2, 'error')]);
+  it('a silent synthesis with nothing cancelled and nobody writing since still gets the fallback', async () => {
+    h.ctx = { newMessages: '' };
+    h.sqlHook = rows([runRow(1, 'complete'), runRow(2, 'error')], false);
     h.model = mockModel([toolStep(['end_turn', {}])]);
     await runFrontTurn(turn({ id: 152, kind: 'synthesis', cardId: 5, messageTs: [], isMention: false }), io(false).io);
     expect(fallbacks()).toHaveLength(1);
   });
 
-  it('needsFallback: synthesis unless a task was cancelled; other turns when mentioned', () => {
+  it('a silent synthesis after someone wrote since the round started ("nvm, works") gets no fallback', async () => {
+    h.ctx = { newMessages: '' };
+    h.sqlHook = (q: string) => (q.includes('from thread_events e left join subagents') ? [] : rows([runRow(1, 'complete')])(q));
+    h.model = mockModel([toolStep(['end_turn', {}])]);
+    await runFrontTurn(turn({ id: 153, kind: 'synthesis', cardId: 5, messageTs: [], isMention: false }), io(false).io);
+    expect(fallbacks()).toHaveLength(0);
+  });
+
+  it('needsFallback: synthesis unless a task was cancelled or someone spoke since; other turns when mentioned', () => {
     expect(needsFallback({ kind: 'synthesis' }, { isMention: false }, false)).toBe(true);
+    expect(needsFallback({ kind: 'synthesis' }, { isMention: false }, false, false)).toBe(true);
+    expect(needsFallback({ kind: 'synthesis' }, { isMention: false }, false, true)).toBe(false);
     expect(needsFallback({ kind: 'synthesis' }, { isMention: true }, true)).toBe(false);
     expect(needsFallback({ kind: 'user' }, { isMention: true }, false)).toBe(true);
     expect(needsFallback({ kind: 'user' }, { isMention: false }, false)).toBe(false);
