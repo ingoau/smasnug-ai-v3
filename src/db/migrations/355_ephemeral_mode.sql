@@ -16,6 +16,8 @@ create table if not exists ephemeral_replies (
   extras jsonb,
   files jsonb not null default '[]'::jsonb,
   shared_ts text,
+  -- When a "Send to thread" press claimed it (shared_ts 'pending'): a claim left by a crash can be retaken later.
+  share_claimed_at timestamptz,
   created_at timestamptz not null default now()
 );
 create index if not exists ephemeral_replies_created_idx on ephemeral_replies (created_at);

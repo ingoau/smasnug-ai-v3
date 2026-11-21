@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { registerTool } from '../core/tools.js';
-import { cancelSubagent, messageSubagent, spawnSubagent, subagentVisibleTo, ToolError } from './subagents.js';
+import { cancelSubagent, isPublicSubagent, messageSubagent, spawnSubagent, subagentVisibleTo, ToolError } from './subagents.js';
 import { MAX_BUTTONS, MAX_LABEL_CHARS } from './reply-buttons.js';
 import { chartsSchema } from './charts.js';
 import { privateViewer, turnState } from './turn-state.js';
@@ -249,8 +249,10 @@ registerTool({
       execute: async ({ id, text, note }) => {
         const s = turnState(ctx);
         if (!(await subagentVisibleTo(s.threadId, id, privateViewer(ctx)))) throw new ToolError(noSubagent(id));
-        // A private turn's steer shows no note on a (possibly public) card.
-        const r = await messageSubagent({ threadId: s.threadId, turnId: s.turn.id, turnKind: s.turn.kind, speakerId: s.turn.authorId, subagentId: id, text, note: privateViewer(ctx) ? undefined : note });
+        // A private turn never steers or resumes a public subagent: its card, results and summary are public.
+        if (privateViewer(ctx) && (await isPublicSubagent(s.threadId, id)))
+          throw new ToolError(`${id} is a public subagent of this thread, so a private answer can't message it (its results would show in the thread). Start a new one with spawn_subagent (seed_from: "${id}" gives it that one's summary).`);
+        const r = await messageSubagent({ threadId: s.threadId, turnId: s.turn.id, turnKind: s.turn.kind, speakerId: s.turn.authorId, subagentId: id, text, note });
         if (r.mode === 'resumed') {
           s.cardId = r.cardId;
           s.delegated = true;

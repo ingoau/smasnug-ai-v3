@@ -46,6 +46,8 @@ export const PRIVATE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   'ask_code_channel',
   'message_code_channel',
   'archive_code_channel',
+  // Posts to the moderators and, once approved, goes into every turn's prompt.
+  'propose_workspace_fact',
 ]);
 
 /** Front tools fine in a private turn: read-only, private to the speaker, or adapted (reply, canvases, files). */
@@ -83,7 +85,6 @@ export const PRIVATE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'remember',
   'forget',
   'search_memory',
-  'propose_workspace_fact',
   'report_failure',
   'read_file',
   'ask_file',
@@ -140,6 +141,14 @@ export async function sendFilesToDm(userId: string, files: OutgoingFile[], idemp
   await uploadFiles({ channelId: dm, files, idempotencyKey });
 }
 
+/** A short ephemeral to the user where their private answers go (a button's own thread_ts may be missing). */
+async function tellUser(userId: string, threadId: string, text: string): Promise<void> {
+  const { channelId } = parseThreadId(threadId);
+  await slackCall('chat.postEphemeral', { channel: channelId, user: userId, text, ...threadTsArg(await privateThreadTs(threadId)) }).catch((err) =>
+    log.warn({ err, threadId }, 'private share note failed'),
+  );
+}
+
 interface PrivateReplyRow {
   id: number;
   threadId: string;
@@ -155,12 +164,20 @@ interface PrivateReplyRow {
 export async function handlePrivateShare(ctx: ActionContext): Promise<void> {
   const id = Number(ctx.value);
   if (!Number.isFinite(id)) return;
-  // Claimed atomically: a double click (or a retried interaction) posts once.
+  // Claimed atomically: a double click (or a retried interaction) posts once. A claim a crash left behind can be
+  // retaken after a minute (the post's idempotency key keeps that from posting twice).
   const [row] = await sql<PrivateReplyRow[]>`
-    update ephemeral_replies set shared_ts = 'pending'
-    where id = ${id} and user_id = ${ctx.userId} and shared_ts is null
+    update ephemeral_replies set shared_ts = 'pending', share_claimed_at = now()
+    where id = ${id} and user_id = ${ctx.userId}
+      and (shared_ts is null or (shared_ts = 'pending' and share_claimed_at < now() - interval '1 minute'))
     returning id::int as id, thread_id, channel_id, user_id, text, extras, files, shared_ts`;
   if (!row) {
+    const [had] = await sql<{ sharedTs: string | null; threadId: string }[]>`select shared_ts, thread_id from ephemeral_replies where id = ${id} and user_id = ${ctx.userId}`;
+    // Being sent by an earlier press: keep the button (that press may still fail and ask to try again).
+    if (had?.sharedTs === 'pending') {
+      await tellUser(ctx.userId, had.threadId, 'Already sending that to the thread…');
+      return;
+    }
     await deleteOriginal(ctx).catch(() => false);
     return;
   }
@@ -181,14 +198,15 @@ export async function handlePrivateShare(ctx: ActionContext): Promise<void> {
     }
     ts = typeof res?.ts === 'string' ? res.ts : null;
     if (row.files.length) {
-      await uploadFiles({ channelId, threadTs, files: row.files, idempotencyKey: `private-share-files:${id}` }).catch((err) =>
-        log.warn({ err, id }, 'sharing a private answer: its files failed'),
-      );
+      await uploadFiles({ channelId, threadTs, files: row.files, idempotencyKey: `private-share-files:${id}` }).catch(async (err) => {
+        log.warn({ err, id }, 'sharing a private answer: its files failed');
+        await tellUser(ctx.userId, row.threadId, "The answer is in the thread, but its files couldn't be shared there (they're still in your DM).");
+      });
     }
   } catch (err) {
     log.warn({ err, code: slackErrorCode(err), id }, 'sharing a private answer failed');
     await sql`update ephemeral_replies set shared_ts = null where id = ${id} and shared_ts = 'pending'`;
-    await slackCall('chat.postEphemeral', { channel: channelId, user: ctx.userId, text: "Couldn't send that to the thread, try again.", ...threadTsArg(ctx.threadTs) }).catch(() => {});
+    await tellUser(ctx.userId, row.threadId, "Couldn't send that to the thread, try again.");
     return;
   }
   await sql`update ephemeral_replies set shared_ts = ${ts ?? 'shared'} where id = ${id}`;

@@ -44,5 +44,11 @@ export function turnState(ctx: ToolContext): FrontTurnState {
  */
 export function privateViewer(ctx: Pick<ToolContext, 'extras'>): string | null {
   const s = ctx.extras.agentTurn as FrontTurnState | undefined;
-  return s?.turn.ephemeral ? s.turn.authorId : null;
+  if (s) return s.turn.ephemeral ? s.turn.authorId : null;
+  // A private subagent's run (child.ts).
+  const child = ctx.extras[PRIVATE_TO_EXTRA];
+  return typeof child === 'string' ? child : null;
 }
+
+/** ToolContext.extras key: a private subagent run's owner (child.ts). */
+export const PRIVATE_TO_EXTRA = 'privateTo';

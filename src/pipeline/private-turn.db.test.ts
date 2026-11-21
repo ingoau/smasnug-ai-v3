@@ -80,6 +80,15 @@ describe.skipIf(!LIVE)('private (`!p`) turns (DB)', () => {
     expect(await front.renderSnapshot(threadId, 'U_A')).toContain(s.subagentId);
     expect(await sub.subagentVisibleTo(threadId, s.subagentId, null)).toBe(false);
     expect(await sub.subagentVisibleTo(threadId, s.subagentId, 'U_A')).toBe(true);
+    expect(await sub.isPublicSubagent(threadId, s.subagentId)).toBe(false);
+
+    // A public results turn of another card doesn't see the private spawn in <since_round_start>.
+    const [pub] = await sql<{ id: number }[]>`insert into turns (thread_id, author_id, status, started_at) values (${threadId}, 'U_B', 'done', now() - interval '1 minute') returning id::int as id`;
+    const [pubCard] = await sql<{ id: number }[]>`insert into cards (thread_id, turn_id, channel_id) values (${threadId}, ${pub!.id}, ${channel}) returning id::int as id`;
+    await sql`insert into thread_events (thread_id, type, actor, payload) values (${threadId}, 'spawn', 'U_A', ${sql.json({ subagentId: s.subagentId, turnId: t!.id, cardId: s.cardId })})`;
+    const { loadSinceRound } = await import('../agent/round-since.js');
+    expect(JSON.stringify(await loadSinceRound(pubCard!.id))).not.toContain(s.subagentId);
+    expect(JSON.stringify(await loadSinceRound(s.cardId))).not.toContain('Private research'); // its own spawn is not news
 
     // Its card never posts.
     const { postCard } = await import('../agent/cards.js');
@@ -110,6 +119,15 @@ describe.skipIf(!LIVE)('private (`!p`) turns (DB)', () => {
     const ctx = (userId: string) => ({ userId, channelId: channel, actionId: share.PRIVATE_SHARE_ACTION, value: String(id), responseUrl: 'https://hooks.example/r', body: {} });
     const before = (await fake.fakeCalls()).length;
     await share.handlePrivateShare(ctx('U_B')); // not theirs
+    // A press while an earlier one is still sending keeps the ephemeral (no delete_original).
+    await sql`update ephemeral_replies set shared_ts = 'pending', share_claimed_at = now() where id = ${id}`;
+    const mid = (await fake.fakeCalls()).length;
+    await share.handlePrivateShare(ctx('U_A'));
+    const pendingCalls = (await fake.fakeCalls()).slice(mid);
+    expect(pendingCalls.filter((c) => c.method === 'chat.postMessage' || (c.method === 'response_url' && c.args.delete_original))).toEqual([]);
+    expect(pendingCalls.some((c) => c.method === 'chat.postEphemeral' && /Already sending/.test(c.args.text))).toBe(true);
+    // A claim left by a crash is retaken after a minute.
+    await sql`update ephemeral_replies set share_claimed_at = now() - interval '2 minutes' where id = ${id}`;
     await share.handlePrivateShare(ctx('U_A'));
     await share.handlePrivateShare(ctx('U_A')); // double click
     const posts = (await fake.fakeCalls()).slice(before).filter((c) => c.method === 'chat.postMessage');

@@ -930,8 +930,9 @@ export class ReplyManager {
     }
     const triggerMs = this.t.triggerTs ? slackTsMs(this.t.triggerTs) : null;
     if (triggerMs != null) extras.footer = responseTimeFooter((this.t.now ?? Date.now)() - triggerMs, this.t.fallbackModel?.() ?? null);
+    // The shared copy is the answer as written (its files go with it), without the DM note.
+    const replyId = await savePrivateReply({ threadId: this.t.threadId, userId, turnId: this.t.turnId, text, extras: hasExtras(extras) ? extras : null, files: dmed ? (files ?? []) : [] });
     e.posting = true;
-    const replyId = await savePrivateReply({ threadId: this.t.threadId, userId, turnId: this.t.turnId, text: body, extras: hasExtras(extras) ? extras : null, files: dmed ? (files ?? []) : [] });
     const threadTs = await privateThreadTs(this.t.threadId);
     try {
       await this.withExtras(extras, async () => {

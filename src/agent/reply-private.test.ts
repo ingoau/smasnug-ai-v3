@@ -81,6 +81,7 @@ describe('private (`!p`) replies', () => {
     expect(calls.map((c) => c.method)).toEqual(['chat.postEphemeral']);
     expect(JSON.stringify(calls[0]!.args.blocks)).toContain('in your DM');
     expect(saved[0].files).toEqual([{ filename: 'a.md', fileId: 'file_1' }]);
+    expect(saved[0].text).toBe('here you go'); // the shared copy has no "in your DM" note
   });
 
   it('drops an empty reply', async () => {

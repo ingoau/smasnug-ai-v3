@@ -24,6 +24,8 @@ export interface SubagentRow {
   id: string;
   threadId: string;
   ownerId: string;
+  /** Started by a private (`!p`) turn: private to this user (migration 355). */
+  privateTo?: string | null;
   title: string;
   status: SubagentStatus;
   summary: string | null;
@@ -88,6 +90,12 @@ async function enqueueRun(runId: number) {
 export async function subagentVisibleTo(threadId: string, subagentId: string, viewer: string | null): Promise<boolean> {
   const [row] = await sql<{ privateTo: string | null }[]>`select private_to from subagents where id = ${subagentId.trim()} and thread_id = ${threadId}`;
   return !row?.privateTo || row.privateTo === viewer;
+}
+
+/** True for an existing subagent of this thread that is public (no private_to). */
+export async function isPublicSubagent(threadId: string, subagentId: string): Promise<boolean> {
+  const [row] = await sql<{ privateTo: string | null }[]>`select private_to from subagents where id = ${subagentId.trim()} and thread_id = ${threadId}`;
+  return Boolean(row) && !row!.privateTo;
 }
 
 export async function spawnSubagent(opts: {

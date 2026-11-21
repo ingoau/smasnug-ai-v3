@@ -3,6 +3,7 @@
  * cancel flag checked exactly at step boundaries (never mid tool call). Progress goes to `runs.details` and the
  * card is re-rendered (coalesced). History is persisted (compacted) at run end.
  */
+import { PRIVATE_TO_EXTRA } from './turn-state.js';
 import { streamText, stepCountIs, tool, type ModelMessage } from 'ai';
 import { z } from 'zod';
 import { env, limits } from '../config.js';
@@ -270,7 +271,13 @@ async function runClaimed(run: RunRow): Promise<void> {
     runId: run.id,
     abortSignal: controller.signal,
     // queueUserImage deliberately unset: the chat models accept images in tool results.
-    extras: { [SLACK_WAIT_EXTRA]: (ev: SlackWaitEvent) => onSlackWait(ev), [SEARCH_DEFER_EXTRA]: deferSearch, [SANDBOX_STARTED_EXTRA]: onSandboxStarted },
+    extras: {
+      [SLACK_WAIT_EXTRA]: (ev: SlackWaitEvent) => onSlackWait(ev),
+      [SEARCH_DEFER_EXTRA]: deferSearch,
+      [SANDBOX_STARTED_EXTRA]: onSandboxStarted,
+      // A private (`!p`) subagent: what it makes (canvases) is for its owner only (turn-state.ts privateViewer).
+      ...(sa.privateTo ? { [PRIVATE_TO_EXTRA]: sa.privateTo } : {}),
+    },
   });
   tools.wait_for_searches = tool({
     description:

@@ -26,7 +26,7 @@ import { budgetStatus } from '../budget.js';
 import { sandboxSettings } from '../settings.js';
 import { prepareBundle } from './bundle.js';
 import { previewDeployer } from './deploy.js';
-import { postPreviewMessage, previewMessage } from './reply-blocks.js';
+import { postPreviewMessage, previewIsPrivate, previewMessage } from './reply-blocks.js';
 import { readTar } from './tar.js';
 import { ACTIVE, acceptTerms, apiTokenOf, claimUrlOf, getPreview, setInlineUntil, setMessageTs, storeLive, termsAccepted, transition, type PreviewRow } from './store.js';
 
@@ -179,7 +179,8 @@ async function announceLive(row: PreviewRow): Promise<void> {
   // Already posted (a reply with `preview`, or the results turn's safety net): nothing to announce.
   if ((await getPreview(row.id))?.announcedAt) return;
   const fallback = `Live preview of ${cleanTitle(row.title)}: ${row.url} · expires ${hhmmUtc(row.expiresAt)}`;
-  if (!(await hasAgreed(row.requesterId).catch(() => false))) {
+  // Not agreed to the privacy policy, or a private (`!p`) subagent's preview: the code message (ephemeral when private).
+  if (!(await hasAgreed(row.requesterId).catch(() => false)) || (await previewIsPrivate(row))) {
     await postPreviewMessage(row);
     return;
   }
@@ -209,7 +210,7 @@ const untrustedTitle = (t: string) => `Title (written by the subagent): "${clean
 /** A late deploy didn't happen: the front agent says so (fallback: the text). */
 async function announceFailed(row: PreviewRow, what: string): Promise<void> {
   const text = `The live preview of “${row.title}” ${what}`;
-  if (!(await hasAgreed(row.requesterId).catch(() => false))) return tellRequester(row, text);
+  if (!(await hasAgreed(row.requesterId).catch(() => false)) || (await previewIsPrivate(row))) return tellRequester(row, text);
   const input = [
     `<preview id="${row.id}" status="${row.status}">`,
     untrustedTitle(row.title),

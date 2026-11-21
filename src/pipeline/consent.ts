@@ -25,6 +25,8 @@ import { removeMessageFromTurns } from './scheduler.js';
 import { requestThreadStop } from './stop.js';
 import { addToBatch } from './debounce.js';
 import { startPrivateTurn } from './private-intake.js';
+import { isEphemeralRequest } from './guidelines.js';
+import { parseThreadId } from '../core/events.js';
 import { redirectGroupPing } from './guideline-actions.js';
 import type { BatchReason } from './rules.js';
 import { showIntakeStatus } from './session-status.js';
@@ -163,12 +165,20 @@ async function replayItem(userId: string, item: HeldItem): Promise<void> {
     await redirectGroupPing(item.event, await getBotIdentity(), { replay: true });
     return;
   }
-  if (item.kind === 'private') {
+  // Private or not is decided by the message as it is now (it may have been edited to add / drop `!p` while held),
+  // and a message deleted meanwhile is never answered.
+  const { channelId } = parseThreadId(item.threadId);
+  const [msg] = await sql<{ text: string; deleted: boolean }[]>`select text, deleted from messages where channel_id = ${channelId} and ts = ${item.ts}`;
+  if (msg?.deleted) return;
+  const isPrivate = msg && (item.kind === 'private' || item.reason === 'mention') ? isEphemeralRequest(msg.text, (await getBotIdentity()).userId) : item.kind === 'private';
+  if (isPrivate) {
     await startPrivateTurn({ threadId: item.threadId, authorId: userId, ts: item.ts });
     return;
   }
-  if (item.reason === 'dm' || item.reason === 'mention') showIntakeStatus(item.threadId, userId, item.ts);
-  await addToBatch(item.threadId, userId, item.ts, item.reason);
+  // A held `!p` request edited into an ordinary mention.
+  const reason: BatchReason = item.kind === 'private' ? 'mention' : item.reason;
+  if (reason === 'dm' || reason === 'mention') showIntakeStatus(item.threadId, userId, item.ts);
+  await addToBatch(item.threadId, userId, item.ts, reason);
 }
 
 /** Maintenance: retry replays left claimed by an error or a crash (still young enough to answer). */

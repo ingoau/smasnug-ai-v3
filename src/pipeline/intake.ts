@@ -152,8 +152,9 @@ async function handleNewMessage(ev: MessageEvent) {
   const threadId = threadIdOf(channelId, rootTs);
   if (cc && !isBot && ev.user) await noteCodeChannelActivity(channelId, ev.user);
   // In a code channel's conversation replies are top level anyway: no group-ping redirect.
-  // Ephemeral mode (`@bot !p …`): a private turn of its own; never in a DM or a code channel's conversation.
-  const privateRequest = !isBot && !ccConversation && isEphemeralRequest(text, bot.userId, { isDm });
+  // Ephemeral mode (`@bot !p …`): a private turn of its own; never in a DM or a code channel (its Status tab lists
+  // every run there).
+  const privateRequest = !isBot && !cc && isEphemeralRequest(text, bot.userId, { isDm });
   // A private answer needs no redirect: nothing is posted under the group ping.
   if (!ccConversation && !isBot && ev.user && !privateRequest && shouldRedirectGroupPing({ isDm, threadTs: ev.thread_ts, ts: ev.ts, mentionsBot, text }) && !isBangStop(text, bot.userId)) {
     await redirectGroupPing({ ...ev, user: ev.user }, bot);
@@ -332,7 +333,9 @@ async function handleEdit(ev: MessageEvent) {
       const bot = await getBotIdentity();
       const mentionsBot = mentionFacts(mentionText(msg), bot.userId).mentionsBot;
       // A group-ping trigger is answered in a new thread (guidelines), never under the original message.
-      if ((isDm || mentionsBot) && !shouldRedirectGroupPing({ isDm, threadTs: msg.thread_ts, ts: msg.ts, mentionsBot, text: msg.text })) {
+      // A private (`!p`) request is never redirected (intake above).
+      const redirected = !isEphemeralRequest(msg.text, bot.userId, { isDm }) && shouldRedirectGroupPing({ isDm, threadTs: msg.thread_ts, ts: msg.ts, mentionsBot, text: msg.text });
+      if ((isDm || mentionsBot) && !redirected) {
         await upsertThread({ id: candidate, channelId: ev.channel, threadTs: conversationRootTs(msg, cc), isDm });
         known = true;
       }
