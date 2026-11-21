@@ -22,6 +22,10 @@ nothing at startup):
   (AES-256-GCM), `store.ts` (rows, consent), `flow.ts` (jobs, preview message, buttons, expiry).
 
 Deviations from the plan below (all decided 2026-10-07 unless noted):
+- **No `sandbox` flag (2026-11-21):** `spawn_subagent` tasks have no `sandbox` field (the front agent twice left it
+  off and the subagent gave up). When configured, every subagent has the sandbox tools; the sandbox is created on its
+  first sandbox tool call, where access is checked (§3.5). From then on the run gets the sandbox run cap and
+  `subagents.sandbox` is set (= has used a sandbox). The front agent says in the instructions when to use it.
 - **Access:** HCA verified (`verified_eligible` or `verified_but_over_18`) OR the admin allowlist, from the start
   (`sandbox_access_mode` defaults to `hca_or_allowlist`; the plan kept allowlist-only until Phase 5, but all phases
   landed together).
@@ -160,9 +164,8 @@ src/sandbox/
 - **pipeline:** `src/worker/main.ts`: add `sandbox` to the module list for processors and maintenance. Tools register
   through `src/tools/index.ts` → import `../sandbox/register.js`.
 - **agent:**
-  - `spawn_subagent` task schema gets `sandbox?: boolean` (§3.5);
-  - `child.ts` drops the sandbox tools and the prompt section unless the subagent has `sandbox = true`, and calls
-    `onRunFinished` (§3.6);
+  - every subagent gets the sandbox tools when sandboxes are configured (no `spawn_subagent` flag; §0, §3.5);
+  - `child.ts` gives the sandbox run cap once the sandbox has started, and calls `onRunFinished` (§3.6);
   - `describeToolStep` gets card texts for the sandbox tools ("Running code…", "Exporting chart.png");
   - prompt changes (§7).
 - **features:**
@@ -243,7 +246,8 @@ from `mcr.microsoft.com/playwright:v1.56.1-noble`; the deploy image from `node:2
 
 ### 3.4 Children's tools (`src/sandbox/tools.ts`)
 
-All tools are registered with `roles: ['child']`. `child.ts` removes them unless `subagents.sandbox` is true.
+All tools are registered with `roles: ['child']`; every subagent has them when sandboxes are configured. The first
+call checks access and creates the sandbox (§3.5).
 
 **Names.** They carry a `sandbox_` prefix. The file store plans its own `read_file`, and `registerTool` throws on
 duplicate names. The prefix also makes it clear to the model which filesystem a tool touches.
@@ -279,7 +283,8 @@ States (`sandboxes.state`): `creating → running → pausing → paused → res
 
 | Event | Hook | Action |
 |---|---|---|
-| Spawn with `sandbox: true` | `spawn_subagent` (agent) calls `canUseSandbox(owner)` + `budget.canStart()` before `spawnSubagent` | Denied → the task is reported as not started (other tasks continue), an ephemeral goes to the owner (§4.1), and the model gets the neutral error text plus the fallback (do it without a sandbox). Allowed → `subagents.sandbox = true`. Nothing is created yet. |
+| Spawn | none | Nothing is checked or created; every subagent has the sandbox tools. |
+| First sandbox tool call (access) | the tool calls `canUseSandbox(owner)` + `budget.canStart()` before `ensureSandbox` | Denied → the subagent gets the neutral error text plus the fallback (do it without a sandbox) as the tool result, and an ephemeral goes to the owner (§4.1). Allowed → `subagents.sandbox = true` and the run gets the sandbox run cap. |
 | First sandbox tool call in a run | `ensureSandbox(subagentId)` | Per-subagent lock (`pg_advisory_xact_lock` on the row, or Redis `lock:sandbox:<sa>`), so parallel tool calls in one step create one sandbox. No row → `create`. Row `paused` → `resume` (if the snapshot expired or the resume fails: `create` fresh and tell the model "your previous sandbox files were lost"). Row `running` → reuse. Opens a usage segment (§4.3). |
 | Run ends | `child.ts` calls `onRunFinished(runId)` after `finishRun` returns `ok` | Sets `sandboxes.idle_since = now()`; unless another run of the subagent is queued/running, enqueues a `pause` job delayed by `limits.sandboxRunEndPauseMs` (45 s; `minIdleMs`: skipped if the sandbox was used again since), so idle time isn't charged for 5 minutes. Enqueues a preview job if the run is `complete` and has a `requested` preview; otherwise the preview is `cancelled`. |
 | Idle | maintenance `sandbox:sweep` (every 30 s) | `running` with no queued/running run on the subagent and `idle_since < now() − limits.sandboxIdlePauseMs` (5 min) → `pause` job. A resume during the grace period just reuses the live sandbox. |
@@ -621,8 +626,8 @@ App Home admin additions:
 
 ## 7. Prompt changes
 
-**Child.** A "Sandbox" section, appended only when `subagents.sandbox` is true, after the shared base, the same way
-the admin-only coding section keeps the base cacheable. It says:
+**Child.** The `sandbox` child skill (`skills/sandbox`; every subagent has the tools, so the how-to is loaded on
+demand). It says:
 - What the sandbox is: a Linux sandbox at `/work`, kept across follow-ups to this subagent, with Python 3 (pandas,
   matplotlib…), Node 22, Chromium/Playwright and internet access, but no private networks and no secrets.
 - When to use it: running code, analysing imported files (`sandbox_import` first), building deliverables, checking
@@ -646,7 +651,7 @@ the admin-only coding section keeps the base cacheable. It says:
 **Front.**
 - **What you can do:** the section lists running code, data / file processing and live previews, so "what can you do"
   includes them (only when sandboxes are configured).
-- **Delegate with `sandbox: true` only when code must run:** installs, data processing, a custom plot or image (a bar, line, area or pie chart is the reply's charts, no sandbox), analysing uploaded
+- **Tell a subagent to use the sandbox (in its instructions: what to run, which `file_…` ids to import) only when code must run:** installs, data processing, a custom plot or image (a bar, line, area or pie chart is the reply's charts, no sandbox), analysing uploaded
   files (pass the `file_…` ids), a headless browser, multi-file builds or a live preview. A single file the front
   agent can write itself (page, script, CSV, text) is `create_file` with no sandbox; research needs none.
 - **Posting:** `reply(files: [...])` with the ids from the result and a one-line description each.
@@ -699,7 +704,7 @@ Budget *accounting* starts in Phase 1, so admin testing counts too.
 
 **Phase 2: tools for children (admin only)**
 - `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`;
-- `spawn_subagent` `sandbox` flag + `subagents.sandbox`;
+- `spawn_subagent` `sandbox` flag + `subagents.sandbox` (flag removed 2026-11-21, §0);
 - child.ts tool filter + prompt section + `onRunFinished`;
 - `describeToolStep` entries; front prompt;
 - `takeLimit('sandbox_exec')`.

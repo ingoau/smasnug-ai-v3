@@ -181,7 +181,7 @@ describe('frontSystemPrompt answer quality rules (failure reports, Nov 2026)', (
   it('suggests a sandbox for calculations only when sandboxes are on', () => {
     const work = (o: { sandbox?: boolean }) => frontSystemPrompt('smasnug ai', o).split('\n').find((l) => l.startsWith('**Work it out'))!;
     expect(work({})).not.toMatch(/sandbox/);
-    expect(work({ sandbox: true })).toMatch(/sandbox subagent/);
+    expect(work({ sandbox: true })).toMatch(/subagent using the sandbox/);
     // Time zones, dates and arithmetic go through the deterministic calculate tool either way.
     for (const o of [{}, { sandbox: true }]) expect(work(o)).toMatch(/Time zone conversions, date maths .* go through calculate/);
   });

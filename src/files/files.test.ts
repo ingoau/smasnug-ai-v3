@@ -275,9 +275,9 @@ describe('Slack file ids', () => {
 
 describe('sandboxHint', () => {
   const base = { fileId: 'file_k3x9q2mf7a', kind: 'video' as const, sandboxChild: false, canSandbox: true };
-  it('front: spawn a sandbox subagent with the file id', () => {
+  it('front: spawn a subagent to use the sandbox, with the file id', () => {
     const h = sandboxHint({ ...base, role: 'front' });
-    expect(h).toMatch(/spawn a subagent with sandbox: true/);
+    expect(h).toMatch(/spawn a subagent, tell it to use the sandbox/);
     expect(h).toContain('file_k3x9q2mf7a');
     expect(h).toMatch(/ffmpeg/);
   });

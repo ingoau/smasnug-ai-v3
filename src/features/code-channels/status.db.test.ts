@@ -101,7 +101,8 @@ describe('code channels: the Status tab', () => {
   it('a subagent start schedules one coalesced refresh, which shows it; finishing moves it to recently finished', async () => {
     const threadId = `${channelId}:0`;
     const [turn] = await sql<{ id: number }[]>`insert into turns (thread_id, author_id, status) values (${threadId}, 'U0ASK', 'running') returning id`;
-    const s = await spawnSubagent({ threadId, turnId: Number(turn!.id), ownerId: 'U0ASK', title: 'Build the login page', instructions: 'do it', sandbox: true });
+    const s = await spawnSubagent({ threadId, turnId: Number(turn!.id), ownerId: 'U0ASK', title: 'Build the login page', instructions: 'do it' });
+    await sql`update subagents set sandbox = true where id = ${s.subagentId}`; // it has used its sandbox
     await queue(QUEUE.subagentRun).remove(`run-${s.runId}`).catch(() => {});
     // The run's card render (every run start / finish / cancel goes through it) asks for a refresh.
     await processCardRender(s.cardId);

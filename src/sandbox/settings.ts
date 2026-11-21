@@ -8,8 +8,11 @@ import { setSetting } from '../features/state.js';
 
 const CACHE_TTL_MS = 3000;
 
-/** The sandbox tools (registered in tools.ts); child.ts drops them for subagents without `sandbox: true`. */
+/** The sandbox tools (registered in tools.ts when the feature is configured; every subagent has them). */
 export const SANDBOX_TOOL_NAMES = ['sandbox_exec', 'sandbox_read_file', 'sandbox_write_file', 'sandbox_import', 'sandbox_export', 'request_preview'] as const;
+
+/** ToolContext.extras key: called (no arguments) once a subagent may use its sandbox; child.ts raises the run cap. */
+export const SANDBOX_STARTED_EXTRA = 'onSandboxStarted';
 
 export type AccessMode = 'hca_or_allowlist' | 'allowlist_only';
 

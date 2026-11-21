@@ -8,7 +8,7 @@ requires: [previews]
 # Web dev: Astro in a sandbox, live Cloudflare preview
 
 ## Front agent (in the thread)
-- Every website build goes to a subagent with `sandbox: true`, never create_file. Even a one-page site.
+- Every website build goes to a subagent that uses the sandbox, never create_file. Even a one-page site.
 - In its task: what the user wants (content, pages, style, any text or files they gave; pass the file_… ids), that it
   is a website build, that it must load the `web-dev` skill first, and that the user wants a live preview.
 - Tell the user in one line that you're building it and you'll post the link when it's done.

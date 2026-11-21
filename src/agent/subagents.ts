@@ -35,7 +35,7 @@ export interface SubagentRow {
   kind?: 'model' | 'cursor';
   cursorAgentId?: string | null;
   cursorAgentUrl?: string | null;
-  /** Spawned with `sandbox: true`: gets the sandbox tools and the longer run cap (src/sandbox/). */
+  /** Has used a code sandbox (set on its first allowed sandbox tool call): sandbox model, longer run cap (src/sandbox/). */
   sandbox?: boolean;
 }
 
@@ -87,8 +87,6 @@ export async function spawnSubagent(opts: {
   title: string;
   instructions: string;
   seedFrom?: string;
-  /** Code sandbox (src/sandbox/): the caller has checked access; nothing is created until the first sandbox tool call. */
-  sandbox?: boolean;
 }): Promise<{ subagentId: string; runId: number; cardId: number }> {
   await checkStartLimits(opts.ownerId, opts.threadId);
   let instructions = opts.instructions;
@@ -102,17 +100,17 @@ export async function spawnSubagent(opts: {
   }
   const subagentId = shortId('sa');
   const title = oneLine(opts.title, 80) || 'Subagent';
-  const model = opts.sandbox ? MODELS.sandbox : MODELS.child;
+  const model = MODELS.child;
   const cardId = await ensureTurnCard({ threadId: opts.threadId, turnId: opts.turnId });
   const runId = await sql.begin(async (tx) => {
-    await tx`insert into subagents (id, thread_id, owner_id, title, status, seeded_from, sandbox) values (${subagentId}, ${opts.threadId}, ${opts.ownerId}, ${title}, 'running', ${seededFrom}, ${opts.sandbox ?? false})`;
+    await tx`insert into subagents (id, thread_id, owner_id, title, status, seeded_from) values (${subagentId}, ${opts.threadId}, ${opts.ownerId}, ${title}, 'running', ${seededFrom})`;
     const [run] = await tx<{ id: number }[]>`
       insert into runs (subagent_id, thread_id, card_id, turn_id, instructions, is_resume, status, model)
       values (${subagentId}, ${opts.threadId}, ${cardId}, ${opts.turnId}, ${instructions}, false, 'queued', ${model}) returning id`;
     return Number(run!.id);
   });
   await enqueueRun(runId);
-  await appendEvent(opts.threadId, 'spawn', opts.ownerId, { subagentId, runId, cardId, turnId: opts.turnId, title, model, instructions: opts.instructions, ...(opts.sandbox ? { sandbox: true } : {}) });
+  await appendEvent(opts.threadId, 'spawn', opts.ownerId, { subagentId, runId, cardId, turnId: opts.turnId, title, model, instructions: opts.instructions });
   await scheduleCardRender(cardId);
   return { subagentId, runId, cardId };
 }
@@ -158,10 +156,9 @@ export async function messageSubagent(opts: {
       return { mode: 'steered', runId: Number(run?.id ?? 0), cardId: run?.cardId ? Number(run.cardId) : null, note };
     }
     if (sa.status === 'idle') {
-      const [last] = await tx<{ model: string | null }[]>`select model from runs where subagent_id = ${sa.id} order by id desc limit 1`;
       const [run] = await tx<{ id: number }[]>`
         insert into runs (subagent_id, thread_id, card_id, turn_id, instructions, is_resume, status, model)
-        values (${sa.id}, ${opts.threadId}, ${cardIdForResume}, ${opts.turnId}, ${opts.text}, true, 'queued', ${last?.model ?? MODELS.child})
+        values (${sa.id}, ${opts.threadId}, ${cardIdForResume}, ${opts.turnId}, ${opts.text}, true, 'queued', ${sa.sandbox ? MODELS.sandbox : MODELS.child})
         returning id`;
       await tx`update subagents set status = 'running', last_active_at = now() where id = ${sa.id}`;
       return { mode: 'resumed', runId: Number(run!.id), cardId: cardIdForResume! };
