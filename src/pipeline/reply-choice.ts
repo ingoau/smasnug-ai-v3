@@ -30,6 +30,8 @@ import { RATE_LIMITED_TEXT } from './intake.js';
 import { scheduleMessages } from './scheduler.js';
 
 export const ALREADY_ANSWERED_TEXT = 'Someone already answered that one.';
+/** A press of buttons retired because the conversation moved on (reply-buttons.ts `expired`; a stale client view). */
+export const EXPIRED_BUTTONS_TEXT = 'Those options are from an earlier message. Just reply in the thread instead.';
 
 const TS_RE = /^\d{9,11}\.\d{6}$/;
 
@@ -81,6 +83,10 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
     await ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
     return;
   }
+  if (row.expiredAt) {
+    await ephemeral(ctx, row.channelId, threadTs, EXPIRED_BUTTONS_TEXT);
+    return;
+  }
   // `who: requester`: only the person the reply answered.
   if (buttonWho(row.responses?.[index]) === 'requester' && row.requesterId && row.requesterId !== ctx.userId) {
     await ephemeral(ctx, row.channelId, threadTs, `Only <@${row.requesterId}> can press that one.`);
@@ -102,7 +108,9 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
   const ts = pressTs(ctx);
   const claimed = await claimPress({ id, index, userId: ctx.userId, pressedMessageTs: ts });
   if (!claimed) {
-    await ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
+    // Lost to a press, or the buttons were retired meanwhile.
+    const now = await loadReplyButtons(id);
+    await ephemeral(ctx, row.channelId, threadTs, now?.expiredAt && !now.pressedAt ? EXPIRED_BUTTONS_TEXT : ALREADY_ANSWERED_TEXT);
     return;
   }
   await noticePolicyUpdate({ userId: ctx.userId, channelId: row.channelId, ...(threadTs ? { threadTs } : {}), messageTs: pressTs(ctx) });

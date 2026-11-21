@@ -19,6 +19,8 @@
  * Every non-prompt button's action_id is `reply:quiet:<i>` (handler: reply-quiet.ts). Responses are stored per button in
  * reply_buttons.responses (null = a plain prompt button; a null column = older rows, every button a prompt).
  * The old `no_turn` / `fixed_reply` object fields still parse (as `none` / `text`).
+ * Buttons still unpressed when the bot answers a newer message in the thread are retired (`expired`): the actions block
+ * is dropped (a buttons-only message keeps the labels as a grey note) and presses are refused.
  */
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 
@@ -95,6 +97,8 @@ export interface ButtonsState {
   outcome?: ButtonOutcome | null;
   /** Which button was pressed (null on older rows: found by its label). */
   pressedIndex?: number | null;
+  /** Retired unpressed (the bot answered a newer message): no buttons shown. */
+  expired?: boolean;
 }
 
 export interface ButtonElement {
@@ -250,12 +254,24 @@ export function pressedNote(b: ButtonsState): ContextBlock {
   return { type: 'context', block_id: pressedBlockId(b.id), elements: [{ type: 'mrkdwn', text: pressedText(b) }] };
 }
 
-/** The buttons (not pressed yet) or the "pressed" note (pressed). */
-export function buttonsBlock(b: ButtonsState): ButtonsActionsBlock | ContextBlock {
-  return b.pressedBy && b.pressedLabel != null ? pressedNote(b) : buttonsActions(b);
+const isPressed = (b: ButtonsState) => Boolean(b.pressedBy && b.pressedLabel != null);
+const optionsText = (b: ButtonsState) => `Options: ${b.labels.join(' | ')}`;
+
+/** The buttons (not pressed yet), the "pressed" note (pressed), or nothing (retired unpressed). */
+export function buttonsBlock(b: ButtonsState): ButtonsActionsBlock | ContextBlock | null {
+  if (isPressed(b)) return pressedNote(b);
+  return b.expired ? null : buttonsActions(b);
+}
+
+/**
+ * The block of a message that carries only buttons (no reply text): as buttonsBlock, but retired buttons leave their
+ * labels as a grey note (the message can't be empty).
+ */
+export function buttonsOnlyBlock(b: ButtonsState): ButtonsActionsBlock | ContextBlock {
+  return buttonsBlock(b) ?? { type: 'context', block_id: buttonsBlockId(b.id), elements: [{ type: 'mrkdwn', text: mrkdwnLabel(optionsText(b)) }] };
 }
 
 /** Plain-text fallback for a message that carries only buttons (no reply text). */
 export function buttonsFallbackText(b: ButtonsState): string {
-  return b.pressedBy && b.pressedLabel != null ? pressedText(b) : `Options: ${b.labels.join(' | ')}`;
+  return isPressed(b) ? pressedText(b) : optionsText(b);
 }

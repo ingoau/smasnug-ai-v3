@@ -25,7 +25,7 @@ import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chatModel, isClaude, modelDisplayName, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
 import { TurnTiming } from '../core/timing.js';
-import { freezeCard } from './cards.js';
+import { freezeCard, retireOldButtons } from './cards.js';
 import { enqueueCardTitle, enqueueSessionTitle } from './titles.js';
 import { TurnCard } from './turn-card.js';
 import { CODING_AGENTS_PROMPT, frontSystemPrompt, MOVE_TO_CHANNEL_PROMPT } from './prompts/front.js';
@@ -768,6 +768,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     turn.kind === 'user' ? await placeTargetFor(turn.threadId, turn.messageTs ?? []).catch((err) => (log.warn({ err }, 'placeTargetFor failed'), null)) : null;
   /** The model that answered the latest model call (chatModel's onServed): a fallback shows in the reply footer. */
   let servedModel: string | null = null;
+  let buttonsRetired = false;
   const replies = new ReplyManager({
     placeTarget: privateTo ? null : placeTarget,
     privateTo,
@@ -799,7 +800,17 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     // Every delivered reply (any turn kind) restarts the thread's idle clock, names the speaker as the bot's
     // conversation partner and records whether it waits for their answer (pipeline/rules.ts awaitsReply).
     // A private answer isn't in the thread: no partner / awaited-reply state from it.
-    onDelivered: privateTo ? undefined : (r) => noteBotReply(turn.threadId, { ts: r.ts, partnerId: turn.authorId, awaitsReply: awaitsReply(r.text, r.buttons) }),
+    // A reply to a user's message also retires earlier replies' unpressed quick-reply buttons (the conversation moved
+    // on), once per turn and in the background.
+    onDelivered: privateTo
+      ? undefined
+      : async (r) => {
+          await noteBotReply(turn.threadId, { ts: r.ts, partnerId: turn.authorId, awaitsReply: awaitsReply(r.text, r.buttons) });
+          if (turn.kind === 'user' && !buttonsRetired) {
+            buttonsRetired = true;
+            void retireOldButtons(turn.threadId, turnId);
+          }
+        },
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
   const state: FrontTurnState = {

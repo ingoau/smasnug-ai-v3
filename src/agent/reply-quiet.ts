@@ -24,7 +24,7 @@ import { log } from '../log.js';
 import { guardEntry } from '../pipeline/entry.js';
 import { RATE_LIMITED_TEXT } from '../pipeline/intake.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
-import { ALREADY_ANSWERED_TEXT, handleReplyChoice, pressTs } from '../pipeline/reply-choice.js';
+import { ALREADY_ANSWERED_TEXT, EXPIRED_BUTTONS_TEXT, handleReplyChoice, pressTs } from '../pipeline/reply-choice.js';
 import { noteBotReply } from '../pipeline/store.js';
 import { rerenderButtonsMessage } from './cards.js';
 import { markdownMessage } from './reply.js';
@@ -84,6 +84,7 @@ export async function handleQuietChoice(ctx: ActionContext): Promise<void> {
     if (unfinished && row.pressedAt.getTime() < Date.now() - RESUME_AFTER_MS) return runAction(ctx, row, response, buttonPlace(response));
     return ephemeral(ctx, row.channelId, threadTs, unfinished ? 'Still working on that one.' : ALREADY_ANSWERED_TEXT);
   }
+  if (row.expiredAt) return ephemeral(ctx, row.channelId, threadTs, EXPIRED_BUTTONS_TEXT);
   if (await refuseWrongPresser(ctx, row, response, threadTs)) return;
 
   const entry = await guardEntry(ctx.userId, row.channelId);
@@ -94,7 +95,11 @@ export async function handleQuietChoice(ctx: ActionContext): Promise<void> {
 
   const ts = pressTs(ctx);
   let claimed = await claimPress({ id, index, userId: ctx.userId, pressedMessageTs: ts });
-  if (!claimed) return ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
+  if (!claimed) {
+    // Lost to a press, or the buttons were retired meanwhile.
+    const now = await loadReplyButtons(id);
+    return ephemeral(ctx, row.channelId, threadTs, now?.expiredAt && !now.pressedAt ? EXPIRED_BUTTONS_TEXT : ALREADY_ANSWERED_TEXT);
+  }
   const label = neutralizeBroadcasts(claimed.pressedLabel ?? '');
   const place = buttonPlace(response);
 

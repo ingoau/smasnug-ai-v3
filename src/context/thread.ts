@@ -157,8 +157,8 @@ async function loadThreadMessages(thread: ThreadRow): Promise<RenderMsg[]> {
  */
 export async function withButtons(threadId: string, msgs: RenderMsg[]): Promise<RenderMsg[]> {
   if (!msgs.length) return msgs;
-  const rows = await sql<{ messageTs: string | null; labels: string[]; pressedBy: string | null; pressedLabel: string | null; pressedMessageTs: string | null; responses: unknown; outcome: unknown }[]>`
-    select message_ts, labels, pressed_by, pressed_label, pressed_message_ts, responses, outcome from reply_buttons
+  const rows = await sql<{ messageTs: string | null; labels: string[]; pressedBy: string | null; pressedLabel: string | null; pressedMessageTs: string | null; responses: unknown; outcome: unknown; expiredAt: Date | null }[]>`
+    select message_ts, labels, pressed_by, pressed_label, pressed_message_ts, responses, outcome, expired_at from reply_buttons
     where thread_id = ${threadId} and message_ts is not null order by id`;
   if (!rows.length) return msgs;
   const offered = new Map(rows.map((r) => [r.messageTs!, r]));
@@ -168,7 +168,7 @@ export async function withButtons(threadId: string, msgs: RenderMsg[]): Promise<
     const actions = Array.isArray(b?.responses) ? b.responses.map((r) => (parseButtonResponse(r)?.kind === 'action' ? (r as { tool: string }).tool : null)) : undefined;
     const outcome = b ? parseButtonOutcome(b.outcome) : null;
     const out = b
-      ? { ...m, buttons: { labels: Array.isArray(b.labels) ? b.labels : [], pressedBy: b.pressedBy, pressedLabel: b.pressedLabel, ...(actions?.some(Boolean) ? { actions } : {}), ...(outcome ? { outcome } : {}) } }
+      ? { ...m, buttons: { labels: Array.isArray(b.labels) ? b.labels : [], pressedBy: b.pressedBy, pressedLabel: b.pressedLabel, ...(actions?.some(Boolean) ? { actions } : {}), ...(outcome ? { outcome } : {}), ...(b.expiredAt && !b.pressedBy ? { retired: true } : {}) } }
       : m;
     return presses.has(m.ts) && !m.botId ? { ...out, viaButton: true } : out;
   });

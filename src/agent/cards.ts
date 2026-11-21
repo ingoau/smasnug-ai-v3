@@ -15,8 +15,8 @@ import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import { renderCard, renderCardBlock, type CardRun, type CardState, type PlanBlock, type RunStatus } from './card-render.js';
 import type { CardStep } from './card-steps.js';
-import { buttonsBlock, buttonsFallbackText } from './reply-buttons.js';
-import { buttonsForMessage, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
+import { buttonsBlock, buttonsFallbackText, buttonsOnlyBlock } from './reply-buttons.js';
+import { buttonsForMessage, expireThreadButtons, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { extrasForMessage } from './charts-store.js';
 import { extrasFallback, footerBlock, hasExtras, replyBody, type ReplyExtras } from './rich-blocks.js';
 import { MAX_FALLBACK_TEXT, MAX_MESSAGE_BLOCKS } from './slack-markdown.js';
@@ -279,8 +279,22 @@ export async function rerenderButtonsMessage(row: ReplyButtonsRow): Promise<void
   }
   const state = toButtonsState(row);
   const extras = await extrasForMessage(row.channelId, row.messageTs);
-  const buttons = buttonsBlock(state);
-  const body = row.replyText != null ? replyBody(row.replyText, extras, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - footerBlock(extras).length, idPrefix: '', buttons }) : [buttons];
+  const body = row.replyText != null ? replyBody(row.replyText, extras, { maxBlocks: MAX_MESSAGE_BLOCKS - 1 - footerBlock(extras).length, idPrefix: '', buttons: buttonsBlock(state) }) : [buttonsOnlyBlock(state)];
   const text = row.replyText != null ? neutralizeBroadcasts(extrasFallback(row.replyText, extras, MAX_FALLBACK_TEXT)) : buttonsFallbackText(state);
   await slackCall('chat.update', { channel: row.channelId, ts: row.messageTs, text, blocks: [...body, ...(row.replyText != null ? footerBlock(extras) : [])] });
+}
+
+/**
+ * The bot answered a newer message in the thread (turn `turnId`): earlier replies' unpressed quick-reply buttons are
+ * stale, so they're retired and their messages re-rendered without them. Never throws.
+ */
+export async function retireOldButtons(threadId: string, turnId: number): Promise<void> {
+  try {
+    const rows = await expireThreadButtons(threadId, turnId);
+    for (const row of rows) {
+      await rerenderButtonsMessage(row).catch((err) => log.warn({ err, code: slackErrorCode(err), buttonsId: row.id }, 'hiding old reply buttons failed'));
+    }
+  } catch (err) {
+    log.warn({ err, threadId }, 'retiring old reply buttons failed');
+  }
 }
