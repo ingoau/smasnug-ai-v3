@@ -158,7 +158,7 @@ export class ModalProvider implements SandboxProvider {
     // agent-browser's daemons (they outlive sandbox_exec calls) don't survive the snapshot: close them so each session
     // saves its cookies + localStorage first (AGENT_BROWSER_RESTORE). Best effort; skipped when none is running.
     await this.exec(h, ['bash', '-c', 'compgen -G "$HOME/.agent-browser/*.pid" >/dev/null && agent-browser close --all >/dev/null 2>&1; true'], {
-      timeoutMs: 20_000,
+      timeoutMs: 10_000, // a healthy close takes ~1 s; pause holds the row lock (LOCK_TTL_MS) throughout
       maxOutputBytes: 1024,
     }).catch((err) => {
       if (err instanceof SandboxGoneError) throw err;
