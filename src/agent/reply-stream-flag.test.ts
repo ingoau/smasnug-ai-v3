@@ -111,6 +111,13 @@ describe('reply stream flag and opening-layout hold', () => {
     expect(posted()).toHaveLength(0);
   });
 
+  it('a nested "stream": false (not the leading key) does not hold the stream', async () => {
+    const rm = new ReplyManager(target());
+    const text = 'Plain words that stream in as they always did.';
+    await argsIn(rm, { text, buttons: [{ stream: false }] });
+    expect(await rm.finish('tc1', text)).toBe('Replied (streamed).');
+  });
+
   it('stream: false with no deltas seen (execute only) still posts whole', async () => {
     const rm = new ReplyManager(target());
     expect(await rm.finish('tc1', 'Just this.', undefined, undefined, undefined, { stream: false })).toBe('Replied (posted).');

@@ -48,8 +48,8 @@ const FIRST_FLUSH_CHARS = 8;
 /** …or after this long, whichever comes first. */
 const FIRST_FLUSH_MS = 80;
 const MAX_MD = 11_500; // markdown limit: 12k chars cumulative per message / per stream call
-/** The reply's arguments so far set `"stream": false` (a top-level key; quotes inside a string value are escaped). */
-const streamOff = (buf: string) => /(?:^|[{,])\s*"stream"\s*:\s*false\b/.test(buf);
+/** The reply's arguments open with `"stream": false` (its schema puts it first; a later or nested one is ignored). */
+const streamOff = (buf: string) => /^\s*\{\s*"stream"\s*:\s*false\b/.test(buf);
 
 /** Blocks a stream may carry (50 per message, one kept free for the buttons at stopStream). */
 const MAX_STREAM_BLOCKS = MAX_MESSAGE_BLOCKS - 1;
@@ -503,8 +503,9 @@ export class ReplyManager {
       const hold = streamOff(e.buf) ? 'post' : streamHold(finalText ?? extractPartialString(e.buf, 'text')?.value ?? '', finalText !== undefined);
       if (hold === 'wait') return;
       if (hold === 'post') {
-        // Its early stream stays until postWhole removes it (holding back an activity message meanwhile).
+        // Its empty early stream goes now (not left up while the rest is written); the activity trail may show meanwhile.
         e.mode = Promise.resolve('post');
+        await this.discardEarly(e);
         return;
       }
     }
