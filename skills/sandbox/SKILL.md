@@ -12,7 +12,7 @@ paused, out of budget; then say so in your result and do what you can without it
 you: files in /work persist.
 
 - **Installed:** Python 3 (pandas, numpy, matplotlib, pillow, openpyxl, requests, beautifulsoup4, playwright),
-  Node 22 + pnpm, Playwright with Chromium, git, jq, sqlite3, zip and curl. Internet access, but no private
+  Node 22 + pnpm, Playwright with Chromium, agent-browser (load `web-browsing`), git, jq, sqlite3, zip and curl. Internet access, but no private
   networks, no secrets, no credentials. System packages: `sandbox_exec` with `as_root` (`apt-get install -y …`).
 - **What it's for:** running code, analysing files, building deliverables (scripts, data files, images, charts,
   HTML pages), cloning and grepping a git repo, a headless browser. Not for things a search or fetch_url answers
@@ -20,7 +20,7 @@ you: files in /work persist.
 - **Files in:** `sandbox_import` a file_… id first (uploads, files made earlier, ids from search results or other
   threads); it lands in /work/in/.
 - **Commands:** keep them short with sensible timeouts (see `sandbox_exec`). For longer work, write a script
-  (`sandbox_write_file`) and run it. No background servers or long-running processes. Independent calls can go in
+  (`sandbox_write_file`) and run it. No background servers or long-running processes (agent-browser's browser is the exception). Independent calls can go in
   one step.
 - **Check what you built:** look at images and charts with `sandbox_read_file`; screenshot an HTML page with
   Playwright and look at the PNG. For animations, look at a few frames or a contact sheet.

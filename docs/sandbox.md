@@ -86,7 +86,8 @@ Deviations from the plan below (all decided 2026-10-07 unless noted):
 - Subagents can run code in an isolated Linux sandbox to:
   - build files (HTML, scripts, CSVs, charts/images);
   - run Python/Node for analysis, including on files users uploaded to the thread;
-  - drive a headless browser (Chromium/Playwright), e.g. to screenshot and check an HTML page they built.
+  - drive a headless browser (Chromium/Playwright), e.g. to screenshot and check an HTML page they built, or browse
+    real sites interactively with agent-browser (§3.3).
 - Outputs land in the thread's file store and are posted by the front agent. Users' uploaded files can be imported
   into the sandbox.
 - Live previews of static sites, as Cloudflare temporary deploys that the requester can claim.
@@ -234,9 +235,20 @@ Built: Modal's image builder (`fromRegistry` + `dockerfileCommands`), defined in
 from `mcr.microsoft.com/playwright:v1.56.1-noble`; the deploy image from `node:22-bookworm-slim` + `wrangler@4.148.0`.
 `pnpm sandbox:images` builds both (first work build ~13 min, then cached).
 
+**agent-browser** (`agent-browser@0.43.0`, `AGENT_BROWSER_VERSION`; skill `skills/web-browsing`): a CLI whose daemon
+keeps a headless browser open between `sandbox_exec` calls, so a child can snapshot a page (elements with refs like
+`@e1`), act on a ref and look again, one short call per step. It is the one background process allowed to outlive a
+command: it detaches into its own session, so the exec's process-group kill and `timeout` don't reach it. It drives
+Playwright's Chromium (linked as `/usr/local/bin/chromium`, no second browser download). Its config is env in
+`modal.ts` `BASE_ENV`: `AGENT_BROWSER_EXECUTABLE_PATH`, `AGENT_BROWSER_RESTORE=default` (the default session saves
+cookies + localStorage under `/work/.agent-browser` every 30 s and on close, and reloads them when it starts) and
+`AGENT_BROWSER_NO_VERSION_CHECK`. The daemon doesn't survive a pause, so `ModalProvider.pause` runs
+`agent-browser close --all` before the snapshot (skipped when no daemon is running): after a resume the next command
+starts a fresh browser with the saved cookies, but open pages are gone. The daemon exits by itself after an hour idle.
+
 - **Work image** (pinned tag, built once per version, referenced by digest):
   - Debian slim; Python 3.12 with numpy, pandas, matplotlib, pillow, openpyxl, requests, beautifulsoup4;
-  - Node 22 + pnpm; Playwright + Chromium (~2 GiB);
+  - Node 22 + pnpm; Playwright + Chromium (~2 GiB); agent-browser (above);
   - git, curl, jq, sqlite3, zip/unzip, ffmpeg (optional, if size allows);
   - user `sandbox`, `/work` owned by it.
 - **Deploy image:** Node 22 + `wrangler@<pinned>`, nothing else. It is only used by the preview deploy (§3.6).
@@ -636,7 +648,7 @@ demand). It says:
 - How:
   - short commands with timeouts;
   - for longer work, write a script, then run it;
-  - no background servers;
+  - no background servers (agent-browser's browser excepted; the `web-browsing` skill covers it);
   - parallel independent calls are fine.
 - Deliverables: `sandbox_export` each one with a description, and list the `file_…` ids + one line each in the
   final message.
