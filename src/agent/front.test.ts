@@ -607,6 +607,25 @@ describe('runFrontTurn: required tool calls and the plain-text nudge', () => {
     expect(h.slack.filter((c) => c.method === 'chat.postMessage').map((c) => c.args.text).join(' ')).not.toContain('flagging');
   });
 
+  it('end_turn with no_reply_requested skips the mention fallback', async () => {
+    h.model = mockModel([toolStep(['end_turn', { no_reply_requested: true }])]);
+    await runFrontTurn(turn({ id: 155 }), io().io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+    expect(h.events.some((e) => e.type === 'reply_skipped')).toBe(true);
+  });
+
+  it('no_reply_requested does not silence a results turn', async () => {
+    h.model = mockModel([toolStep(['end_turn', { no_reply_requested: true }])]);
+    await runFrontTurn(turn({ id: 157, kind: 'synthesis' }), io().io);
+    expect(h.events.some((e) => e.type === 'reply_skipped')).toBe(false);
+  });
+
+  it('plain end_turn on a mention still gets the fallback', async () => {
+    h.model = mockModel([toolStep(['end_turn', {}])]);
+    await runFrontTurn(turn({ id: 156 }), io().io);
+    expect(fallbacks()).toHaveLength(1);
+  });
+
   it('end_turn after the nudge stays silent', async () => {
     h.model = mockModel([textStep('nothing to add here'), toolStep(['end_turn', {}])]);
     await runFrontTurn(turn({ id: 142, isMention: false }), io(false).io);

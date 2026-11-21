@@ -76,11 +76,12 @@ describe('detect', () => {
         { type: 'reply', actor: 'bot', payload: { turnId: 1, fallback: true }, at: '' },
         { type: 'plain_text_nudge', actor: 'system', payload: { turnId: 1 }, at: '' },
         { type: 'lookup_guard', actor: 'system', payload: { turnId: 1, guard: 'restrict' }, at: '' },
+        { type: 'reply_skipped', actor: 'bot', payload: { turnId: 1, noReplyRequested: true }, at: '' },
       ],
       followUps: [{ userId: 'U1', text: "no, I meant the other channel", minutesAfter: 2 }],
       reactions: [{ name: '-1', count: 1 }],
     });
-    expect(codes(t)).toEqual(expect.arrayContaining(['stopped', 'fallback_reply', 'plain_text', 'lookup_guard', 'user_correction', 'negative_reaction']));
+    expect(codes(t)).toEqual(expect.arrayContaining(['stopped', 'fallback_reply', 'plain_text', 'lookup_guard', 'reply_skipped', 'user_correction', 'negative_reaction']));
   });
 
   it('ignores corrections from others or long after', () => {

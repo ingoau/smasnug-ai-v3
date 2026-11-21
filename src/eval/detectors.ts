@@ -97,6 +97,8 @@ export function detect(t: EvalTurn): Flag[] {
   if (eventsOf(t, 'turn_stopped').length) add('stopped', 4, 'someone stopped the turn (!stop)');
   const fallback = eventsOf(t, 'reply').filter((e) => e.payload.fallback && !e.payload.outcome && !e.payload.canvasLink);
   if (fallback.length) add('fallback_reply', 4, fallback[0]!.payload.fromText ? 'posted unsent plain text as the reply' : 'generic fallback reply');
+  // end_turn({ no_reply_requested }) skipped a mention's fallback: right when the speaker said "don't respond", a silent miss otherwise.
+  if (eventsOf(t, 'reply_skipped').length) add('reply_skipped', 2, 'ended silently on a mention: model said no reply was requested');
   if (eventsOf(t, 'reply_dropped').length) add('reply_dropped', 3, `${eventsOf(t, 'reply_dropped').length} reply call(s) dropped`);
 
   // User reaction
