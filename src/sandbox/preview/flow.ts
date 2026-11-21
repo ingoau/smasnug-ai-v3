@@ -26,7 +26,7 @@ import { budgetStatus } from '../budget.js';
 import { sandboxSettings } from '../settings.js';
 import { prepareBundle } from './bundle.js';
 import { previewDeployer } from './deploy.js';
-import { previewButtonBlocks } from './reply-blocks.js';
+import { postPreviewMessage, previewMessage } from './reply-blocks.js';
 import { readTar } from './tar.js';
 import { ACTIVE, acceptTerms, apiTokenOf, claimUrlOf, getPreview, setInlineUntil, setMessageTs, storeLive, termsAccepted, transition, type PreviewRow } from './store.js';
 
@@ -171,21 +171,35 @@ export async function deployPreview(previewId: string): Promise<void> {
 const cleanTitle = (t: string) => t.replace(/[<>&*_~`"]/g, '');
 const hhmmUtc = (d: Date | null) => `${(d ?? new Date()).toISOString().slice(11, 16)} UTC`;
 
-/** The live preview reached the thread after its run: an outcome turn has the front agent post it (fallback: our message). */
+/**
+ * A preview went live outside its request_preview call (a late terms answer, or a call that was aborted): an outcome
+ * turn has the front agent post it (fallback: our message).
+ */
 async function announceLive(row: PreviewRow): Promise<void> {
   const fallback = `Live preview of ${cleanTitle(row.title)}: ${row.url} · expires ${hhmmUtc(row.expiresAt)}`;
-  if (!(await hasAgreed(row.requesterId).catch(() => false))) return postPreviewMessage(row);
+  if (!(await hasAgreed(row.requesterId).catch(() => false))) {
+    await postPreviewMessage(row);
+    return;
+  }
   const input = [
     `<preview id="${row.id}" status="live">`,
-    `System notice (not a message from <@${row.requesterId}>): the live preview "${cleanTitle(row.title)}" a subagent built for <@${row.requesterId}> is now deployed (after the run finished, once they accepted Cloudflare's terms): ${row.url} (expires ${hhmmUtc(row.expiresAt)}, unless claimed).`,
+    `System notice (not a message from <@${row.requesterId}>): the live preview "${cleanTitle(row.title)}" a subagent built for <@${row.requesterId}> is now deployed: ${row.url} (expires ${hhmmUtc(row.expiresAt)}, unless claimed).`,
     '</preview>',
-    `Post the link now in one short reply with preview: "${row.id}" (that adds the "Get claim link" button only they can use). Don't start new work.`,
+    `Post the link now in one short reply with preview: "${row.id}" (that adds the "Get claim link" button only they can use), unless a message in the thread already shows this link with its claim button. Don't start new work.`,
   ].join('\n');
   const r = await settleWithOutcome({ threadId: row.threadId, speakerId: row.requesterId, source: 'preview', sourceRef: row.id, input, fallback, isMention: true, transition: async () => true }).catch((err) => {
     log.warn({ err, previewId: row.id }, 'preview live turn failed');
     return null;
   });
   if (!r?.turnId) await postPreviewMessage(row);
+}
+
+/** request_preview's text while the terms prompt is unanswered. */
+function waitingText(row: Pick<PreviewRow, 'id' | 'requesterId'>): string {
+  return (
+    `Preview waiting: <@${row.requesterId}> hasn't accepted Cloudflare's terms yet (a prompt only they see is in the thread). ` +
+    `When they accept, it deploys and the link is posted in the thread. Say so in your result (the preview id is ${row.id}); don't request it again.`
+  );
 }
 
 const untrustedTitle = (t: string) => `Title (written by the subagent): "${cleanTitle(t)}"`;
@@ -240,6 +254,8 @@ const sleep = (ms: number, signal?: AbortSignal) =>
  */
 export async function deployInline(previewId: string, o: { abortSignal?: AbortSignal; pollMs?: number; waitMs?: number } = {}): Promise<string> {
   let row = await getPreview(previewId);
+  // Requested again while the terms prompt is open: the new files replaced the old ones; still waiting.
+  if (row?.status === 'awaiting_terms') return waitingText(row);
   if (!row || row.status !== 'requested') return 'Preview not deployed: it is no longer pending.';
   const pre = await preflight(row);
   if (pre) return `Preview not deployed: ${pre.problem} Export the files instead and say so.`;
@@ -258,15 +274,21 @@ export async function deployInline(previewId: string, o: { abortSignal?: AbortSi
     }
     // Stop waiting; whatever the status is now, the accept handler saw the mark (no job) or sees it gone (job).
     status = (await setInlineUntil(previewId, null)) ?? 'cancelled';
-    if (status === 'awaiting_terms')
-      return (
-        `Preview waiting: <@${row.requesterId}> hasn't accepted Cloudflare's terms yet (a prompt only they see is in the thread). ` +
-        `When they accept, it deploys and the link is posted in the thread. Say so in your result (the preview id is ${row.id}); don't request it again.`
-      );
+    if (status === 'awaiting_terms') return waitingText(row);
     if (status !== 'requested') return 'Preview not deployed: the terms were declined or the request ended. Export the files instead and say so.';
   }
+  // The run was stopped meanwhile: nobody would get the result.
+  if (o.abortSignal?.aborted) {
+    const r = await getPreview(previewId);
+    if (r) await endEarly(r, 'cancelled', 'run aborted');
+    return 'Preview not deployed: the run was stopped.';
+  }
   const res = await deployCore(previewId);
-  if (res.ok) return liveText(res.live);
+  if (res.ok) {
+    // Stopped while deploying: the result never reaches the front agent, so tell it like a late deploy.
+    if (o.abortSignal?.aborted) await announceLive(res.live).catch((err) => log.warn({ err, previewId }, 'announcing an aborted inline deploy failed'));
+    return liveText(res.live);
+  }
   if ('skipped' in res) {
     row = await getPreview(previewId);
     return row?.status === 'live' ? liveText(row) : 'Preview not deployed: it is no longer pending.';
@@ -303,28 +325,6 @@ export function termsBlocks(row: Pick<PreviewRow, 'id' | 'title'>): unknown[] {
       ],
     },
   ];
-}
-
-export function previewMessage(row: PreviewRow): { text: string; blocks: unknown[] } {
-  const exp = row.expiresAt ?? new Date();
-  const epoch = Math.floor(exp.getTime() / 1000);
-  const hhmm = exp.toISOString().slice(11, 16);
-  const title = row.title.replace(/[<>&*_~`]/g, '');
-  const text = `Live preview of ${title} for <@${row.requesterId}>: ${row.url} · expires ${hhmm} UTC`;
-  return {
-    text,
-    blocks: [
-      { type: 'section', text: { type: 'mrkdwn', text: `Live preview of *${title}* for <@${row.requesterId}>: <${row.url}> · expires <!date^${epoch}^{time}|${hhmm} UTC>` } },
-      ...previewButtonBlocks(row),
-    ],
-  };
-}
-
-async function postPreviewMessage(row: PreviewRow): Promise<void> {
-  const { channelId, threadTs } = threadOf(row);
-  const m = previewMessage(row);
-  const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), text: m.text, blocks: m.blocks, unfurl_links: false, unfurl_media: false }, { idempotencyKey: `preview:${row.id}` });
-  if (res?.ts) await setMessageTs(row.id, res.ts);
 }
 
 async function updateEndedMessage(row: PreviewRow, text: string): Promise<void> {
@@ -367,6 +367,8 @@ export async function handleTermsAccept(ctx: ActionContext): Promise<void> {
 export function acceptedInline(r: Pick<PreviewRow, 'inlineUntil'>, now = Date.now()): boolean {
   return Boolean(r.inlineUntil && new Date(r.inlineUntil).getTime() > now);
 }
+
+export { previewMessage };
 
 export async function handleTermsCancel(ctx: ActionContext): Promise<void> {
   const row = await getPreview(ctx.value ?? '');

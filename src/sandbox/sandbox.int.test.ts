@@ -623,6 +623,10 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       expect(pv.status).toBe('awaiting_terms');
       expect(pv.inlineUntil).toBeNull();
       expect(F.acceptedInline(pv)).toBe(false);
+      // Requested again while the prompt is open: same row, new files, still waiting.
+      expect(await call(ctx, 'request_preview', { dir: 'site', title: 'Hi page v2' })).toMatch(/^Preview waiting/);
+      expect(await sql`select id from previews where run_id = ${sa.runId}`).toHaveLength(1);
+      expect((await PS.getPreview(pv.id))!.title).toBe('Hi page v2');
       // The run ends: the prompt stays open.
       await finishRun(sa.runId);
       await hooks.onSandboxRunFinished(sa.runId);
@@ -644,6 +648,64 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       const fb = await renderOutcomeFallback('preview', pv.id, sti.fallback);
       expect(JSON.stringify(fb!.blocks)).toContain('preview:claim');
       expect(t).toBeTruthy();
+    });
+
+    it('abort: before the deploy the request is cancelled; after it, the front agent is told like a late deploy', async () => {
+      const a = await setup({ accepted: true });
+      const { id } = await PS.upsertRequestedPreview({ runId: a.sa.runId, subagentId: a.sa.subagentId, threadId: a.t, requesterId: a.u, title: 'Stopped', bundleFileId: 'file_none' });
+      const stopped = new AbortController();
+      stopped.abort();
+      expect(await F.deployInline(id, { abortSignal: stopped.signal })).toMatch(/run was stopped/);
+      expect((await PS.getPreview(id))!.status).toBe('cancelled');
+      // Aborted while deploying: it goes live and an outcome turn tells the front agent.
+      const b = await setup({ accepted: true });
+      const ac = new AbortController();
+      const impl = fakeDeploy.getMockImplementation()!;
+      fakeDeploy.mockImplementationOnce(async (o: any) => {
+        ac.abort();
+        return impl(o);
+      });
+      const out = await (toolsFor('child', b.ctx).request_preview as any).execute({ dir: 'site', title: 'Hi page' }, { toolCallId: `tc${rand()}`, messages: [], abortSignal: ac.signal });
+      expect(out).toMatch(/^Deployed:/);
+      const pv = await latest(b.sa.runId);
+      expect(pv.status).toBe('live');
+      const [sti] = await sql<any[]>`select input from scheduled_turn_inputs where source = 'preview' and source_ref = ${pv.id}`;
+      expect(sti.input).toContain(pv.url);
+      expect(sti.input).not.toContain('after the run finished');
+    });
+
+    it('announcement: the safety net posts unannounced live previews once; an announced one is skipped', async () => {
+      const a = await setup({ accepted: true });
+      await call(a.ctx, 'request_preview', { dir: 'site', title: 'One' });
+      const one = await latest(a.sa.runId);
+      await call(a.ctx, 'request_preview', { dir: 'site', title: 'Two' });
+      const two = await latest(a.sa.runId);
+      expect(two.id).not.toBe(one.id);
+      await PS.markAnnounced(two.id);
+      const two2 = await PS.getPreview(two.id);
+      expect(two2!.announcedAt).toBeTruthy();
+      expect(two2!.messageTs).toBeNull(); // a front reply: never rewritten by takedown
+      const { postUnannouncedPreviews } = await import('./preview/reply-blocks.js');
+      let n = (await fakeCalls()).length;
+      expect(await postUnannouncedPreviews([a.sa.runId])).toHaveLength(1);
+      const posts = (await callsSince(n)).filter((c) => c.method === 'chat.postMessage');
+      expect(posts).toHaveLength(1);
+      expect(JSON.stringify(posts[0]!.args)).toContain(one.id);
+      expect(JSON.stringify(posts[0]!.args)).toContain('preview:claim');
+      const row = await PS.getPreview(one.id);
+      expect(row!.messageTs).toBeTruthy();
+      expect(row!.announcedAt).toBeTruthy();
+      n = (await fakeCalls()).length;
+      expect(await postUnannouncedPreviews([a.sa.runId])).toHaveLength(0);
+      expect((await callsSince(n)).filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+    });
+
+    it('daily cap: failed previews (our side) don\'t count, refused ones do', async () => {
+      const t = await newThread();
+      const u = await newUser();
+      const before = await PS.previewCountsToday(u);
+      await sql`insert into previews (id, thread_id, requester_id, title, status) values (${`pv_f${rand()}`}, ${t}, ${u}, 'f', 'failed'), (${`pv_r${rand()}`}, ${t}, ${u}, 'r', 'refused')`;
+      expect((await PS.previewCountsToday(u)).user).toBe(before.user + 1);
     });
 
     it('accept-handler coordination: a waiting call means no job', () => {

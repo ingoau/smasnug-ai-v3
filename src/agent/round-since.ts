@@ -10,7 +10,7 @@ import { sql } from '../db/index.js';
 import { oneLine } from './util.js';
 
 export type SinceItem =
-  | { kind: 'message'; at: number; ts: string; userId: string | null; self: boolean }
+  | { kind: 'message'; at: number; ts: string; userId: string | null; botId?: string | null; self: boolean }
   | { kind: 'cancel' | 'spawn' | 'steer' | 'resume'; at: number; subagentId: string; title: string | null; actor: string | null; turnTs: string[] }
   | { kind: 'stop_all'; at: number; actor: string | null; thisCard: boolean };
 
@@ -91,7 +91,7 @@ export async function loadSinceRound(cardId: number, self?: { userId?: string; b
   for (const m of messages) {
     const isSelf = Boolean((self?.userId && m.userId === self.userId) || (self?.botId && m.botId === self.botId));
     if (isSelf && (turnEnd == null || Number(m.ts) * 1000 <= turnEnd)) continue;
-    items.push({ kind: 'message', at: Number(m.ts) * 1000, ts: m.ts, userId: m.userId, self: isSelf });
+    items.push({ kind: 'message', at: Number(m.ts) * 1000, ts: m.ts, userId: m.userId, botId: m.botId, self: isSelf });
   }
   for (const e of events) {
     const at = new Date(e.createdAt).getTime();

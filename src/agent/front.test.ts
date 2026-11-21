@@ -113,7 +113,7 @@ const { simulateReadableStream } = await import('ai');
 await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
-const { runFrontTurn, barePingKind, barePingInstruction, needsFallback, previewLine, FILTERED_TEXT } = await import('./front.js');
+const { runFrontTurn, barePingKind, barePingInstruction, needsFallback, previewLine, peopleSpokeSince, FILTERED_TEXT } = await import('./front.js');
 const { streamArgsText } = await import('./slack-markdown.js');
 
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
@@ -1471,8 +1471,20 @@ describe('synthesis turns after a cancellation', () => {
     expect(live).toContain('https://x.workers.dev');
     expect(live).toContain('live until 01:57 UTC');
     expect(live).toContain('preview: "pv_ab12"');
+    const posted = previewLine({ id: 'pv_ab12', status: 'live', url: 'https://x.workers.dev', expiresAt: new Date('2026-11-21T01:57:00Z'), error: null, announcedAt: new Date() });
+    expect(posted).toContain('already posted in the thread');
+    expect(posted).not.toContain('preview: "pv_ab12"');
     expect(previewLine({ id: 'pv_ab12', status: 'awaiting_terms', url: null, expiresAt: null, error: null })).toMatch(/accept Cloudflare's terms/);
     expect(previewLine({ id: 'pv_ab12', status: 'refused', url: null, expiresAt: null, error: 'password form' })).toBe('- pv_ab12: refused (password form)');
+  });
+
+  it('peopleSpokeSince: only messages from people (not the bot, not other bots)', () => {
+    const msg = (o: { userId: string | null; botId?: string | null; self?: boolean }) => ({ kind: 'message' as const, at: 1, ts: '1.000001', self: false, ...o });
+    expect(peopleSpokeSince([])).toBe(false);
+    expect(peopleSpokeSince([msg({ userId: 'UBOT', self: true })])).toBe(false);
+    expect(peopleSpokeSince([msg({ userId: 'U9', botId: 'B9' })])).toBe(false);
+    expect(peopleSpokeSince([msg({ userId: null, botId: 'B9' })])).toBe(false);
+    expect(peopleSpokeSince([msg({ userId: 'U1' })])).toBe(true);
   });
 
   it('needsFallback: synthesis unless a task was cancelled or someone spoke since; other turns when mentioned', () => {

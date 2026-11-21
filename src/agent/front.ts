@@ -34,7 +34,7 @@ import { placeTargetFor } from './reply-buttons-store.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread, maybeSynthesize } from './subagents.js';
 import { renderBatchStatus, renderOpenBatches } from './batch-status.js';
-import { loadSinceRound, renderSinceRound } from './round-since.js';
+import { loadSinceRound, renderSinceRound, type SinceItem } from './round-since.js';
 import { cursorInstructRefusal, cursorRefusal, isCursorAdmin } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
 import { decidePlainText, endsTurnAfterStep, PLAIN_TEXT_NUDGE_NOTE, postablePlainText, replyEndsWithLookups, REPLY_WITH_LOOKUPS_NOTE, type StepCall, type StepResultPart } from './turn-end.js';
@@ -47,6 +47,7 @@ import { clipTokens, oneLine } from './util.js';
 import { saveTrace, TraceRecorder } from './trace.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
 import { previewsOfRuns, type PreviewRow } from '../sandbox/preview/store.js';
+import { postUnannouncedPreviews } from '../sandbox/preview/reply-blocks.js';
 import { offersMoveButton } from '../features/code-channels/logic.js';
 import { hiddenToolsFor, loadCodeChannelTurnContext, NO_CODE_CHANNELS, renderChildrenSection, renderHereSection, type CodeChannelTurnContext } from '../features/code-channels/turn-context.js';
 
@@ -236,10 +237,11 @@ export async function renderSnapshot(threadId: string): Promise<string> {
 }
 
 /** One preview of a finished run, for the results turn: what to post (a live one with reply(preview)). */
-export function previewLine(p: Pick<PreviewRow, 'id' | 'status' | 'url' | 'expiresAt' | 'error'>): string {
+export function previewLine(p: Pick<PreviewRow, 'id' | 'status' | 'url' | 'expiresAt' | 'error'> & Partial<Pick<PreviewRow, 'announcedAt'>>): string {
   const hhmm = p.expiresAt ? `${new Date(p.expiresAt).toISOString().slice(11, 16)} UTC` : '?';
   switch (p.status) {
     case 'live':
+      if (p.announcedAt) return `- ${p.url} (preview id ${p.id}, live until ${hhmm} unless claimed): already posted in the thread with its claim button; don't post it again (you may refer to it)`;
       return `- ${p.url} (preview id ${p.id}, live until ${hhmm} unless claimed): put the link in your reply and pass preview: "${p.id}" for the claim button`;
     case 'requested':
     case 'deploying':
@@ -483,9 +485,9 @@ async function buildTurnMessage(
     parts.push(section('finished_subagents', res.text));
     const sinceItems = await loadSinceRound(turn.cardId, self).catch((err) => (log.warn({ err }, 'loadSinceRound failed'), null));
     const since = sinceItems ? renderSinceRound(sinceItems) : '';
-    // Someone wrote in the thread after the round started (or is waiting for their own turn): the results may be
-    // stale ("nvm, works"), so ending silently is allowed (needsFallback).
-    peopleSpoke = Boolean(sinceItems?.some((i) => i.kind === 'message' && !i.self) || ctx.newMessages.trim() || queued);
+    // A person (not the bot, not another bot) wrote in the thread after the round started: the results may be stale
+    // ("nvm, works"), so ending silently is allowed (needsFallback).
+    peopleSpoke = peopleSpokeSince(sinceItems ?? []);
     parts.push(section('since_round_start', since, ' note="What happened in this thread after the turn that started this round."'));
     if (ctx.newMessages.trim()) parts.push(section('new_messages', clipTokens(ctx.newMessages, BUDGET.newMessages)));
     parts.push(SYNTHESIS_INSTRUCTION);
@@ -1108,6 +1110,17 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, outcome: true, text });
   };
 
+  /**
+   * Results turns: live previews of the card's runs that no message announced (a silent turn, or a reply without
+   * `preview`) get the code-posted preview message. True if one was posted.
+   */
+  const postPreviewSafetyNet = async (): Promise<boolean> => {
+    if (turn.kind !== 'synthesis' || !built.synthesisRunIds.length || !previewsConfigured()) return false;
+    const posted = await postUnannouncedPreviews(built.synthesisRunIds).catch((err) => (log.warn({ err, turnId }, 'preview safety net failed'), []));
+    for (const ts of posted) await noteCodeReply(ts);
+    return posted.length > 0;
+  };
+
   if (stopped || (await checkStop())) {
     // The user pressed stop: the pipeline confirms ("Stopped."). Close anything still open quietly; no error note,
     // no fallback (except an outcome turn's factual confirmation). Streams Slack already halted just make
@@ -1131,6 +1144,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       return;
     }
     if (outcome) return void (await postOutcomeFallback());
+    if (await postPreviewSafetyNet()) return;
     // A reaction (or other non-reply visible effect) already answered the user: don't throw, or the pipeline posts
     // "Something broke" on top of it.
     if (state.visible.size > 0) return;
@@ -1139,6 +1153,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 
   // Reply streams whose tool call never executed (invalid input, retried under a new call id) are closed too.
   await replies.closeUnfinished();
+  const previewPosted = await postPreviewSafetyNet();
   // A canvas made this turn with no reply after it: nobody would see its link (create_canvas leaves posting it to
   // the reply). Post the link instead of the generic fallback.
   if (!state.visible.has('reply')) {
@@ -1153,7 +1168,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   }
 
   if (state.visible.size === 0 && outcome) await postOutcomeFallback();
-  else if (state.visible.size === 0 && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
+  else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
@@ -1180,6 +1195,11 @@ async function turnCanvases(turnId: number): Promise<{ title: string; permalink:
 export function canvasLinkText(canvases: { title: string; permalink: string }[]): string {
   const links = canvases.map((c) => `[${c.title.replace(/[[\]<>]/g, '').trim() || 'canvas'}](${c.permalink})`);
   return links.length === 1 ? `here's the canvas: ${links[0]}` : `here are the canvases: ${links.join(', ')}`;
+}
+
+/** Whether a person (not the bot, not another bot) wrote in the thread since the round started. */
+export function peopleSpokeSince(items: readonly SinceItem[]): boolean {
+  return items.some((i) => i.kind === 'message' && !i.self && Boolean(i.userId) && !i.botId);
 }
 
 /**

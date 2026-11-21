@@ -15,6 +15,7 @@ import { turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
 import { prepareImageArgs, prepareOutgoingFiles } from './files.js';
 import { previewReplyExtras } from '../sandbox/preview/reply-blocks.js';
+import { markAnnounced } from '../sandbox/preview/store.js';
 import { cardsSchema, containersSchema, fieldsSchema, imagesSchema, linksSchema, MAX_IMAGES, tablesSchema } from './rich-blocks.js';
 import { accessModelText, canUseSandbox, notifyAccess } from '../sandbox/access.js';
 import { sandboxConfigured } from '../sandbox/settings.js';
@@ -147,6 +148,8 @@ registerTool({
         const fileNote = (notes.length ? ` File problems: ${notes.join(' ')}` : '') + (pv?.note ? ` ${pv.note}` : '');
         if (res.startsWith('Replied')) {
           s.visible.add('reply');
+          // The preview's link + claim button reached the thread: results turns and the safety net won't post it again.
+          if (preview && pv?.items.length) await markAnnounced(preview.trim()).catch(() => {});
           return `${res}${fileNote} Don't send another reply unless you have something new.`;
         } else if (s.replies.anyVisible) s.visible.add('reply'); // e.g. a stream the user stopped halfway
         return `${res}${fileNote}`;

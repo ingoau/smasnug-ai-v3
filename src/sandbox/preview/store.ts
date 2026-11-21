@@ -33,6 +33,8 @@ export interface PreviewRow {
   termsPromptExpiresAt: Date | null;
   /** A request_preview call is waiting for the terms answer until then (it deploys; the accept handler doesn't queue). */
   inlineUntil: Date | null;
+  /** When a message with its link + claim button reached the thread (front reply or code-posted message). */
+  announcedAt: Date | null;
   error: string | null;
   createdAt: Date;
 }
@@ -75,14 +77,15 @@ export async function previewsOfRuns(runIds: number[]): Promise<PreviewRow[]> {
 }
 
 /**
- * Previews counted against the daily caps: today's, except those that never got anywhere (cancelled before deploy).
+ * Previews counted against the daily caps: today's, except those that never got anywhere (cancelled before deploy)
+ * or failed on our side (a refused one still counts).
  * The user's count starts at their last admin limit reset when that was today.
  */
 export async function previewCountsToday(userId: string): Promise<{ user: number; global: number }> {
   const resetAt = await dailyResetAt(userId);
   const [r] = await sql<{ user: number; global: number }[]>`
     select count(*) filter (where requester_id = ${userId} and created_at >= ${resetAt ?? new Date(0)})::int as user, count(*)::int as global
-    from previews where created_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc' and status <> 'cancelled'`;
+    from previews where created_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc' and status not in ('cancelled', 'failed')`;
   return { user: r?.user ?? 0, global: r?.global ?? 0 };
 }
 
@@ -143,8 +146,14 @@ export function apiTokenOf(row: PreviewRow): string | null {
   }
 }
 
+/** A code-posted preview message went out (the only kind of message takedown may edit): also announced. */
 export async function setMessageTs(id: string, ts: string): Promise<void> {
-  await sql`update previews set message_ts = ${ts} where id = ${id}`;
+  await sql`update previews set message_ts = ${ts}, announced_at = coalesce(announced_at, now()) where id = ${id}`;
+}
+
+/** A front reply carrying its link + claim button went out (message_ts stays unset: replies are never rewritten). */
+export async function markAnnounced(id: string): Promise<void> {
+  await sql`update previews set announced_at = coalesce(announced_at, now()) where id = ${id}`;
 }
 
 export async function livePreviews(limit = 20): Promise<PreviewRow[]> {
