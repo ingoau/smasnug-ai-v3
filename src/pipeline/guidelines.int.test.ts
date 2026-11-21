@@ -290,4 +290,46 @@ describe.skipIf(!infra)('workspace AI-bot guidelines (intake)', () => {
       expect(await sql`select ts from messages where ts = ${ts}`).toHaveLength(1);
     });
   });
+  describe('!p (private answer)', () => {
+    it('a top-level mention gets a private turn of its own: an ack only for the asker, no batch, no status', async () => {
+      const src = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> !p what is the wifi password?', ts: src }));
+      const thread = `${C}:${src}`;
+      expect(await debounceJobs()).toEqual([]);
+      const [t] = await sql<{ id: number; ephemeral: boolean; messageTs: string[]; isMention: boolean }[]>`
+        select id::int as id, ephemeral, message_ts, is_mention from turns where thread_id = ${thread}`;
+      expect(t).toMatchObject({ ephemeral: true, messageTs: [src], isMention: true });
+      const calls = await fakeCalls();
+      const acks = calls.filter((c) => c.method === 'chat.postEphemeral');
+      expect(acks).toEqual([expect.objectContaining({ args: expect.objectContaining({ channel: C, user: 'U1' }) })]);
+      expect(acks[0]!.args.thread_ts).toBeUndefined(); // at the root, next to the question
+      expect(calls.filter((c) => c.method === 'chat.postMessage' || c.method === 'agents.sessions.setStatus')).toEqual([]);
+      // A redelivered event: no second turn.
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<@UBOT> !p what is the wifi password?', ts: src }));
+      expect(await turns(thread)).toHaveLength(1);
+
+      let seen: TurnRow | undefined;
+      run.mockImplementationOnce(async (turn) => {
+        seen = turn;
+      });
+      await processThreadRun(job({ threadId: thread }));
+      expect(seen).toMatchObject({ ephemeral: true, messageTs: [src] });
+      expect((await fakeCalls()).filter((c) => c.method === 'agents.sessions.setStatus')).toEqual([]);
+    });
+
+    it('in a thread the ack goes into the thread; with a group ping there is no public redirect', async () => {
+      await makeThread();
+      await storeMsg('U1', T, 'root');
+      const ts = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '!p <@UBOT> summarise this', ts, thread_ts: T }));
+      const acks = (await fakeCalls()).filter((c) => c.method === 'chat.postEphemeral');
+      expect(acks.map((c) => c.args.thread_ts)).toEqual([T]);
+      expect((await turns()).map((r) => r.messageTs)).toEqual([[ts]]);
+
+      const src = nextTs();
+      await processSlackEvent(messageEnvelope({ user: 'U1', text: '<!subteam^S1|@team> <@UBOT> !p quick check', ts: src }));
+      expect((await fakeCalls()).filter((c) => c.method === 'chat.postMessage')).toEqual([]);
+      expect(await turns(`${C}:${src}`)).toHaveLength(1);
+    });
+  });
 });

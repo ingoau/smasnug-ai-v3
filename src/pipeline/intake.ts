@@ -16,7 +16,8 @@ import { guardEntry } from './entry.js';
 import { dropHeldMessage, holdForConsent, noticePolicyUpdate, updateHeldMessage } from './consent.js';
 import { hasAgreed } from '../features/privacy.js';
 import { handleBangStop, redirectGroupPing } from './guideline-actions.js';
-import { hasQuietPrefix, isBangStop, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
+import { hasQuietPrefix, isBangStop, isEphemeralRequest, isHiddenMessage, shouldRedirectGroupPing } from './guidelines.js';
+import { startPrivateTurn } from './private-intake.js';
 import { answersOtherOffer, awaitedReplyFresh, decide, isRecentPartner, isSlackbotUser, mentionFacts, mentionText, NEW_MESSAGE_SUBTYPES, shouldDisengage, conversationRootTs, isTopLevel } from './rules.js';
 import { acceptParentPost, noteCodeChannelActivity, routeCodeChannel } from './code-channel-intake.js';
 import { codeChannelsEnabled } from '../features/code-channels/settings.js';
@@ -151,7 +152,10 @@ async function handleNewMessage(ev: MessageEvent) {
   const threadId = threadIdOf(channelId, rootTs);
   if (cc && !isBot && ev.user) await noteCodeChannelActivity(channelId, ev.user);
   // In a code channel's conversation replies are top level anyway: no group-ping redirect.
-  if (!ccConversation && !isBot && ev.user && shouldRedirectGroupPing({ isDm, threadTs: ev.thread_ts, ts: ev.ts, mentionsBot, text }) && !isBangStop(text, bot.userId)) {
+  // Ephemeral mode (`@bot !p …`): a private turn of its own; never in a DM or a code channel's conversation.
+  const privateRequest = !isBot && !ccConversation && isEphemeralRequest(text, bot.userId, { isDm });
+  // A private answer needs no redirect: nothing is posted under the group ping.
+  if (!ccConversation && !isBot && ev.user && !privateRequest && shouldRedirectGroupPing({ isDm, threadTs: ev.thread_ts, ts: ev.ts, mentionsBot, text }) && !isBangStop(text, bot.userId)) {
     await redirectGroupPing({ ...ev, user: ev.user }, bot);
     return;
   }
@@ -271,13 +275,17 @@ async function handleNewMessage(ev: MessageEvent) {
         conversation: isDm ? channelId : threadId,
         ...(ev.thread_ts && !ccConversation ? { promptThreadTs: ev.thread_ts } : {}),
         messageTs: ev.ts,
-        item: { kind: 'batch', threadId, ts: ev.ts, reason: decision.reason },
+        item: privateRequest ? { kind: 'private', threadId, ts: ev.ts } : { kind: 'batch', threadId, ts: ev.ts, reason: decision.reason },
       });
     }
     return;
   }
   await noticePolicyUpdate({ userId: authorId, channelId, ...(ev.thread_ts && !ccConversation ? { threadTs: ev.thread_ts } : {}), messageTs: ev.ts });
 
+  if (privateRequest && decision.reason === 'mention') {
+    await startPrivateTurn({ threadId, authorId, ts: ev.ts });
+    return;
+  }
   // DMs and mentions get the status indicator right away, before the debounce window (fire-and-forget).
   if (decision.reason === 'dm' || decision.reason === 'mention') showIntakeStatus(threadId, authorId, ev.ts);
   // The turn's context needs conversations.info: fetch it during the debounce window (cached for the turn).

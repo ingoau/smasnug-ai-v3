@@ -19,6 +19,11 @@ export interface TurnRow {
    * this is meant for you" unless `addressed` (which wins).
    */
   gated?: boolean;
+  /**
+   * Ephemeral mode (`@bot !p …`, pipeline/guidelines.ts): everything the turn shows goes only to its author
+   * (chat.postEphemeral). Never merged with another turn; a results turn of an ephemeral turn's card is ephemeral too.
+   */
+  ephemeral?: boolean;
   messageTs: string[];
   cardId: number | null;
   status: 'pending' | 'running' | 'done' | 'cancelled' | 'error';

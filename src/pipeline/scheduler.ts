@@ -18,7 +18,7 @@ import { redis } from '../core/redis.js';
 import { limits } from '../config.js';
 import { decideHold, pickNextTurn, yieldCutoff, type PendingTurn } from './turn-hold.js';
 
-const TURN_COLS = sql`id::int as id, thread_id, author_id, kind, is_mention, addressed, gated, message_ts, card_id::int as card_id, status, phase`;
+const TURN_COLS = sql`id::int as id, thread_id, author_id, kind, is_mention, addressed, gated, ephemeral, message_ts, card_id::int as card_id, status, phase`;
 
 /** A message with the intake reason it was batched for (rules.ts BatchReason). */
 export interface ReasonedTs {
@@ -52,14 +52,31 @@ export async function requestTurn(opts: {
   addressed?: boolean;
   /** User turns: the relevance gate said yes (TurnRow.gated). */
   gated?: boolean;
+  /**
+   * User turns: ephemeral mode (TurnRow.ephemeral), always a turn of its own (never merged into a pending turn).
+   * Results turns inherit it from their card (cards.ephemeral).
+   */
+  ephemeral?: boolean;
 }): Promise<number> {
   const id = await sql.begin(async (tx) => {
     await lockThread(tx, opts.threadId);
+    if (opts.kind === 'user' && opts.ephemeral) {
+      // Once per message (a retried intake job must not answer twice).
+      const [had] = await tx<{ id: number }[]>`
+        select id::int as id from turns where thread_id = ${opts.threadId} and ephemeral and message_ts && ${opts.messageTs ?? []}::text[] limit 1`;
+      if (had) return had.id;
+      const [row] = await tx<{ id: number }[]>`
+        insert into turns (thread_id, author_id, kind, is_mention, ephemeral, message_ts)
+        values (${opts.threadId}, ${opts.authorId}, 'user', ${opts.isMention ?? true}, true, ${mergeTs([], opts.messageTs ?? [])}::text[])
+        returning id::int as id`;
+      return row!.id;
+    }
     if (opts.kind === 'user')
       return addToPendingTurnTx(tx, opts.threadId, opts.authorId, opts.messageTs ?? [], opts.isMention ?? false, { addressed: opts.addressed, gated: opts.gated });
     const [row] = await tx<{ id: number }[]>`
-      insert into turns (thread_id, author_id, kind, is_mention, message_ts, card_id)
-      values (${opts.threadId}, ${opts.authorId}, ${opts.kind}, ${opts.isMention ?? false}, ${opts.messageTs ?? []}::text[], ${opts.cardId ?? null})
+      insert into turns (thread_id, author_id, kind, is_mention, message_ts, card_id, ephemeral)
+      values (${opts.threadId}, ${opts.authorId}, ${opts.kind}, ${opts.isMention ?? false}, ${opts.messageTs ?? []}::text[], ${opts.cardId ?? null},
+        coalesce((select ephemeral from cards where id = ${opts.cardId ?? null}), false))
       returning id::int as id`;
     return row!.id;
   });
@@ -97,7 +114,7 @@ async function addToPendingTurnTx(
   const gated = flags.gated ?? false;
   const [pending] = await tx<{ id: number; messageTs: string[] }[]>`
     select id::int as id, message_ts from turns
-    where thread_id = ${threadId} and author_id = ${authorId} and kind = 'user' and status = 'pending'
+    where thread_id = ${threadId} and author_id = ${authorId} and kind = 'user' and status = 'pending' and not ephemeral
     order by id limit 1 for update`;
   if (pending) {
     await tx`update turns set message_ts = ${mergeTs(pending.messageTs, ts)}::text[], is_mention = is_mention or ${isMention},
@@ -123,11 +140,12 @@ export async function pushToRunningTurn(threadId: string, authorId: string, ts: 
   const reasonOf = new Map(items?.map((i) => [i.ts, i.reason]));
   return sql.begin(async (tx) => {
     await lockThread(tx, threadId);
-    const [running] = await tx<{ id: number; authorId: string; phase: string | null; kind: string }[]>`
-      select id::int as id, author_id, phase, kind from turns
+    const [running] = await tx<{ id: number; authorId: string; phase: string | null; kind: string; ephemeral: boolean }[]>`
+      select id::int as id, author_id, phase, kind, ephemeral from turns
       where thread_id = ${threadId} and status = 'running' order by id desc limit 1 for update`;
-    if (!running || running.authorId !== authorId || running.phase !== 'tools' || running.kind !== 'user') return null;
-    const [waiting] = await tx`select 1 from turns where thread_id = ${threadId} and author_id = ${authorId} and status = 'pending' limit 1`;
+    // A private (`!p`) turn never takes public messages, and its answer must not mix with them.
+    if (!running || running.authorId !== authorId || running.phase !== 'tools' || running.kind !== 'user' || running.ephemeral) return null;
+    const [waiting] = await tx`select 1 from turns where thread_id = ${threadId} and author_id = ${authorId} and status = 'pending' and not ephemeral limit 1`;
     if (waiting) return null; // keep order: the author's newer messages queue behind their waiting turn
     for (const t of ts) {
       await tx`insert into thread_inbox (turn_id, message_ts, is_mention, reason) values (${running.id}, ${t}, ${isMention}, ${reasonOf.get(t) ?? null})`;

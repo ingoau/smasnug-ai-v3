@@ -24,6 +24,7 @@ import { removeFromBatch } from './debounce.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { requestThreadStop } from './stop.js';
 import { addToBatch } from './debounce.js';
+import { startPrivateTurn } from './private-intake.js';
 import { redirectGroupPing } from './guideline-actions.js';
 import type { BatchReason } from './rules.js';
 import { showIntakeStatus } from './session-status.js';
@@ -36,6 +37,8 @@ const CLAIM_STALE_S = 5 * 60;
 /** What to replay after agreement: a debounce batch entry, or a group ping still to be redirected. */
 export type HeldItem =
   | { kind: 'batch'; threadId: string; ts: string; reason: BatchReason }
+  /** A private (`!p`) request: its own private turn (private-intake.ts). */
+  | { kind: 'private'; threadId: string; ts: string }
   | { kind: 'redirect'; event: SlackMessage & { channel: string; user: string } };
 
 /**
@@ -160,6 +163,10 @@ async function replayItem(userId: string, item: HeldItem): Promise<void> {
     await redirectGroupPing(item.event, await getBotIdentity(), { replay: true });
     return;
   }
+  if (item.kind === 'private') {
+    await startPrivateTurn({ threadId: item.threadId, authorId: userId, ts: item.ts });
+    return;
+  }
   if (item.reason === 'dm' || item.reason === 'mention') showIntakeStatus(item.threadId, userId, item.ts);
   await addToBatch(item.threadId, userId, item.ts, item.reason);
 }
@@ -185,6 +192,8 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   const wasAgreed = await hasAgreed(userId);
   await forgetConsent(userId);
   await sql`delete from privacy_held where user_id = ${userId}`;
+  // Their private (`!p`) answers, kept for the "Send to thread" button.
+  await sql`delete from ephemeral_replies where user_id = ${userId}`;
   const facts = await deleteAllFacts(userId);
   await sql`update reminders set status = 'cancelled', text = '' where owner_id = ${userId} and status = 'pending'`;
   await sql`update watches set status = 'cancelled', criteria = '', state = '{}'::jsonb where owner_id = ${userId} and status = 'active'`;
