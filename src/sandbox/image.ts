@@ -4,14 +4,17 @@
  * code change here; old snapshots keep working, because they are images of their own.
  *
  * Work image: Playwright's Ubuntu image (Node 22 + Chromium and its system deps), plus Python 3.12 with the usual
- * data libraries, pnpm, the Playwright packages for both languages (same browser build), and the unprivileged
- * `sandbox` user owning /work. Deploy image: Node 22 + a pinned wrangler, nothing else.
+ * data libraries, pnpm, the Playwright packages for both languages (same browser build), agent-browser (driving
+ * Playwright's Chromium, linked as /usr/local/bin/chromium; skills/web-browsing), and the unprivileged `sandbox` user
+ * owning /work. Deploy image: Node 22 + a pinned wrangler, nothing else.
  */
 import { env } from '../config.js';
 
 export const PLAYWRIGHT_VERSION = '1.56.1';
 /** The Python package matching PLAYWRIGHT_VERSION's browser build. */
 export const PLAYWRIGHT_PY_VERSION = '1.56.0';
+/** agent-browser (vercel-labs): a browser CLI whose daemon keeps the page open between sandbox_exec calls. */
+export const AGENT_BROWSER_VERSION = '0.43.0';
 
 export interface ImageDef {
   /** Short name for logs and the `sandboxes.image` column. */
@@ -27,13 +30,15 @@ const SANDBOX_USER = [
 
 export function workImage(): ImageDef {
   return {
-    name: `work-pw${PLAYWRIGHT_VERSION}`,
+    name: `work-pw${PLAYWRIGHT_VERSION}-ab${AGENT_BROWSER_VERSION}`,
     registry: `mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble`,
     commands: [
       'ENV DEBIAN_FRONTEND=noninteractive PLAYWRIGHT_BROWSERS_PATH=/ms-playwright',
       'RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv git jq sqlite3 zip unzip curl ca-certificates util-linux && rm -rf /var/lib/apt/lists/*',
       `RUN pip3 install --break-system-packages --no-cache-dir numpy pandas matplotlib pillow openpyxl requests beautifulsoup4 playwright==${PLAYWRIGHT_PY_VERSION}`,
       `RUN npm install -g pnpm@10 playwright@${PLAYWRIGHT_VERSION}`,
+      // agent-browser drives Playwright's Chromium (no second browser download); config is env (modal.ts BASE_ENV).
+      `RUN npm install -g agent-browser@${AGENT_BROWSER_VERSION} && npm cache clean --force && ln -s "$(ls -d /ms-playwright/chromium-*/chrome-linux*/chrome | head -1)" /usr/local/bin/chromium && /usr/local/bin/chromium --version`,
       // `require('playwright')` works from any directory.
       'ENV NODE_PATH=/usr/lib/node_modules',
       ...SANDBOX_USER,

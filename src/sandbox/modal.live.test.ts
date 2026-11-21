@@ -109,4 +109,25 @@ describe.skipIf(!LIVE || !process.env.MODAL_TOKEN_ID)('Modal provider (live)', (
     await (await p()).deletePaused(paused);
     await expect((await p()).resume(paused, await spec())).rejects.toThrow();
   }, 240_000);
+
+  it('agent-browser: the page stays open across execs; localStorage survives a pause (close-before-snapshot + restore)', async () => {
+    const h = await (await p()).create(await spec());
+    handles.push(h);
+    const open = await sh(h, 'agent-browser open https://example.com && agent-browser snapshot -i', { timeoutMs: 90_000 });
+    expect(open.exitCode, open.stderr.toString()).toBe(0);
+    expect(open.stdout.toString()).toMatch(/\[ref=e1\]/);
+    // A separate exec: the daemon and its refs are still there.
+    const next = await sh(h, `agent-browser get url && agent-browser eval "localStorage.setItem('smasnug', 'kept'); 1"`);
+    expect(next.exitCode, next.stderr.toString()).toBe(0);
+    expect(next.stdout.toString()).toContain('https://example.com/');
+    const paused = await (await p()).pause(h);
+    snapshots.push(paused);
+    const h2 = await (await p()).resume(paused, await spec());
+    handles.push(h2);
+    const back = await sh(h2, `agent-browser open https://example.com >/dev/null && agent-browser eval "localStorage.getItem('smasnug')"`, { timeoutMs: 90_000 });
+    expect(back.exitCode, back.stderr.toString()).toBe(0);
+    expect(back.stdout.toString()).toContain('kept');
+    await (await p()).destroy(h2);
+    await (await p()).deletePaused(paused);
+  }, 300_000);
 });

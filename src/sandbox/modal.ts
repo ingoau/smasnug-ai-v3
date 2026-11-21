@@ -19,7 +19,19 @@ import { SandboxGoneError, shq, type ExecOptions, type ExecResult, type Handle, 
 
 /** Snapshots outlive the subagent's 24 h idle expiry with room to spare; deletePaused removes them earlier. */
 const SNAPSHOT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const BASE_ENV = { PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin', HOME: '/work', LANG: 'C.UTF-8', TZ: 'UTC', NODE_PATH: '/usr/lib/node_modules', PLAYWRIGHT_BROWSERS_PATH: '/ms-playwright' };
+const BASE_ENV = {
+  PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+  HOME: '/work',
+  LANG: 'C.UTF-8',
+  TZ: 'UTC',
+  NODE_PATH: '/usr/lib/node_modules',
+  PLAYWRIGHT_BROWSERS_PATH: '/ms-playwright',
+  // agent-browser (image.ts): Playwright's Chromium; the default session saves cookies + localStorage under
+  // /work/.agent-browser (every 30 s and on close, see pause()), so a login survives a pause; no update check.
+  AGENT_BROWSER_EXECUTABLE_PATH: '/usr/local/bin/chromium',
+  AGENT_BROWSER_RESTORE: 'default',
+  AGENT_BROWSER_NO_VERSION_CHECK: '1',
+};
 const AS_USER = ['setpriv', '--reuid=1000', '--regid=1000', '--init-groups', '--reset-env'];
 /**
  * Stdin goes in pieces of this size: the SDK sends each write() as one stdin RPC, and one big message fails
@@ -143,6 +155,15 @@ export class ModalProvider implements SandboxProvider {
 
   async pause(h: Handle): Promise<Paused> {
     const sb = await this.sandbox(h);
+    // agent-browser's daemons (they outlive sandbox_exec calls) don't survive the snapshot: close them so each session
+    // saves its cookies + localStorage first (AGENT_BROWSER_RESTORE). Best effort; skipped when none is running.
+    await this.exec(h, ['bash', '-c', 'compgen -G "$HOME/.agent-browser/*.pid" >/dev/null && agent-browser close --all >/dev/null 2>&1; true'], {
+      timeoutMs: 10_000, // a healthy close takes ~1 s; pause holds the row lock (LOCK_TTL_MS) throughout
+      maxOutputBytes: 1024,
+    }).catch((err) => {
+      if (err instanceof SandboxGoneError) throw err;
+      log.debug({ err }, 'agent-browser close before pause failed');
+    });
     let img: Image;
     try {
       img = await sb.snapshotFilesystem({ ttlMs: SNAPSHOT_TTL_MS, timeoutMs: 120_000 });
