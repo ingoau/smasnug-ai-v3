@@ -61,10 +61,13 @@ const SUBAGENT_EVENTS = ['cancel', 'spawn', 'steer', 'resume'] as const;
  * subagent events since it started. `self`: the bot's own user / bot id (its later replies show as "you replied").
  */
 export async function loadSinceRound(cardId: number, self?: { userId?: string; botId?: string }): Promise<SinceItem[]> {
-  const [turn] = await sql<{ id: number; threadId: string; messageTs: string[]; startedAt: Date | null; createdAt: Date; finishedAt: Date | null }[]>`
-    select t.id::int as id, t.thread_id, t.message_ts, t.started_at, t.created_at, t.finished_at
+  const [turn] = await sql<{ id: number; threadId: string; messageTs: string[]; startedAt: Date | null; createdAt: Date; finishedAt: Date | null; viewer: string | null }[]>`
+    select t.id::int as id, t.thread_id, t.message_ts, t.started_at, t.created_at, t.finished_at,
+      case when c.ephemeral then t.author_id end as viewer
     from cards c join turns t on t.id = c.turn_id where c.id = ${cardId}`;
   if (!turn) return [];
+  // Private (`!p`) work shows only in that user's own private results turns.
+  const viewer = turn.viewer ?? null;
   const since = turn.startedAt ?? turn.createdAt;
   const own = turn.messageTs ?? [];
   const lastOwn = own.length ? own.reduce((a, b) => (Number(b) > Number(a) ? b : a)) : null;
@@ -83,6 +86,9 @@ export async function loadSinceRound(cardId: number, self?: { userId?: string; b
       where e.thread_id = ${turn.threadId} and e.created_at >= ${since}
         and e.type in ('cancel', 'spawn', 'steer', 'resume', 'stop_all')
         and not (e.type in ('spawn', 'resume') and e.payload->>'cardId' = ${String(cardId)})
+        and (s.private_to is null or s.private_to = ${viewer})
+        and not exists (select 1 from turns pt where pt.id = (case when e.payload->>'turnId' ~ '^[0-9]+$' then (e.payload->>'turnId')::bigint end)
+                          and pt.ephemeral and pt.author_id is distinct from ${viewer})
       order by e.id`,
   ]);
   const items: SinceItem[] = [];

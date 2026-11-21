@@ -16,7 +16,7 @@ import { log } from '../log.js';
 import { claimNotice, forgetConsent, hasAgreed, privacyPolicy, PROMPT_TEXT, promptBlocks, recordAgreement, UPDATED_TEXT, updatedBlocks } from '../features/privacy.js';
 import { ephemeral, respond } from '../features/util.js';
 import { publishHome } from '../features/home.js';
-import { forgetUserCodeChannelData } from '../features/code-channels/store.js';
+import { forgetUserCodeChannelData, isCodeChannel } from '../features/code-channels/store.js';
 import { deleteAllFacts } from '../features/memory/store.js';
 import { deleteFilesOwnedBy } from '../files/large.js';
 import { applyDelete } from './store.js';
@@ -24,6 +24,9 @@ import { removeFromBatch } from './debounce.js';
 import { removeMessageFromTurns } from './scheduler.js';
 import { requestThreadStop } from './stop.js';
 import { addToBatch } from './debounce.js';
+import { startPrivateTurn } from './private-intake.js';
+import { isEphemeralRequest } from './guidelines.js';
+import { parseThreadId } from '../core/events.js';
 import { redirectGroupPing } from './guideline-actions.js';
 import type { BatchReason } from './rules.js';
 import { showIntakeStatus } from './session-status.js';
@@ -36,6 +39,8 @@ const CLAIM_STALE_S = 5 * 60;
 /** What to replay after agreement: a debounce batch entry, or a group ping still to be redirected. */
 export type HeldItem =
   | { kind: 'batch'; threadId: string; ts: string; reason: BatchReason }
+  /** A private (`!p`) request: its own private turn (private-intake.ts). */
+  | { kind: 'private'; threadId: string; ts: string }
   | { kind: 'redirect'; event: SlackMessage & { channel: string; user: string } };
 
 /**
@@ -160,8 +165,22 @@ async function replayItem(userId: string, item: HeldItem): Promise<void> {
     await redirectGroupPing(item.event, await getBotIdentity(), { replay: true });
     return;
   }
-  if (item.reason === 'dm' || item.reason === 'mention') showIntakeStatus(item.threadId, userId, item.ts);
-  await addToBatch(item.threadId, userId, item.ts, item.reason);
+  // Private or not is decided by the message as it is now (it may have been edited to add / drop `!p` while held),
+  // and a message deleted meanwhile is never answered.
+  const { channelId } = parseThreadId(item.threadId);
+  const [msg] = await sql<{ text: string; deleted: boolean }[]>`select text, deleted from messages where channel_id = ${channelId} and ts = ${item.ts}`;
+  if (msg?.deleted) return;
+  // Never in a code channel (intake: its Status tab lists every run there).
+  const canBePrivate = (item.kind === 'private' || item.reason === 'mention') && !(await isCodeChannel(channelId).catch(() => false));
+  const isPrivate = msg && canBePrivate ? isEphemeralRequest(msg.text, (await getBotIdentity()).userId) : item.kind === 'private';
+  if (isPrivate) {
+    await startPrivateTurn({ threadId: item.threadId, authorId: userId, ts: item.ts });
+    return;
+  }
+  // A held `!p` request edited into an ordinary mention.
+  const reason: BatchReason = item.kind === 'private' ? 'mention' : item.reason;
+  if (reason === 'dm' || reason === 'mention') showIntakeStatus(item.threadId, userId, item.ts);
+  await addToBatch(item.threadId, userId, item.ts, reason);
 }
 
 /** Maintenance: retry replays left claimed by an error or a crash (still young enough to answer). */
@@ -185,6 +204,8 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   const wasAgreed = await hasAgreed(userId);
   await forgetConsent(userId);
   await sql`delete from privacy_held where user_id = ${userId}`;
+  // Their private (`!p`) answers, kept for the "Send to thread" button.
+  await sql`delete from ephemeral_replies where user_id = ${userId}`;
   const facts = await deleteAllFacts(userId);
   await sql`update reminders set status = 'cancelled', text = '' where owner_id = ${userId} and status = 'pending'`;
   await sql`update watches set status = 'cancelled', criteria = '', state = '{}'::jsonb where owner_id = ${userId} and status = 'active'`;

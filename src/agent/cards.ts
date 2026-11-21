@@ -82,16 +82,26 @@ export async function loadCard(cardId: number): Promise<{ card: CardRow; runs: C
   return { card: { ...card, id: Number(card.id), steps: Array.isArray(card.steps) ? card.steps : [], buttons: buttons ?? null, extras }, runs };
 }
 
-/** Get or create this turn's card row (not yet posted). */
+/**
+ * Get or create this turn's card row (not yet posted). A private (`!p`) turn's card is ephemeral: never posted or
+ * rendered in Slack, and its results turn is private too (scheduler.requestTurn).
+ */
 export async function ensureTurnCard(opts: { threadId: string; turnId: number }): Promise<number> {
   const { channelId } = parseThreadId(opts.threadId);
   const [row] = await sql<{ id: number }[]>`
-    insert into cards (thread_id, turn_id, channel_id, parent_card_id)
+    insert into cards (thread_id, turn_id, channel_id, parent_card_id, ephemeral)
     values (${opts.threadId}, ${opts.turnId}, ${channelId},
-      (select card_id from turns where id = ${opts.turnId} and kind = 'synthesis'))
+      (select card_id from turns where id = ${opts.turnId} and kind = 'synthesis'),
+      coalesce((select ephemeral from turns where id = ${opts.turnId}), false))
     on conflict (turn_id) where turn_id is not null do update set turn_id = excluded.turn_id
     returning id`;
   return Number(row!.id);
+}
+
+/** A private (`!p`) turn's card: never shown in Slack. */
+export async function isEphemeralCard(cardId: number): Promise<boolean> {
+  const [row] = await sql<{ ephemeral: boolean }[]>`select ephemeral from cards where id = ${cardId}`;
+  return Boolean(row?.ephemeral);
 }
 
 /** The turn's last delivered reply, which the card attaches to. */
@@ -120,6 +130,7 @@ export async function saveCardSteps(cardId: number, steps: CardStep[]): Promise<
  * the card has nothing to show yet or already lives in another message.
  */
 export async function cardBlockFor(cardId: number): Promise<PlanBlock | null> {
+  if (await isEphemeralCard(cardId)) return null;
   const loaded = await loadCard(cardId);
   if (!loaded || loaded.card.messageTs || (!loaded.runs.length && !loaded.card.steps.length)) return null;
   return renderCardBlock(toState(loaded.card), loaded.runs);
@@ -139,6 +150,7 @@ export async function attachCard(cardId: number, ts: string, text: string): Prom
  * only steps is never posted alone.
  */
 export async function postCard(cardId: number, reply?: ReplyRef | null): Promise<void> {
+  if (await isEphemeralCard(cardId)) return;
   const loaded = await loadCard(cardId);
   if (!loaded) return;
   if (loaded.card.messageTs) {

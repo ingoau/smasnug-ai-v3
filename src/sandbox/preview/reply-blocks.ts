@@ -8,7 +8,8 @@ import type { ReplyExtra } from '../../agent/rich-blocks.js';
 import { parseThreadId, threadTsArg } from '../../core/events.js';
 import { slackCall } from '../../core/slack.js';
 import { sql } from '../../db/index.js';
-import { getPreview, setMessageTs, type PreviewRow } from './store.js';
+import { getPreview, markAnnounced, setMessageTs, type PreviewRow } from './store.js';
+import { privateThreadTs } from '../../agent/private-reply.js';
 
 /** The claim + report buttons and the context line of a live preview (also under a front reply with `preview`). */
 export function previewButtonBlocks(row: Pick<PreviewRow, 'id' | 'requesterId'>): unknown[] {
@@ -59,10 +60,23 @@ export function previewMessage(row: PreviewRow): { text: string; blocks: unknown
   };
 }
 
+/** The preview's subagent is private to a user (started by a `!p` turn, subagents.private_to). */
+export async function previewIsPrivate(row: Pick<PreviewRow, 'subagentId'>): Promise<boolean> {
+  if (!row.subagentId) return false;
+  const [s] = await sql<{ privateTo: string | null }[]>`select private_to from subagents where id = ${row.subagentId}`;
+  return Boolean(s?.privateTo);
+}
+
 /** Post the code preview message in its thread (once per preview) and record it (message_ts, announced_at). */
 export async function postPreviewMessage(row: PreviewRow): Promise<string | null> {
   const { channelId, threadTs } = parseThreadId(row.threadId);
   const m = previewMessage(row);
+  // Built by a private (`!p`) subagent: only its requester sees it (an ephemeral, never rewritten).
+  if (await previewIsPrivate(row)) {
+    await slackCall('chat.postEphemeral', { channel: channelId, user: row.requesterId, ...threadTsArg(await privateThreadTs(row.threadId)), text: m.text, blocks: m.blocks }, { idempotencyKey: `preview:${row.id}` });
+    await markAnnounced(row.id);
+    return null;
+  }
   const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), text: m.text, blocks: m.blocks, unfurl_links: false, unfurl_media: false }, { idempotencyKey: `preview:${row.id}` });
   const ts = typeof res?.ts === 'string' ? res.ts : null;
   if (ts) await setMessageTs(row.id, ts);

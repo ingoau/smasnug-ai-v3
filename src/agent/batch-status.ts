@@ -75,10 +75,12 @@ const ago = (d: Date) => {
  * earlier request (it may not be the one this turn is about). A batch of one subagent still running without
  * failures is skipped: <subagents> lists it already.
  */
-export async function renderOpenBatches(threadId: string, maxCards = 2): Promise<string> {
+export async function renderOpenBatches(threadId: string, maxCards = 2, viewer: string | null = null): Promise<string> {
+  // A private (`!p`) turn's card: only for that user's private turns (`viewer`).
   const cards = await sql<{ id: number; createdAt: Date; authorId: string | null }[]>`
     select c.id, c.created_at, t.author_id from cards c left join turns t on t.id = c.turn_id
     where c.thread_id = ${threadId} and not c.synthesized and c.created_at > now() - interval '1 day'
+      and (not c.ephemeral or t.author_id = ${viewer})
       and exists (select 1 from runs r where r.card_id = c.id)
     order by c.id desc limit ${maxCards}`;
   const lines: string[] = [];

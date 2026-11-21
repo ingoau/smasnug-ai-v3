@@ -9,6 +9,8 @@
  *    bot answers in a new top-level message instead of replying under the group ping.
  * 4. `<>` prefix, or `# ` (a single `#` and a space, an alias; `##` is rule 1): never triggers a turn or the gate unless the bot is
  *    @mentioned (still stored and visible).
+ * 5. `@bot !p …` (ephemeral mode): the answer is shown only to the asker (chat.postEphemeral); the question itself
+ *    is an ordinary, public message.
  */
 
 const lead = (text: string | null | undefined) => (text ?? '').trimStart();
@@ -42,6 +44,20 @@ export function isBangStop(text: string | null | undefined, botUserId: string, o
   const mentioned = botMention.test(raw);
   if (!mentioned && !opts.isDm) return false;
   return /^!stop$/i.test(raw.replace(botMention, ' ').trim());
+}
+
+/**
+ * Rule 5: `@bot !p <question>` (or `!p @bot …`; case-insensitive): an @mention whose text, with every bot mention
+ * (and any other leading mentions) removed, starts with `!p` as a word. Never in a 1:1 DM (the answer is private there anyway).
+ */
+export function isEphemeralRequest(text: string | null | undefined, botUserId: string, opts: { isDm?: boolean } = {}): boolean {
+  if (opts.isDm) return false;
+  const raw = text ?? '';
+  const botMention = new RegExp(`<@${botUserId}(?:\\|[^>]*)?>`, 'g');
+  if (!botMention.test(raw)) return false;
+  // Other leading mentions (people, groups) may come first: `@team @bot !p …`.
+  const rest = raw.replace(botMention, ' ').replace(/^(?:\s*<[@!][^>]*>)+/, '').trim();
+  return /^!p(?:\s|$)/i.test(rest);
 }
 
 /**

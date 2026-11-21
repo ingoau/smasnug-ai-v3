@@ -7,6 +7,7 @@
  * newer message is still in debounce / at the gate, and then lets the user turns queued behind it run first. While
  * it waits the holder releases the lock and re-checks via a delayed thread-run job (the debounce fire also wakes it).
  */
+import { postPrivateNote } from '../agent/private-reply.js';
 import type { Job } from 'bullmq';
 import { runFrontTurn, type TurnIO } from '../agent/front.js';
 import { appendEvent, isCodeChannelRoot, parseThreadId, threadTsArg } from '../core/events.js';
@@ -107,7 +108,8 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
   // DMs / mentions usually already show the status from intake (adopted here); otherwise show it now. Never awaited:
   // the model call must not wait for Slack.
   // A code channel's conversation shows `processing` for every turn (docs/code-channels.md, Status).
-  if (turn.isMention || isCodeChannelRoot(threadTs)) {
+  // A private (`!p`) turn shows no status: the session status is visible to everyone in the thread.
+  if (!turn.ephemeral && (turn.isMention || isCodeChannelRoot(threadTs))) {
     if (await adoptIntakeStatus(turn.threadId)) indicator.adopt();
     else void indicator.start().then(() => timing.mark('status_done'));
   }
@@ -116,7 +118,7 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     drainInbox: () => drainInbox(turn.id, turn.threadId),
     setPhase: (phase) => setPhase(turn.id, phase),
     isMention: turn.isMention,
-    setActivity: (text) => indicator.setActivity(text),
+    ...(turn.ephemeral ? {} : { setActivity: (text: string) => indicator.setActivity(text) }),
     sessionReleased: () => indicator.released(),
     stopRequested,
     // DM / agent-container turns: what the user is looking at next to the container.
@@ -137,7 +139,8 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     } else {
       log.error({ err, turnId: turn.id, threadId: turn.threadId }, 'front turn failed');
       try {
-        await slackCall('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), text: ERROR_TEXT }, { idempotencyKey: `turn-error:${turn.id}` });
+        if (turn.ephemeral) await postPrivateNote({ threadId: turn.threadId, userId: turn.authorId, text: ERROR_TEXT, idempotencyKey: `turn-error:${turn.id}` });
+        else await slackCall('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), text: ERROR_TEXT }, { idempotencyKey: `turn-error:${turn.id}` });
       } catch (postErr) {
         log.error({ err: postErr, turnId: turn.id }, 'failed to post error message');
       }
@@ -156,7 +159,8 @@ export async function runTurn(turn: TurnRow, onStatus?: (status: TurnStatus) => 
     // This turn cleared the indicator (any intake status with it); a turn that never showed one still takes back an
     // intake status left for messages that ended up in its inbox.
     if (indicator.isShown || silent) await noteStatusCleared(turn.threadId);
-    else await clearIntakeStatus(turn.threadId, turn.authorId, final);
+    // A private turn never had one: an intake status in the thread belongs to someone's public message.
+    else if (!turn.ephemeral) await clearIntakeStatus(turn.threadId, turn.authorId, final);
     const followUp = await finishTurn(turn.id, status);
     await appendEvent(turn.threadId, 'turn_finished', 'system', {
       turnId: turn.id,

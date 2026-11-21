@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   broadcastSafePrefix,
+  isEphemeralRequest,
   groupRedirectText,
   hasGroupPing,
   hasQuietPrefix,
@@ -155,5 +156,25 @@ describe('decide: <> prefix', () => {
     expect(decide(facts({ quietPrefix: true, twoParty: false }))).toEqual({ action: 'ignore', reason: 'quiet' });
     expect(decide(facts({ quietPrefix: true, mentionsBot: true }))).toEqual({ action: 'batch', reason: 'mention' });
     expect(decide(facts({ quietPrefix: true, isDm: true, mentionsBot: true }))).toEqual({ action: 'batch', reason: 'dm' });
+  });
+});
+
+describe('isEphemeralRequest', () => {
+  const bot = 'UBOT';
+  it('matches `!p` right after (or before) a bot mention', () => {
+    expect(isEphemeralRequest('<@UBOT> !p what is this?', bot)).toBe(true);
+    expect(isEphemeralRequest('<@UBOT|smasnug>   !P  hi', bot)).toBe(true);
+    expect(isEphemeralRequest('!p <@UBOT> hi', bot)).toBe(true);
+    expect(isEphemeralRequest('<@UBOT> !p', bot)).toBe(true);
+    expect(isEphemeralRequest('<!subteam^S1|@team> <@U2> <@UBOT> !p hi', bot)).toBe(true);
+  });
+  it('needs the mention and `!p` as its own word', () => {
+    expect(isEphemeralRequest('!p hi', bot)).toBe(false);
+    expect(isEphemeralRequest('<@UBOT> !please help', bot)).toBe(false);
+    expect(isEphemeralRequest('<@UBOT> what does !p do', bot)).toBe(false);
+    expect(isEphemeralRequest('<@UOTHER> !p hi', bot)).toBe(false);
+  });
+  it('never in a 1:1 DM', () => {
+    expect(isEphemeralRequest('<@UBOT> !p hi', bot, { isDm: true })).toBe(false);
   });
 });
