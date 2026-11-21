@@ -1,4 +1,4 @@
-/** Persistence for quick-reply buttons (table reply_buttons, migrations 090, 330, 345 and 346). */
+/** Persistence for quick-reply buttons (table reply_buttons, migrations 090, 330, 345, 346 and 356). */
 import { sql } from '../db/index.js';
 import { buttonPlace, parseButtonOutcome, parseButtonResponse, type ButtonOutcome, type ButtonResponse, type ButtonsState } from './reply-buttons.js';
 
@@ -23,6 +23,8 @@ export interface ReplyButtonsRow {
   outcome: ButtonOutcome | null;
   /** Which button was pressed (null on older rows). */
   pressedIndex: number | null;
+  /** Set when the buttons were retired unpressed (the bot answered a newer message): hidden, no longer pressable. */
+  expiredAt: Date | null;
 }
 
 const norm = (r: any): ReplyButtonsRow => ({
@@ -34,9 +36,10 @@ const norm = (r: any): ReplyButtonsRow => ({
   requesterId: r.requesterId ?? null,
   outcome: parseButtonOutcome(r.outcome),
   pressedIndex: r.pressedIndex == null ? null : Number(r.pressedIndex),
+  expiredAt: r.expiredAt ?? null,
 });
 
-export const toButtonsState = (r: ReplyButtonsRow): ButtonsState => ({ id: r.id, labels: r.labels, pressedBy: r.pressedBy, pressedLabel: r.pressedLabel, responses: r.responses, outcome: r.outcome, pressedIndex: r.pressedIndex });
+export const toButtonsState = (r: ReplyButtonsRow): ButtonsState => ({ id: r.id, labels: r.labels, pressedBy: r.pressedBy, pressedLabel: r.pressedLabel, responses: r.responses, outcome: r.outcome, pressedIndex: r.pressedIndex, expired: r.expiredAt != null });
 
 /** Create (or, for a retried turn, reuse) the row for one reply's buttons. Its id goes into the button values. */
 export async function createReplyButtons(o: { threadId: string; channelId: string; turnId: number; key: string; labels: string[]; responses?: (ButtonResponse | null)[]; requesterId?: string | null }): Promise<ReplyButtonsRow> {
@@ -78,10 +81,23 @@ export async function claimPress(o: { id: number; index: number; userId: string;
   const [row] = await sql`
     update reply_buttons set pressed_by = ${o.userId}, pressed_label = labels->>${o.index}::int, pressed_index = ${o.index}::int,
       pressed_message_ts = ${o.pressedMessageTs}, pressed_at = now()
-    where id = ${o.id} and pressed_at is null and message_ts is not null
+    where id = ${o.id} and pressed_at is null and expired_at is null and message_ts is not null
       and ${o.index}::int >= 0 and ${o.index}::int < jsonb_array_length(labels)
     returning *`;
   return row ? norm(row) : undefined;
+}
+
+/**
+ * Retire the thread's unpressed buttons from other turns (the bot is answering a newer message, so they're stale):
+ * marked expired, never pressable again. Returns the rows retired now (the caller re-renders their messages).
+ */
+export async function expireThreadButtons(threadId: string, exceptTurnId: number): Promise<ReplyButtonsRow[]> {
+  const rows = await sql`
+    update reply_buttons set expired_at = now()
+    where thread_id = ${threadId} and turn_id is distinct from ${exceptTurnId}
+      and pressed_at is null and expired_at is null and message_ts is not null
+    returning *`;
+  return rows.map(norm);
 }
 
 export async function setPressedMessageTs(id: number, ts: string): Promise<void> {

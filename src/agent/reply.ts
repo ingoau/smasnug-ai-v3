@@ -1154,7 +1154,7 @@ export class ReplyManager {
       const full = placeText(row.replyText != null ? withoutMarkers(row.replyText) : null, text, target.place);
       const card = await this.cardBlock();
       // Without new buttons the message keeps the press's note (a plan card render would put it back anyway).
-      const tail = actions ?? buttonsBlock(toButtonsState(row));
+      const tail = actions ?? buttonsBlock(toButtonsState(row)) ?? undefined;
       // The earlier card goes first, so a render of it that is due can't write the old layout over this reply.
       detached = await detachMessageCards(this.t.channelId, target.ts, this.t.turnId);
       await this.updateLayout(target.ts, () => replyLayout(full, tail, card, extras), extras);

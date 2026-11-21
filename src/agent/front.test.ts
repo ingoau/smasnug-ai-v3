@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
   /** Optional rows for sql queries (keyed by matching the query text). */
   sqlHook: undefined as undefined | ((query: string) => any[] | undefined),
   postedCards: [] as number[],
+  retired: [] as [string, number][],
   /** Overrides for the mocked renderThreadContext result. */
   ctx: {} as Record<string, unknown>,
   spawns: [] as any[],
@@ -75,6 +76,7 @@ vi.mock('./subagents.js', () => ({
 vi.mock('./cards.js', () => ({
   postCard: async (id: number) => void h.postedCards.push(id),
   freezeCard: async () => {},
+  retireOldButtons: async (threadId: string, turnId: number) => void h.retired.push([threadId, turnId]),
   scheduleCardRender: async () => {},
   // The turn's card (turn-card.ts): card 5 once a spawn made one or a step needs one; rendered as h.cardBlock.
   turnCardId: async () => (h.spawns.length || h.cardSteps.length ? 5 : null),
@@ -190,6 +192,7 @@ beforeEach(() => {
   h.slackHook = undefined;
   h.sqlHook = undefined;
   h.postedCards = [];
+  h.retired = [];
   h.ctx = {};
   h.spawns = [];
   h.cardSteps = [];
@@ -766,6 +769,16 @@ describe('runFrontTurn: conversation state', () => {
     h.model = mockModel([toolStep(['reply', { text: 'want me to dig deeper?' }])]);
     await runFrontTurn(turn({ id: 99 }), io().io);
     expect(queries.some((q) => q.includes('last_bot_reply_at = now()') && q.includes('awaits_reply_from'))).toBe(true);
+  });
+
+  it("a user turn's replies retire earlier replies' unpressed buttons (once per turn); a results turn's don't", async () => {
+    h.model = mockModel([toolStep(['reply', { text: 'first' }], ['reply', { text: 'second' }])]);
+    await runFrontTurn(turn({ id: 98 }), io().io);
+    expect(h.retired).toEqual([['C1:100.000001', 98]]);
+    h.retired = [];
+    h.model = mockModel([toolStep(['reply', { text: 'results' }])]);
+    await runFrontTurn(turn({ id: 97, kind: 'synthesis' }), io().io);
+    expect(h.retired).toEqual([]);
   });
 
   it('records the turn\'s tool calls and shows a recent previous turn\'s calls to the next user turn', async () => {

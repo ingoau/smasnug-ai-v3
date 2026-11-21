@@ -149,4 +149,43 @@ describe.skipIf(!INTEGRATION)('reply buttons: press flow', () => {
     expect(upd.args.blocks[2].elements[0].text).toBe('<@UBTNC> pressed *Go deeper*');
     expect(upd.args.text).toBe('here is the gist. want more?');
   });
+
+  // Last: it retires every unpressed row in the thread.
+  it('a reply to a newer message retires the unpressed buttons of earlier turns; presses of them are refused', async () => {
+    const { retireOldButtons } = await import('../agent/cards.js');
+    const old = await offer(['Yes', 'No'], 'still keen?');
+    const onlyButtons = await offer(['A', 'B'], 'x');
+    await sql`update reply_buttons set reply_text = null where id = ${onlyButtons.id}`;
+    const current = await offer(['Now', 'Later'], 'and this?');
+    const k = (await fakeCalls()).length;
+    await retireOldButtons(threadId, n); // the current turn (offer's turn id = n) keeps its buttons
+    const ups = (await callsSince(k)).filter((c) => c.method === 'chat.update');
+    const upOld = ups.find((c) => c.args.ts === old.ts)!;
+    expect(upOld.args.blocks.map((b: any) => b.type)).toEqual(['markdown']);
+    expect(upOld.args.text).toBe('still keen?');
+    const upOnly = ups.find((c) => c.args.ts === onlyButtons.ts)!;
+    expect(upOnly.args.blocks).toEqual([{ type: 'context', block_id: `reply_${onlyButtons.id}_buttons`, elements: [{ type: 'mrkdwn', text: 'Options: A | B' }] }]);
+    expect(ups.find((c) => c.args.ts === current.ts)).toBeUndefined();
+    // Already pressed rows (earlier tests) aren't touched.
+    const pressedTs = (await sql<{ messageTs: string }[]>`select message_ts from reply_buttons where thread_id = ${threadId} and pressed_at is not null`).map((r) => r.messageTs);
+    expect(ups.filter((c) => pressedTs.includes(c.args.ts))).toHaveLength(0);
+    const [cur] = await sql<any[]>`select expired_at from reply_buttons where id = ${current.id}`;
+    expect(cur.expiredAt).toBeNull();
+
+    // Idempotent: a second call retires nothing more.
+    const k2 = (await fakeCalls()).length;
+    await retireOldButtons(threadId, n);
+    expect((await callsSince(k2)).filter((c) => c.method === 'chat.update')).toHaveLength(0);
+
+    // A stale client presses a retired button: an ephemeral, no claim, no turn.
+    const turns = (await turnsOf()).length;
+    const k3 = (await fakeCalls()).length;
+    await press({ user: 'UBTND', id: old.id, index: 0, ts: old.ts, actionTs: '1700000500.000001' });
+    const eph = (await callsSince(k3)).find((c) => c.method === 'chat.postEphemeral')!;
+    expect(eph.args.text).toMatch(/earlier message/);
+    const [row] = await sql<any[]>`select pressed_at from reply_buttons where id = ${old.id}`;
+    expect(row.pressedAt).toBeNull();
+    expect(await turnsOf()).toHaveLength(turns);
+    expect(await store.claimPress({ id: old.id, index: 0, userId: 'UBTND', pressedMessageTs: '1700000500.000002' })).toBeUndefined();
+  });
 });

@@ -30,6 +30,8 @@ import { RATE_LIMITED_TEXT } from './intake.js';
 import { scheduleMessages } from './scheduler.js';
 
 export const ALREADY_ANSWERED_TEXT = 'Someone already answered that one.';
+/** A press of buttons retired because the conversation moved on (reply-buttons.ts `expired`; a stale client view). */
+export const EXPIRED_BUTTONS_TEXT = 'Those options are from an earlier message. Just reply in the thread instead.';
 
 const TS_RE = /^\d{9,11}\.\d{6}$/;
 
@@ -79,6 +81,10 @@ export async function handleReplyChoice(ctx: ActionContext): Promise<void> {
   const { threadTs } = parseThreadId(row.threadId);
   if (row.pressedAt) {
     await ephemeral(ctx, row.channelId, threadTs, ALREADY_ANSWERED_TEXT);
+    return;
+  }
+  if (row.expiredAt) {
+    await ephemeral(ctx, row.channelId, threadTs, EXPIRED_BUTTONS_TEXT);
     return;
   }
   // `who: requester`: only the person the reply answered.
