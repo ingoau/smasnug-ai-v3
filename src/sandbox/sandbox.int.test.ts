@@ -129,13 +129,19 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
     redis.disconnect();
   });
 
-  it('refuses the tools for subagents without the flag, and for users without access', async () => {
+  it('any subagent may use the tools (the first allowed call marks it and tells its run); users without access are refused', async () => {
     const t = await newThread();
     const u = await newUser();
     const sa = await newSubagent({ threadId: t, owner: u, sandbox: false });
-    expect(await call(ctxOf(t, u, sa), 'sandbox_exec', { command: 'ls' })).toMatch(/only available to subagents started with sandbox: true/);
+    let started = 0;
+    const ctx = { ...ctxOf(t, u, sa), extras: { onSandboxStarted: () => void started++ } };
+    expect(await call(ctx, 'sandbox_exec', { command: 'ls' })).not.toMatch(/only available/);
+    expect(started).toBe(1);
+    const [marked] = await sql<{ sandbox: boolean }[]>`select sandbox from subagents where id = ${sa.subagentId}`;
+    expect(marked!.sandbox).toBe(true);
+    const created = fake.counts.create;
     const stranger = await newUser(false);
-    const sa2 = await newSubagent({ threadId: t, owner: stranger });
+    const sa2 = await newSubagent({ threadId: t, owner: stranger, sandbox: false });
     const prev = H.hcaClient.check;
     H.hcaClient.check = async () => 'unverified';
     try {
@@ -156,7 +162,9 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
     } finally {
       H.hcaClient.check = prev;
     }
-    expect(fake.counts.create).toBe(0);
+    expect(fake.counts.create).toBe(created);
+    const [refused] = await sql<{ sandbox: boolean }[]>`select sandbox from subagents where id = ${sa2.subagentId}`;
+    expect(refused!.sandbox).toBe(false);
   });
 
   it('creates one sandbox for parallel calls, lazily, and runs commands', async () => {

@@ -17,8 +17,6 @@ import { prepareImageArgs, prepareOutgoingFiles } from './files.js';
 import { previewReplyExtras } from '../sandbox/preview/reply-blocks.js';
 import { markAnnounced } from '../sandbox/preview/store.js';
 import { cardsSchema, containersSchema, fieldsSchema, imagesSchema, linksSchema, MAX_IMAGES, tablesSchema } from './rich-blocks.js';
-import { accessModelText, canUseSandbox, notifyAccess } from '../sandbox/access.js';
-import { sandboxConfigured } from '../sandbox/settings.js';
 import { readSkill } from './skills.js';
 import { readSubagentResult } from './subagent-result.js';
 
@@ -189,9 +187,6 @@ registerTool({
               title: z.string().describe('Short task title for the plan card, e.g. "Research hosting options" (≤ 6 words)'),
               instructions: z.string().describe('Complete instructions: the task, all needed context (links, names, file ids file_… of uploads it should use), and what a good result looks like'),
               seed_from: z.string().optional().describe('Id of an expired subagent whose summary should seed this one'),
-              ...(sandboxConfigured()
-                ? { sandbox: z.boolean().optional().describe('Give this subagent a code sandbox (Linux, Python, Node, headless Chromium) to run code: installs, data processing, analysing files, a headless browser, multi-file builds, live previews. Not for a single file you can write yourself (use create_file). Also needed to read or grep any public git repo or package ("how does X work in repo Y", its scopes, limits, config, defaults): tell it to `git clone --filter=blob:none` and grep the code; a fetched README is not an answer.') }
-                : {}),
             }),
           )
           .min(1)
@@ -204,16 +199,8 @@ registerTool({
         const failed: { title: string; error: string }[] = [];
         let firstError: unknown;
         // One after another: the limits are checked per spawn, and every run is queued (and starts) right away.
-        for (const t of tasks as (typeof tasks[number] & { sandbox?: boolean })[]) {
+        for (const t of tasks) {
           try {
-            if (t.sandbox) {
-              // Access is checked before anything starts; the explanation goes to the owner only.
-              const access = await canUseSandbox(s.turn.authorId);
-              if (!access.ok) {
-                void notifyAccess({ userId: s.turn.authorId, channelId: ctx.channelId, threadTs: ctx.threadTs, reason: access.reason });
-                throw new ToolError(accessModelText(access.reason));
-              }
-            }
             const r = await spawnSubagent({
               threadId: s.threadId,
               turnId: s.turn.id,
@@ -221,7 +208,6 @@ registerTool({
               title: t.title,
               instructions: t.instructions,
               seedFrom: t.seed_from,
-              sandbox: !!t.sandbox && sandboxConfigured(),
             });
             s.cardId = r.cardId;
             s.spawned.add(r.subagentId);

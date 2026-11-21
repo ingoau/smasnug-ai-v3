@@ -9,7 +9,7 @@ TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK 
 `postgres` (camelCase transform on), Redis via `ioredis`, queues via BullMQ, zod, pino, vitest.
 
 Models (`MODEL_*`, `src/models.ts`): Claude Haiku 5.5 for gate fallback, front (effort low, `FRONT_REASONING_EFFORT`; every step
-must call a tool) and children (medium, `CHILD_REASONING_EFFORT`); Claude Sonnet 5.5 for sandbox children. `chatModel()` tries
+must call a tool) and children (medium, `CHILD_REASONING_EFFORT`); Claude Sonnet 5.5 for children that have used a sandbox (from their next run). `chatModel()` tries
 Hack Club AI (`HACKCLUB_AI_KEY`, an OpenRouter proxy, free up to $3/day) → the Anthropic API (`ANTHROPIC_API_KEY`, $100/month
 credit) → `openai/gpt-6-luna` on OpenRouter (paid). A spent budget (402, a 429 mentioning the spending limit/top-up, Anthropic's
 "credit balance is too low") skips that provider until UTC midnight. Pass model settings as `providerOptions: modelOptions({...})`,
@@ -54,7 +54,7 @@ TEST_REDIS_URL are set, `<test db>_<name>` + the test Redis db plus an offset (s
 | agent | `src/agent/**`, `skills/**` | front agent loop, reply tool + streaming, subagents/runs/inbox, plan cards (turn steps + runs), skills (`load_skill`), background card / DM session titles (`titles.ts`), lookup guard, sweeper, expiry, compaction, synthesis |
 | features | `src/features/**`, `slack-manifest.yml` | memory + extraction + memory tools, workspace facts, App Home, send_message + confirmation + attribution, reports/suspension/moderation, report_user (bot reports, `bot-reports.ts`), limits/guard, kill switches, retention, HuddleFM DJ mode (`huddlefm/`), code channels (`code-channels/`, `docs/code-channels.md`; intake side in `src/pipeline/code-channel-intake.ts`) |
 | evals | `src/eval/**`, `scripts/eval-export.ts`, `src/agent/trace.ts` | traces (recording, retention), detectors, eval export (docs/evals.md) |
-| sandbox | `src/sandbox/**` | code sandboxes (docs/sandbox.md): provider (Modal) + lifecycle, sandbox tools (children with `sandbox: true`), HCA access + allowlist, budget/quotas, live previews (Cloudflare) |
+| sandbox | `src/sandbox/**` | code sandboxes (docs/sandbox.md): provider (Modal) + lifecycle, sandbox tools (every child, sandbox started on first use), HCA access + allowlist, budget/quotas, live previews (Cloudflare) |
 
 Cross-module contracts are stub files with final signatures — implement yours, call others', don't change a
 signature without coordinating: `src/pipeline/scheduler.ts` (requestTurn), `src/agent/front.ts` (runFrontTurn,

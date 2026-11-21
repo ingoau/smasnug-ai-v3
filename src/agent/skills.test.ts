@@ -84,7 +84,7 @@ describe('the repo skills', () => {
     expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/!stop/);
     expect(readSkill('child', 'bot-source', undefined, all)).toContain('raw.githubusercontent.com/ingoau/smasnug-ai-v3/main/');
     expect(readSkill('child', 'bot-source', undefined, all)).toContain('git clone --filter=blob:none https://github.com/ingoau/smasnug-ai-v3 /work/repo');
-    expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/`sandbox: true` if answering means searching the code/);
+    expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/tell it to use the sandbox if answering means searching the code/);
   });
 
   it('about-yourself serves the privacy policy from the file consent uses, override included', () => {
@@ -127,6 +127,15 @@ describe('requires', () => {
     expect(repo.find((s) => s.name === 'code-sandboxes')?.requires).toEqual(['sandbox']);
     expect(readSkill('front', 'huddle-dj', undefined, repo, () => true)).toMatch(/huddle_dj_mode/);
     expect(repo.find((s) => s.name === 'live-previews')?.requires).toEqual(['previews']);
+  });
+  it('the sandbox how-to is a subagent skill, and the always-on child section points to it', async () => {
+    const repo = loadSkills(defaultSkillsDir());
+    const sbx = repo.find((s) => s.name === 'sandbox');
+    expect(sbx?.roles).toEqual(['child']);
+    expect(sbx?.requires).toEqual(['sandbox']);
+    expect(readSkill('child', 'sandbox', undefined, repo, () => true)).toMatch(/sandbox_export/);
+    const { sandboxChildPrompt } = await import('../sandbox/prompts.js');
+    expect(sandboxChildPrompt()).toMatch(/Load the `sandbox` skill/);
   });
 
   it('a requires name must be an own feature, not an inherited property', () => {

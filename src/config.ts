@@ -34,7 +34,7 @@ const Env = z.object({
   /**
    * Chat model per role (src/models.ts). A Claude id (`claude-…`) runs on Hack Club (as `anthropic/claude-….x`), then
    * the Anthropic API, then MODEL_LUNA on OpenRouter (paid credit, so the cheaper model). Any other id (e.g.
-   * `openai/gpt-6-luna`) runs on Hack Club then OpenRouter as before. `sandbox` = subagents spawned with a sandbox.
+   * `openai/gpt-6-luna`) runs on Hack Club then OpenRouter as before. `sandbox` = subagents that have started a code sandbox.
    */
   MODEL_GATE: z.string().default('claude-haiku-5-5'),
   MODEL_FRONT: z.string().default('claude-haiku-5-5'),
@@ -97,8 +97,8 @@ const Env = z.object({
    */
   HUDDLEFM_USER_ID: z.string().optional(),
   /**
-   * Code sandboxes (src/sandbox/, docs/sandbox.md): subagents spawned with `sandbox: true` run code in Modal
-   * Sandboxes. Off (no tools, no jobs, no App Home section) unless MODAL_TOKEN_ID and MODAL_TOKEN_SECRET are set.
+   * Code sandboxes (src/sandbox/, docs/sandbox.md): every subagent can run code in Modal Sandboxes
+   * (started lazily on its first sandbox tool call). Off (no tools, no jobs, no App Home section) unless MODAL_TOKEN_ID and MODAL_TOKEN_SECRET are set.
    * Never logged; never passed into a sandbox.
    */
   MODAL_TOKEN_ID: z.string().optional(),
@@ -429,7 +429,7 @@ export const limits = {
    * against the user's daily sandbox minutes and the budget. A follow-up within the grace reuses the live sandbox.
    */
   sandboxRunEndPauseMs: 45_000,
-  /** Run duration cap for subagents with a sandbox (other runs keep runMaxDurationMs). */
+  /** Run duration cap once a subagent's sandbox has started (other runs keep runMaxDurationMs). */
   sandboxRunMaxDurationMs: 30 * 60_000,
   sandboxExecDefaultMs: 60_000,
   sandboxExecMaxMs: 300_000,

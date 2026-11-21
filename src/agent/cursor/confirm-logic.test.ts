@@ -51,9 +51,9 @@ describe('front prompt', () => {
     expect(CODING_AGENTS_PROMPT).toContain('spawn_coding_agent');
     expect(CODING_AGENTS_PROMPT).toContain('Launch');
   });
-  it('limits coding agents to changes (code questions go to a sandbox subagent) and treats tests/review as judgment-based', () => {
+  it('limits coding agents to changes (code questions go to a subagent with the sandbox) and treats tests/review as judgment-based', () => {
     expect(CODING_AGENTS_PROMPT).not.toMatch(/explore or search/);
-    expect(CODING_AGENTS_PROMPT).toMatch(/Questions about your code .* spawn_subagent task with sandbox: true/);
+    expect(CODING_AGENTS_PROMPT).toMatch(/Questions about your code .* spawn_subagent task that clones and greps the repo in the sandbox/);
     expect(CODING_AGENTS_PROMPT).toMatch(/A declined or cancelled proposal isn't re-proposed/);
     expect(CODING_AGENTS_PROMPT).toMatch(/tests and self-review when the agent judges them necessary/);
     expect(CODING_AGENTS_PROMPT).toMatch(/PR link if one is present|share findings/i);

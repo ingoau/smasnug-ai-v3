@@ -27,7 +27,7 @@ import { onSandboxRunFinished } from '../sandbox/hooks.js';
 import { resolveFile } from '../files/store.js';
 import type { FileAccessContext } from '../files/access.js';
 import { sandboxChildPrompt } from '../sandbox/prompts.js';
-import { previewsConfigured, SANDBOX_TOOL_NAMES, sandboxConfigured } from '../sandbox/settings.js';
+import { SANDBOX_STARTED_EXTRA, sandboxConfigured } from '../sandbox/settings.js';
 import { saveTrace, TraceRecorder } from './trace.js';
 
 /** Step cap per run (the token cap applies too). */
@@ -231,10 +231,25 @@ async function runClaimed(run: RunRow): Promise<void> {
   }
 
   const controller = new AbortController();
-  // Code sandbox subagents (src/sandbox/) get the longer run cap: builds and analyses take a while.
-  const sandbox = !!sa.sandbox && sandboxConfigured();
-  const maxDurationMs = sandbox ? limits.sandboxRunMaxDurationMs : limits.runMaxDurationMs;
-  const wrapUpAt = Date.now() + maxDurationMs - WRAP_UP_BEFORE_TIMEOUT_MS;
+  // Code sandbox subagents (src/sandbox/) get the longer run cap: builds and analyses take a while. Every subagent has
+  // the sandbox tools; one that hasn't used them yet gets the cap raised on its first allowed call (onSandboxStarted).
+  let sandbox = !!sa.sandbox && sandboxConfigured();
+  const runStart = Date.now();
+  let maxDurationMs = sandbox ? limits.sandboxRunMaxDurationMs : limits.runMaxDurationMs;
+  let wrapUpAt = runStart + maxDurationMs - WRAP_UP_BEFORE_TIMEOUT_MS;
+  let timeout: NodeJS.Timeout | undefined;
+  const armTimeout = () => {
+    if (timeout) clearTimeout(timeout);
+    timeout = setTimeout(() => controller.abort(new RunAbort('timeout')), Math.max(0, runStart + maxDurationMs - Date.now()));
+  };
+  let runEnded = false;
+  const onSandboxStarted = () => {
+    if (sandbox || runEnded) return;
+    sandbox = true;
+    maxDurationMs = limits.sandboxRunMaxDurationMs;
+    wrapUpAt = runStart + maxDurationMs - WRAP_UP_BEFORE_TIMEOUT_MS;
+    if (timeout) armTimeout();
+  };
   let cancelRequested = false;
 
   const { channelId, threadTs } = parseThreadId(run.threadId);
@@ -255,7 +270,7 @@ async function runClaimed(run: RunRow): Promise<void> {
     runId: run.id,
     abortSignal: controller.signal,
     // queueUserImage deliberately unset: the chat models accept images in tool results.
-    extras: { [SLACK_WAIT_EXTRA]: (ev: SlackWaitEvent) => onSlackWait(ev), [SEARCH_DEFER_EXTRA]: deferSearch },
+    extras: { [SLACK_WAIT_EXTRA]: (ev: SlackWaitEvent) => onSlackWait(ev), [SEARCH_DEFER_EXTRA]: deferSearch, [SANDBOX_STARTED_EXTRA]: onSandboxStarted },
   });
   tools.wait_for_searches = tool({
     description:
@@ -270,9 +285,10 @@ async function runClaimed(run: RunRow): Promise<void> {
       return results ? [results, rest].filter(Boolean).join('\n\n') : `No results yet. ${rest} Carry on, or call wait_for_searches again.`;
     },
   });
-  if (!sandbox) for (const name of SANDBOX_TOOL_NAMES) delete tools[name];
-  const instructions = [childSystemPrompt(), skillsPrompt('child'), sandbox ? sandboxChildPrompt({ previews: previewsConfigured() }) : ''].filter(Boolean).join('\n\n');
-  // Subagents run on MODELS.child, sandbox ones on the stronger MODELS.sandbox (runs.model records it at spawn).
+  // The sandbox section is the same for every subagent (the how-to is the child `sandbox` skill), so the prompt stays cacheable.
+  const instructions = [childSystemPrompt(), skillsPrompt('child'), sandboxConfigured() ? sandboxChildPrompt() : ''].filter(Boolean).join('\n\n');
+  // Subagents run on MODELS.child; ones that have used a sandbox run on the stronger MODELS.sandbox from their next run
+  // on (the model isn't switched mid-run: the history holds the first model's reasoning). runs.model records it.
   const modelId = sandbox ? MODELS.sandbox : MODELS.child;
   const model = chatModel(modelId);
   const reasoningEffort = env.CHILD_REASONING_EFFORT !== 'default' ? env.CHILD_REASONING_EFFORT : null;
@@ -368,7 +384,7 @@ async function runClaimed(run: RunRow): Promise<void> {
 
   // Timers and the shutdown registry start right before the try, so its finally always clears them.
   active.set(run.id, controller);
-  const timeout = setTimeout(() => controller.abort(new RunAbort('timeout')), maxDurationMs);
+  armTimeout();
   const heartbeat = setInterval(() => {
     sql<{ cancelRequested: boolean }[]>`update runs set heartbeat_at = now() where id = ${run.id} and status = 'running' returning cancel_requested`
       .then((rows) => {
@@ -526,6 +542,7 @@ async function runClaimed(run: RunRow): Promise<void> {
     log.error({ err, runId: run.id }, 'subagent run failed');
     await finishSafely(run, { status: 'error', error: shortError(err) }, { tokens, history: compactHistory(messages) });
   } finally {
+    runEnded = true;
     clearTimeout(timeout);
     clearInterval(heartbeat);
     clearInterval(elapsedTicker);

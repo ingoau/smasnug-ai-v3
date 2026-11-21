@@ -90,7 +90,7 @@ afterAll(async () => {
 describe('registry', () => {
   it('grants tools per role', () => {
     const front = Object.keys(toolsFor('front', baseCtx())).sort();
-    // Code sandbox tools (src/sandbox/) are registered only when Modal is configured; child.ts filters them per subagent.
+    // Code sandbox tools (src/sandbox/) are registered only when Modal is configured; child.ts gives them to every subagent.
     const sandboxTools: readonly string[] = SANDBOX_TOOL_NAMES;
     const allChild = Object.keys(toolsFor('child', baseCtx())).sort();
     const child = allChild.filter((n) => !sandboxTools.includes(n));

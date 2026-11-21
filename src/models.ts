@@ -17,7 +17,7 @@ export const hackclub = env.HACKCLUB_AI_KEY
 /** The Anthropic API (monthly credit): Claude models after Hack Club's daily budget, before paid OpenRouter. */
 export const anthropic = env.ANTHROPIC_API_KEY ? createAnthropic({ apiKey: env.ANTHROPIC_API_KEY }) : null;
 
-/** Model ids per role (`sandbox`: subagents spawned with a code sandbox). See MODEL_* in config.ts. */
+/** Model ids per role (`sandbox`: subagents that have started a code sandbox). See MODEL_* in config.ts. */
 export const MODELS = {
   gate: env.MODEL_GATE,
   front: env.MODEL_FRONT,

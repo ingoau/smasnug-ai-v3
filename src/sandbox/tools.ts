@@ -1,8 +1,9 @@
 /**
  * Sandbox tools (docs/sandbox.md §3.4), children only: registered with roles ['child'] when the feature is
- * configured, and child.ts drops them for subagents spawned without `sandbox: true`. Every call re-checks the flag,
- * access (kill switch, budget, allowlist / HCA) and quotas, then gets the subagent's sandbox lazily
- * (lifecycle.ensureSandbox). Everything that comes back from the sandbox is untrusted content.
+ * configured, so every subagent has them. Every call checks access (kill switch, budget, allowlist / HCA) and
+ * quotas, then gets the subagent's sandbox lazily (lifecycle.ensureSandbox); the first call that gets one marks the
+ * subagent as a sandbox one (`subagents.sandbox`) and tells its run (SANDBOX_STARTED_EXTRA: longer run cap).
+ * Everything that comes back from the sandbox is untrusted content.
  */
 import { createHash } from 'node:crypto';
 import { tool, type Tool } from 'ai';
@@ -23,17 +24,15 @@ import { EXEC_SCRIPT, formatExecResult, importFailedText, isImagePath, safeBaseN
 import { SandboxRefused, withSandbox } from './lifecycle.js';
 import { SandboxGoneError, shq, workPath, type Handle } from './provider.js';
 import { sandboxProvider } from './providers.js';
-import { previewsConfigured, sandboxSettings } from './settings.js';
+import { previewsConfigured, SANDBOX_STARTED_EXTRA, sandboxSettings } from './settings.js';
 import { previewCountsToday, upsertRequestedPreview } from './preview/store.js';
 import { deployInline } from './preview/flow.js';
 
-const NOT_ENABLED = 'Sandbox tools are only available to subagents started with sandbox: true.';
+const NOT_ENABLED = 'Sandbox tools are only available to subagents.';
 
-/** Flag, access and kill switches. Returns the model-facing refusal, or null to go ahead. */
+/** Access and kill switches. Returns the model-facing refusal, or null to go ahead. */
 async function gate(ctx: ToolContext): Promise<string | null> {
   if (ctx.role !== 'child' || !ctx.subagentId) return NOT_ENABLED;
-  const [sa] = await sql<{ sandbox: boolean }[]>`select sandbox from subagents where id = ${ctx.subagentId}`;
-  if (!sa?.sandbox) return NOT_ENABLED;
   const access = await canUseSandbox(ctx.speakerId);
   if (!access.ok) {
     void notifyAccess({ userId: ctx.speakerId, channelId: ctx.channelId, threadTs: ctx.threadTs, reason: access.reason });
@@ -43,6 +42,13 @@ async function gate(ctx: ToolContext): Promise<string | null> {
   return null;
 }
 
+/** The sandbox is up (past access and the start quotas): mark the subagent and tell its run (longer run cap). */
+async function markStarted(ctx: ToolContext): Promise<void> {
+  await sql`update subagents set sandbox = true where id = ${ctx.subagentId!} and not sandbox`;
+  const started = ctx.extras[SANDBOX_STARTED_EXTRA];
+  if (typeof started === 'function') (started as () => void)();
+}
+
 const owner = (ctx: ToolContext) => ({ subagentId: ctx.subagentId!, threadId: ctx.threadId, ownerId: ctx.speakerId });
 
 /** Run a tool body against the sandbox with the shared checks and error handling. */
@@ -50,7 +56,10 @@ async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<st
   const refusal = await gate(ctx);
   if (refusal) return refusal;
   try {
-    const { value, note } = await withSandbox(owner(ctx), fn);
+    const { value, note } = await withSandbox(owner(ctx), async (h) => {
+      await markStarted(ctx);
+      return fn(h);
+    });
     return note ? `[Note: ${note}]\n${value}` : value;
   } catch (err) {
     if (err instanceof SandboxRefused) return err.message;

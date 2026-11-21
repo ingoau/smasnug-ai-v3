@@ -17,7 +17,6 @@ import { registerTool, type ToolContext } from '../core/tools.js';
 import { recordModelUsage } from '../features/guard.js';
 import { chatModel, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
-import { sql } from '../db/index.js';
 import { EXTRAS, getExtra } from '../tools/extras.js';
 import { errMsg, untrusted } from '../tools/util.js';
 import { BlockedUrlError } from '../tools/safe-fetch.js';
@@ -100,31 +99,25 @@ const SANDBOX_USES: Partial<Record<FileKind, string>> = {
 };
 
 /**
- * The next step for a file read_file / ask_file can't open (pure), by who can act on it: the front agent starts a
- * sandbox subagent, a sandbox subagent imports it, another subagent reports it. '' without sandbox access (then the
- * plain message stays, so nobody is told about a tool they can't use).
+ * The next step for a file read_file / ask_file can't open (pure), by who can act on it: the front agent delegates it
+ * to a subagent to use the sandbox on, a subagent (every one has the sandbox tools) imports it. '' without sandbox access
+ * (then the plain message stays, so nobody is told about a tool they can't use).
  */
-export function sandboxHint(o: { fileId: string; kind: FileKind; role: ToolContext['role']; sandboxChild: boolean; canSandbox: boolean }): string {
+export function sandboxHint(o: { fileId: string; kind: FileKind; role: ToolContext['role']; canSandbox: boolean }): string {
   if (!o.canSandbox) return '';
   const uses = SANDBOX_USES[o.kind] ?? SANDBOX_USES.binary!;
   if (o.role === 'front') {
-    return ` To analyse it (${uses}), spawn a subagent with sandbox: true and put this file id (${o.fileId}) in its instructions; it imports the file with sandbox_import. Don't tell the speaker you can't open this kind of file.`;
+    return ` To analyse it (${uses}), spawn a subagent, tell it to use the sandbox and put this file id (${o.fileId}) in its instructions; it imports the file with sandbox_import. Don't tell the speaker you can't open this kind of file.`;
   }
-  if (o.sandboxChild) return ` To analyse it (${uses}), sandbox_import ${o.fileId} and work on it with sandbox_exec.`;
-  return ` It can be analysed in a code sandbox (${uses}): say so in your result, with this file id (${o.fileId}), so a sandbox subagent can be started for it.`;
+  return ` To analyse it (${uses}), sandbox_import ${o.fileId} and work on it with sandbox_exec.`;
 }
 
 /** sandboxHint for this context (sandbox access looked up; any failure → no hint). */
 async function sandboxHintFor(ctx: ToolContext, f: FileMeta, kind: FileKind): Promise<string> {
   if (!sandboxConfigured() || (ctx.role !== 'front' && ctx.role !== 'child')) return '';
   try {
-    const [access, sandboxChild] = await Promise.all([
-      canUseSandbox(ctx.speakerId),
-      ctx.role === 'child' && ctx.subagentId
-        ? sql<{ sandbox: boolean }[]>`select sandbox from subagents where id = ${ctx.subagentId}`.then((r) => !!r[0]?.sandbox)
-        : Promise.resolve(false),
-    ]);
-    return sandboxHint({ fileId: f.id, kind, role: ctx.role, sandboxChild, canSandbox: access.ok });
+    const access = await canUseSandbox(ctx.speakerId);
+    return sandboxHint({ fileId: f.id, kind, role: ctx.role, canSandbox: access.ok });
   } catch (err) {
     log.debug({ err }, 'sandbox hint: access check failed');
     return '';

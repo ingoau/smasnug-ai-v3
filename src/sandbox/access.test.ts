@@ -122,7 +122,7 @@ describe('access texts', () => {
     const { loadSkills, defaultSkillsDir, readSkill, skillsPrompt } = await import('../agent/skills.js');
     const all = loadSkills(defaultSkillsDir());
     const p = readSkill('front', 'code-sandboxes', undefined, all, () => true);
-    expect(p).toMatch(/`sandbox: true` only when it needs code run/);
+    expect(p).toMatch(/Tell it to use the sandbox only when it needs code run/);
     expect(p).toMatch(/A single file you can write yourself \(a page, script, CSV, text\) is create_file with no sandbox/);
     expect(p).toMatch(/do the task without one where you can \(e\.g\. create_file\), without asking first/);
     expect(p).not.toMatch(/preview/i);
