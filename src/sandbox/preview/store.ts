@@ -31,6 +31,8 @@ export interface PreviewRow {
   claimExpiresAt: Date | null;
   messageTs: string | null;
   termsPromptExpiresAt: Date | null;
+  /** A request_preview call is waiting for the terms answer until then (it deploys; the accept handler doesn't queue). */
+  inlineUntil: Date | null;
   error: string | null;
   createdAt: Date;
 }
@@ -42,11 +44,15 @@ export async function getPreview(id: string): Promise<PreviewRow | null> {
   return r ? { ...r, runId: r.runId == null ? null : Number(r.runId) } : null;
 }
 
-/** One preview per run: a second request in the same run replaces the first (its bundle is dropped). */
+/**
+ * The run's pending preview (requested / awaiting terms) is replaced by a second request in the same run (its bundle
+ * is dropped); otherwise (none yet, or the earlier one is live or ended) a new row is made: a run may deploy again
+ * after a fix.
+ */
 export async function upsertRequestedPreview(o: { runId: number; subagentId: string; threadId: string; requesterId: string; title: string; bundleFileId: string }): Promise<{ id: string; replacedBundle: string | null }> {
-  const [old] = await sql<{ id: string; bundleFileId: string | null; status: PreviewStatus }[]>`select id, bundle_file_id, status from previews where run_id = ${o.runId}`;
+  const [old] = await sql<{ id: string; bundleFileId: string | null }[]>`
+    select id, bundle_file_id from previews where run_id = ${o.runId} and status in ('requested', 'awaiting_terms') order by created_at desc limit 1`;
   if (old) {
-    if (old.status !== 'requested') throw new Error(`a preview for this run is already ${old.status}`);
     await sql`update previews set title = ${o.title}, bundle_file_id = ${o.bundleFileId} where id = ${old.id}`;
     return { id: old.id, replacedBundle: old.bundleFileId };
   }
@@ -54,6 +60,18 @@ export async function upsertRequestedPreview(o: { runId: number; subagentId: str
   await sql`insert into previews (id, run_id, subagent_id, thread_id, requester_id, title, bundle_file_id, status)
             values (${id}, ${o.runId}, ${o.subagentId}, ${o.threadId}, ${o.requesterId}, ${o.title}, ${o.bundleFileId}, 'requested')`;
   return { id, replacedBundle: null };
+}
+
+/** Set or clear the inline wait mark; returns the row's status (null: no such row). */
+export async function setInlineUntil(id: string, until: Date | null): Promise<PreviewStatus | null> {
+  const [r] = await sql<{ status: PreviewStatus }[]>`update previews set inline_until = ${until} where id = ${id} returning status`;
+  return r?.status ?? null;
+}
+
+/** The previews of these runs (newest first per run), for the results turn. */
+export async function previewsOfRuns(runIds: number[]): Promise<PreviewRow[]> {
+  if (!runIds.length) return [];
+  return sql<PreviewRow[]>`select * from previews where run_id in ${sql(runIds)} order by run_id, created_at desc`;
 }
 
 /**
@@ -78,12 +96,13 @@ export async function acceptTerms(userId: string): Promise<void> {
 }
 
 /** Move to `to` only from one of `from` (atomic). Returns the row when it moved. */
-export async function transition(id: string, from: PreviewStatus[], to: PreviewStatus, extra: { error?: string | null; termsPromptExpiresAt?: Date | null } = {}): Promise<PreviewRow | null> {
+export async function transition(id: string, from: PreviewStatus[], to: PreviewStatus, extra: { error?: string | null; termsPromptExpiresAt?: Date | null; inlineUntil?: Date | null } = {}): Promise<PreviewRow | null> {
   const ended = !ACTIVE.includes(to);
   const [r] = await sql<PreviewRow[]>`
     update previews set status = ${to},
       error = coalesce(${extra.error ?? null}, error),
       terms_prompt_expires_at = ${extra.termsPromptExpiresAt === undefined ? sql`terms_prompt_expires_at` : extra.termsPromptExpiresAt},
+      inline_until = ${extra.inlineUntil === undefined ? sql`inline_until` : extra.inlineUntil},
       ended_at = ${ended ? sql`now()` : sql`ended_at`},
       api_token_enc = ${ended ? null : sql`api_token_enc`},
       claim_url_enc = ${ended ? null : sql`claim_url_enc`}

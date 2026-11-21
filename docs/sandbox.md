@@ -115,7 +115,7 @@ Deviations from the plan below (all decided 2026-10-07 unless noted):
 | D13 | **Previews: Cloudflare temporary deploys with claim links.** Use `wrangler deploy --temporary`, or the REST flow: `POST /client/v4/provisioning/previews/challenge` → proof-of-work → `POST /provisioning/previews`, which returns `account.{id,apiToken,expiresAt}` and `claim.{url,expiresAt}`. Each deploy creates a temporary account. The site lives at `<script>.<sub>.workers.dev` for **60 min**; redeploys don't extend that, and unclaimed accounts are deleted. Limits: ≤ 1,000 static files, ≤ 5 MiB each. | Free, needs no Cloudflare account of ours, and the user can keep the site by claiming it. [blog](https://blog.cloudflare.com/temporary-accounts/), [claim deployments](https://developers.cloudflare.com/workers/platform/claim-deployments/), [API changelog](https://developers.cloudflare.com/changelog/post/2026-07-14-temporary-accounts-api/) |
 | D14 | **The claim URL is a bearer credential.** It never reaches the model, thread events or logs. Only the requester's own button press shows it, ephemerally. Stored encrypted and cleared at expiry. | Anyone holding it can claim the account into their own Cloudflare account permanently. |
 | D15 | **The requester accepts Cloudflare's Terms and Privacy Policy before account creation:** an ephemeral Accept/Cancel on first use, recorded per user. | Account creation happens on the user's behalf. |
-| D16 | **Deploying is a code step after the subagent finishes, not a model tool.** Preferred: from a **fresh** Modal sandbox with no Cloudflare credentials, a fresh `HOME`/`XDG_CONFIG_HOME` per deploy and a pinned wrangler version. Alternative: the REST API from the worker, with the proof-of-work in a worker thread. | Wrangler caches the temporary account for 60 min, so a shared HOME would put a second requester into the first one's account. A fresh sandbox also keeps the subagent's own sandbox, which holds untrusted content, away from the deploy. |
+| D16 | **Deploying is a code step, not model-controlled.** `request_preview` runs it inline in the subagent's run (the model only names the directory; code does the checks and the deploy), so the subagent gets the URL back and can check it, and the front agent posts it. Preferred: from a **fresh** Modal sandbox with no Cloudflare credentials, a fresh `HOME`/`XDG_CONFIG_HOME` per deploy and a pinned wrangler version. Alternative: the REST API from the worker, with the proof-of-work in a worker thread. | Wrangler caches the temporary account for 60 min, so a shared HOME would put a second requester into the first one's account. A fresh sandbox also keeps the subagent's own sandbox, which holds untrusted content, away from the deploy. |
 | D17 | **Phishing mitigations:**<br>• injected banner "Preview built by smasnug for @user, expires HH:MM";<br>• `X-Robots-Tag: noindex`;<br>• builds with password or card forms are refused;<br>• per-user rate limits;<br>• admin takedown (delete via the temporary token while it's valid; works before a claim, §9.2). | The bot would otherwise be a free, anonymous phishing host. |
 
 ## 3. Architecture
@@ -261,7 +261,7 @@ Every tool:
 | `sandbox_write_file` | `path`, `content` | Text only, ≤ 200 KB per call; anything larger is made with `sandbox_exec`. Paths must stay under `/work`, normalized, no `..`. |
 | `sandbox_import` | `file_id`, `path?` | Copies a thread file from the file store to `/work/in/<safe name>`. Uses the file store's access rule (`resolveFile`: this thread's files, or the owner's own). ≤ `limits.sandboxImportMaxBytes` (50 MB). |
 | `sandbox_export` | `path`, `name?`, `description` | Reads the file (≤ `limits.sandboxExportMaxBytes`, 20 MB; bigger, up to 1000 MB: a large file, §0). It is stored as `createFile({ threadId, ownerId, name, content, description, createdRunId, createdSubagentId, idempotencyKey })`, which returns `file_…`. The name is sanitized; the MIME type comes from content sniffing, not the extension. Idempotent per (run, path, content hash). |
-| `request_preview` | `dir`, `title` | **Does not deploy.** Checks that `index.html` exists, ≤ 1,000 files, each ≤ 5 MiB and ≤ 25 MiB total, via one `find`/`stat` exec. Tars the dir, stores the tarball as an internal file-store file, and inserts a `previews` row (`requested`, one per run). Counts `takeLimit('preview')`. Returns: "Preview queued. After you finish, the system deploys it and posts the link in the thread. Mention in your result that a preview was requested." |
+| `request_preview` | `dir`, `title` | Checks that `index.html` exists, ≤ 1,000 files, each ≤ 5 MiB and ≤ 25 MiB total, via one `find`/`stat` exec. Tars the dir, stores the tarball as an internal file-store file, and inserts a `previews` row (`requested`; a still-pending row of the same run is replaced, a live one stays, so a run can redeploy after a fix). Counts toward the daily preview caps. Then **deploys inline** (§3.6) and returns the URL, preview id and expiry (or that it's waiting for the terms answer, or why not). |
 
 **File store contract** (built in round 3, `src/files/store.ts`; design doc, "Files"):
 - export: `createFile({ threadId, ownerId, name, content, description, createdRunId, createdSubagentId, idempotencyKey })`
@@ -293,22 +293,37 @@ the sandbox busy past `lifetimeMs` loses unsaved state, and the tool says so.
 
 ### 3.6 Preview deploy step
 
-1. **`request_preview`** (in the run) stores the bundle and a `previews` row `requested` (§3.4).
-2. **`onRunFinished`** → `sandbox` job `preview-prepare` (jobId `preview-prepare-<id>`):
-   - entry checks for the requester (`checkEntry(owner, channel, { countMessage: false })`);
-   - kill switches, access and budget;
-   - the terms check:
-     - Not yet accepted (`preview_terms` for the current `PREVIEW_TERMS_VERSION`) → status `awaiting_terms`, plus an
-       ephemeral to the requester in the thread. It names Cloudflare, links the Terms and Privacy Policy, says a
-       temporary Cloudflare account is created in their name, and has **Accept / Cancel** (`preview:terms_accept`,
-       `preview:terms_cancel`). It expires after 30 min (sweep → `cancelled`).
-     - Accepted → `preview-deploy`.
-3. **`preview-deploy`** (claim with `for update skip locked` + a lease, attempts 1):
+Code in `src/sandbox/preview/flow.ts`.
+
+1. **`request_preview`** (in the run) stores the bundle and a `previews` row `requested` (§3.4), then `deployInline`:
+   - **preflight**: entry checks for the requester (`checkEntry(owner, channel, { countMessage: false })`), kill
+     switches, access and budget. A problem ends the row and is returned to the model.
+   - **terms**: not yet accepted (`preview_terms` for the current `PREVIEW_TERMS_VERSION`) → status `awaiting_terms`
+     with `inline_until` set, and the terms ephemeral to the requester (names Cloudflare, links the Terms and Privacy
+     Policy, says a temporary Cloudflare account is created in their name; **Accept / Cancel**, `preview:terms_accept`,
+     `preview:terms_cancel`; the prompt expires after 30 min, sweep → `cancelled`). The tool polls the row for up to
+     `limits.previewTermsWaitMs` (2 min). The accept handler moves the row back to `requested` and queues the deploy
+     job **only if `inline_until` is unset or past**; when the tool stops waiting it clears `inline_until` (returning
+     the status), so exactly one side deploys: accepted in time → the tool deploys; not yet → the tool returns
+     "waiting for the terms" and the late path (step 3) deploys after a later Accept.
+   - **deploy** (`deployCore`, below) and return the URL, preview id and expiry. The subagent should fetch the URL to
+     check it; it puts the URL and id in its result. Nothing is posted by code.
+2. **Results turn**: `renderCardResults` lists each run's previews from the DB (live: URL, id, expiry; waiting; failed
+   with the reason), so the front agent doesn't depend on the result text. It posts the link with
+   `reply(preview: "pv_…")`, which adds the claim and Report buttons (§3.6.1).
+3. **Late path** (an Accept after the tool stopped waiting, or a `requested` row left when the run ended):
+   `onRunFinishedPreview` cancels pending rows (`requested`, `awaiting_terms`) of a run that didn't complete, and
+   queues `preview-prepare` (preflight + terms) for a `requested` row of a complete run; `preview-deploy` runs
+   `deployCore`. The outcome goes to the front agent as an **outcome turn** (`settleWithOutcome`, source `preview`,
+   ref = preview id): live → "post the link with `reply(preview)`"; refused / failed → the reason. If that turn shows
+   nothing, its fallback is the code-posted preview message with the buttons (`registerOutcomeFallback`); a requester
+   without privacy consent (or a skipped turn) gets the message / an ephemeral directly.
+4. **`deployCore`** (claim `requested` → `deploying` atomically):
    - The worker loads the bundle and, in `preview/bundle.ts` (pure, in Node, not in a sandbox):
      - re-checks the limits;
      - runs the **form scan**: `<input type=password>`, `autocomplete` values `cc-*` / `current-password`,
        field names or labels matching card/cvv/iban/ssn/password (in HTML and string literals in JS). A match
-       → `refused`, and the requester gets a short ephemeral;
+       → `refused`;
      - re-packs the bundle.
    - **Fresh sandbox** from the deploy image (`lifetimeMs` 5 min, no tags linking it to a user beyond the preview id):
      - write the bundle, the fixed `wrangler.jsonc` (`name: smasnug-p-<shortid>`, `assets.directory`,
@@ -316,26 +331,25 @@ the sandbox busy past `lifetimeMs` loses unsaved state, and the tool says so.
      - the Worker serves the assets; on `text/html` it uses HTMLRewriter to inject the banner ("Preview built by
        smasnug for @displayname · expires HH:MM UTC · not affiliated with any site it imitates"); it sets
        `X-Robots-Tag: noindex, nofollow` and `Content-Security-Policy: form-action 'none'` (see §5.5).
-     - If the spike shows `--temporary` can't deploy a Worker with code, fall back to an assets-only Worker: banner
-       injected into every `.html` at bundle time, and `X-Robots-Tag` via a generated `_headers` that replaces any
-       user `_headers`.
+     - Assets-only fallback (`PREVIEW_ASSETS_ONLY=1`): banner injected into every `.html` at bundle time, and
+       `X-Robots-Tag` via a generated `_headers` that replaces any user `_headers`.
    - Run `env HOME=/tmp/h-<id> XDG_CONFIG_HOME=/tmp/h-<id>/.config WRANGLER_OUTPUT_FILE_PATH=/tmp/out.ndjson CI=1
      npx wrangler deploy --temporary [--no-autoconfig]`. Read the Worker URL from the ND-JSON and
      `account.{id,apiToken,expiresAt}` + `claim.{url,expiresAt}` from `wrangler-temporary-account.toml`. Then destroy
      the sandbox. Stdout/stderr are never logged raw; only the exit code and a redacted tail on failure.
    - Store the secrets encrypted, status `live`, and add the URL to the run's `sources` (card re-render).
-   - Post the preview message (§3.6.1).
    - Deploy sandbox seconds count toward the budget.
-4. **Expiry** (`sandbox:previews`, every minute): at `expires_at` → `expired`, the encrypted columns are nulled, and
-   the message is updated to "Preview expired" with no button.
+5. **Expiry** (`sandbox:previews`, every minute): at `expires_at` → `expired` and the encrypted columns are nulled. No
+   message is edited (the link usually sits in the front agent's reply); its claim button then answers "can no longer
+   be claimed".
 
-#### 3.6.1 Preview message and claim
+#### 3.6.1 Claim and report buttons
 
-- Posted by code with `slackCall('chat.postMessage', …, { idempotencyKey: 'preview:<id>' })` in the run's thread:
-  "Live preview of *title* for <@owner>: <url> · expires <!date^…^{time}|HH:MM UTC>".
-- Buttons: **Get claim link** (`preview:claim`, value = preview id) and **Report** (`preview:report`: mod channel +
-  "Thanks, reported").
-- Context line: "Temporary Cloudflare deployment. Only <@owner> can claim it to keep it."
+- `previewButtonBlocks` (`preview/reply-blocks.ts`): **Get claim link** (`preview:claim`, value = preview id) and
+  **Report** (`preview:report`: mod channel + "Thanks, reported"), plus the context line "Temporary Cloudflare
+  deployment. Only <@owner> can claim it to keep it." They go under a front reply with `preview: "pv_…"` (checked at
+  reply time: the preview exists, is in this thread and is `live`; otherwise no buttons and a note to the model), or
+  under the code-posted fallback message "Live preview of *title* for <@owner>: <url> · expires <!date^…^{time}|HH:MM UTC>".
 - **Claim:**
   - the handler checks clicker = requester, status `live` and `claim_expires_at > now()`;
   - it decrypts the claim URL and returns it in an ephemeral with "anyone with this link can take ownership; don't
@@ -344,11 +358,8 @@ the sandbox busy past `lifetimeMs` loses unsaved state, and the tool says so.
   - The click is logged without the URL.
 - **Takedown** (admin only: the mod-channel report post and the App Home "Live previews" list): delete the script
   via the temporary token (`DELETE /accounts/{id}/workers/scripts/{name}`, verified before a claim, §9.2), status `taken_down`,
-  secrets nulled, message updated. If the delete fails, the preview still expires in < 60 min, and the admin is told
+  secrets nulled, and the code-posted message (if any) updated. If the delete fails, the preview still expires in < 60 min, and the admin is told
   so.
-- **The front agent** sees, via the child's result, that a preview was requested. The prompt says the system posts
-  the link and button itself (§7). Its synthesis may run before the deploy lands, which is fine: "the preview link
-  will appear here in a minute".
 
 ### 3.7 Queue jobs and maintenance
 
@@ -362,8 +373,8 @@ New queue `sandbox` in `src/core/queues.ts`, processor in `src/sandbox/register.
 |---|---|---|
 | `pause` | `{ sandboxId, generation }` | jobId `pause-<id>-<gen>`, so a resume (new generation) makes stale pauses no-ops. Snapshot → terminate → `paused`. |
 | `destroy` | `{ sandboxId }` | Idempotent. |
-| `preview-prepare` | `{ previewId }` | §3.6 step 2 |
-| `preview-deploy` | `{ previewId }` | §3.6 step 3. A slow job (proof-of-work / npx): its own lease, attempts 1; failure → `failed` + an ephemeral to the requester |
+| `preview-prepare` | `{ previewId }` | §3.6 step 3 (late path) |
+| `preview-deploy` | `{ previewId }` | §3.6 step 3 (late path). A slow job (npx): attempts 1; live or failed → an outcome turn for the front agent |
 
 Maintenance tasks (exported `maintenance` from the sandbox register):
 - `sandbox:sweep` (30 s): idle → pause, dead subagent → destroy, close usage segments;

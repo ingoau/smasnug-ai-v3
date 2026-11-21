@@ -33,7 +33,27 @@ type Tx = TransactionSql<{}>;
 
 /** `huddlefm`: DJ mode notices (grant answered, session ended, chatter; src/features/huddlefm/notices.ts). */
 /** `button_action`: an action button's bound call failed (src/agent/reply-quiet.ts). */
-export type OutcomeSource = 'send' | 'coding_launch' | 'huddlefm' | 'button_action';
+/** `preview`: a live preview deployed (or failed) after the subagent's run ended (src/sandbox/preview/flow.ts). */
+export type OutcomeSource = 'send' | 'coding_launch' | 'huddlefm' | 'button_action' | 'preview';
+
+/** Sources whose turns carry a code-written fallback (front.ts posts it when the turn shows nothing). */
+export const OUTCOME_SOURCES: readonly string[] = ['send', 'coding_launch', 'huddlefm', 'button_action', 'preview'];
+
+/**
+ * A source may post its fallback as a message of its own (e.g. with buttons) instead of the plain text: the renderer
+ * gets the turn's source_ref and the fallback text and returns the message, or null for the plain text.
+ */
+type FallbackRenderer = (sourceRef: string | null, fallback: string) => Promise<{ text: string; blocks: unknown[]; onPosted?: (ts: string) => Promise<void> } | null>;
+const fallbackRenderers = new Map<string, FallbackRenderer>();
+
+export function registerOutcomeFallback(source: OutcomeSource, render: FallbackRenderer): void {
+  fallbackRenderers.set(source, render);
+}
+
+export async function renderOutcomeFallback(source: string, sourceRef: string | null, fallback: string): ReturnType<FallbackRenderer> {
+  const r = fallbackRenderers.get(source);
+  return r ? r(sourceRef, fallback).catch((err) => (log.warn({ err, source }, 'outcome fallback renderer failed'), null)) : null;
+}
 
 /** Why no outcome turn may run for `speakerId` in `threadId` (null = ok). */
 export async function outcomeSkipReason(threadId: string | null, speakerId: string): Promise<string | null> {

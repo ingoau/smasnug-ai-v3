@@ -25,6 +25,7 @@ import { SandboxGoneError, shq, workPath, type Handle } from './provider.js';
 import { sandboxProvider } from './providers.js';
 import { previewsConfigured, sandboxSettings } from './settings.js';
 import { previewCountsToday, upsertRequestedPreview } from './preview/store.js';
+import { deployInline } from './preview/flow.js';
 
 const NOT_ENABLED = 'Sandbox tools are only available to subagents started with sandbox: true.';
 
@@ -290,12 +291,12 @@ async function exportLarge(ctx: ToolContext, h: Handle, abs: string, size: numbe
 if (previewsConfigured())
   reg('request_preview', (ctx) =>
     tool({
-      description: `Ask for a live web preview of a static site you built: one directory with an index.html at its top (≤ ${limits.previewMaxFiles} files, ≤ 5 MiB each, ≤ 25 MiB total; no login, password or payment forms: those are refused). This does NOT deploy now: after you finish, the system deploys it (a temporary Cloudflare site, live 60 minutes) and posts the link in the thread. Only when the user wants a live page. One per task.`,
+      description: `Deploy a live web preview of a static site you built: one directory with an index.html at its top (≤ ${limits.previewMaxFiles} files, ≤ 5 MiB each, ≤ 25 MiB total; no login, password or payment forms: those are refused). It deploys now (a temporary Cloudflare site, live 60 minutes; takes ~20 s, longer the first time while the user accepts Cloudflare's terms) and returns the URL and a preview id. Only when the user wants a live page. Once per working version: call it again only after fixing a broken site. Each deploy counts toward the daily limit.`,
       inputSchema: z.object({
         dir: z.string().describe('Directory under /work with the site, e.g. "site"'),
         title: z.string().min(1).max(80).describe('Short title, e.g. "Portfolio page"'),
       }),
-      execute: async ({ dir, title }) => {
+      execute: async ({ dir, title }, opts) => {
         const abs = workPath(dir);
         if (!abs) return badPath(dir);
         if ((await sandboxSettings()).previewsDisabled) return 'Live previews are turned off right now. You may tell the user that plainly; export the files instead.';
@@ -303,7 +304,8 @@ if (previewsConfigured())
         const counts = await previewCountsToday(ctx.speakerId);
         if (counts.user >= limits.userPreviewsPerDay) return `Limit reached: at most ${limits.userPreviewsPerDay} live previews per user per day. Export the files instead and say so.`;
         if (counts.global >= limits.globalPreviewsPerDay) return 'No more live previews can be made today. Export the files instead and say so.';
-        return run(ctx, 'request_preview', async (h) => {
+        let previewId: string | null = null;
+        const packed = await run(ctx, 'request_preview', async (h) => {
           const check = await p().exec(
             h,
             ['bash', '-c', `cd ${shq(abs)} 2>/dev/null || { echo NODIR; exit 0; }; test -f index.html && echo INDEX; echo FILES $(find . -type f | wc -l); echo LINKS $(find . -type l | wc -l); echo TOTAL $(find . -type f -printf '%s\\n' | awk '{s+=$1} END {print s+0}'); echo MAX $(find . -type f -printf '%s %p\\n' | sort -n | tail -1)`],
@@ -337,8 +339,12 @@ if (previewsConfigured())
           const res = await upsertRequestedPreview({ runId: ctx.runId!, subagentId: ctx.subagentId!, threadId: ctx.threadId, requesterId: ctx.speakerId, title, bundleFileId: bundle.id });
           if (res.replacedBundle) await fileStore.delete(res.replacedBundle).catch(() => {});
           void appendEvent(ctx.threadId, 'preview_requested', `subagent:${ctx.subagentId}`, { runId: ctx.runId, previewId: res.id, title }).catch(() => {});
-          return 'Preview queued. After you finish, the system deploys it and posts the link in the thread. Mention in your result that a live preview was requested (the link comes separately; you never get it).';
+          previewId = res.id;
+          return 'packed';
         });
+        // The deploy (and a terms wait) happens outside the sandbox: it runs in a fresh deploy sandbox by code.
+        if (!previewId) return packed;
+        return deployInline(previewId, { abortSignal: opts?.abortSignal });
       },
     }),
   );

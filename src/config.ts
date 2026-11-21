@@ -461,6 +461,8 @@ export const limits = {
   /** Cloudflare deletes unclaimed temporary deployments after 60 min; redeploys don't extend it. */
   previewLifetimeMs: 60 * 60_000,
   previewTermsTtlMs: 30 * 60_000,
+  /** How long request_preview waits for a first-time requester's terms answer before leaving it to the late path. */
+  previewTermsWaitMs: 2 * 60_000,
   previewDeployTimeoutMs: 4 * 60_000,
   /** HCA: a positive answer is trusted this long before re-checking (and kept as the "last known positive"). */
   hcaPositiveTtlMs: 7 * 24 * 60 * 60 * 1000,

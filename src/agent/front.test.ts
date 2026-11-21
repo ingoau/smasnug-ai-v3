@@ -113,7 +113,7 @@ const { simulateReadableStream } = await import('ai');
 await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
-const { runFrontTurn, barePingKind, barePingInstruction, needsFallback, FILTERED_TEXT } = await import('./front.js');
+const { runFrontTurn, barePingKind, barePingInstruction, needsFallback, previewLine, FILTERED_TEXT } = await import('./front.js');
 const { streamArgsText } = await import('./slack-markdown.js');
 
 const usage = { inputTokens: { total: 10, noCache: 10, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 5, text: 5, reasoning: 0 } };
@@ -1464,6 +1464,15 @@ describe('synthesis turns after a cancellation', () => {
     h.model = mockModel([toolStep(['end_turn', {}])]);
     await runFrontTurn(turn({ id: 153, kind: 'synthesis', cardId: 5, messageTs: [], isMention: false }), io(false).io);
     expect(fallbacks()).toHaveLength(0);
+  });
+
+  it('previewLine: a live preview says how to post it; a waiting one says the link comes later', () => {
+    const live = previewLine({ id: 'pv_ab12', status: 'live', url: 'https://x.workers.dev', expiresAt: new Date('2026-11-21T01:57:00Z'), error: null });
+    expect(live).toContain('https://x.workers.dev');
+    expect(live).toContain('live until 01:57 UTC');
+    expect(live).toContain('preview: "pv_ab12"');
+    expect(previewLine({ id: 'pv_ab12', status: 'awaiting_terms', url: null, expiresAt: null, error: null })).toMatch(/accept Cloudflare's terms/);
+    expect(previewLine({ id: 'pv_ab12', status: 'refused', url: null, expiresAt: null, error: 'password form' })).toBe('- pv_ab12: refused (password form)');
   });
 
   it('needsFallback: synthesis unless a task was cancelled or someone spoke since; other turns when mentioned', () => {
