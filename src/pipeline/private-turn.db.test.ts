@@ -138,4 +138,18 @@ describe.skipIf(!LIVE)('private (`!p`) turns (DB)', () => {
     expect(row!.sharedTs).toBeTruthy();
     expect(row!.sharedTs).not.toBe('pending');
   });
+
+  it('a retaken claim whose post is still held by an earlier press is not marked shared', async () => {
+    const id = await share.savePrivateReply({ threadId, userId: 'U_A', turnId: 1, text: 'another answer', extras: null, files: [] });
+    // An earlier press crashed mid-post: its claim is stale and its idempotency key has no result.
+    await sql`update ephemeral_replies set shared_ts = 'pending', share_claimed_at = now() - interval '2 minutes' where id = ${id}`;
+    await sql`insert into idempotency_keys (key) values (${`chat.postMessage:private-share:${id}`})`;
+    const before = (await fake.fakeCalls()).length;
+    await share.handlePrivateShare({ userId: 'U_A', channelId: channel, actionId: share.PRIVATE_SHARE_ACTION, value: String(id), responseUrl: 'https://hooks.example/r', body: {} });
+    const calls = (await fake.fakeCalls()).slice(before);
+    expect(calls.some((c) => c.method === 'response_url' && c.args.delete_original)).toBe(false);
+    expect(calls.some((c) => c.method === 'chat.postEphemeral' && /Still sending/.test(c.args.text))).toBe(true);
+    const [row] = await sql<{ sharedTs: string | null }[]>`select shared_ts from ephemeral_replies where id = ${id}`;
+    expect(row!.sharedTs).toBeNull();
+  });
 });

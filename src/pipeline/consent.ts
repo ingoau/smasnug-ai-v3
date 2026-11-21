@@ -16,7 +16,7 @@ import { log } from '../log.js';
 import { claimNotice, forgetConsent, hasAgreed, privacyPolicy, PROMPT_TEXT, promptBlocks, recordAgreement, UPDATED_TEXT, updatedBlocks } from '../features/privacy.js';
 import { ephemeral, respond } from '../features/util.js';
 import { publishHome } from '../features/home.js';
-import { forgetUserCodeChannelData } from '../features/code-channels/store.js';
+import { forgetUserCodeChannelData, isCodeChannel } from '../features/code-channels/store.js';
 import { deleteAllFacts } from '../features/memory/store.js';
 import { deleteFilesOwnedBy } from '../files/large.js';
 import { applyDelete } from './store.js';
@@ -170,7 +170,9 @@ async function replayItem(userId: string, item: HeldItem): Promise<void> {
   const { channelId } = parseThreadId(item.threadId);
   const [msg] = await sql<{ text: string; deleted: boolean }[]>`select text, deleted from messages where channel_id = ${channelId} and ts = ${item.ts}`;
   if (msg?.deleted) return;
-  const isPrivate = msg && (item.kind === 'private' || item.reason === 'mention') ? isEphemeralRequest(msg.text, (await getBotIdentity()).userId) : item.kind === 'private';
+  // Never in a code channel (intake: its Status tab lists every run there).
+  const canBePrivate = (item.kind === 'private' || item.reason === 'mention') && !(await isCodeChannel(channelId).catch(() => false));
+  const isPrivate = msg && canBePrivate ? isEphemeralRequest(msg.text, (await getBotIdentity()).userId) : item.kind === 'private';
   if (isPrivate) {
     await startPrivateTurn({ threadId: item.threadId, authorId: userId, ts: item.ts });
     return;

@@ -197,6 +197,13 @@ export async function handlePrivateShare(ctx: ActionContext): Promise<void> {
       res = await send(markdownMessage(layout.text));
     }
     ts = typeof res?.ts === 'string' ? res.ts : null;
+    // The post's idempotency key is still held by an earlier press (slow, or crashed mid-post): nothing was posted
+    // by this one, so it must not count as shared.
+    if (!ts && res?.skipped) {
+      await sql`update ephemeral_replies set shared_ts = null where id = ${id} and shared_ts = 'pending'`;
+      await tellUser(ctx.userId, row.threadId, 'Still sending that to the thread, try again in a moment if it doesn\'t show up.');
+      return;
+    }
     if (row.files.length) {
       await uploadFiles({ channelId, threadTs, files: row.files, idempotencyKey: `private-share-files:${id}` }).catch(async (err) => {
         log.warn({ err, id }, 'sharing a private answer: its files failed');

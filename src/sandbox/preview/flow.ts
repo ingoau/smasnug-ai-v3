@@ -27,6 +27,7 @@ import { sandboxSettings } from '../settings.js';
 import { prepareBundle } from './bundle.js';
 import { previewDeployer } from './deploy.js';
 import { postPreviewMessage, previewIsPrivate, previewMessage } from './reply-blocks.js';
+import { privateThreadTs } from '../../agent/private-reply.js';
 import { readTar } from './tar.js';
 import { ACTIVE, acceptTerms, apiTokenOf, claimUrlOf, getPreview, setInlineUntil, setMessageTs, storeLive, termsAccepted, transition, type PreviewRow } from './store.js';
 
@@ -41,7 +42,9 @@ const threadOf = (row: PreviewRow) => parseThreadId(row.threadId);
 const inThread = (row: PreviewRow) => ({ threadTs: threadOf(row).threadTs });
 
 async function tellRequester(row: PreviewRow, text: string, blocks?: unknown[]): Promise<void> {
-  const { channelId, threadTs } = threadOf(row);
+  const { channelId, threadTs: rowThreadTs } = threadOf(row);
+  // A private (`!p`) subagent's preview: where that answer's ephemerals go (postPreviewMessage does the same).
+  const threadTs = (await previewIsPrivate(row)) ? await privateThreadTs(row.threadId) : rowThreadTs;
   await slackCall('chat.postEphemeral', { channel: channelId, user: row.requesterId, ...threadTsArg(threadTs), text, ...(blocks ? { blocks } : {}) }).catch((err) =>
     log.warn({ err, previewId: row.id }, 'preview ephemeral failed'),
   );
