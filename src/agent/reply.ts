@@ -40,6 +40,8 @@ import { prepareButtonActions } from './button-actions.js';
 import { createReplyButtons, detachMessageCards, loadReplyButtons, messageHasLiveCard, postedBefore, reattachMessageCards, setReplyText, setButtonsMessage, type PlaceTarget, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
 import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
 import { forgetOpenActivity, recordOpenActivity } from './activity-registry.js';
+import { privateThreadTs, savePrivateReply, sendFilesToDm, shareActions } from './private-reply.js';
+import { sql } from '../db/index.js';
 
 /** Coalescing interval for appends once the stream is open. */
 const FLUSH_MS = 250;
@@ -100,6 +102,12 @@ export interface ReplyTarget {
    * into that button's message (posted whole, not streamed) instead of a new one; if that fails, it's posted as usual.
    */
   placeTarget?: PlaceTarget | null;
+  /**
+   * Ephemeral mode (`@bot !p …`, private-reply.ts): every reply goes to this user only, posted whole with
+   * chat.postEphemeral (never streamed, no plan card or quick-reply buttons), with a "Send to thread" button; files
+   * go to their DM.
+   */
+  privateTo?: string;
 }
 
 /** The plan card as one block (a Slack plan block, live or finished). */
@@ -220,7 +228,7 @@ export function markdownMessage(text: string) {
 }
 
 /** A reply message's final layout: [plan card, reply with its extras and buttons (inline at `[[buttons]]`, else last), footer]. */
-function replyLayout(text: string, actions?: ButtonsActionsBlock | ContextBlock, card?: CardBlock | null, extras?: ReplyExtras | null): { text: string; blocks: unknown[] } {
+export function replyLayout(text: string, actions?: ButtonsActionsBlock | ContextBlock, card?: CardBlock | null, extras?: ReplyExtras | null): { text: string; blocks: unknown[] } {
   const footer = footerBlock(extras);
   const maxBlocks = MAX_MESSAGE_BLOCKS - 1 - (card ? 1 : 0) - footer.length;
   // An empty markdown block is invalid: an extras-only reply is their blocks plus a text fallback.
@@ -330,7 +338,7 @@ export class ReplyManager {
     // While the turn's first delivered reply may still go into a button's message, replies are posted whole (Slack
     // can't stream into an existing message). The place is claimed only when a reply is actually delivered (postWhole):
     // a dropped or failed first call leaves it for the retry.
-    const mode = this.t.placeTarget && !this.placeUsed
+    const mode = this.t.privateTo || (this.t.placeTarget && !this.placeUsed)
       ? Promise.resolve('post' as const)
       : this.t.activeRuns().then(
           (n) => chooseDelivery({ turnKind: this.t.turnKind, runningRuns: n }),
@@ -375,7 +383,7 @@ export class ReplyManager {
     // An earlier reply call that never got to stream (failed input, the model retrying): its empty stream goes, so it
     // doesn't sit above this one or hold back activity cards.
     for (const o of this.entries.values()) if (o !== e && o.early && !o.finished && !o.streamTs) void this.discardEarly(o);
-    if (!earlyStream.enabled || e.early || e.streamTs || e.keyBase || e.finished || this.trail?.isOpen) return;
+    if (this.t.privateTo || !earlyStream.enabled || e.early || e.streamTs || e.keyBase || e.finished || this.trail?.isOpen) return;
     const early: Promise<string | null> = this.openEarly(e)
       .catch((err) => {
         const code = slackErrorCode(err);
@@ -464,6 +472,7 @@ export class ReplyManager {
   delta(toolCallId: string, d: string) {
     const e = this.start(toolCallId);
     this.t.timing?.mark('first_reply_delta');
+    if (this.t.privateTo) return; // posted whole at the end
     e.buf += d;
     if (this.t.timing && !('first_reply_text' in this.t.timing.marks) && (extractPartialString(e.buf, 'text')?.value ?? '').trim()) this.t.timing.mark('first_reply_text');
     // First reply of the turn, stream not open yet: open it as soon as a few words are there (then coalesce).
@@ -709,6 +718,7 @@ export class ReplyManager {
       await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, stopped: true, streamed: e.streamed });
       return STOPPED_RESULT;
     }
+    if (this.t.privateTo) return this.finishPrivate(e, toolCallId, this.t.privateTo, text, extras, chartNotes, files, buttons);
     // Marker lines alone show nothing (their extras may have been dropped).
     const blank = !withoutMarkers(text).trim();
     if (!e.streamTs) {
@@ -877,6 +887,81 @@ export class ReplyManager {
       ...(extras.degraded ? { degraded: true } : {}),
     });
     return `Replied (${delivered})${btnRow ? ` with buttons: ${btnRow.labels.join(' | ')}` : ''}.${chartSuffix()}`;
+  }
+
+  /**
+   * A private turn's reply (ReplyTarget.privateTo): one ephemeral message with a "Send to thread" button; files go to
+   * the user's DM (an ephemeral message can't carry files), quick-reply buttons are left out.
+   */
+  private async finishPrivate(
+    e: ReplyEntry,
+    toolCallId: string,
+    userId: string,
+    text: string,
+    extras: ReplyExtras,
+    notes: string[],
+    files?: OutgoingFile[],
+    buttons?: readonly unknown[],
+  ): Promise<string> {
+    const suffix = () => (notes.length ? ` ${notes.join(' ')}` : '');
+    const blank = !withoutMarkers(text).trim();
+    if (blank && !files?.length && !extras.items.length) {
+      const reason = notes.length ? `Not posted: ${notes.join(' ')}` : EMPTY_RESULT;
+      e.dropped = reason;
+      await appendEvent(this.t.threadId, 'reply_dropped', 'bot', { turnId: this.t.turnId, index: e.index, reason, text, private: true });
+      return reason;
+    }
+    if (normalizeButtonLabels(buttons).length) notes.push("Quick-reply buttons aren't available in a private answer, so they were left out.");
+    let body = text;
+    let dmed = 0;
+    if (files?.length) {
+      try {
+        await sendFilesToDm(userId, files, this.key(e, ':private-files'));
+        dmed = files.length;
+        body = `${blank ? '' : `${text}\n\n`}_${dmed === 1 ? 'The file is' : `The ${dmed} files are`} in your DM with me._`;
+      } catch (err) {
+        log.warn({ err, code: slackErrorCode(err) }, 'private reply: sending the files to the DM failed');
+        notes.push("Sending the files to the speaker's DM failed; tell them.");
+      }
+    }
+    if (!withoutMarkers(body).trim() && !extras.items.length) {
+      e.dropped = 'nothing to post';
+      return `Not posted: sending the files failed and there was no text.${suffix()}`;
+    }
+    const triggerMs = this.t.triggerTs ? slackTsMs(this.t.triggerTs) : null;
+    if (triggerMs != null) extras.footer = responseTimeFooter((this.t.now ?? Date.now)() - triggerMs, this.t.fallbackModel?.() ?? null);
+    e.posting = true;
+    const replyId = await savePrivateReply({ threadId: this.t.threadId, userId, turnId: this.t.turnId, text: body, extras: hasExtras(extras) ? extras : null, files: dmed ? (files ?? []) : [] });
+    const threadTs = await privateThreadTs(this.t.threadId);
+    try {
+      await this.withExtras(extras, async () => {
+        const msg = replyLayout(body, shareActions(replyId), null, extras);
+        await slackCall('chat.postEphemeral', { channel: this.t.channelId, user: userId, ...threadTsArg(threadTs), text: msg.text, blocks: msg.blocks }, { idempotencyKey: this.key(e, ':private') });
+      });
+    } catch (err) {
+      e.posting = false;
+      e.dropped = 'posting failed';
+      log.warn({ err, code: slackErrorCode(err) }, 'private reply failed');
+      await appendEvent(this.t.threadId, 'reply_dropped', 'bot', { turnId: this.t.turnId, index: e.index, reason: 'post failed', text, private: true });
+      throw err;
+    }
+    // A degraded post (Slack refused the extras): the share button posts the same fallbacks.
+    if (extras.degraded) await sql`update ephemeral_replies set extras = ${sql.json(extras as never)} where id = ${replyId}`.catch(() => {});
+    this.t.timing?.mark('reply_posted');
+    this.extrasAsBlocks.set(toolCallId, !extras.degraded);
+    this.delivered++;
+    this.deliveredTexts.push(text);
+    await appendEvent(this.t.threadId, 'reply', 'bot', {
+      turnId: this.t.turnId,
+      index: e.index,
+      mode: 'private',
+      text,
+      privateReplyId: replyId,
+      ...(dmed ? { files: files!.map((f) => (f.fileId ? `${f.fileId} (${f.filename})` : f.filename)), filesTo: 'dm' } : {}),
+      ...(extras.items.length ? { extras: extras.items.map((c) => c.summary) } : {}),
+      ...(extras.degraded ? { degraded: true } : {}),
+    });
+    return `Replied privately (only <@${userId}> sees it${dmed ? '; the files went to their DM' : ''}).${suffix()}`;
   }
 
   /** Persist extras before a plan card can re-render this message (a re-render rebuilds blocks from the DB). */

@@ -1,4 +1,5 @@
 // Module registration: importing this registers tools/actions. The worker wires processors and maintenance.
+import { handlePrivateShare, PRIVATE_SHARE_ACTION } from './private-reply.js';
 import type { Job } from 'bullmq';
 import { QUEUE, type QueueName } from '../core/queues.js';
 import { registerAction } from '../core/actions.js';
@@ -85,3 +86,5 @@ registerAction(REPLY_QUIET_ACTION, handleQuietChoice);
 
 /** Link buttons on reply cards (rich-blocks.ts): Slack opens the URL itself and still sends the click; nothing to do. */
 registerAction('link:', async () => {});
+// "Send to thread" under a private (`!p`) answer (private-reply.ts).
+registerAction(PRIVATE_SHARE_ACTION, handlePrivateShare);

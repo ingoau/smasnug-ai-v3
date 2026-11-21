@@ -29,6 +29,8 @@ import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { joinFiles, MAX_JOIN_FILES } from '../files/tools.js';
 import { isCanvasFile } from '../files/slack-ref.js';
 import { log } from '../log.js';
+import { privateViewer } from '../agent/turn-state.js';
+import { subagentVisibleTo } from '../agent/subagents.js';
 import {
   canEditCanvas,
   canvasWindow,
@@ -190,7 +192,17 @@ const channelGrant = (ctx: Pick<ToolContext, 'channelId'>, canvasId: string) =>
  * Each grant is idempotent per canvas. Returns a model-facing warning whenever the conversation's grant failed
  * (others there may not be able to open the link) or the speaker may not be able to open it.
  */
-async function grantAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId'>, canvasId: string): Promise<string | null> {
+async function grantAccess(ctx: Pick<ToolContext, 'channelId' | 'speakerId' | 'extras'>, canvasId: string): Promise<string | null> {
+  // A private (`!p`) turn: shared with the speaker only (the answer with its link is ephemeral too).
+  if (privateViewer(ctx)) {
+    try {
+      await slackCall('canvases.access.set', { canvas_id: canvasId, access_level: 'write', user_ids: [ctx.speakerId] }, { idempotencyKey: `canvas-access:${canvasId}:speaker` });
+      return 'This is a private answer: the canvas is shared with the speaker only (nobody else in this conversation can open it).';
+    } catch (err) {
+      log.warn({ err, canvasId, code: slackErrorCode(err) }, 'canvas write access for the speaker failed');
+      return "Access couldn't be shared automatically: the speaker may have to request access when they open the link. Say so in your reply.";
+    }
+  }
   const kind = await conversationKind(ctx.channelId);
   let conversationOk = kind === 'im';
   try {
@@ -277,13 +289,16 @@ async function filesDocument(ctx: Pick<ToolContext, 'threadId' | 'speakerId'>, i
 
 /** One source for a canvas write: from_subagent, from_files, or `content` as given. */
 async function documentFrom(
-  ctx: Pick<ToolContext, 'threadId' | 'speakerId'>,
+  ctx: Pick<ToolContext, 'threadId' | 'speakerId' | 'extras'>,
   input: { content?: string; from_subagent?: string; from_files?: string[] },
 ): Promise<{ content: string; note: string } | { error: string } | null> {
   const sub = input.from_subagent?.trim();
   const files = input.from_files?.filter((f) => f.trim());
   if (sub && files?.length) return { error: 'pass from_subagent or from_files, not both.' };
-  if (sub) return subagentDocument(ctx.threadId, sub, input.content);
+  if (sub) {
+    if (!(await subagentVisibleTo(ctx.threadId, sub, privateViewer(ctx)))) return { error: `no finished subagent "${sub}" in this thread.` };
+    return subagentDocument(ctx.threadId, sub, input.content);
+  }
   if (files?.length) return filesDocument(ctx, files, input.content);
   return null;
 }

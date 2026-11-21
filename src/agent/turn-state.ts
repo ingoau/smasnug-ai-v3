@@ -37,3 +37,12 @@ export function turnState(ctx: ToolContext): FrontTurnState {
   if (!s) throw new Error('this tool is only available inside a front-agent turn');
   return s;
 }
+
+/**
+ * Ephemeral mode (`@bot !p …`): the user whose private turn this is, else null (also outside a front turn). Private
+ * subagents (subagents.private_to) are visible only to that user's private turns.
+ */
+export function privateViewer(ctx: Pick<ToolContext, 'extras'>): string | null {
+  const s = ctx.extras.agentTurn as FrontTurnState | undefined;
+  return s?.turn.ephemeral ? s.turn.authorId : null;
+}

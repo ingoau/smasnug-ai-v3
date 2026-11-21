@@ -32,6 +32,7 @@ import { CODING_AGENTS_PROMPT, frontSystemPrompt, MOVE_TO_CHANNEL_PROMPT } from 
 import { skillsPrompt } from './skills.js';
 import { placeTargetFor } from './reply-buttons-store.js';
 import { ReplyManager, markdownMessage } from './reply.js';
+import { PRIVATE_HIDDEN_TOOLS, postPrivateNote } from './private-reply.js';
 import { activeRunsInThread, maybeSynthesize } from './subagents.js';
 import { renderBatchStatus, renderOpenBatches } from './batch-status.js';
 import { loadSinceRound, renderSinceRound, type SinceItem } from './round-since.js';
@@ -219,12 +220,15 @@ export function formatLocalTime(now: Date, tz: string | undefined): string {
 }
 
 /** The thread's subagents (running + idle; expired/cancelled excluded) for the front agent. */
-export async function renderSnapshot(threadId: string): Promise<string> {
+/** `viewer`: the user of a private (`!p`) turn, who also sees their private subagents (others never do). */
+export async function renderSnapshot(threadId: string, viewer: string | null = null): Promise<string> {
   const rows = await sql<{ id: string; ownerId: string; title: string; status: string; summary: string | null; current: string | null; lastError: string | null; runStatus: string | null; kind: string; sandbox: boolean }[]>`
     select s.id, s.owner_id, s.title, s.status, s.summary, s.kind, s.sandbox,
       (select coalesce(r.details, r.status) from runs r where r.subagent_id = s.id and r.status in ('queued', 'running') order by r.id desc limit 1) as current,
       (select r.error from runs r where r.subagent_id = s.id and r.status not in ('queued', 'running') order by r.id desc limit 1) as last_error
-    from subagents s where s.thread_id = ${threadId} and s.status in ('running', 'idle') order by s.created_at`;
+    from subagents s where s.thread_id = ${threadId} and s.status in ('running', 'idle')
+      and (s.private_to is null or s.private_to = ${viewer})
+    order by s.created_at`;
   if (rows.length === 0) return '';
   return rows
     .map((r) => {
@@ -357,9 +361,11 @@ export function summarizeToolCalls(calls: { tool: string; args: unknown }[]): { 
  * recently and used tools: a follow-up like "yes, make it" then knows what was looked up or started. Only the calls,
  * never their results (Slack content isn't repeated).
  */
-export async function renderPreviousTurnTools(threadId: string, turnId: number, now = new Date()): Promise<string> {
+export async function renderPreviousTurnTools(threadId: string, turnId: number, now = new Date(), viewer: string | null = null): Promise<string> {
+  // Private (`!p`) turns are skipped, except the viewer's own in their next private turn.
   const [prev] = await sql<{ id: number; finishedAt: Date | null }[]>`
     select id::int as id, finished_at from turns where thread_id = ${threadId} and id < ${turnId} and status in ('done', 'error')
+      and (not ephemeral or author_id = ${viewer})
     order by id desc limit 1`;
   if (!prev?.finishedAt || now.getTime() - new Date(prev.finishedAt).getTime() > limits.previousTurnToolsMaxAgeMs) return '';
   const [ev] = await sql<{ payload: { calls?: { tool: string; args: string }[] } }[]>`
@@ -382,9 +388,10 @@ async function buildTurnMessage(
   codeChannels: CodeChannelTurnContext = NO_CODE_CHANNELS,
 ): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; peopleSpoke?: boolean; outcome?: TurnOutcome }> {
   const { channelId } = parseThreadId(turn.threadId);
+  const viewer = turn.ephemeral ? turn.authorId : null;
   const [memory, snapshot, ctx, dj, self, conversation, pending, quotas, codeChannelHere] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId, { threadId: turn.threadId })).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
-    timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId)),
+    timing.span('ctx_snapshot', () => renderSnapshot(turn.threadId, viewer)),
     timing.span('ctx_thread', () => renderThreadContext(turn.threadId, { newMessageTs: turn.messageTs, timing })),
     renderDjState({ channelId: parseThreadId(turn.threadId).channelId, threadId: turn.threadId, speakerId: turn.authorId }),
     getBotIdentity().catch(() => undefined),
@@ -453,10 +460,10 @@ async function buildTurnMessage(
   parts.push(section('huddle_dj', dj));
   // Batches still in play (spawned, results turn not yet run): their status, failures included (batch-status.ts).
   // Not in a results turn: its card is already synthesized and <finished_subagents> carries the final status.
-  const batches = turn.kind === 'synthesis' ? '' : await renderOpenBatches(turn.threadId).catch((err) => (log.warn({ err }, 'renderOpenBatches failed'), ''));
+  const batches = turn.kind === 'synthesis' ? '' : await renderOpenBatches(turn.threadId, 2, viewer).catch((err) => (log.warn({ err }, 'renderOpenBatches failed'), ''));
   parts.push(section('subagents', [snapshot ? clipTokens(snapshot, BUDGET.snapshot) : 'None in this thread.', batches].filter(Boolean).join('\n')));
   if (turn.kind === 'user') {
-    const prevTools = await renderPreviousTurnTools(turn.threadId, turn.id, now).catch((err) => (log.warn({ err }, 'renderPreviousTurnTools failed'), ''));
+    const prevTools = await renderPreviousTurnTools(turn.threadId, turn.id, now, viewer).catch((err) => (log.warn({ err }, 'renderPreviousTurnTools failed'), ''));
     parts.push(
       section(
         'previous_turn_tools',
@@ -522,6 +529,7 @@ async function buildTurnMessage(
     );    const ahead = await resultsAheadNote(turn).catch((err) => (log.warn({ err }, 'resultsAheadNote failed'), ''));
     if (ahead) parts.push(ahead);
   }
+  if (turn.ephemeral) parts.push(PRIVATE_TURN_NOTE);
   return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, anyCancelled, peopleSpoke, ...(outcome ? { outcome } : {}) };
 }
 
@@ -577,6 +585,12 @@ export async function renderQueuedTurns(threadId: string, now = new Date()): Pro
     );
   return parts.join('\n\n');
 }
+
+/**
+ * Ephemeral mode (`@bot !p …`): how this turn's output is delivered. In the turn message, not the system prompt, so
+ * other turns don't pay for it.
+ */
+export const PRIVATE_TURN_NOTE = `PRIVATE ANSWER (the speaker used !p): everything you send in this turn is shown only to the speaker (an ephemeral Slack message), and it never appears in the thread, so nobody else, not even you in later public turns, sees it. Each reply is sent once, complete (no streaming, no plan card). Quick-reply buttons aren't available. Files you attach are sent to the speaker's DM, and canvases are shared with the speaker only. Subagents work as usual: their results come back to you in a private results turn. The speaker can share your answer in the thread with a button, so write it normally; just don't post anywhere public (no reactions, no messages elsewhere).`;
 
 /**
  * The synthesis turn's instruction: how to write up (or continue from) finished subagent results. Lives here, not in
@@ -735,16 +749,28 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   stopPoll?.unref();
   // Cards only where a reply is expected (DMs, mentions, reminder turns, write-ups): a silent unmentioned turn
   // would otherwise post and delete a message in the thread, which can notify its followers.
-  const activityCards = Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks' && (io.isMention || Boolean(turn.addressed) || turn.kind === 'synthesis');
+  // Ephemeral mode (`@bot !p`, private-reply.ts): everything goes to the author only; no cards, no streams.
+  const privateTo = turn.ephemeral ? turn.authorId : undefined;
+  const activityCards = !privateTo && Boolean(io.setActivity) && env.STATUS_ACTIVITY_MODE === 'tasks' && (io.isMention || Boolean(turn.addressed) || turn.kind === 'synthesis');
   // The turn's plan card (one per message): its own steps and the runs it starts.
   const turnCard = new TurnCard({ threadId: turn.threadId, turnId, enabled: activityCards });
+  /** A code-written message (fallback, error, canvas link, outcome): in the thread, or to the author in a private turn. */
+  const postNote = async (text: string, key: string, msg: Record<string, unknown> = markdownMessage(text)): Promise<string | null> => {
+    if (privateTo) {
+      await postPrivateNote({ threadId: turn.threadId, userId: privateTo, text, idempotencyKey: key });
+      return null;
+    }
+    const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...msg }, { idempotencyKey: key });
+    return typeof res?.ts === 'string' ? res.ts : null;
+  };
   // Started by a prompt button whose response goes into its own message (append / replace): the first reply goes there.
   const placeTarget =
     turn.kind === 'user' ? await placeTargetFor(turn.threadId, turn.messageTs ?? []).catch((err) => (log.warn({ err }, 'placeTargetFor failed'), null)) : null;
   /** The model that answered the latest model call (chatModel's onServed): a fallback shows in the reply footer. */
   let servedModel: string | null = null;
   const replies = new ReplyManager({
-    placeTarget,
+    placeTarget: privateTo ? null : placeTarget,
+    privateTo,
     threadId: turn.threadId,
     channelId,
     threadTs,
@@ -772,7 +798,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     },
     // Every delivered reply (any turn kind) restarts the thread's idle clock, names the speaker as the bot's
     // conversation partner and records whether it waits for their answer (pipeline/rules.ts awaitsReply).
-    onDelivered: (r) => noteBotReply(turn.threadId, { ts: r.ts, partnerId: turn.authorId, awaitsReply: awaitsReply(r.text, r.buttons) }),
+    // A private answer isn't in the thread: no partner / awaited-reply state from it.
+    onDelivered: privateTo ? undefined : (r) => noteBotReply(turn.threadId, { ts: r.ts, partnerId: turn.authorId, awaitsReply: awaitsReply(r.text, r.buttons) }),
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
   const state: FrontTurnState = {
@@ -805,6 +832,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const codeChannels = await loadCodeChannelTurnContext(turn.threadId, turn.authorId);
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, abortSignal: stopAbort.signal, extras });
   for (const name of hiddenToolsFor(codeChannels)) delete tools[name];
+  if (privateTo) for (const name of PRIVATE_HIDDEN_TOOLS) delete tools[name];
   recordReactVisibility(tools, state);
   // Coding agents change the bot's own code: only offered in the admin's own message turns when configured (not in
   // synthesis / scheduled turns, whose input is other content; re-checked on use).
@@ -1098,8 +1126,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   }
 
   /** A code-written reply (outcome, canvas link, fallback) is a bot reply too: idle clock and partner, never awaited. */
-  const noteCodeReply = (ts: unknown) =>
-    noteBotReply(turn.threadId, { ts: typeof ts === 'string' ? ts : null, partnerId: turn.authorId, awaitsReply: false }).catch((err) => log.warn({ err }, 'noteBotReply failed'));
+  const noteCodeReply = async (ts: unknown) =>
+    privateTo ? undefined : noteBotReply(turn.threadId, { ts: typeof ts === 'string' ? ts : null, partnerId: turn.authorId, awaitsReply: false }).catch((err) => log.warn({ err }, 'noteBotReply failed'));
 
   // Confirmation outcome turns (src/features/outcome-turn.ts): never the generic fallback / error texts; when the
   // turn shows nothing (silent, failed, stopped), the code-written outcome (e.g. "sent ✓ <link>") is posted instead,
@@ -1112,9 +1140,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     // Some sources post their own message (e.g. a live preview with its claim button).
     const own = outcome.source ? await renderOutcomeFallback(outcome.source, outcome.sourceRef ?? null, text) : null;
     const msg = own ? { text: own.text, blocks: own.blocks, unfurl_links: false, unfurl_media: false } : markdownMessage(text);
-    const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...msg }, { idempotencyKey: `outcome-fallback:${turnId}` });
-    if (own?.onPosted && typeof res?.ts === 'string') await own.onPosted(res.ts).catch((err) => log.warn({ err, turnId }, 'outcome fallback onPosted failed'));
-    await noteCodeReply(res?.ts);
+    const ts = await postNote(text, `outcome-fallback:${turnId}`, msg);
+    if (own?.onPosted && ts) await own.onPosted(ts).catch((err) => log.warn({ err, turnId }, 'outcome fallback onPosted failed'));
+    await noteCodeReply(ts);
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, outcome: true, text });
   };
 
@@ -1123,7 +1151,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
    * `preview`) get the code-posted preview message. True if one was posted.
    */
   const postPreviewSafetyNet = async (): Promise<boolean> => {
-    if (turn.kind !== 'synthesis' || !built.synthesisRunIds.length || !previewsConfigured()) return false;
+    // A private results turn: its preview goes out with the private reply only (never a public post).
+    if (privateTo || turn.kind !== 'synthesis' || !built.synthesisRunIds.length || !previewsConfigured()) return false;
     const posted = await postUnannouncedPreviews(built.synthesisRunIds).catch((err) => (log.warn({ err, turnId }, 'preview safety net failed'), []));
     for (const ts of posted) await noteCodeReply(ts);
     return posted.length > 0;
@@ -1150,7 +1179,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     const closed = await replies.abortOpenStreams(note);
     if (closed) return;
     if (replies.anyVisible) {
-      await slackCall('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(note) }, { idempotencyKey: `error:${turnId}` });
+      await postNote(note, `error:${turnId}`);
       return;
     }
     if (outcome) return void (await postOutcomeFallback());
@@ -1170,8 +1199,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     const canvases = await turnCanvases(turnId).catch((err) => (log.warn({ err }, 'turnCanvases failed'), []));
     if (canvases.length) {
       const text = canvasLinkText(canvases);
-      const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: `canvas-link:${turnId}` });
-      await noteCodeReply(res?.ts);
+      await noteCodeReply(await postNote(text, `canvas-link:${turnId}`));
       await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, canvasLink: true, text });
       return;
     }
@@ -1185,8 +1213,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
-    const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: `fallback:${turnId}` });
-    await noteCodeReply(res?.ts);
+    await noteCodeReply(await postNote(text, `fallback:${turnId}`));
     await appendEvent(turn.threadId, 'reply', 'bot', {
       turnId,
       fallback: true,

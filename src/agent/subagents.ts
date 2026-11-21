@@ -80,6 +80,16 @@ async function enqueueRun(runId: number) {
   await enqueue(QUEUE.subagentRun, { runId }, { jobId: `run-${runId}`, attempts: 1 });
 }
 
+/**
+ * Whether a turn may see / use this subagent: one started by a private (`!p`) turn (private_to) only from that user's
+ * private turns (`viewer`, turn-state.ts privateViewer); every other subagent from any turn. Unknown ids: true (the
+ * caller reports them as it always did).
+ */
+export async function subagentVisibleTo(threadId: string, subagentId: string, viewer: string | null): Promise<boolean> {
+  const [row] = await sql<{ privateTo: string | null }[]>`select private_to from subagents where id = ${subagentId.trim()} and thread_id = ${threadId}`;
+  return !row?.privateTo || row.privateTo === viewer;
+}
+
 export async function spawnSubagent(opts: {
   threadId: string;
   turnId: number;
@@ -103,7 +113,10 @@ export async function spawnSubagent(opts: {
   const model = MODELS.child;
   const cardId = await ensureTurnCard({ threadId: opts.threadId, turnId: opts.turnId });
   const runId = await sql.begin(async (tx) => {
-    await tx`insert into subagents (id, thread_id, owner_id, title, status, seeded_from) values (${subagentId}, ${opts.threadId}, ${opts.ownerId}, ${title}, 'running', ${seededFrom})`;
+    // Started by a private (`!p`) turn: private to its owner (hidden from every other turn, subagentVisibleTo).
+    await tx`insert into subagents (id, thread_id, owner_id, title, status, seeded_from, private_to)
+             values (${subagentId}, ${opts.threadId}, ${opts.ownerId}, ${title}, 'running', ${seededFrom},
+               (select case when ephemeral then ${opts.ownerId} end from turns where id = ${opts.turnId}))`;
     const [run] = await tx<{ id: number }[]>`
       insert into runs (subagent_id, thread_id, card_id, turn_id, instructions, is_resume, status, model)
       values (${subagentId}, ${opts.threadId}, ${cardId}, ${opts.turnId}, ${instructions}, false, 'queued', ${model}) returning id`;

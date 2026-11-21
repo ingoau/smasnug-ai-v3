@@ -8,10 +8,10 @@ import { z } from 'zod';
 import { limits } from '../config.js';
 import { sql } from '../db/index.js';
 import { registerTool } from '../core/tools.js';
-import { cancelSubagent, messageSubagent, spawnSubagent, ToolError } from './subagents.js';
+import { cancelSubagent, messageSubagent, spawnSubagent, subagentVisibleTo, ToolError } from './subagents.js';
 import { MAX_BUTTONS, MAX_LABEL_CHARS } from './reply-buttons.js';
 import { chartsSchema } from './charts.js';
-import { turnState } from './turn-state.js';
+import { privateViewer, turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
 import { prepareImageArgs, prepareOutgoingFiles } from './files.js';
 import { previewReplyExtras } from '../sandbox/preview/reply-blocks.js';
@@ -170,6 +170,9 @@ registerTool({
     }),
 });
 
+/** Another user's private (`!p`) subagent, or one a public turn may not touch: reported as unknown. */
+const noSubagent = (id: string) => `No subagent ${id} in this thread.`;
+
 /** Subagents one spawn_subagent call may start (each is its own subagent; per-user / per-thread limits still apply). */
 export const MAX_SPAWN_TASKS = 10;
 
@@ -201,6 +204,7 @@ registerTool({
         // One after another: the limits are checked per spawn, and every run is queued (and starts) right away.
         for (const t of tasks) {
           try {
+            if (t.seed_from && !(await subagentVisibleTo(s.threadId, t.seed_from, privateViewer(ctx)))) throw new ToolError(noSubagent(t.seed_from));
             const r = await spawnSubagent({
               threadId: s.threadId,
               turnId: s.turn.id,
@@ -244,7 +248,9 @@ registerTool({
       }),
       execute: async ({ id, text, note }) => {
         const s = turnState(ctx);
-        const r = await messageSubagent({ threadId: s.threadId, turnId: s.turn.id, turnKind: s.turn.kind, speakerId: s.turn.authorId, subagentId: id, text, note });
+        if (!(await subagentVisibleTo(s.threadId, id, privateViewer(ctx)))) throw new ToolError(noSubagent(id));
+        // A private turn's steer shows no note on a (possibly public) card.
+        const r = await messageSubagent({ threadId: s.threadId, turnId: s.turn.id, turnKind: s.turn.kind, speakerId: s.turn.authorId, subagentId: id, text, note: privateViewer(ctx) ? undefined : note });
         if (r.mode === 'resumed') {
           s.cardId = r.cardId;
           s.delegated = true;
@@ -272,6 +278,7 @@ registerTool({
       inputSchema: z.object({ id: z.string().describe('Subagent id, e.g. "sa_ab12cd"') }),
       execute: async ({ id }) => {
         const s = turnState(ctx);
+        if (!(await subagentVisibleTo(s.threadId, id, privateViewer(ctx)))) throw new ToolError(noSubagent(id));
         const msg = await cancelSubagent({ threadId: s.threadId, subagentId: id, actor: s.turn.authorId, turnId: s.turn.id });
         s.visible.add('cancel');
         if (s.spawned.delete(id)) {
@@ -292,7 +299,7 @@ registerTool({
       description:
         "Read a subagent's full result (from this thread): its status, the latest run's complete output, the files it created (ids to post with reply(files)) and earlier runs. Use it when someone asks about a subagent's output after the results turn, instead of re-running it with message_subagent or asking ask_thread. Read-only; nothing is shown to anyone.",
       inputSchema: z.object({ id: z.string().describe('Subagent id, e.g. "sa_ab12cd"') }),
-      execute: async ({ id }) => readSubagentResult(ctx.threadId, id),
+      execute: async ({ id }) => ((await subagentVisibleTo(ctx.threadId, id, privateViewer(ctx))) ? readSubagentResult(ctx.threadId, id) : `No subagent "${id}" in this thread.`),
     }),
 });
 
