@@ -242,8 +242,9 @@ async function runClaimed(run: RunRow): Promise<void> {
     if (timeout) clearTimeout(timeout);
     timeout = setTimeout(() => controller.abort(new RunAbort('timeout')), Math.max(0, runStart + maxDurationMs - Date.now()));
   };
+  let runEnded = false;
   const onSandboxStarted = () => {
-    if (sandbox) return;
+    if (sandbox || runEnded) return;
     sandbox = true;
     maxDurationMs = limits.sandboxRunMaxDurationMs;
     wrapUpAt = runStart + maxDurationMs - WRAP_UP_BEFORE_TIMEOUT_MS;
@@ -541,6 +542,7 @@ async function runClaimed(run: RunRow): Promise<void> {
     log.error({ err, runId: run.id }, 'subagent run failed');
     await finishSafely(run, { status: 'error', error: shortError(err) }, { tokens, history: compactHistory(messages) });
   } finally {
+    runEnded = true;
     clearTimeout(timeout);
     clearInterval(heartbeat);
     clearInterval(elapsedTicker);

@@ -1,7 +1,7 @@
 /**
  * Sandbox tools (docs/sandbox.md §3.4), children only: registered with roles ['child'] when the feature is
  * configured, so every subagent has them. Every call checks access (kill switch, budget, allowlist / HCA) and
- * quotas, then gets the subagent's sandbox lazily (lifecycle.ensureSandbox); the first allowed call marks the
+ * quotas, then gets the subagent's sandbox lazily (lifecycle.ensureSandbox); the first call that gets one marks the
  * subagent as a sandbox one (`subagents.sandbox`) and tells its run (SANDBOX_STARTED_EXTRA: longer run cap).
  * Everything that comes back from the sandbox is untrusted content.
  */
@@ -39,10 +39,14 @@ async function gate(ctx: ToolContext): Promise<string | null> {
     return accessModelText(access.reason);
   }
   void firstUseNotice({ userId: ctx.speakerId, channelId: ctx.channelId, threadTs: ctx.threadTs }).catch(() => {});
-  await sql`update subagents set sandbox = true where id = ${ctx.subagentId} and not sandbox`;
+  return null;
+}
+
+/** The sandbox is up (past access and the start quotas): mark the subagent and tell its run (longer run cap). */
+async function markStarted(ctx: ToolContext): Promise<void> {
+  await sql`update subagents set sandbox = true where id = ${ctx.subagentId!} and not sandbox`;
   const started = ctx.extras[SANDBOX_STARTED_EXTRA];
   if (typeof started === 'function') (started as () => void)();
-  return null;
 }
 
 const owner = (ctx: ToolContext) => ({ subagentId: ctx.subagentId!, threadId: ctx.threadId, ownerId: ctx.speakerId });
@@ -52,7 +56,10 @@ async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<st
   const refusal = await gate(ctx);
   if (refusal) return refusal;
   try {
-    const { value, note } = await withSandbox(owner(ctx), fn);
+    const { value, note } = await withSandbox(owner(ctx), async (h) => {
+      await markStarted(ctx);
+      return fn(h);
+    });
     return note ? `[Note: ${note}]\n${value}` : value;
   } catch (err) {
     if (err instanceof SandboxRefused) return err.message;

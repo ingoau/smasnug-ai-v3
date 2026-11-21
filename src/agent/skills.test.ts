@@ -128,6 +128,15 @@ describe('requires', () => {
     expect(readSkill('front', 'huddle-dj', undefined, repo, () => true)).toMatch(/huddle_dj_mode/);
     expect(repo.find((s) => s.name === 'live-previews')?.requires).toEqual(['previews']);
   });
+  it('the sandbox how-to is a subagent skill, and the always-on child section points to it', async () => {
+    const repo = loadSkills(defaultSkillsDir());
+    const sbx = repo.find((s) => s.name === 'sandbox');
+    expect(sbx?.roles).toEqual(['child']);
+    expect(sbx?.requires).toEqual(['sandbox']);
+    expect(readSkill('child', 'sandbox', undefined, repo, () => true)).toMatch(/sandbox_export/);
+    const { sandboxChildPrompt } = await import('../sandbox/prompts.js');
+    expect(sandboxChildPrompt()).toMatch(/Load the `sandbox` skill/);
+  });
 
   it('a requires name must be an own feature, not an inherited property', () => {
     const odd = loadSkills(skillDir({ 'x/SKILL.md': '---\ndescription: d\nrequires: [toString]\n---\nbody' }));

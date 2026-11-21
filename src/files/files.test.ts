@@ -274,16 +274,16 @@ describe('Slack file ids', () => {
 });
 
 describe('sandboxHint', () => {
-  const base = { fileId: 'file_k3x9q2mf7a', kind: 'video' as const, sandboxChild: false, canSandbox: true };
+  const base = { fileId: 'file_k3x9q2mf7a', kind: 'video' as const, canSandbox: true };
   it('front: spawn a subagent to use the sandbox, with the file id', () => {
     const h = sandboxHint({ ...base, role: 'front' });
     expect(h).toMatch(/spawn a subagent, tell it to use the sandbox/);
     expect(h).toContain('file_k3x9q2mf7a');
     expect(h).toMatch(/ffmpeg/);
   });
-  it('a sandbox child imports it; another child reports it', () => {
-    expect(sandboxHint({ ...base, role: 'child', sandboxChild: true })).toMatch(/sandbox_import file_k3x9q2mf7a/);
-    expect(sandboxHint({ ...base, role: 'child', kind: 'pdf' })).toMatch(/say so in your result/);
+  it('a subagent (every one has the sandbox tools) imports it itself', () => {
+    expect(sandboxHint({ ...base, role: 'child' })).toMatch(/sandbox_import file_k3x9q2mf7a/);
+    expect(sandboxHint({ ...base, role: 'child', kind: 'pdf' })).not.toMatch(/say so in your result/);
   });
   it('nothing without sandbox access', () => {
     expect(sandboxHint({ ...base, role: 'front', canSandbox: false })).toBe('');

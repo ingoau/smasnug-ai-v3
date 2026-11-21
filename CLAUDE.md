@@ -9,7 +9,7 @@ TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK 
 `postgres` (camelCase transform on), Redis via `ioredis`, queues via BullMQ, zod, pino, vitest.
 
 Models (`MODEL_*`, `src/models.ts`): Claude Haiku 5.5 for gate fallback, front (effort low, `FRONT_REASONING_EFFORT`; every step
-must call a tool) and children (medium, `CHILD_REASONING_EFFORT`); Claude Sonnet 5.5 for sandbox children. `chatModel()` tries
+must call a tool) and children (medium, `CHILD_REASONING_EFFORT`); Claude Sonnet 5.5 for children that have used a sandbox (from their next run). `chatModel()` tries
 Hack Club AI (`HACKCLUB_AI_KEY`, an OpenRouter proxy, free up to $3/day) → the Anthropic API (`ANTHROPIC_API_KEY`, $100/month
 credit) → `openai/gpt-6-luna` on OpenRouter (paid). A spent budget (402, a 429 mentioning the spending limit/top-up, Anthropic's
 "credit balance is too low") skips that provider until UTC midnight. Pass model settings as `providerOptions: modelOptions({...})`,
