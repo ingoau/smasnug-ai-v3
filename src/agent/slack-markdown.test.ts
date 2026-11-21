@@ -12,6 +12,7 @@ import {
   streamUnits,
   type ReplyBlock,
   type StreamUnit,
+  streamHold,
 } from './slack-markdown.js';
 
 const preformatted = (blocks: ReplyBlock[]) =>
@@ -308,5 +309,30 @@ describe('placement markers', () => {
     expectPrefixStable('a\r\n[[image:1]]\r\nb');
     // An ordinary link at the start of a line is not held once it can't be a marker.
     expect(streamUnits('Here:\n[link', false)).toEqual([{ kind: 'md', start: 0, end: 11 }]);
+  });
+});
+
+describe('streamHold', () => {
+  it('posts a reply that opens with a marker, or a heading then a marker', () => {
+    expect(streamHold('[[image:1]]\nText', false)).toBe('post');
+    expect(streamHold('# Title\n[[image:1]]\n', false)).toBe('post');
+    expect(streamHold('# Title\n\n[[table:2]]', true)).toBe('post');
+  });
+  it('waits while the opening may still become one', () => {
+    expect(streamHold('', false)).toBe('wait');
+    expect(streamHold('#', false)).toBe('wait');
+    expect(streamHold('# Tit', false)).toBe('wait');
+    expect(streamHold('# Title\n', false)).toBe('wait');
+    expect(streamHold('# Title\n\n', false)).toBe('wait');
+    expect(streamHold('# Title\n[[ima', false)).toBe('wait');
+    expect(streamHold('[[image:1]]', false)).toBe('wait'); // may still get more on the line
+    expect(streamHold('[', false)).toBe('wait');
+  });
+  it('streams everything else', () => {
+    expect(streamHold('Hello there', false)).toBe('stream');
+    expect(streamHold('# Title\nSome text', false)).toBe('stream');
+    expect(streamHold('# Title', true)).toBe('stream');
+    expect(streamHold('[link](x) here', false)).toBe('stream');
+    expect(streamHold('#hashtag', false)).toBe('stream');
   });
 });

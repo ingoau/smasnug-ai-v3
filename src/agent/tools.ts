@@ -117,6 +117,13 @@ registerTool({
       description:
         'Post a message in the current Slack thread (markdown; optional files, inline images, data tables, key/value fields, containers (collapsible sections, boxes, alerts), link cards, link buttons, charts). The only way to talk to people in this thread. Not calling it is a valid choice (silence, or a reaction instead). A reply ends your turn unless continue_turn is true (calls in the same step that need their results, like searches, still run and come back to you). Usually one reply per turn; never send two replies that say the same thing.',
       inputSchema: z.object({
+        // First, so it arrives before the text streams.
+        stream: z
+          .boolean()
+          .optional()
+          .describe(
+            'Write this first, before text. false = post the reply once, complete, instead of streaming it in: use it when the layout matters, e.g. a heading followed by an [[image:1]] or [[table:1]]. Leave it out otherwise (replies stream).',
+          ),
         text: z
           .string()
           .describe(
@@ -140,7 +147,7 @@ registerTool({
       onInputDelta: ({ toolCallId, inputTextDelta }) => {
         turnState(ctx).replies.delta(toolCallId, inputTextDelta);
       },
-      execute: async ({ text, files, images, tables, cards, fields, containers, links, buttons, charts, preview }, { toolCallId }) => {
+      execute: async ({ stream, text, files, images, tables, cards, fields, containers, links, buttons, charts, preview }, { toolCallId }) => {
         const s = turnState(ctx);
         // At most 10 files per message (Slack); access is checked per id (this thread, or the speaker's own files).
         const prepared = await prepareOutgoingFiles({ threadId: ctx.threadId, speakerId: ctx.speakerId, turnId: ctx.turnId }, files?.slice(0, 10));
@@ -150,7 +157,7 @@ registerTool({
         const all = [...prepared.files.filter((f) => !f.fileId || !inline.has(f.fileId)), ...imgs.attach.filter((a) => !prepared.files.some((f) => f.fileId === a.fileId))];
         const attach = all.slice(0, 10);
         const pv = preview ? await previewReplyExtras(ctx.threadId, preview).catch(() => ({ items: [], note: 'Checking the preview failed, so no claim button was added.' })) : null;
-        const res = await s.replies.finish(toolCallId, text, attach, buttons, charts, { images: imgs.images, tables, cards, fields, containers, links, extraItems: pv?.items });
+        const res = await s.replies.finish(toolCallId, text, attach, buttons, charts, { stream, images: imgs.images, tables, cards, fields, containers, links, extraItems: pv?.items });
         const notes = [...prepared.errors, ...imgs.errors, ...((files?.length ?? 0) > 10 || all.length > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
         const fileNote = (notes.length ? ` File problems: ${notes.join(' ')}` : '') + (pv?.note ? ` ${pv.note}` : '');
         if (res.startsWith('Replied')) {

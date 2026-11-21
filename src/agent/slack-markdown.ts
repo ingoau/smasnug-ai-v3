@@ -669,3 +669,38 @@ export function blocksText(blocks: readonly any[]): string | undefined {
   }
   return parts.length ? parts.join('\n\n') : undefined;
 }
+
+// ---------- Stream hold (opening layout) ----------
+
+/**
+ * Whether a reply's first streamed chunk may go out yet, from its text so far (`complete`: the whole text). A reply
+ * that opens with a placement marker, or with a heading straight followed by one (heading-then-image), would stream
+ * without the block and then jump when the final layout puts it in: 'post' (deliver it whole instead). 'wait' while
+ * that can't be told yet (the first line, or the line after an opening heading, is still arriving and may be a marker);
+ * headings are short, so the hold is brief. Otherwise 'stream'.
+ */
+export function streamHold(text: string, complete: boolean): 'wait' | 'post' | 'stream' {
+  const lines = text.split('\n');
+  const at = (from: number) => {
+    let i = from;
+    while (i < lines.length && !lines[i]!.trim() && (complete || i < lines.length - 1)) i++;
+    if (i >= lines.length || !lines[i]!.trim()) return null;
+    return { i, line: lines[i]!, done: complete || i < lines.length - 1 };
+  };
+  /** A line that is, may become (still arriving), or is not a marker. */
+  const kind = (l: { line: string; done: boolean }) =>
+    !l.done ? (markerRef(l.line) || MARKER_PREFIX.test(l.line) ? 'maybe' : 'text') : markerRef(l.line) ? 'marker' : 'text';
+  const first = at(0);
+  if (!first) return complete ? 'stream' : 'wait';
+  const k0 = kind(first);
+  if (k0 === 'marker') return 'post';
+  if (k0 === 'maybe') return 'wait';
+  if (!first.done && /^[ \t]{0,3}#{0,6}$/.test(first.line)) return 'wait'; // may still become a heading
+  if (!/^[ \t]{0,3}#{1,6}[ \t]/.test(first.line)) return 'stream';
+  if (!first.done) return 'wait';
+  const next = at(first.i + 1);
+  if (!next) return complete ? 'stream' : 'wait';
+  const k1 = kind(next);
+  if (k1 === 'marker') return 'post';
+  return k1 === 'text' ? 'stream' : 'wait';
+}
