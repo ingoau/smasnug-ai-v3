@@ -11,10 +11,12 @@ requires: [previews]
 - Every website build goes to a subagent with `sandbox: true`, never create_file. Even a one-page site.
 - In its task: what the user wants (content, pages, style, any text or files they gave; pass the file_… ids), that it
   is a website build, that it must load the `web-dev` skill first, and that the user wants a live preview.
-- Tell the user in one line that you're building it and the preview link will appear in the thread when it's done.
-  Never write or promise a link yourself; the system posts it (with a claim button) after the user accepts Cloudflare's terms.
+- Tell the user in one line that you're building it and you'll post the link when it's done.
+- The results give the live preview's URL and id: put the link in your reply and pass `preview: "<id>"` (adds the
+  claim button). If it's waiting for the user to accept Cloudflare's terms, say the link comes once they accept (you're
+  told when it's live). Never invent a URL or a claim link.
 - Changes to a site you built go to the same subagent as a follow-up (its sandbox still has the project), which
-  requests a new preview.
+  deploys a new preview.
 - Previews are static only: no backend, database, logins, password or payment forms. If the user wants those, say so
   and build the static part (forms can post to a third-party service like Formspree, or be mocked).
 
@@ -37,10 +39,12 @@ Always Astro, always in the sandbox, always finished with `request_preview`.
    `cd /work && python3 -m http.server 4321 -d site/dist >/dev/null 2>&1 & srv=$!; sleep 1; node /work/shot.cjs; kill $srv`
    with a CommonJS Playwright script (`require('playwright')`; the global install isn't visible to ESM imports) that screenshots each page at desktop (1280 wide) and phone (390 wide) widths, full page.
    Look at the PNGs with `sandbox_read_file` and fix what looks wrong (overflow, broken images, unreadable text).
-5. **Publish**: `request_preview` with `dir: "/work/site/dist"` and a short title. One per run; limits are ≤ 1,000 files,
+5. **Publish**: `request_preview` with `dir: "/work/site/dist"` and a short title. It deploys and returns the URL and a
+   preview id (or says it's waiting for the user to accept Cloudflare's terms). Fetch the URL to check it renders; if
+   it's broken, fix, rebuild and call it again (each deploy counts toward the daily limit). Limits: ≤ 1,000 files,
    ≤ 5 MiB each, ≤ 25 MiB total. If it's refused (limits, turned off), say why and export instead.
 6. **Source**: zip the project without `node_modules`/`dist`
    (`cd /work && zip -qr site.zip site -x 'site/node_modules/*' 'site/dist/*' 'site/.astro/*'`) and `sandbox_export` it so
    the user can keep it.
-7. **Result**: what you built (pages, notable choices), that a live preview was requested (the link is posted
-   separately and lasts 60 minutes unless claimed), and the source zip. Never invent a URL.
+7. **Result**: what you built (pages, notable choices), the preview URL and preview id from `request_preview` (it lasts
+   60 minutes unless claimed; or that it's waiting for the terms), and the source zip. Never invent a URL.

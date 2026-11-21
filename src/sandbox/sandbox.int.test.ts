@@ -501,65 +501,62 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       D.previewDeployer.takedown = prevTakedown;
     });
 
-    async function requested() {
+    let prevWait = 0;
+    beforeAll(async () => {
+      const { limits } = await import('../config.js');
+      prevWait = limits.previewTermsWaitMs;
+      (limits as { previewTermsWaitMs: number }).previewTermsWaitMs = 400;
+    });
+    afterAll(async () => {
+      const { limits } = await import('../config.js');
+      (limits as { previewTermsWaitMs: number }).previewTermsWaitMs = prevWait;
+    });
+
+    /** A thread, user and running sandbox subagent with a site in /work/site. */
+    async function setup(o: { accepted?: boolean } = {}) {
       const t = await newThread();
       const u = await newUser();
+      if (o.accepted) await PS.acceptTerms(u);
       const sa = await newSubagent({ threadId: t, owner: u });
       const ctx = ctxOf(t, u, sa);
       await call(ctx, 'sandbox_exec', { command: 'true' });
       const [row] = await sql<any[]>`select provider_id from sandboxes where subagent_id = ${sa.subagentId}`;
-      site(fake.boxes.get(row.providerId));
-      const out = await call(ctx, 'request_preview', { dir: 'site', title: 'Hi page' });
-      expect(out).toMatch(/Preview queued/);
-      const [pv] = await sql<any[]>`select * from previews where run_id = ${sa.runId}`;
-      expect(pv.status).toBe('requested');
-      return { t, u, sa, ctx, pv };
+      const box = fake.boxes.get(row.providerId);
+      site(box);
+      const [channelId, threadTs] = t.split(':') as [string, string];
+      return { t, u, sa, ctx, box, channelId, threadTs };
     }
+    const latest = async (runId: number) => (await sql<any[]>`select * from previews where run_id = ${runId} order by created_at desc`)[0];
 
-    it('terms → accept → deploy → message; only the requester can claim; report; expiry clears secrets', async () => {
-      const { t, u, sa, pv } = await requested();
+    it('accepted terms: request_preview deploys inline and returns the URL + id; nothing posted; claim, report, expiry', async () => {
+      const { t, u, sa, ctx, channelId, threadTs } = await setup({ accepted: true });
       let n = (await fakeCalls()).length;
-      await finishRun(sa.runId);
-      await hooks.onSandboxRunFinished(sa.runId);
-      await F.preparePreview(pv.id);
-      let row = await PS.getPreview(pv.id);
-      expect(row!.status).toBe('awaiting_terms');
-      const eph = (await callsSince(n)).filter((c) => c.method === 'chat.postEphemeral');
-      expect(eph).toHaveLength(1);
-      expect(eph[0]!.args.user).toBe(u);
-      expect(JSON.stringify(eph[0]!.args.blocks)).toContain('preview:terms_accept');
-      // Someone else can't accept.
-      const [channelId, threadTs] = t.split(':');
-      const click = (userId: string, actionId: string) => ({ userId, channelId, threadTs, actionId, value: pv.id, responseUrl: `https://hooks.slack.invalid/${rand()}`, body: {} });
-      await F.handleTermsAccept(click('UOTHER', 'preview:terms_accept'));
-      expect((await PS.getPreview(pv.id))!.status).toBe('awaiting_terms');
-      // The terms prompt is an ephemeral: its button payload has no thread; the answer still goes to the thread.
-      n = (await fakeCalls()).length;
-      await F.handleTermsAccept({ userId: u, channelId, actionId: 'preview:terms_accept', value: pv.id, responseUrl: 'https://hooks.slack.invalid/acc', body: { container: { is_ephemeral: true } } });
-      expect((await PS.getPreview(pv.id))!.status).toBe('requested');
-      const accepted = await callsSince(n);
-      expect(accepted.filter((c) => c.method === 'response_url').map((c) => c.args)).toEqual([{ url: 'https://hooks.slack.invalid/acc', delete_original: true }]);
-      expect(accepted.find((c) => c.method === 'chat.postEphemeral')!.args).toMatchObject({ channel: channelId, thread_ts: threadTs, user: u, text: expect.stringMatching(/^Thanks\. Deploying/) });
-      n = (await fakeCalls()).length;
-      await F.deployPreview(pv.id);
-      row = await PS.getPreview(pv.id);
+      const out = await call(ctx, 'request_preview', { dir: 'site', title: 'Hi page' });
+      const pv = await latest(sa.runId);
+      expect(out).toMatch(/^Deployed: https:\/\/smasnug-p-.*workers\.dev/);
+      expect(out).toContain(`preview id ${pv.id}`);
+      expect(out).not.toContain('SECRET');
+      const row = await PS.getPreview(pv.id);
       expect(row!.status).toBe('live');
-      expect(row!.url).toMatch(/workers\.dev/);
       expect(row!.claimUrlEnc).toBeTruthy();
       expect(row!.bundleFileId && (await files.fileStore.get(row!.bundleFileId))).toBeFalsy();
       const deployed = fakeDeploy.mock.calls.at(-1)![0];
-      const index = deployed.files.find((f: any) => f.path === 'index.html').data.toString();
-      expect(index).toContain('smasnug-preview-banner');
+      expect(deployed.files.find((f: any) => f.path === 'index.html').data.toString()).toContain('smasnug-preview-banner');
       expect(deployed.files.map((f: any) => f.path)).toContain('_headers');
-      const posts = (await callsSince(n)).filter((c) => c.method === 'chat.postMessage');
-      expect(posts).toHaveLength(1);
-      expect(JSON.stringify(posts[0]!.args)).toContain('preview:claim');
-      expect(JSON.stringify(posts[0]!.args)).not.toContain('SECRET');
-      // Claim: others refused, the requester gets the URL ephemerally.
+      // Inline: code posts nothing (the front agent posts the link with reply(preview)).
+      expect((await callsSince(n)).filter((c) => c.method === 'chat.postMessage' || c.method === 'chat.postEphemeral')).toHaveLength(0);
+      // The reply's buttons for it: only for this thread and a live preview.
+      const { previewReplyExtras } = await import('./preview/reply-blocks.js');
+      const ok = await previewReplyExtras(t, pv.id);
+      expect(ok.note).toBeNull();
+      expect(JSON.stringify(ok.items.map((i) => i.block))).toContain('preview:claim');
+      expect((await previewReplyExtras('COTHER:1.000001', pv.id)).items).toHaveLength(0);
+      expect((await previewReplyExtras(t, 'pv_nope')).note).toMatch(/No preview/);
+      // Claim: others refused, the requester gets the URL ephemerally in the thread.
+      const click = (userId: string) => ({ userId, channelId, threadTs, actionId: 'preview:claim', value: pv.id, responseUrl: `https://hooks.slack.invalid/${rand()}`, body: {} });
       n = (await fakeCalls()).length;
-      await F.handleClaim(click('UOTHER', 'preview:claim'));
-      await F.handleClaim(click(u, 'preview:claim'));
-      // In the thread (chat.postEphemeral), never via response_url (that lands at the channel root).
+      await F.handleClaim(click('UOTHER'));
+      await F.handleClaim(click(u));
       const claimCalls = await callsSince(n);
       expect(claimCalls.some((c) => c.method === 'response_url')).toBe(false);
       const replies = claimCalls.filter((c) => c.method === 'chat.postEphemeral');
@@ -568,74 +565,199 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
         [u, threadTs],
       ]);
       expect(replies[0]!.args.text).toMatch(/Only <@.*> can claim/);
-      expect(replies[0]!.args.text).not.toContain('SECRET');
       expect(replies[1]!.args.text).toContain('https://dash.cloudflare.com/claim/SECRET-CLAIM');
-      // Report → mod channel (when configured) + thanks.
       n = (await fakeCalls()).length;
-      await F.handleReport(click('UOTHER', 'preview:report'));
+      await F.handleReport({ ...click('UOTHER'), actionId: 'preview:report' });
       expect((await callsSince(n)).some((c) => c.method === 'chat.postEphemeral' && c.args.thread_ts === threadTs && /Thanks, reported/.test(c.args.text))).toBe(true);
-      // No secret ever reached the thread's events.
       const evs = await sql<any[]>`select payload from thread_events where thread_id = ${t}`;
       expect(JSON.stringify(evs)).not.toContain('SECRET');
-      // Expiry.
+      // A fixed site in the same run deploys again (a new row; the live one stays).
+      expect(await call(ctx, 'request_preview', { dir: 'site', title: 'Hi page v2' })).toMatch(/^Deployed:/);
+      expect(await sql`select id from previews where run_id = ${sa.runId}`).toHaveLength(2);
+      // Expiry: secrets gone, no message edited.
       await sql`update previews set expires_at = now() - interval '1 minute' where id = ${pv.id}`;
       n = (await fakeCalls()).length;
       await F.expirePreviews();
-      row = await PS.getPreview(pv.id);
-      expect(row!.status).toBe('expired');
-      expect(row!.claimUrlEnc).toBeNull();
-      expect(row!.apiTokenEnc).toBeNull();
-      const upd = (await callsSince(n)).filter((c) => c.method === 'chat.update');
-      expect(upd[0]!.args.text).toMatch(/has expired/);
-      expect(JSON.stringify(upd[0]!.args.blocks)).not.toContain('preview:claim');
-      await F.handleClaim(click(u, 'preview:claim'));
+      const ended = await PS.getPreview(pv.id);
+      expect(ended!.status).toBe('expired');
+      expect(ended!.claimUrlEnc).toBeNull();
+      expect(ended!.apiTokenEnc).toBeNull();
+      expect((await callsSince(n)).filter((c) => c.method === 'chat.update')).toHaveLength(0);
     });
 
-    it('terms are asked once per version; cancel and unanswered prompts end the preview', async () => {
-      const a = await requested();
-      await finishRun(a.sa.runId);
-      await F.preparePreview(a.pv.id);
-      const [channelId, threadTs] = a.t.split(':');
-      await F.handleTermsCancel({ userId: a.u, channelId, threadTs, actionId: 'preview:terms_cancel', value: a.pv.id, responseUrl: 'https://hooks.slack.invalid/x', body: {} });
-      expect((await PS.getPreview(a.pv.id))!.status).toBe('cancelled');
-      // Accepted earlier → straight to deploy.
-      const b = await requested();
-      await PS.acceptTerms(b.u);
-      await finishRun(b.sa.runId);
-      await F.preparePreview(b.pv.id);
-      expect((await PS.getPreview(b.pv.id))!.status).toBe('requested');
-      // Unanswered prompt expires.
-      const c = await requested();
-      await finishRun(c.sa.runId);
-      await F.preparePreview(c.pv.id);
-      await sql`update previews set terms_prompt_expires_at = now() - interval '1 minute' where id = ${c.pv.id}`;
-      await F.expirePreviews();
-      expect((await PS.getPreview(c.pv.id))!.status).toBe('cancelled');
+    it('first time: accepted while the call waits → the call deploys (no job)', async () => {
+      const { u, sa, ctx, channelId } = await setup();
+      const { limits } = await import('../config.js');
+      (limits as { previewTermsWaitMs: number }).previewTermsWaitMs = 5000;
+      try {
+        const n = (await fakeCalls()).length;
+        const pending = call(ctx, 'request_preview', { dir: 'site', title: 'Hi page' });
+        let pv: any;
+        for (let i = 0; i < 100 && pv?.status !== 'awaiting_terms'; i++) {
+          await new Promise((r) => setTimeout(r, 50));
+          pv = await latest(sa.runId);
+        }
+        expect(pv.status).toBe('awaiting_terms');
+        expect(new Date(pv.inlineUntil).getTime()).toBeGreaterThan(Date.now());
+        const eph = (await callsSince(n)).filter((c) => c.method === 'chat.postEphemeral');
+        expect(eph).toHaveLength(1);
+        expect(JSON.stringify(eph[0]!.args.blocks)).toContain('preview:terms_accept');
+        // Someone else can't accept.
+        await F.handleTermsAccept({ userId: 'UOTHER', channelId, actionId: 'preview:terms_accept', value: pv.id, responseUrl: 'https://hooks.slack.invalid/o', body: {} });
+        expect((await PS.getPreview(pv.id))!.status).toBe('awaiting_terms');
+        await F.handleTermsAccept({ userId: u, channelId, actionId: 'preview:terms_accept', value: pv.id, responseUrl: 'https://hooks.slack.invalid/acc', body: { container: { is_ephemeral: true } } });
+        expect(await pending).toMatch(/^Deployed:/);
+        const row = await PS.getPreview(pv.id);
+        expect(row!.status).toBe('live');
+        expect(row!.inlineUntil).toBeNull();
+      } finally {
+        (limits as { previewTermsWaitMs: number }).previewTermsWaitMs = 400;
+      }
     });
 
-    it('a failed run drops the request; password forms are refused at deploy', async () => {
-      const a = await requested();
-      await finishRun(a.sa.runId, 'error');
-      await hooks.onSandboxRunFinished(a.sa.runId);
-      expect((await PS.getPreview(a.pv.id))!.status).toBe('cancelled');
-      // A login form.
+    it('first time, no answer in time: waiting; a later accept deploys by job and tells the front agent', async () => {
+      const { t, u, sa, ctx, channelId } = await setup();
+      const out = await call(ctx, 'request_preview', { dir: 'site', title: 'Hi page' });
+      expect(out).toMatch(/^Preview waiting/);
+      const pv = await latest(sa.runId);
+      expect(pv.status).toBe('awaiting_terms');
+      expect(pv.inlineUntil).toBeNull();
+      expect(F.acceptedInline(pv)).toBe(false);
+      // Requested again while the prompt is open: same row, new files, still waiting.
+      expect(await call(ctx, 'request_preview', { dir: 'site', title: 'Hi page v2' })).toMatch(/^Preview waiting/);
+      expect(await sql`select id from previews where run_id = ${sa.runId}`).toHaveLength(1);
+      expect((await PS.getPreview(pv.id))!.title).toBe('Hi page v2');
+      // The run ends: the prompt stays open.
+      await finishRun(sa.runId);
+      await hooks.onSandboxRunFinished(sa.runId);
+      expect((await PS.getPreview(pv.id))!.status).toBe('awaiting_terms');
+      await F.handleTermsAccept({ userId: u, channelId, actionId: 'preview:terms_accept', value: pv.id, responseUrl: 'https://hooks.slack.invalid/acc', body: {} });
+      expect((await PS.getPreview(pv.id))!.status).toBe('requested');
+      const n = (await fakeCalls()).length;
+      await F.deployPreview(pv.id);
+      const row = await PS.getPreview(pv.id);
+      expect(row!.status).toBe('live');
+      // An outcome turn tells the front agent to post it; code posts nothing itself.
+      const [sti] = await sql<any[]>`select source, input, fallback from scheduled_turn_inputs where source = 'preview' and source_ref = ${pv.id}`;
+      expect(sti.input).toContain(row!.url);
+      expect(sti.input).toContain(`preview: "${pv.id}"`);
+      expect(sti.fallback).toContain(row!.url);
+      expect((await callsSince(n)).filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+      // Its fallback, if the turn shows nothing: the code message with the claim button.
+      const { renderOutcomeFallback } = await import('../features/outcome-turn.js');
+      const fb = await renderOutcomeFallback('preview', pv.id, sti.fallback);
+      expect(JSON.stringify(fb!.blocks)).toContain('preview:claim');
+      // Posted meanwhile (a reply with preview, or the results turn's safety net): the turn becomes "do nothing".
+      const { outcomeObsolete } = await import('../features/outcome-turn.js');
+      expect(await outcomeObsolete('preview', pv.id)).toBeNull();
+      await PS.markAnnounced(pv.id);
+      expect(await outcomeObsolete('preview', pv.id)).toMatch(/already posted.*end_turn/);
+      expect(t).toBeTruthy();
+    });
+
+    it('abort: before the deploy the request is cancelled; after it, the front agent is told like a late deploy', async () => {
+      const a = await setup({ accepted: true });
+      const { id } = await PS.upsertRequestedPreview({ runId: a.sa.runId, subagentId: a.sa.subagentId, threadId: a.t, requesterId: a.u, title: 'Stopped', bundleFileId: 'file_none' });
+      const stopped = new AbortController();
+      stopped.abort();
+      expect(await F.deployInline(id, { abortSignal: stopped.signal })).toMatch(/run was stopped/);
+      expect((await PS.getPreview(id))!.status).toBe('cancelled');
+      // Aborted while deploying: it goes live and an outcome turn tells the front agent.
+      const b = await setup({ accepted: true });
+      const ac = new AbortController();
+      const impl = fakeDeploy.getMockImplementation()!;
+      fakeDeploy.mockImplementationOnce(async (o: any) => {
+        ac.abort();
+        return impl(o);
+      });
+      const out = await (toolsFor('child', b.ctx).request_preview as any).execute({ dir: 'site', title: 'Hi page' }, { toolCallId: `tc${rand()}`, messages: [], abortSignal: ac.signal });
+      expect(out).toMatch(/^Deployed:/);
+      const pv = await latest(b.sa.runId);
+      expect(pv.status).toBe('live');
+      const [sti] = await sql<any[]>`select input from scheduled_turn_inputs where source = 'preview' and source_ref = ${pv.id}`;
+      expect(sti.input).toContain(pv.url);
+      expect(sti.input).not.toContain('after the run finished');
+    });
+
+    it('announcement: the safety net posts unannounced live previews once; an announced one is skipped', async () => {
+      const a = await setup({ accepted: true });
+      await call(a.ctx, 'request_preview', { dir: 'site', title: 'One' });
+      const one = await latest(a.sa.runId);
+      await call(a.ctx, 'request_preview', { dir: 'site', title: 'Two' });
+      const two = await latest(a.sa.runId);
+      expect(two.id).not.toBe(one.id);
+      await PS.markAnnounced(two.id);
+      const two2 = await PS.getPreview(two.id);
+      expect(two2!.announcedAt).toBeTruthy();
+      expect(two2!.messageTs).toBeNull(); // a front reply: never rewritten by takedown
+      const { postUnannouncedPreviews } = await import('./preview/reply-blocks.js');
+      let n = (await fakeCalls()).length;
+      expect(await postUnannouncedPreviews([a.sa.runId])).toHaveLength(1);
+      const posts = (await callsSince(n)).filter((c) => c.method === 'chat.postMessage');
+      expect(posts).toHaveLength(1);
+      expect(JSON.stringify(posts[0]!.args)).toContain(one.id);
+      expect(JSON.stringify(posts[0]!.args)).toContain('preview:claim');
+      const row = await PS.getPreview(one.id);
+      expect(row!.messageTs).toBeTruthy();
+      expect(row!.announcedAt).toBeTruthy();
+      n = (await fakeCalls()).length;
+      expect(await postUnannouncedPreviews([a.sa.runId])).toHaveLength(0);
+      expect((await callsSince(n)).filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+    });
+
+    it('daily cap: failed previews (our side) don\'t count, refused ones do', async () => {
       const t = await newThread();
       const u = await newUser();
-      await PS.acceptTerms(u);
-      const sa = await newSubagent({ threadId: t, owner: u });
-      const ctx = ctxOf(t, u, sa);
-      await call(ctx, 'sandbox_exec', { command: 'true' });
-      const [row] = await sql<any[]>`select provider_id from sandboxes where subagent_id = ${sa.subagentId}`;
-      fake.boxes.get(row.providerId)!.files.set('/work/site/index.html', Buffer.from('<form><input name="user"><input type="password"></form>'));
-      expect(await call(ctx, 'request_preview', { dir: 'site', title: 'Login' })).toMatch(/Preview queued/);
-      const [pv] = await sql<any[]>`select id from previews where run_id = ${sa.runId}`;
+      const before = await PS.previewCountsToday(u);
+      await sql`insert into previews (id, thread_id, requester_id, title, status) values (${`pv_f${rand()}`}, ${t}, ${u}, 'f', 'failed'), (${`pv_r${rand()}`}, ${t}, ${u}, 'r', 'refused')`;
+      expect((await PS.previewCountsToday(u)).user).toBe(before.user + 1);
+    });
+
+    it('accept-handler coordination: a waiting call means no job', () => {
+      expect(F.acceptedInline({ inlineUntil: new Date(Date.now() + 10_000) })).toBe(true);
+      expect(F.acceptedInline({ inlineUntil: new Date(Date.now() - 1) })).toBe(false);
+      expect(F.acceptedInline({ inlineUntil: null })).toBe(false);
+    });
+
+    it('cancel and unanswered prompts end the preview; a request left at run end is prepared by the jobs', async () => {
+      const a = await setup();
+      expect(await call(a.ctx, 'request_preview', { dir: 'site', title: 'Hi page' })).toMatch(/^Preview waiting/);
+      const apv = await latest(a.sa.runId);
+      await F.handleTermsCancel({ userId: a.u, channelId: a.channelId, threadTs: a.threadTs, actionId: 'preview:terms_cancel', value: apv.id, responseUrl: 'https://hooks.slack.invalid/x', body: {} });
+      expect((await PS.getPreview(apv.id))!.status).toBe('cancelled');
+      // Unanswered prompt expires.
+      const c = await setup();
+      await call(c.ctx, 'request_preview', { dir: 'site', title: 'Hi page' });
+      const cpv = await latest(c.sa.runId);
+      await sql`update previews set terms_prompt_expires_at = now() - interval '1 minute' where id = ${cpv.id}`;
+      await F.expirePreviews();
+      expect((await PS.getPreview(cpv.id))!.status).toBe('cancelled');
+      // A `requested` row left when the run ended (the call never got to deploy) → prepare → deploy job.
+      const b = await setup({ accepted: true });
+      const { id } = await PS.upsertRequestedPreview({ runId: b.sa.runId, subagentId: b.sa.subagentId, threadId: b.t, requesterId: b.u, title: 'Left', bundleFileId: 'file_none' });
+      await finishRun(b.sa.runId);
+      await hooks.onSandboxRunFinished(b.sa.runId);
+      await F.preparePreview(id);
+      expect((await PS.getPreview(id))!.status).toBe('requested');
+    });
+
+    it('a failed run drops a waiting request; password forms are refused inline', async () => {
+      const a = await setup();
+      expect(await call(a.ctx, 'request_preview', { dir: 'site', title: 'Hi page' })).toMatch(/^Preview waiting/);
+      const apv = await latest(a.sa.runId);
+      await finishRun(a.sa.runId, 'error');
+      await hooks.onSandboxRunFinished(a.sa.runId);
+      expect((await PS.getPreview(apv.id))!.status).toBe('cancelled');
+      // A login form.
+      const b = await setup({ accepted: true });
+      b.box!.files.set('/work/site/index.html', Buffer.from('<form><input name="user"><input type="password"></form>'));
       const calls = fakeDeploy.mock.calls.length;
-      await F.deployPreview(pv.id);
-      expect((await PS.getPreview(pv.id))!.status).toBe('refused');
+      expect(await call(b.ctx, 'request_preview', { dir: 'site', title: 'Login' })).toMatch(/^Preview refused/);
+      expect((await latest(b.sa.runId)).status).toBe('refused');
       expect(fakeDeploy.mock.calls.length).toBe(calls);
       // No index.html → refused at request time.
-      fake.boxes.get(row.providerId)!.files.set('/work/empty/readme.txt', Buffer.from('x'));
-      expect(await call(ctx, 'request_preview', { dir: 'empty', title: 'x' })).toMatch(/no index\.html/);
+      b.box!.files.set('/work/empty/readme.txt', Buffer.from('x'));
+      expect(await call(b.ctx, 'request_preview', { dir: 'empty', title: 'x' })).toMatch(/no index\.html/);
     });
   });
 });

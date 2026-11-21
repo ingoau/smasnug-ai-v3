@@ -64,6 +64,44 @@ async function streamIn(rm: InstanceType<typeof ReplyManager>, text: string, siz
   await sleep(300);
 }
 
+describe('reply: ready-made extra items (a live preview\'s claim buttons)', () => {
+  it('go below the text, in order', async () => {
+    calls.length = 0;
+    failOn = null;
+    const actions = { type: 'actions', elements: [{ type: 'button', action_id: 'preview:claim', text: { type: 'plain_text', text: 'Get claim link' }, value: 'pv_x' }] };
+    const context = { type: 'context', elements: [{ type: 'mrkdwn', text: 'Temporary Cloudflare deployment.' }] };
+    await new ReplyManager(target('user', 1)).finish('tc1', 'live: https://x.workers.dev', undefined, undefined, undefined, {
+      extraItems: [
+        { ref: 'preview:1', block: actions, fallback: 'Live preview: https://x.workers.dev', summary: '' },
+        { ref: 'preview:2', block: context, fallback: '', summary: '' },
+      ],
+    });
+    const post = calls.find((c) => c.method === 'chat.postMessage')!;
+    const types = post.args.blocks.map((b: any) => b.type);
+    expect(types.slice(0, 3)).toEqual(['markdown', 'actions', 'context']);
+    expect(post.args.blocks[1].elements[0].action_id).toBe('preview:claim');
+    expect(post.args.text).toBe('live: https://x.workers.dev');
+  });
+
+  it('report whether they went out as blocks (not when Slack refused them)', async () => {
+    const actions = { type: 'actions', elements: [{ type: 'button', action_id: 'preview:claim', text: { type: 'plain_text', text: 'Get claim link' }, value: 'pv_x' }] };
+    const items = [{ ref: 'preview:1', block: actions, fallback: 'Live preview: https://x.workers.dev', summary: '' }];
+    calls.length = 0;
+    failOn = null;
+    const ok = new ReplyManager(target('user', 1));
+    await ok.finish('tc1', 'live: https://x.workers.dev', undefined, undefined, undefined, { extraItems: items });
+    expect(ok.extrasDeliveredAsBlocks('tc1')).toBe(true);
+    calls.length = 0;
+    failOn = (m, a) => (m === 'chat.postMessage' && JSON.stringify(a.blocks ?? []).includes('preview:claim') ? 'invalid_blocks' : null);
+    const refused = new ReplyManager(target('user', 2));
+    const res = await refused.finish('tc1', 'live: https://x.workers.dev', undefined, undefined, undefined, { extraItems: items });
+    failOn = null;
+    expect(res).toMatch(/^Replied/);
+    expect(refused.extrasDeliveredAsBlocks('tc1')).toBe(false);
+    expect(refused.extrasDeliveredAsBlocks('tc_other')).toBe(false);
+  });
+});
+
 describe('reply: code is delivered exactly as written', () => {
   it('posted: prose as markdown blocks, code as rich_text preformatted with its language, raw text fallback', async () => {
     calls.length = 0;

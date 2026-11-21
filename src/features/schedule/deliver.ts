@@ -137,7 +137,7 @@ export async function createScheduledTurnTx(
   opts: {
     threadId: string;
     ownerId: string;
-    source: 'reminder' | 'watch' | 'send' | 'coding_launch' | 'huddlefm' | 'button_action';
+    source: 'reminder' | 'watch' | 'send' | 'coding_launch' | 'huddlefm' | 'button_action' | 'preview';
     /** reminder / watch id; outcome turns use `sourceRef` (a uuid) instead. */
     sourceId: number | null;
     sourceRef?: string;
@@ -160,9 +160,9 @@ export async function createScheduledTurnTx(
 }
 
 /** The input of a scheduled turn (front agent: rendered in place of new messages), and an outcome turn's fallback. */
-export async function scheduledTurnInput(turnId: number): Promise<{ source: string; input: string; fallback: string | null } | null> {
-  const [row] = await sql<{ source: string; input: string; fallback: string | null }[]>`
-    select source, input, fallback from scheduled_turn_inputs where turn_id = ${turnId}`;
+export async function scheduledTurnInput(turnId: number): Promise<{ source: string; sourceRef: string | null; input: string; fallback: string | null } | null> {
+  const [row] = await sql<{ source: string; sourceRef: string | null; input: string; fallback: string | null }[]>`
+    select source, source_ref, input, fallback from scheduled_turn_inputs where turn_id = ${turnId}`;
   return row ?? null;
 }
 

@@ -18,6 +18,7 @@ import { lowQuotaLines, recordModelUsage, userQuotaStates } from '../features/gu
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { renderTurnRules } from '../features/memory/rules.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
+import { OUTCOME_SOURCES, outcomeObsolete, renderOutcomeFallback } from '../features/outcome-turn.js';
 import { loadPendingActions, renderPendingActions } from '../features/pending.js';
 import { renderDjState } from '../features/huddlefm/render.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
@@ -33,7 +34,7 @@ import { placeTargetFor } from './reply-buttons-store.js';
 import { ReplyManager, markdownMessage } from './reply.js';
 import { activeRunsInThread, maybeSynthesize } from './subagents.js';
 import { renderBatchStatus, renderOpenBatches } from './batch-status.js';
-import { loadSinceRound, renderSinceRound } from './round-since.js';
+import { loadSinceRound, renderSinceRound, type SinceItem } from './round-since.js';
 import { cursorInstructRefusal, cursorRefusal, isCursorAdmin } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
 import { decidePlainText, endsTurnAfterStep, PLAIN_TEXT_NUDGE_NOTE, postablePlainText, replyEndsWithLookups, REPLY_WITH_LOOKUPS_NOTE, type StepCall, type StepResultPart } from './turn-end.js';
@@ -45,6 +46,8 @@ import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
 import { saveTrace, TraceRecorder } from './trace.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
+import { previewsOfRuns, type PreviewRow } from '../sandbox/preview/store.js';
+import { postUnannouncedPreviews } from '../sandbox/preview/reply-blocks.js';
 import { offersMoveButton } from '../features/code-channels/logic.js';
 import { hiddenToolsFor, loadCodeChannelTurnContext, NO_CODE_CHANNELS, renderChildrenSection, renderHereSection, type CodeChannelTurnContext } from '../features/code-channels/turn-context.js';
 
@@ -98,6 +101,9 @@ export const BUDGET = {
   participants: 400,
   synthesis: 12000,
 } as const;
+
+/** An outcome turn's code-written fallback (features/outcome-turn.ts) and where it came from. */
+type TurnOutcome = { fallback: string | null; source?: string; sourceRef?: string | null };
 
 const FALLBACK_TEXT = "Sorry, I couldn't come up with a reply to that. Could you try rephrasing?";
 /** Posted instead of FALLBACK_TEXT when every provider's safety filter refused the turn's last step. */
@@ -230,6 +236,25 @@ export async function renderSnapshot(threadId: string): Promise<string> {
     .join('\n');
 }
 
+/** One preview of a finished run, for the results turn: what to post (a live one with reply(preview)). */
+export function previewLine(p: Pick<PreviewRow, 'id' | 'status' | 'url' | 'expiresAt' | 'error'> & Partial<Pick<PreviewRow, 'announcedAt'>>): string {
+  const hhmm = p.expiresAt ? `${new Date(p.expiresAt).toISOString().slice(11, 16)} UTC` : '?';
+  switch (p.status) {
+    case 'live':
+      if (p.announcedAt) return `- ${p.url} (preview id ${p.id}, live until ${hhmm} unless claimed): already posted in the thread with its claim button; don't post it again (you may refer to it)`;
+      return `- ${p.url} (preview id ${p.id}, live until ${hhmm} unless claimed): put the link in your reply and pass preview: "${p.id}" for the claim button`;
+    case 'requested':
+    case 'deploying':
+      return `- ${p.id}: being deployed; you'll be told when it's live. Say the link comes in a minute`;
+    case 'awaiting_terms':
+      return `- ${p.id}: waiting for the requester to accept Cloudflare's terms (a prompt only they see); it deploys when they do and you'll be told. Say the link comes once they accept`;
+    case 'expired':
+      return `- ${p.id}: expired`;
+    default:
+      return `- ${p.id}: ${p.status.replace('_', ' ')}${p.error ? ` (${oneLine(p.error, 120)})` : ''}`;
+  }
+}
+
 /** The finished runs of a card for a synthesis turn: complete, failed and cancelled — none dropped. */
 export async function renderCardResults(cardId: number): Promise<{ text: string; runIds: number[]; allCancelled: boolean; anyCancelled: boolean }> {
   const runs = await sql<{ id: number; subagentId: string; title: string; ownerId: string; status: string; instructions: string; result: string | null; error: string | null; isResume: boolean; retry: boolean }[]>`
@@ -238,6 +263,8 @@ export async function renderCardResults(cardId: number): Promise<{ text: string;
   const per = Math.floor(BUDGET.synthesis / Math.max(1, runs.length));
   // Files a run made: metadata only (the front agent posts them with reply(files) without reading them).
   const made = await filesCreatedByRuns(runs.map((r) => Number(r.id)));
+  // Live previews they deployed (src/sandbox/preview): from the DB, so the link doesn't depend on the result text.
+  const previews = previewsConfigured() ? await previewsOfRuns(runs.map((r) => Number(r.id))).catch((err) => (log.warn({ err }, 'previewsOfRuns failed'), [])) : [];
   const parts = runs.map((r) => {
     const head = `## ${r.subagentId} "${r.title}" (owner <@${r.ownerId}>)${r.isResume ? ' [follow-up run]' : ''} — ${r.status.toUpperCase()}`;
     const task = `Task: ${oneLine(r.instructions, 300)}`;
@@ -249,7 +276,9 @@ export async function renderCardResults(cardId: number): Promise<{ text: string;
           : `Failed: ${r.error ?? 'unknown error'}`;
     const files = made.get(Number(r.id)) ?? [];
     const fileList = files.length ? `\nFiles it created (post with reply(files: [ids]), or join several into one document with create_file(from_files: [ids]); no need to read them):\n${files.map((f) => `- ${fileListingLine(f)}`).join('\n')}` : '';
-    return `${head}\n${task}\n${body}${fileList}`;
+    const pvs = previews.filter((p) => Number(p.runId) === Number(r.id));
+    const pvList = pvs.length ? `\nLive previews it deployed (newest first):\n${pvs.map(previewLine).join('\n')}` : '';
+    return `${head}\n${task}\n${body}${fileList}${pvList}`;
   });
   // Batch status on top (batch-status.ts): failed / cancelled parts can't hide among many results.
   const status = renderBatchStatus(
@@ -351,7 +380,7 @@ async function buildTurnMessage(
   timing = new TurnTiming(),
   session?: SessionInfo | null,
   codeChannels: CodeChannelTurnContext = NO_CODE_CHANNELS,
-): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; outcome?: { fallback: string | null } }> {
+): Promise<{ text: string; synthesisRunIds: number[]; anyCancelled: boolean; peopleSpoke?: boolean; outcome?: TurnOutcome }> {
   const { channelId } = parseThreadId(turn.threadId);
   const [memory, snapshot, ctx, dj, self, conversation, pending, quotas, codeChannelHere] = await Promise.all([
     timing.span('ctx_memory', () => renderSpeakerMemory(turn.authorId, { threadId: turn.threadId })).catch((err) => (log.warn({ err }, 'renderSpeakerMemory failed'), '')),
@@ -443,7 +472,8 @@ async function buildTurnMessage(
   parts.push(section('current_time', renderNow(now, speaker.tz)));
   let synthesisRunIds: number[] = [];
   let anyCancelled = false;
-  let outcome: { fallback: string | null } | undefined;
+  let peopleSpoke = false;
+  let outcome: TurnOutcome | undefined;
   // Non-user turns (subagent results, reminders, outcomes): people's messages already waiting for their own turn.
   const queued = turn.kind !== 'user' ? await renderQueuedTurns(turn.threadId).catch((err) => (log.warn({ err }, 'renderQueuedTurns failed'), '')) : '';
   if (turn.kind === 'synthesis' && turn.cardId) {
@@ -453,9 +483,11 @@ async function buildTurnMessage(
     const earlier = await renderEarlierRounds(turn.cardId).catch((err) => (log.warn({ err }, 'renderEarlierRounds failed'), ''));
     if (earlier) parts.push(section('earlier_rounds', earlier));
     parts.push(section('finished_subagents', res.text));
-    const since = await loadSinceRound(turn.cardId, self)
-      .then((items) => renderSinceRound(items))
-      .catch((err) => (log.warn({ err }, 'loadSinceRound failed'), ''));
+    const sinceItems = await loadSinceRound(turn.cardId, self).catch((err) => (log.warn({ err }, 'loadSinceRound failed'), null));
+    const since = sinceItems ? renderSinceRound(sinceItems) : '';
+    // A person (not the bot, not another bot) wrote in the thread after the round started: the results may be stale
+    // ("nvm, works"), so ending silently is allowed (needsFallback).
+    peopleSpoke = peopleSpokeSince(sinceItems ?? []);
     parts.push(section('since_round_start', since, ' note="What happened in this thread after the turn that started this round."'));
     if (ctx.newMessages.trim()) parts.push(section('new_messages', clipTokens(ctx.newMessages, BUDGET.newMessages)));
     parts.push(SYNTHESIS_INSTRUCTION);
@@ -465,9 +497,13 @@ async function buildTurnMessage(
     // coding-agent launch, src/features/outcome-turn.ts) or a HuddleFM DJ notice (src/features/huddlefm/notices.ts):
     // its stored input replaces new messages.
     const sched = await scheduledTurnInput(turn.id).catch((err) => (log.warn({ err }, 'scheduledTurnInput failed'), null));
-    parts.push(sched ? sched.input : 'A scheduled turn whose details are missing. Do nothing: call end_turn.');
+    const isOutcome = Boolean(sched && OUTCOME_SOURCES.includes(sched.source));
+    // An outcome that became moot before this turn ran (e.g. the preview was posted meanwhile): a "do nothing" notice
+    // and no fallback.
+    const moot = sched && isOutcome ? await outcomeObsolete(sched.source, sched.sourceRef ?? null) : null;
+    parts.push(moot ?? (sched ? sched.input : 'A scheduled turn whose details are missing. Do nothing: call end_turn.'));
     if (queued) parts.push(queued);
-    if (sched && (sched.source === 'send' || sched.source === 'coding_launch' || sched.source === 'huddlefm' || sched.source === 'button_action')) outcome = { fallback: sched.fallback };
+    if (sched && isOutcome) outcome = { fallback: moot ? null : sched.fallback, source: sched.source, sourceRef: sched.sourceRef ?? null };
   } else {
     parts.push(section('new_messages', clipTokens(ctx.newMessages, BUDGET.newMessages), ` from="<@${turn.authorId}>" note="The message(s) you are responding to now."`));
     const barePing = turn.isMention ? await isBarePing(turn).catch(() => null) : null;
@@ -486,7 +522,7 @@ async function buildTurnMessage(
     );    const ahead = await resultsAheadNote(turn).catch((err) => (log.warn({ err }, 'resultsAheadNote failed'), ''));
     if (ahead) parts.push(ahead);
   }
-  return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, anyCancelled, ...(outcome ? { outcome } : {}) };
+  return { text: parts.filter(Boolean).join('\n\n'), synthesisRunIds, anyCancelled, peopleSpoke, ...(outcome ? { outcome } : {}) };
 }
 
 /**
@@ -1069,9 +1105,24 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (!outcome?.fallback || replies.anyVisible || state.visible.has('reply')) return;
     // Code-written, but it can carry outside text (e.g. a HuddleFM track title): never a group ping.
     const text = neutralizeBroadcasts(outcome.fallback);
-    const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...markdownMessage(text) }, { idempotencyKey: `outcome-fallback:${turnId}` });
+    // Some sources post their own message (e.g. a live preview with its claim button).
+    const own = outcome.source ? await renderOutcomeFallback(outcome.source, outcome.sourceRef ?? null, text) : null;
+    const msg = own ? { text: own.text, blocks: own.blocks, unfurl_links: false, unfurl_media: false } : markdownMessage(text);
+    const res = await slackCall<any>('chat.postMessage', { channel: channelId, ...threadTsArg(threadTs), ...msg }, { idempotencyKey: `outcome-fallback:${turnId}` });
+    if (own?.onPosted && typeof res?.ts === 'string') await own.onPosted(res.ts).catch((err) => log.warn({ err, turnId }, 'outcome fallback onPosted failed'));
     await noteCodeReply(res?.ts);
     await appendEvent(turn.threadId, 'reply', 'bot', { turnId, fallback: true, outcome: true, text });
+  };
+
+  /**
+   * Results turns: live previews of the card's runs that no message announced (a silent turn, or a reply without
+   * `preview`) get the code-posted preview message. True if one was posted.
+   */
+  const postPreviewSafetyNet = async (): Promise<boolean> => {
+    if (turn.kind !== 'synthesis' || !built.synthesisRunIds.length || !previewsConfigured()) return false;
+    const posted = await postUnannouncedPreviews(built.synthesisRunIds).catch((err) => (log.warn({ err, turnId }, 'preview safety net failed'), []));
+    for (const ts of posted) await noteCodeReply(ts);
+    return posted.length > 0;
   };
 
   if (stopped || (await checkStop())) {
@@ -1088,6 +1139,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   if (failed) {
     log.error({ err: failed, turnId }, 'front turn failed');
     await appendEvent(turn.threadId, 'error', 'bot', { turnId, error: String((failed as any)?.message ?? failed) }).catch(() => {});
+    // Before any early return below: a live preview the failed turn didn't post still reaches the thread.
+    const previewPostedOnFailure = await postPreviewSafetyNet();
     // Already visible (stream open or reply posted): close it out ourselves instead of letting the pipeline post.
     const note = outcome?.fallback ?? ERROR_NOTE;
     const closed = await replies.abortOpenStreams(note);
@@ -1097,6 +1150,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       return;
     }
     if (outcome) return void (await postOutcomeFallback());
+    if (previewPostedOnFailure) return;
     // A reaction (or other non-reply visible effect) already answered the user: don't throw, or the pipeline posts
     // "Something broke" on top of it.
     if (state.visible.size > 0) return;
@@ -1105,6 +1159,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 
   // Reply streams whose tool call never executed (invalid input, retried under a new call id) are closed too.
   await replies.closeUnfinished();
+  const previewPosted = await postPreviewSafetyNet();
   // A canvas made this turn with no reply after it: nobody would see its link (create_canvas leaves posting it to
   // the reply). Post the link instead of the generic fallback.
   if (!state.visible.has('reply')) {
@@ -1119,7 +1174,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   }
 
   if (state.visible.size === 0 && outcome) await postOutcomeFallback();
-  else if (state.visible.size === 0 && needsFallback(turn, io, built.anyCancelled)) {
+  else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
@@ -1148,12 +1203,17 @@ export function canvasLinkText(canvases: { title: string; permalink: string }[])
   return links.length === 1 ? `here's the canvas: ${links[0]}` : `here are the canvases: ${links.join(', ')}`;
 }
 
+/** Whether a person (not the bot, not another bot) wrote in the thread since the round started. */
+export function peopleSpokeSince(items: readonly SinceItem[]): boolean {
+  return items.some((i) => i.kind === 'message' && !i.self && Boolean(i.userId) && !i.botId);
+}
+
 /**
- * Whether a turn that showed nothing gets the generic fallback. A results (synthesis) turn does, unless a task on its
- * card was cancelled: then the request changed since the round started (someone stopped part of it), and ending
- * silently (end_turn) may be the right answer.
+ * Whether a turn that showed nothing gets the generic fallback. A results (synthesis) turn does, unless the request
+ * may have changed since the round started: a task on its card was cancelled (someone stopped part of it), or
+ * someone wrote in the thread since ("nvm, it works"). Then ending silently (end_turn) may be the right answer.
  */
-export function needsFallback(turn: Pick<TurnRow, 'kind'>, io: Pick<TurnIO, 'isMention'>, anyCancelled: boolean): boolean {
-  if (turn.kind === 'synthesis') return !anyCancelled;
+export function needsFallback(turn: Pick<TurnRow, 'kind'>, io: Pick<TurnIO, 'isMention'>, anyCancelled: boolean, peopleSpoke = false): boolean {
+  if (turn.kind === 'synthesis') return !anyCancelled && !peopleSpoke;
   return io.isMention;
 }

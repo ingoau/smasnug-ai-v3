@@ -34,7 +34,7 @@ import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guideline
 import { chooseDelivery, type DeliveryMode } from './util.js';
 import { buttonsActions, buttonsBlock, buttonsFallbackText, normalizeButtonLabels, normalizeButtons, placeText, type ButtonsActionsBlock, type ContextBlock } from './reply-buttons.js';
 import { saveReplyExtras } from './charts-store.js';
-import { buildExtras, degradedFileIds, hasLayoutMarkers, extrasFallback, footerBlock, hasExtras, imageExtras, replyBody, responseTimeFooter, slackTsMs, withoutMarkers, type PreparedImage, type ReplyExtras } from './rich-blocks.js';
+import { buildExtras, degradedFileIds, hasLayoutMarkers, extrasFallback, footerBlock, hasExtras, imageExtras, replyBody, responseTimeFooter, slackTsMs, withoutMarkers, type PreparedImage, type ReplyExtra, type ReplyExtras } from './rich-blocks.js';
 import { MAX_MESSAGE_BLOCKS, mdDisplay, replyMessage, segmentBlock, streamUnits } from './slack-markdown.js';
 import { prepareButtonActions } from './button-actions.js';
 import { createReplyButtons, detachMessageCards, loadReplyButtons, messageHasLiveCard, postedBefore, reattachMessageCards, setReplyText, setButtonsMessage, type PlaceTarget, toButtonsState, type ReplyButtonsRow } from './reply-buttons-store.js';
@@ -250,10 +250,14 @@ export interface ReplyRich {
   fields?: unknown;
   links?: unknown;
   containers?: unknown;
+  /** Ready-made extras added last (e.g. a live preview's claim buttons, src/sandbox/preview/reply-blocks.ts). */
+  extraItems?: readonly ReplyExtra[];
 }
 
 export class ReplyManager {
   private entries = new Map<string, ReplyEntry>();
+  /** Per delivered reply (tool call id): whether its extras went out as blocks (false: Slack refused them, degraded). */
+  private extrasAsBlocks = new Map<string, boolean>();
   private nextIndex = 0;
   /** Number of replies successfully delivered this turn. */
   delivered = 0;
@@ -648,6 +652,11 @@ export class ReplyManager {
   }
 
   /** Called from the tool's execute with the complete, validated input. */
+  /** Whether the reply of this tool call was delivered with its extras as blocks (not degraded to their text fallbacks). */
+  extrasDeliveredAsBlocks(toolCallId: string): boolean {
+    return this.extrasAsBlocks.get(toolCallId) === true;
+  }
+
   async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly unknown[], chartsRaw?: unknown, rich: ReplyRich = {}): Promise<string> {
     const e = this.start(toolCallId);
     e.finished = true;
@@ -663,6 +672,7 @@ export class ReplyManager {
       const at = extras.items.findIndex((it) => !it.ref.startsWith('chart:'));
       extras.items.splice(at < 0 ? extras.items.length : at, 0, ...imageExtras(imgs));
     }
+    if (rich.extraItems?.length) extras.items.push(...rich.extraItems);
     const chartSuffix = () => (chartNotes.length ? ` ${chartNotes.join(' ')}` : '');
     const charts = extras.items;
     if (e.timer) {
@@ -814,6 +824,7 @@ export class ReplyManager {
     if (delivered === 'posted') await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
     if (last.ts) await this.rememberExtras(last.ts, extras);
     if (btnRow) await this.recordButtons(e, btnRow, buttonsTs && buttonsTs === last.ts ? buttonsTs : null, last, extras);
+    this.extrasAsBlocks.set(toolCallId, !extras.degraded);
     this.delivered++;
     if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs, ...(hasExtras(extras) ? { extras } : {}) };
     this.deliveredTexts.push(text);

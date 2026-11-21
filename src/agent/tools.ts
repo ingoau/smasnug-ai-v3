@@ -14,6 +14,8 @@ import { chartsSchema } from './charts.js';
 import { turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
 import { prepareImageArgs, prepareOutgoingFiles } from './files.js';
+import { previewReplyExtras } from '../sandbox/preview/reply-blocks.js';
+import { markAnnounced } from '../sandbox/preview/store.js';
 import { cardsSchema, containersSchema, fieldsSchema, imagesSchema, linksSchema, MAX_IMAGES, tablesSchema } from './rich-blocks.js';
 import { accessModelText, canUseSandbox, notifyAccess } from '../sandbox/access.js';
 import { sandboxConfigured } from '../sandbox/settings.js';
@@ -95,6 +97,11 @@ registerTool({
     }),
 });
 
+const previewSchema = z
+  .string()
+  .optional()
+  .describe('A live preview\'s id ("pv_…", from subagent results or a preview notice): adds its "Get claim link" button (only the requester can claim it) and a Report button under the reply. Put the preview URL in the text.');
+
 registerTool({
   name: 'reply',
   roles: ['front'],
@@ -117,6 +124,7 @@ registerTool({
         links: linksSchema,
         buttons: buttonsSchema,
         charts: chartsSchema,
+        preview: previewSchema,
         continue_turn: continueTurnSchema,
       }),
       onInputStart: ({ toolCallId }) => {
@@ -125,7 +133,7 @@ registerTool({
       onInputDelta: ({ toolCallId, inputTextDelta }) => {
         turnState(ctx).replies.delta(toolCallId, inputTextDelta);
       },
-      execute: async ({ text, files, images, tables, cards, fields, containers, links, buttons, charts }, { toolCallId }) => {
+      execute: async ({ text, files, images, tables, cards, fields, containers, links, buttons, charts, preview }, { toolCallId }) => {
         const s = turnState(ctx);
         // At most 10 files per message (Slack); access is checked per id (this thread, or the speaker's own files).
         const prepared = await prepareOutgoingFiles({ threadId: ctx.threadId, speakerId: ctx.speakerId, turnId: ctx.turnId }, files?.slice(0, 10));
@@ -134,11 +142,15 @@ registerTool({
         const inline = new Set(imgs.images.flatMap((i) => (i.file?.fileId ? [i.file.fileId] : [])));
         const all = [...prepared.files.filter((f) => !f.fileId || !inline.has(f.fileId)), ...imgs.attach.filter((a) => !prepared.files.some((f) => f.fileId === a.fileId))];
         const attach = all.slice(0, 10);
-        const res = await s.replies.finish(toolCallId, text, attach, buttons, charts, { images: imgs.images, tables, cards, fields, containers, links });
+        const pv = preview ? await previewReplyExtras(ctx.threadId, preview).catch(() => ({ items: [], note: 'Checking the preview failed, so no claim button was added.' })) : null;
+        const res = await s.replies.finish(toolCallId, text, attach, buttons, charts, { images: imgs.images, tables, cards, fields, containers, links, extraItems: pv?.items });
         const notes = [...prepared.errors, ...imgs.errors, ...((files?.length ?? 0) > 10 || all.length > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
-        const fileNote = notes.length ? ` File problems: ${notes.join(' ')}` : '';
+        const fileNote = (notes.length ? ` File problems: ${notes.join(' ')}` : '') + (pv?.note ? ` ${pv.note}` : '');
         if (res.startsWith('Replied')) {
           s.visible.add('reply');
+          // The preview's link + claim button reached the thread: results turns and the safety net won't post it again.
+          // Only when the buttons really went out (Slack may refuse the blocks: the reply then carries text fallbacks).
+          if (preview && pv?.items.length && s.replies.extrasDeliveredAsBlocks(toolCallId)) await markAnnounced(preview.trim()).catch(() => {});
           return `${res}${fileNote} Don't send another reply unless you have something new.`;
         } else if (s.replies.anyVisible) s.visible.add('reply'); // e.g. a stream the user stopped halfway
         return `${res}${fileNote}`;

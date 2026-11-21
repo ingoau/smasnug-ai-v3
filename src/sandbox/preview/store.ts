@@ -31,6 +31,10 @@ export interface PreviewRow {
   claimExpiresAt: Date | null;
   messageTs: string | null;
   termsPromptExpiresAt: Date | null;
+  /** A request_preview call is waiting for the terms answer until then (it deploys; the accept handler doesn't queue). */
+  inlineUntil: Date | null;
+  /** When a message with its link + claim button reached the thread (front reply or code-posted message). */
+  announcedAt: Date | null;
   error: string | null;
   createdAt: Date;
 }
@@ -42,11 +46,15 @@ export async function getPreview(id: string): Promise<PreviewRow | null> {
   return r ? { ...r, runId: r.runId == null ? null : Number(r.runId) } : null;
 }
 
-/** One preview per run: a second request in the same run replaces the first (its bundle is dropped). */
+/**
+ * The run's pending preview (requested / awaiting terms) is replaced by a second request in the same run (its bundle
+ * is dropped); otherwise (none yet, or the earlier one is live or ended) a new row is made: a run may deploy again
+ * after a fix.
+ */
 export async function upsertRequestedPreview(o: { runId: number; subagentId: string; threadId: string; requesterId: string; title: string; bundleFileId: string }): Promise<{ id: string; replacedBundle: string | null }> {
-  const [old] = await sql<{ id: string; bundleFileId: string | null; status: PreviewStatus }[]>`select id, bundle_file_id, status from previews where run_id = ${o.runId}`;
+  const [old] = await sql<{ id: string; bundleFileId: string | null }[]>`
+    select id, bundle_file_id from previews where run_id = ${o.runId} and status in ('requested', 'awaiting_terms') order by created_at desc limit 1`;
   if (old) {
-    if (old.status !== 'requested') throw new Error(`a preview for this run is already ${old.status}`);
     await sql`update previews set title = ${o.title}, bundle_file_id = ${o.bundleFileId} where id = ${old.id}`;
     return { id: old.id, replacedBundle: old.bundleFileId };
   }
@@ -56,15 +64,28 @@ export async function upsertRequestedPreview(o: { runId: number; subagentId: str
   return { id, replacedBundle: null };
 }
 
+/** Set or clear the inline wait mark; returns the row's status (null: no such row). */
+export async function setInlineUntil(id: string, until: Date | null): Promise<PreviewStatus | null> {
+  const [r] = await sql<{ status: PreviewStatus }[]>`update previews set inline_until = ${until} where id = ${id} returning status`;
+  return r?.status ?? null;
+}
+
+/** The previews of these runs (newest first per run), for the results turn. */
+export async function previewsOfRuns(runIds: number[]): Promise<PreviewRow[]> {
+  if (!runIds.length) return [];
+  return sql<PreviewRow[]>`select * from previews where run_id in ${sql(runIds)} order by run_id, created_at desc`;
+}
+
 /**
- * Previews counted against the daily caps: today's, except those that never got anywhere (cancelled before deploy).
+ * Previews counted against the daily caps: today's, except those that never got anywhere (cancelled before deploy)
+ * or failed on our side (a refused one still counts).
  * The user's count starts at their last admin limit reset when that was today.
  */
 export async function previewCountsToday(userId: string): Promise<{ user: number; global: number }> {
   const resetAt = await dailyResetAt(userId);
   const [r] = await sql<{ user: number; global: number }[]>`
     select count(*) filter (where requester_id = ${userId} and created_at >= ${resetAt ?? new Date(0)})::int as user, count(*)::int as global
-    from previews where created_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc' and status <> 'cancelled'`;
+    from previews where created_at >= date_trunc('day', now() at time zone 'utc') at time zone 'utc' and status not in ('cancelled', 'failed')`;
   return { user: r?.user ?? 0, global: r?.global ?? 0 };
 }
 
@@ -78,12 +99,13 @@ export async function acceptTerms(userId: string): Promise<void> {
 }
 
 /** Move to `to` only from one of `from` (atomic). Returns the row when it moved. */
-export async function transition(id: string, from: PreviewStatus[], to: PreviewStatus, extra: { error?: string | null; termsPromptExpiresAt?: Date | null } = {}): Promise<PreviewRow | null> {
+export async function transition(id: string, from: PreviewStatus[], to: PreviewStatus, extra: { error?: string | null; termsPromptExpiresAt?: Date | null; inlineUntil?: Date | null } = {}): Promise<PreviewRow | null> {
   const ended = !ACTIVE.includes(to);
   const [r] = await sql<PreviewRow[]>`
     update previews set status = ${to},
       error = coalesce(${extra.error ?? null}, error),
       terms_prompt_expires_at = ${extra.termsPromptExpiresAt === undefined ? sql`terms_prompt_expires_at` : extra.termsPromptExpiresAt},
+      inline_until = ${extra.inlineUntil === undefined ? sql`inline_until` : extra.inlineUntil},
       ended_at = ${ended ? sql`now()` : sql`ended_at`},
       api_token_enc = ${ended ? null : sql`api_token_enc`},
       claim_url_enc = ${ended ? null : sql`claim_url_enc`}
@@ -124,8 +146,14 @@ export function apiTokenOf(row: PreviewRow): string | null {
   }
 }
 
+/** A code-posted preview message went out (the only kind of message takedown may edit): also announced. */
 export async function setMessageTs(id: string, ts: string): Promise<void> {
-  await sql`update previews set message_ts = ${ts} where id = ${id}`;
+  await sql`update previews set message_ts = ${ts}, announced_at = coalesce(announced_at, now()) where id = ${id}`;
+}
+
+/** A front reply carrying its link + claim button went out (message_ts stays unset: replies are never rewritten). */
+export async function markAnnounced(id: string): Promise<void> {
+  await sql`update previews set announced_at = coalesce(announced_at, now()) where id = ${id}`;
 }
 
 export async function livePreviews(limit = 20): Promise<PreviewRow[]> {

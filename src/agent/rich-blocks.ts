@@ -770,7 +770,7 @@ export function replyBody(text: string, extras: ReplyExtras | null | undefined, 
  */
 export function extrasFallback(text: string, extras: ReplyExtras | null | undefined, max = MAX_FALLBACK_TEXT): string {
   const base = withoutMarkers(text).trim();
-  const extra = (extras?.items ?? []).map((it) => it.summary).join('\n');
+  const extra = (extras?.items ?? []).map((it) => it.summary).filter(Boolean).join('\n');
   if (!extra) return base.slice(0, max);
   if (!base) return extra.slice(0, max);
   const room = max - base.length - 1;
