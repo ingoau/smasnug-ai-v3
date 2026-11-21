@@ -256,6 +256,8 @@ export interface ReplyRich {
 
 export class ReplyManager {
   private entries = new Map<string, ReplyEntry>();
+  /** Per delivered reply (tool call id): whether its extras went out as blocks (false: Slack refused them, degraded). */
+  private extrasAsBlocks = new Map<string, boolean>();
   private nextIndex = 0;
   /** Number of replies successfully delivered this turn. */
   delivered = 0;
@@ -650,6 +652,11 @@ export class ReplyManager {
   }
 
   /** Called from the tool's execute with the complete, validated input. */
+  /** Whether the reply of this tool call was delivered with its extras as blocks (not degraded to their text fallbacks). */
+  extrasDeliveredAsBlocks(toolCallId: string): boolean {
+    return this.extrasAsBlocks.get(toolCallId) === true;
+  }
+
   async finish(toolCallId: string, rawText: string, files?: OutgoingFile[], buttons?: readonly unknown[], chartsRaw?: unknown, rich: ReplyRich = {}): Promise<string> {
     const e = this.start(toolCallId);
     e.finished = true;
@@ -817,6 +824,7 @@ export class ReplyManager {
     if (delivered === 'posted') await this.trail?.discard().catch((err) => log.warn({ err }, 'discarding the activity message failed'));
     if (last.ts) await this.rememberExtras(last.ts, extras);
     if (btnRow) await this.recordButtons(e, btnRow, buttonsTs && buttonsTs === last.ts ? buttonsTs : null, last, extras);
+    this.extrasAsBlocks.set(toolCallId, !extras.degraded);
     this.delivered++;
     if (last.ts) this.lastDelivered = { ts: last.ts, text: last.text, streamed: delivered === 'streamed' && last.ts === e.streamTs, ...(hasExtras(extras) ? { extras } : {}) };
     this.deliveredTexts.push(text);

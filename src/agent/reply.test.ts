@@ -82,6 +82,24 @@ describe('reply: ready-made extra items (a live preview\'s claim buttons)', () =
     expect(post.args.blocks[1].elements[0].action_id).toBe('preview:claim');
     expect(post.args.text).toBe('live: https://x.workers.dev');
   });
+
+  it('report whether they went out as blocks (not when Slack refused them)', async () => {
+    const actions = { type: 'actions', elements: [{ type: 'button', action_id: 'preview:claim', text: { type: 'plain_text', text: 'Get claim link' }, value: 'pv_x' }] };
+    const items = [{ ref: 'preview:1', block: actions, fallback: 'Live preview: https://x.workers.dev', summary: '' }];
+    calls.length = 0;
+    failOn = null;
+    const ok = new ReplyManager(target('user', 1));
+    await ok.finish('tc1', 'live: https://x.workers.dev', undefined, undefined, undefined, { extraItems: items });
+    expect(ok.extrasDeliveredAsBlocks('tc1')).toBe(true);
+    calls.length = 0;
+    failOn = (m, a) => (m === 'chat.postMessage' && JSON.stringify(a.blocks ?? []).includes('preview:claim') ? 'invalid_blocks' : null);
+    const refused = new ReplyManager(target('user', 2));
+    const res = await refused.finish('tc1', 'live: https://x.workers.dev', undefined, undefined, undefined, { extraItems: items });
+    failOn = null;
+    expect(res).toMatch(/^Replied/);
+    expect(refused.extrasDeliveredAsBlocks('tc1')).toBe(false);
+    expect(refused.extrasDeliveredAsBlocks('tc_other')).toBe(false);
+  });
 });
 
 describe('reply: code is delivered exactly as written', () => {

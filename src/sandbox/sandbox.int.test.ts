@@ -647,6 +647,11 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       const { renderOutcomeFallback } = await import('../features/outcome-turn.js');
       const fb = await renderOutcomeFallback('preview', pv.id, sti.fallback);
       expect(JSON.stringify(fb!.blocks)).toContain('preview:claim');
+      // Posted meanwhile (a reply with preview, or the results turn's safety net): the turn becomes "do nothing".
+      const { outcomeObsolete } = await import('../features/outcome-turn.js');
+      expect(await outcomeObsolete('preview', pv.id)).toBeNull();
+      await PS.markAnnounced(pv.id);
+      expect(await outcomeObsolete('preview', pv.id)).toMatch(/already posted.*end_turn/);
       expect(t).toBeTruthy();
     });
 

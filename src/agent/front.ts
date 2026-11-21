@@ -18,7 +18,7 @@ import { lowQuotaLines, recordModelUsage, userQuotaStates } from '../features/gu
 import { renderSpeakerMemory, renderWorkspaceFacts } from '../features/memory/render.js';
 import { renderTurnRules } from '../features/memory/rules.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
-import { OUTCOME_SOURCES, renderOutcomeFallback } from '../features/outcome-turn.js';
+import { OUTCOME_SOURCES, outcomeObsolete, renderOutcomeFallback } from '../features/outcome-turn.js';
 import { loadPendingActions, renderPendingActions } from '../features/pending.js';
 import { renderDjState } from '../features/huddlefm/render.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
@@ -497,9 +497,13 @@ async function buildTurnMessage(
     // coding-agent launch, src/features/outcome-turn.ts) or a HuddleFM DJ notice (src/features/huddlefm/notices.ts):
     // its stored input replaces new messages.
     const sched = await scheduledTurnInput(turn.id).catch((err) => (log.warn({ err }, 'scheduledTurnInput failed'), null));
-    parts.push(sched ? sched.input : 'A scheduled turn whose details are missing. Do nothing: call end_turn.');
+    const isOutcome = Boolean(sched && OUTCOME_SOURCES.includes(sched.source));
+    // An outcome that became moot before this turn ran (e.g. the preview was posted meanwhile): a "do nothing" notice
+    // and no fallback.
+    const moot = sched && isOutcome ? await outcomeObsolete(sched.source, sched.sourceRef ?? null) : null;
+    parts.push(moot ?? (sched ? sched.input : 'A scheduled turn whose details are missing. Do nothing: call end_turn.'));
     if (queued) parts.push(queued);
-    if (sched && OUTCOME_SOURCES.includes(sched.source)) outcome = { fallback: sched.fallback, source: sched.source, sourceRef: sched.sourceRef ?? null };
+    if (sched && isOutcome) outcome = { fallback: moot ? null : sched.fallback, source: sched.source, sourceRef: sched.sourceRef ?? null };
   } else {
     parts.push(section('new_messages', clipTokens(ctx.newMessages, BUDGET.newMessages), ` from="<@${turn.authorId}>" note="The message(s) you are responding to now."`));
     const barePing = turn.isMention ? await isBarePing(turn).catch(() => null) : null;
@@ -1135,6 +1139,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   if (failed) {
     log.error({ err: failed, turnId }, 'front turn failed');
     await appendEvent(turn.threadId, 'error', 'bot', { turnId, error: String((failed as any)?.message ?? failed) }).catch(() => {});
+    // Before any early return below: a live preview the failed turn didn't post still reaches the thread.
+    const previewPostedOnFailure = await postPreviewSafetyNet();
     // Already visible (stream open or reply posted): close it out ourselves instead of letting the pipeline post.
     const note = outcome?.fallback ?? ERROR_NOTE;
     const closed = await replies.abortOpenStreams(note);
@@ -1144,7 +1150,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
       return;
     }
     if (outcome) return void (await postOutcomeFallback());
-    if (await postPreviewSafetyNet()) return;
+    if (previewPostedOnFailure) return;
     // A reaction (or other non-reply visible effect) already answered the user: don't throw, or the pipeline posts
     // "Something broke" on top of it.
     if (state.visible.size > 0) return;

@@ -149,7 +149,8 @@ registerTool({
         if (res.startsWith('Replied')) {
           s.visible.add('reply');
           // The preview's link + claim button reached the thread: results turns and the safety net won't post it again.
-          if (preview && pv?.items.length) await markAnnounced(preview.trim()).catch(() => {});
+          // Only when the buttons really went out (Slack may refuse the blocks: the reply then carries text fallbacks).
+          if (preview && pv?.items.length && s.replies.extrasDeliveredAsBlocks(toolCallId)) await markAnnounced(preview.trim()).catch(() => {});
           return `${res}${fileNote} Don't send another reply unless you have something new.`;
         } else if (s.replies.anyVisible) s.visible.add('reply'); // e.g. a stream the user stopped halfway
         return `${res}${fileNote}`;

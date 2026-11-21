@@ -14,7 +14,7 @@ import { enqueue, QUEUE } from '../../core/queues.js';
 import { slackCall } from '../../core/slack.js';
 import { sql } from '../../db/index.js';
 import { checkEntry } from '../../features/guard.js';
-import { registerOutcomeFallback, settleWithOutcome } from '../../features/outcome-turn.js';
+import { registerOutcomeFallback, registerOutcomeObsolete, settleWithOutcome } from '../../features/outcome-turn.js';
 import { hasAgreed } from '../../features/privacy.js';
 import { confirmDialog } from '../../features/reports.js';
 import { deleteOriginal, ephemeral, isAdmin, postToModChannel, requireAdmin, userProfile } from '../../features/util.js';
@@ -176,6 +176,8 @@ const hhmmUtc = (d: Date | null) => `${(d ?? new Date()).toISOString().slice(11,
  * turn has the front agent post it (fallback: our message).
  */
 async function announceLive(row: PreviewRow): Promise<void> {
+  // Already posted (a reply with `preview`, or the results turn's safety net): nothing to announce.
+  if ((await getPreview(row.id))?.announcedAt) return;
   const fallback = `Live preview of ${cleanTitle(row.title)}: ${row.url} · expires ${hhmmUtc(row.expiresAt)}`;
   if (!(await hasAgreed(row.requesterId).catch(() => false))) {
     await postPreviewMessage(row);
@@ -222,11 +224,20 @@ async function announceFailed(row: PreviewRow, what: string): Promise<void> {
   if (!r?.turnId) await tellRequester(row, text);
 }
 
+/** When the live-preview outcome turn runs: moot if the preview was posted meanwhile (or is no longer live). */
+registerOutcomeObsolete('preview', async (sourceRef) => {
+  const row = sourceRef ? await getPreview(sourceRef) : null;
+  if (!row || row.status !== 'live') return null; // a failure notice, or gone: keep the stored input
+  if (!row.announcedAt) return null;
+  return `System notice: the live preview ${row.id} (${row.url}) is already posted in this thread with its claim button. Nothing to do: call end_turn.`;
+});
+
 /** An outcome turn for a live preview that showed nothing: post the code message with its buttons instead. */
 registerOutcomeFallback('preview', async (sourceRef) => {
   const row = sourceRef ? await getPreview(sourceRef) : null;
   if (!row || row.status !== 'live' || !row.url) return null;
   const m = previewMessage(row);
+  // (A moot turn has no fallback, so an announced preview never gets here.)
   return { ...m, onPosted: (ts) => setMessageTs(row.id, ts) };
 });
 

@@ -50,6 +50,23 @@ export function registerOutcomeFallback(source: OutcomeSource, render: FallbackR
   fallbackRenderers.set(source, render);
 }
 
+/**
+ * A source may find, when its outcome turn finally runs, that the notice is moot (e.g. a live preview someone already
+ * posted): the check returns the input to use instead (a "do nothing" notice), or null to keep the stored one. A moot
+ * turn posts no fallback.
+ */
+type ObsoleteCheck = (sourceRef: string | null) => Promise<string | null>;
+const obsoleteChecks = new Map<string, ObsoleteCheck>();
+
+export function registerOutcomeObsolete(source: OutcomeSource, check: ObsoleteCheck): void {
+  obsoleteChecks.set(source, check);
+}
+
+export async function outcomeObsolete(source: string, sourceRef: string | null): Promise<string | null> {
+  const c = obsoleteChecks.get(source);
+  return c ? c(sourceRef).catch((err) => (log.warn({ err, source }, 'outcome obsolete check failed'), null)) : null;
+}
+
 export async function renderOutcomeFallback(source: string, sourceRef: string | null, fallback: string): ReturnType<FallbackRenderer> {
   const r = fallbackRenderers.get(source);
   return r ? r(sourceRef, fallback).catch((err) => (log.warn({ err, source }, 'outcome fallback renderer failed'), null)) : null;
