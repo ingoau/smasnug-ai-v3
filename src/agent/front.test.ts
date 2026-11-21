@@ -611,6 +611,13 @@ describe('runFrontTurn: required tool calls and the plain-text nudge', () => {
     h.model = mockModel([toolStep(['end_turn', { no_reply_requested: true }])]);
     await runFrontTurn(turn({ id: 155 }), io().io);
     expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+    expect(h.events.some((e) => e.type === 'reply_skipped')).toBe(true);
+  });
+
+  it('no_reply_requested does not silence a results turn', async () => {
+    h.model = mockModel([toolStep(['end_turn', { no_reply_requested: true }])]);
+    await runFrontTurn(turn({ id: 157, kind: 'synthesis' }), io().io);
+    expect(h.events.some((e) => e.type === 'reply_skipped')).toBe(false);
   });
 
   it('plain end_turn on a mention still gets the fallback', async () => {

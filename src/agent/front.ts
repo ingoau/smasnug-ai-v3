@@ -1178,7 +1178,10 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   }
 
   if (state.visible.size === 0 && outcome) await postOutcomeFallback();
-  else if (state.visible.size === 0 && !previewPosted && !silenceRequested && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
+  else if (state.visible.size === 0 && !previewPosted && silenceRequested && turn.kind !== 'synthesis' && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
+    // Asked not to respond: no fallback, but leave a trace of it (evals can spot a misused flag).
+    await appendEvent(turn.threadId, 'reply_skipped', 'bot', { turnId, noReplyRequested: true });
+  } else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
