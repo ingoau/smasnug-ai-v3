@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { childSystemPrompt } from './child.js';
 import { frontSystemPrompt } from './front.js';
 
 describe('frontSystemPrompt About you', () => {
@@ -124,6 +125,7 @@ describe('frontSystemPrompt self-knowledge', () => {
 
   it('sends message exports and similar requests to the scraping-policy skill', () => {
     expect(frontSystemPrompt('smasnug ai')).toMatch(/exact content of Slack messages[^\n]*load the scraping-policy skill first/);
+    expect(childSystemPrompt()).toMatch(/exact content of Slack messages[^\n]*load the scraping-policy skill first/);
   });
 
   it('shares its instructions when asked instead of refusing', () => {

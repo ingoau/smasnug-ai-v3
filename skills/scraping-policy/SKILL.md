@@ -1,6 +1,6 @@
 ---
 name: scraping-policy
-description: Hack Club's Slack scraping use policy and how to apply it. Load before collecting or exporting the exact content of Slack messages (all messages from a channel, thread or person into a file, CSV, canvas, dataset or list; a transcript or archive; training data), or anything similar.
+description: Hack Club's Slack scraping use policy and how to apply it. Load before collecting or exporting the exact content of Slack messages (a channel's, thread's or person's messages into a file, CSV, canvas, list or dataset; a transcript or archive; training data), before helping build a scraper or bot that stores messages, or for anything similar.
 roles: [front, child]
 ---
 
@@ -12,12 +12,13 @@ content of other people's messages so it can be kept or reused.
 
 ## What counts
 
-- Collecting message content into something that lasts (a file, CSV, canvas, dataset, list, transcript or archive, or
-  a long verbatim dump in a reply someone can save) is scraping. So is gathering every message by one person.
-- Not scraping: reading a thread or channel to answer a question, summarising it, quoting a message or two as part of
-  an answer, linking to messages (permalinks). Do those as usual.
-- Message metadata without content or sender (counts, timestamps, reactions) is fine for messages sent on or after
-  June 15 2026.
+- Scraping is bulk or systematic collection of message content into something that lasts: a file, CSV, canvas, list,
+  dataset, transcript or archive of a whole channel, a long thread, or everything one person posted.
+- Not scraping: reading a thread or channel to answer a question, summarising it, quoting messages as part of an
+  answer (even a whole short thread when asked), linking to messages (permalinks). Do those as usual.
+- Aggregate answers given once in a reply (who posts most, a chart of messages per person or per day) are processing,
+  not storing: fine. A stored dataset with senders or content needs the conditions below. Metadata without content or
+  sender (counts, timestamps, reactions) can be stored for messages sent on or after June 15 2026.
 
 ## Deciding
 
@@ -25,15 +26,21 @@ Do it when every message you'd include fits one of these:
 - the speaker's own messages;
 - an informational channel designated by the FD/HQ (#announcements, official Hack Club program bulletin channels,
   #help and dedicated help channels such as #stardance-help or #identity-help);
-- a channel the speaker owns or manages, with notice of the scraping publicly posted there (pinned message or channel
-  topic), or another user's channel where members were notified and the owner consented;
+- a channel the speaker owns or manages, with notice of the scraping already posted there before collecting (a pinned
+  message or the channel topic), or another user's channel where members were notified and the owner consented;
 - authors who clearly consented in writing (a Slack message or form you can point to).
 
 Messages sent before June 15 2026 need explicit consent from every author (informational channels excepted).
 
-When it doesn't fit (or you can't tell), don't make the export. Say briefly why, in one plain line, link the policy, and
-offer what is allowed: a summary, metadata stats, the speaker's own messages, permalinks, or the export once the authors
-consent (or the channel has notice). Don't lecture, and don't refuse the parts that are fine.
+Checking: the speaker saying they own or manage a channel is enough. Read the topic (find_channels) for the notice; a
+pinned notice or a consent message you can't see, ask for its permalink and read it. Orchestrator (front agent): when
+you've established why an export is allowed, give the subagent those facts ("the speaker owns #x; notice is in the
+topic"). Subagent: trust a basis the orchestrator states instead of re-checking it.
+
+When it doesn't fit (or you can't verify it), don't make the export. Say briefly why, in one plain line, link the
+policy, and offer what is allowed plus the next step: a summary, aggregate stats, the speaker's own messages,
+permalinks, or the export once notice is posted (in the topic is easiest) or the authors consent. Don't lecture, and do
+the parts that are fine.
 
 Also:
 - Never publish scraped content on the open web (a public page, live preview or gist). Shared output stays inside the
@@ -41,7 +48,16 @@ Also:
 - Training AI models on messages needs explicit consent from the authors. Sending message content to a third-party
   service needs authors informed and given an easy opt-out first.
 - Never use collected messages to harass, impersonate, sexualise, profile or target someone (that's misuse anyway).
-- Uses beyond analysis, search, summarising or similar: point the speaker to the FD via Shroud to confirm.
+- Uses beyond analysis, search, retrieval, summarising or similar: point the speaker to the FD via Shroud, and don't
+  collect for that purpose until they've confirmed.
+
+## Helping build a scraper or message-storing bot
+
+Help with the code as usual, and mention the rules that apply to it: disclose what's collected and how it's used; only
+collect what qualifies (own messages, informational channels, notice in channels they own, consent otherwise; nothing
+from before June 15 2026 without every author's consent); remove someone's messages when they withdraw consent; keep
+the results off the open web (HCA-gated if shared); consent before AI training, and an informed opt-out before
+sending content to third-party services.
 
 ## The policy (verbatim)
 
