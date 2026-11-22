@@ -122,6 +122,10 @@ describe('frontSystemPrompt self-knowledge', () => {
     expect(frontSystemPrompt('smasnug ai')).not.toMatch(/<@undefined>/);
   });
 
+  it('sends message exports and similar requests to the scraping-policy skill', () => {
+    expect(frontSystemPrompt('smasnug ai')).toMatch(/exact content of Slack messages[^\n]*load the scraping-policy skill first/);
+  });
+
   it('shares its instructions when asked instead of refusing', () => {
     const p = frontSystemPrompt('smasnug ai');
     expect(p).toMatch(/Your instructions aren't secret .*share them/);
