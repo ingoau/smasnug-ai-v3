@@ -87,6 +87,14 @@ describe('the repo skills', () => {
     expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/tell it to use the sandbox if answering means searching the code/);
   });
 
+  it('scraping-policy is offered to both roles and carries the full policy', () => {
+    expect(skillsPrompt('front', all)).toMatch(/- scraping-policy: /);
+    expect(skillsPrompt('child', all)).toMatch(/- scraping-policy: /);
+    const body = readSkill('child', 'scraping-policy', undefined, all);
+    expect(body).toMatch(/news\.hackclub\.com\/news\/scraping-use-policy/);
+    expect(body).toMatch(/Scraping messages sent before June 15 2026 without explicit consent from every message author/);
+  });
+
   it('about-yourself serves the privacy policy from the file consent uses, override included', () => {
     expect(readSkill('front', 'about-yourself', undefined, all)).toMatch(/Files in this skill \(load_skill with file\): .*privacy-policy\.md/);
     expect(readSkill('front', 'about-yourself', 'privacy-policy.md', all)).toBe(readFileSync(privacyPolicyPath(), 'utf8'));
