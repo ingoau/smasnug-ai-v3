@@ -176,6 +176,7 @@ describe.skipIf(!INTEGRATION)('files from elsewhere', () => {
       const imgs = await prepareImageArgs({ threadId: threadA, speakerId: 'U_ASKER' }, [{ file: fileId }], 5);
       expect(imgs.images).toEqual([]);
       expect(imgs.errors).toEqual([expect.stringContaining("couldn't be attached")]);
+      expect(imgs.missing).toBe(1);
     } finally {
       fetchOverride.fn = null;
     }
