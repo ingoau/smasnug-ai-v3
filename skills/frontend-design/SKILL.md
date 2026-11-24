@@ -15,8 +15,9 @@ this bot: the frontmatter and the "Here" section below were added; the text afte
   design direction you chose in your result in a line or two, so they can redirect you with a follow-up.
 - "The client" is the user who asked. The brief's own words always win: if they asked for a style, colours or fonts,
   use them.
-- Screenshots: render the pages in the sandbox and look at them (web-dev, step 4) at desktop and phone widths, and
-  critique against the plan before you publish.
+- Screenshots: serve and screenshot in one command (a CommonJS Playwright script; no server survives a command) at
+  desktop (1280 wide) and phone (390 wide) widths, look at the PNGs with `sandbox_read_file`, and critique against the
+  plan before you deliver or publish (websites: web-dev, step 4).
 - Fonts: self-host or load from Google Fonts / Fontsource; check they actually load in the screenshot.
 - There is no notes memory between runs: skip the advice about jotting notes for future passes.
 
