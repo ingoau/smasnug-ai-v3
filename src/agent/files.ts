@@ -40,7 +40,9 @@ export async function prepareOutgoingFiles(
       if ('error' in f) errors.push(f.error);
       else if (!seen.has(f.id)) {
         seen.add(f.id);
-        files.push({ fileId: f.id, filename: sanitizeFileName(f.name) });
+        const problem = await notDownloadable(f);
+        if (problem) errors.push(problem);
+        else files.push({ fileId: f.id, filename: sanitizeFileName(f.name) });
       }
       continue;
     }
@@ -66,6 +68,22 @@ export async function prepareOutgoingFiles(
     }
   }
   return { files, errors };
+}
+
+/**
+ * An upload not fetched yet is fetched now (and kept, like any first use), so a file Slack won't let the bot download
+ * (e.g. in a channel the bot isn't in, without a user token that may read files) is reported per file before the
+ * message goes out, instead of failing the whole upload after the text is already visible. Null: it can be posted.
+ */
+async function notDownloadable(f: FileMeta): Promise<string | null> {
+  if (f.origin !== 'upload' || f.hasContent || f.blobSlackFileId) return null;
+  try {
+    await loadFileBytes(f);
+    return null;
+  } catch (err) {
+    log.info({ err, fileId: f.id }, 'file to post could not be downloaded');
+    return `${f.id} (${f.name}) couldn't be attached: ${err instanceof FileError ? err.message : 'downloading it from Slack failed'}.`;
+  }
 }
 
 /** Image types Slack's image block shows (`slack_file`: png, jpg, jpeg, gif). */
@@ -103,6 +121,11 @@ export async function prepareImageArgs(
       const f = await resolveFile(item.file, ctx);
       if ('error' in f) {
         errors.push(f.error);
+        continue;
+      }
+      const problem = await notDownloadable(f);
+      if (problem) {
+        errors.push(problem);
         continue;
       }
       const file = { fileId: f.id, filename: sanitizeFileName(f.name) };

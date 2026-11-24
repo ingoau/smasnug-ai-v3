@@ -14,6 +14,7 @@ import { chartsSchema } from './charts.js';
 import { privateViewer, turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
 import { prepareImageArgs, prepareOutgoingFiles } from './files.js';
+import { FILES_NOT_ATTACHED } from './reply.js';
 import { previewReplyExtras } from '../sandbox/preview/reply-blocks.js';
 import { markAnnounced } from '../sandbox/preview/store.js';
 import { cardsSchema, containersSchema, fieldsSchema, imagesSchema, linksSchema, MAX_IMAGES, tablesSchema } from './rich-blocks.js';
@@ -163,6 +164,10 @@ registerTool({
           // The preview's link + claim button reached the thread: results turns and the safety net won't post it again.
           // Only when the buttons really went out (Slack may refuse the blocks: the reply then carries text fallbacks).
           if (preview && pv?.items.length && s.replies.extrasDeliveredAsBlocks(toolCallId)) await markAnnounced(preview.trim()).catch(() => {});
+          // Requested files that didn't make it: the text (already visible) may say they're there.
+          if (prepared.errors.length || imgs.errors.some((n) => n.includes("couldn't be attached")) || res.includes(FILES_NOT_ATTACHED)) {
+            return `${res}${fileNote} The speaker can't see the missing files. If your reply says they're attached or shown, correct that now in a short follow-up reply (say they couldn't be attached and why; link the message the file is in if you have it). Don't try the same file again.`;
+          }
           return `${res}${fileNote} Don't send another reply unless you have something new.`;
         } else if (s.replies.anyVisible) s.visible.add('reply'); // e.g. a stream the user stopped halfway
         return `${res}${fileNote}`;

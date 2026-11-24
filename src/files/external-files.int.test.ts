@@ -162,6 +162,25 @@ describe.skipIf(!INTEGRATION)('files from elsewhere', () => {
     expect(prepared).toEqual({ files: [{ fileId: shot.id, filename: 'bug.png' }], errors: [] });
   });
 
+  it("a file Slack won't let the bot download is reported before posting, not attached", async () => {
+    const id = `FDENIED${r}`;
+    const msg = { ts: '1790000003.000100', userId: 'U_SAM', botId: null, username: null, text: '', files: [{ id, name: 'meme.gif', mimetype: 'image/gif', urlPrivate: 'https://files.slack.com/files-pri/T/meme.gif' }] };
+    const reg = await S.registerExternalFiles(threadA, [msg], { sourceChannelId: PUB, sourcePublic: true });
+    const fileId = reg.get(id)!.id;
+    fetchOverride.fn = async (url) => ({ url, status: 403, contentType: 'text/plain', body: Buffer.alloc(0) });
+    try {
+      const { prepareOutgoingFiles, prepareImageArgs } = await import('../agent/files.js');
+      const prepared = await prepareOutgoingFiles({ threadId: threadA, speakerId: 'U_ASKER' }, [fileId]);
+      expect(prepared.files).toEqual([]);
+      expect(prepared.errors).toEqual([expect.stringMatching(new RegExp(`^${fileId} \\(meme\\.gif\\) couldn't be attached: Slack didn't let the bot download it`))]);
+      const imgs = await prepareImageArgs({ threadId: threadA, speakerId: 'U_ASKER' }, [{ file: fileId }], 5);
+      expect(imgs.images).toEqual([]);
+      expect(imgs.errors).toEqual([expect.stringContaining("couldn't be attached")]);
+    } finally {
+      fetchOverride.fn = null;
+    }
+  });
+
   it('caps new registrations per tool result', async () => {
     const msgs = Array.from({ length: S.MAX_EXTERNAL_FILES + 5 }, (_, i) => ({
       ts: `1790000010.${String(i).padStart(6, '0')}`,
