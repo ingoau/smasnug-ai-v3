@@ -136,6 +136,15 @@ describe('requires', () => {
     expect(readSkill('front', 'huddle-dj', undefined, repo, () => true)).toMatch(/huddle_dj_mode/);
     expect(repo.find((s) => s.name === 'live-previews')?.requires).toEqual(['previews']);
   });
+  it('frontend-design is a sandbox subagent skill that keeps its license and that web-dev points to', () => {
+    const repo = loadSkills(defaultSkillsDir());
+    const fd = repo.find((s) => s.name === 'frontend-design');
+    expect(fd?.roles).toEqual(['child']);
+    expect(fd?.requires).toEqual(['sandbox']);
+    expect(fd?.files).toContain('LICENSE.txt');
+    expect(readSkill('child', 'frontend-design', undefined, repo, () => true)).toMatch(/## Here \(read first\)[\s\S]*# Frontend Design/);
+    expect(readSkill('child', 'web-dev', undefined, repo, () => true)).toMatch(/load the `frontend-design` skill/);
+  });
   it('the sandbox how-to is a subagent skill, and the always-on child section points to it', async () => {
     const repo = loadSkills(defaultSkillsDir());
     const sbx = repo.find((s) => s.name === 'sandbox');

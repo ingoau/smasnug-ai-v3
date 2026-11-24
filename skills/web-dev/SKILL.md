@@ -10,7 +10,7 @@ requires: [previews]
 ## Front agent (in the thread)
 - Every website build goes to a subagent that uses the sandbox, never create_file. Even a one-page site.
 - In its task: what the user wants (content, pages, style, any text or files they gave; pass the file_… ids), that it
-  is a website build, that it must load the `web-dev` skill first, and that the user wants a live preview.
+  is a website build, that it must load the `web-dev` and `frontend-design` skills first, and that the user wants a live preview.
 - Tell the user in one line that you're building it and you'll post the link when it's done.
 - The results give the live preview's URL and id: put the link in your reply and pass `preview: "<id>"` (adds the
   claim button). If it's waiting for the user to accept Cloudflare's terms, say the link comes once they accept (you're
@@ -29,7 +29,8 @@ Always Astro, always in the sandbox, always finished with `request_preview`.
 2. **Build the pages**: `src/pages/*.astro` (one file per route), shared layout in `src/layouts/`, components in
    `src/components/`, static files in `public/`. Write files with `sandbox_write_file`.
    - Static output only: no `output: 'server'`, no adapter, no API routes or server endpoints.
-   - Make it look designed, not like a template: a deliberate palette and type pairing, real copy (no lorem ipsum),
+   - Design it first: load the `frontend-design` skill and follow its process (a short plan of palette, type and
+     layout for this brief, checked against the generic defaults it lists, then build). Real copy (no lorem ipsum),
      responsive down to phone width, semantic HTML, alt text, good contrast.
    - Keep it light: no huge images (resize with pillow if the user's are big), no heavy JS. Use Astro islands only for
      interactivity that needs them.
