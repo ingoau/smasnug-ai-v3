@@ -28,7 +28,7 @@ import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import type { TurnTiming } from '../core/timing.js';
 import { uploadFiles, uploadPrivateFiles, type OutgoingFile } from './files.js';
-import { recordFilePosts } from '../files/store.js';
+import { FileError, recordFilePosts } from '../files/store.js';
 import { extractPartialString } from './partial-json.js';
 import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chooseDelivery, type DeliveryMode } from './util.js';
@@ -56,6 +56,9 @@ const streamOff = (buf: string) => /^\s*\{\s*"stream"\s*:\s*false\b/.test(buf);
 /** Blocks a stream may carry (50 per message, one kept free for the buttons at stopStream). */
 const MAX_STREAM_BLOCKS = MAX_MESSAGE_BLOCKS - 1;
 /** A later reply in a turn is held back until this many chars arrived, so it can be checked for duplication first. */
+/** In a reply result: the reply's text went out but its files didn't (tools.ts then asks the model to correct it). */
+export const FILES_NOT_ATTACHED = 'the files were NOT attached';
+
 export const EMPTY_RESULT = 'Not posted: the reply was empty. To stay silent, call end_turn.';
 
 export interface ReplyTarget {
@@ -875,7 +878,7 @@ export class ReplyManager {
       } catch (err) {
         log.warn({ err }, 'reply file upload failed');
         await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, mode: delivered, text, filesError: String(err) });
-        return `Replied (${delivered}), but uploading the files failed.${chartSuffix()}`;
+        return `Replied (${delivered}), but ${FILES_NOT_ATTACHED} (${err instanceof FileError ? err.message : 'uploading them failed'}).${chartSuffix()}`;
       }
     }
     await appendEvent(this.t.threadId, 'reply', 'bot', {

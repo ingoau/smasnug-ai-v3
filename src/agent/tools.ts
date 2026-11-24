@@ -14,6 +14,7 @@ import { chartsSchema } from './charts.js';
 import { privateViewer, turnState } from './turn-state.js';
 import { continueTurnSchema } from './turn-end.js';
 import { prepareImageArgs, prepareOutgoingFiles } from './files.js';
+import { EMPTY_RESULT, FILES_NOT_ATTACHED } from './reply.js';
 import { previewReplyExtras } from '../sandbox/preview/reply-blocks.js';
 import { markAnnounced } from '../sandbox/preview/store.js';
 import { cardsSchema, containersSchema, fieldsSchema, imagesSchema, linksSchema, MAX_IMAGES, tablesSchema } from './rich-blocks.js';
@@ -158,11 +159,18 @@ registerTool({
         const res = await s.replies.finish(toolCallId, text, attach, buttons, charts, { stream, images: imgs.images, tables, cards, fields, containers, links, extraItems: pv?.items });
         const notes = [...prepared.errors, ...imgs.errors, ...((files?.length ?? 0) > 10 || all.length > 10 ? ['Only the first 10 files were posted (Slack allows 10 per message).'] : [])];
         const fileNote = (notes.length ? ` File problems: ${notes.join(' ')}` : '') + (pv?.note ? ` ${pv.note}` : '');
+        // Requested files or images that won't be in the reply (not found, not downloadable, bad url).
+        const missing = prepared.errors.length + imgs.missing;
+        if (res === EMPTY_RESULT && missing) return `Not posted: none of the files or images could be attached.${fileNote} Tell the speaker in a reply that it didn't work and why.`;
         if (res.startsWith('Replied')) {
           s.visible.add('reply');
           // The preview's link + claim button reached the thread: results turns and the safety net won't post it again.
           // Only when the buttons really went out (Slack may refuse the blocks: the reply then carries text fallbacks).
           if (preview && pv?.items.length && s.replies.extrasDeliveredAsBlocks(toolCallId)) await markAnnounced(preview.trim()).catch(() => {});
+          // Requested files that didn't make it: the text (already visible) may say they're there.
+          if (missing || res.includes(FILES_NOT_ATTACHED)) {
+            return `${res}${fileNote} The speaker can't see the missing files. If your reply says they're attached or shown, correct that now in a short follow-up reply (say they couldn't be attached and why; link the message the file is in if you have it). Don't try the same file again.`;
+          }
           return `${res}${fileNote} Don't send another reply unless you have something new.`;
         } else if (s.replies.anyVisible) s.visible.add('reply'); // e.g. a stream the user stopped halfway
         return `${res}${fileNote}`;
