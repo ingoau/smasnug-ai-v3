@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.hoisted(() => {
+  process.env.OPENROUTER_KEY ||= 'test';
+});
 import { randomBytes } from 'node:crypto';
 import { openFor, sealFor, userKey } from './crypto.js';
 import { scrubText } from './scrub.js';
@@ -75,7 +79,6 @@ describe('modal transport sealing', () => {
   it('seals vault modal state and opens it again', async () => {
     process.env.VAULT_SECRET_KEY = KEY;
     // config reads env at import: re-import with the key set.
-    const { vi } = await import('vitest');
     vi.resetModules();
     const t = await import('./transport.js');
     const body = { type: 'view_submission', view: { callback_id: 'vaultm:save', state: { values: { secret: { v: { value: 'pw' } } } } } };
@@ -87,5 +90,17 @@ describe('modal transport sealing', () => {
     const body = { type: 'view_submission', view: { callback_id: 'report:x', state: { values: { a: { v: { value: 'x' } } } } } };
     sealViewState(body);
     expect(openViewState(body).values?.a?.v?.value).toBe('x');
+  });
+});
+
+describe('sessionSecrets', () => {
+  it('scrubs token-like cookie and storage values only', async () => {
+    const { sessionSecrets } = await import('./scrub.js');
+    const state = JSON.stringify({
+      cookies: [{ name: 'sid', value: 'abcdefghijklmnop1234' }, { name: 'lang', value: 'en-GB' }],
+      origins: [{ origin: 'https://x.com', localStorage: [{ name: 't', value: 'eyJhbGciOiJIUzI1NiJ9.x' }, { name: 'n', value: 'a b c d e f g h i j' }] }],
+    });
+    expect(sessionSecrets('s', state).map((x) => x.value)).toEqual(['abcdefghijklmnop1234', 'eyJhbGciOiJIUzI1NiJ9.x']);
+    expect(sessionSecrets('s', 'not json')).toEqual([]);
   });
 });

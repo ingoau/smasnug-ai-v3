@@ -10,15 +10,17 @@
  *   the same path as send_message's confirmation.
  *
  * Only the owner's click counts. Clicks from anyone else are refused. A grant ("10 min in this thread") is keyed by
- * owner + grant key + thread, so it never carries over to another thread.
+ * owner + grant key + thread, so it never carries over to another thread; callers build the key with grantKeyFor
+ * (identity.ts), so a grant earned by the front agent never covers a subagent, nor one subagent's another's.
  */
+import type { TransactionSql } from 'postgres';
 import { limits } from '../../config.js';
 import type { ActionContext } from '../../core/actions.js';
 import { parseThreadId, threadTsArg } from '../../core/events.js';
 import { slackCall } from '../../core/slack.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
-import { settleWithOutcome } from '../outcome-turn.js';
+import { outcomeSkipReason, settleWithOutcome } from '../outcome-turn.js';
 import { mrkdwnEscape, respond, truncate } from '../util.js';
 import { audit } from './audit.js';
 import { openFor, sealFor } from './crypto.js';
@@ -110,10 +112,21 @@ export function approvalButtons(id: string, allowWindow: boolean): unknown[] {
   ];
 }
 
+/** Detail lines packed into sections of at most `max` characters (a section's text is capped at 3000). */
+export function detailSections(detail: string[], max = 2900): string[] {
+  const out: string[] = [];
+  for (const line of detail) {
+    const last = out.at(-1);
+    if (last != null && last.length + 1 + line.length <= max) out[out.length - 1] = `${last}\n${line}`;
+    else out.push(line);
+  }
+  return out.map((t) => truncate(t, max));
+}
+
 function cardBlocks(o: { title: string; detail: string[]; buttons: unknown[]; footer: string }): unknown[] {
   return [
     { type: 'section', text: { type: 'mrkdwn', text: truncate(o.title, 2900) } },
-    ...(o.detail.length ? [{ type: 'section', text: { type: 'mrkdwn', text: truncate(o.detail.join('\n'), 2900) } }] : []),
+    ...detailSections(o.detail).map((text) => ({ type: 'section', text: { type: 'mrkdwn', text } })),
     { type: 'actions', elements: o.buttons },
     { type: 'context', elements: [{ type: 'mrkdwn', text: o.footer }] },
   ];
@@ -225,9 +238,39 @@ export async function decide(row: ApprovalRow, status: Exclude<ApprovalStatus, '
   return claimed;
 }
 
+/** The card's title as plain text without the question mark ("Use your credential `k` for a request to x.com"). */
+function plainTitle(row: Pick<ApprovalRow, 'title'>): string {
+  return row.title.replace(/\*/g, '').replace(/\?\s*$/, '').trim();
+}
+
+/** Code-written fallback, posted if the outcome turn shows nothing (a channel thread always sees the result). */
+function defaultFallback(row: ApprovalRow, decision: 'approved' | 'denied' | 'expired' | 'interrupted'): string {
+  const what = truncate(plainTitle(row), 300);
+  if (decision === 'approved') return `Done: ${what}`;
+  if (decision === 'denied') return `Denied: ${what}`;
+  if (decision === 'expired') return `Expired: ${what}`;
+  return `Interrupted: ${what}. It may or may not have run.`;
+}
+
+const settledTransition = (id: string) => async (tx: TransactionSql<{}>) =>
+  (await tx`update vault_approvals set settled_at = now() where id = ${id} and settled_at is null returning id`).length > 0;
+
 async function settle(row: ApprovalRow, decision: 'approved' | 'denied' | 'expired'): Promise<void> {
   const exec = executors.get(row.kind);
-  if (!exec) return;
+  if (!exec) {
+    await sql`update vault_approvals set payload_enc = null, settled_at = coalesce(settled_at, now()) where id = ${row.id}`;
+    return;
+  }
+  // No outcome turn may run (thread gone, paused, suspended…): don't run the action either.
+  const skip = await outcomeSkipReason(row.threadId, row.ownerId).catch((err) => (log.warn({ err, id: row.id }, 'approval skip check failed'), null));
+  if (skip) {
+    await sql`update vault_approvals set payload_enc = null where id = ${row.id}`;
+    log.info({ id: row.id, kind: row.kind, decision, skip }, 'vault approval: no outcome turn may run, action not run');
+    await settleWithOutcome({ threadId: row.threadId, speakerId: row.ownerId, source: 'approval', sourceRef: row.id, input: '', isMention: true, skip, transition: settledTransition(row.id) }).catch((err) =>
+      log.error({ err, id: row.id }, 'approval outcome (skipped) failed'),
+    );
+    return;
+  }
   let payload: unknown = null;
   try {
     const [r] = await sql<{ payloadEnc: Buffer | null }[]>`select payload_enc from vault_approvals where id = ${row.id}`;
@@ -240,20 +283,55 @@ async function settle(row: ApprovalRow, decision: 'approved' | 'denied' | 'expir
     out = await exec(row, payload, decision);
   } catch (err) {
     log.error({ err, id: row.id, kind: row.kind }, 'approval executor failed');
-    out = { input: `<approval_outcome id="${row.id}" decision="${decision}">The action failed: ${String((err as Error)?.message ?? err).slice(0, 300)}</approval_outcome>` };
+    out = { input: `<approval_outcome id="${row.id}" decision="${decision}">The action failed: ${String((err as Error)?.message ?? err).slice(0, 300)}</approval_outcome>`, fallback: `Failed: ${truncate(plainTitle(row), 300)}` };
   }
   await sql`update vault_approvals set payload_enc = null where id = ${row.id}`;
-  if (!out) return;
+  if (!out) {
+    await sql`update vault_approvals set settled_at = coalesce(settled_at, now()) where id = ${row.id}`;
+    return;
+  }
   await settleWithOutcome({
     threadId: row.threadId,
     speakerId: row.ownerId,
     source: 'approval',
     sourceRef: row.id,
     input: out.input,
-    fallback: out.fallback ?? null,
-    isMention: false,
-    transition: async (tx) => (await tx`update vault_approvals set settled_at = now() where id = ${row.id} and settled_at is null returning id`).length > 0,
+    fallback: out.fallback ?? defaultFallback(row, decision),
+    // The owner just acted (or the card expired on them): status from the start, and a reply is expected.
+    isMention: true,
+    transition: settledTransition(row.id),
   }).catch((err) => log.error({ err, id: row.id }, 'approval outcome failed'));
+}
+
+/**
+ * Outcome rows decided more than 5 minutes ago but never settled (the worker died mid-action, or settling threw):
+ * settle them now without re-running anything. An approved one may or may not have run.
+ */
+export async function settleInterrupted(): Promise<void> {
+  const rows = await sql<ApprovalRow[]>`
+    select ${COLS} from vault_approvals
+    where mode = 'outcome' and settled_at is null and status in ('approved', 'denied', 'expired') and decided_at < now() - interval '5 minutes'
+    order by decided_at limit 50`;
+  for (const r of rows) {
+    const decision = r.status as 'approved' | 'denied' | 'expired';
+    await sql`update vault_approvals set payload_enc = null where id = ${r.id}`;
+    const interrupted = decision === 'approved';
+    const body = interrupted
+      ? 'The owner approved this, but it was interrupted while it ran (the bot restarted): it may or may not have run. Check before retrying, and tell them.'
+      : decision === 'denied'
+        ? 'The owner denied it; nothing ran.'
+        : 'The approval card expired; nothing ran.';
+    await settleWithOutcome({
+      threadId: r.threadId,
+      speakerId: r.ownerId,
+      source: 'approval',
+      sourceRef: r.id,
+      input: outcomeInput(r, interrupted ? 'interrupted' : decision, body),
+      fallback: defaultFallback(r, interrupted ? 'interrupted' : decision),
+      isMention: true,
+      transition: settledTransition(r.id),
+    }).catch((err) => log.warn({ err, id: r.id }, 'settling an interrupted approval failed'));
+  }
 }
 
 function decidedText(row: ApprovalRow, status: ApprovalStatus): string {
@@ -268,7 +346,8 @@ function decidedText(row: ApprovalRow, status: ApprovalStatus): string {
 export async function replaceCard(ctx: Pick<ActionContext, 'responseUrl'> | null, row: ApprovalRow, status: ApprovalStatus): Promise<void> {
   const text = decidedText(row, status);
   if (ctx?.responseUrl && (await respond(ctx.responseUrl, { replace_original: true, text }))) return;
-  if (row.cardChannel && row.cardTs) await slackCall('chat.update', { channel: row.cardChannel, ts: row.cardTs, text, blocks: [] }).catch(() => {});
+  if (row.cardChannel && row.cardTs)
+    await slackCall('chat.update', { channel: row.cardChannel, ts: row.cardTs, text, blocks: [] }, { idempotencyKey: `vault-card-update:${row.id}:${status}` }).catch(() => {});
 }
 
 /** Button handler for vault:approve_once / approve_window / deny. */
@@ -292,13 +371,14 @@ export async function handleApprovalAction(ctx: ActionContext): Promise<void> {
   await replaceCard(ctx, claimed, claimed.status);
 }
 
-/** Maintenance: expire pending cards (outcome mode tells the agent). */
+/** Maintenance: expire pending cards (outcome mode tells the agent), then settle outcome rows left unsettled. */
 export async function expireApprovals(): Promise<void> {
   const rows = await sql<ApprovalRow[]>`select ${COLS} from vault_approvals where status = 'pending' and expires_at <= now() limit 50`;
   for (const r of rows) {
     const done = await decide(r, 'expired').catch((err) => (log.warn({ err }, 'approval expiry failed'), null));
     if (done) await replaceCard(null, done, 'expired');
   }
+  await settleInterrupted().catch((err) => log.warn({ err }, 'settling interrupted approvals failed'));
 }
 
 /** Render a decided outcome for the front agent. */

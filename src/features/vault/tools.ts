@@ -20,7 +20,7 @@ import { checkUrl, safeFetch } from '../../tools/safe-fetch.js';
 import { errMsg, untrusted } from '../../tools/util.js';
 import { audit } from './audit.js';
 import { vaultConfigured } from './crypto.js';
-import { vaultIdentity } from './identity.js';
+import { grantKeyFor, vaultIdentity } from './identity.js';
 import {
   describeCredential,
   getCredential,
@@ -47,11 +47,11 @@ const FETCH_SHOWN_CHARS = 20_000;
 
 const usable = (c: Credential) => c.kind === 'token' || c.kind === 'login';
 
-/** Tell the owner privately that something happened in their vault. */
-async function noticeOwner(ctx: ToolContext, ownerId: string, text: string): Promise<void> {
+/** Tell the owner privately that something happened in their vault. `key`: idempotency key of the triggering event. */
+async function noticeOwner(ctx: ToolContext, ownerId: string, text: string, key: string): Promise<void> {
   const { channelId, threadTs } = parseThreadId(ctx.threadId);
-  await slackCall('chat.postEphemeral', { channel: channelId, user: ownerId, ...threadTsArg(threadTs), text }).catch(() =>
-    slackCall('chat.postMessage', { channel: ownerId, text }).catch((err) => log.warn({ err }, 'vault notice failed')),
+  await slackCall('chat.postEphemeral', { channel: channelId, user: ownerId, ...threadTsArg(threadTs), text }, { idempotencyKey: `vault-notice:${key}` }).catch(() =>
+    slackCall('chat.postMessage', { channel: ownerId, text }, { idempotencyKey: `vault-notice:${key}:dm` }).catch((err) => log.warn({ err }, 'vault notice failed')),
   );
 }
 
@@ -76,14 +76,8 @@ export async function runCredentialFetch(ownerId: string, threadId: string | nul
   if (url.protocol !== 'https:' || !hostAllowed(url.hostname, c.meta.domains)) throw new VaultError(`"${c.name}" may only be sent to ${c.meta.domains?.join(', ') || 'no website'} over https.`);
   const secret = await revealSecret({ ...c, kind: 'token' });
   const [hName, hValue] = headerFor(c, secret.value);
-  const extra: Record<string, string> = {};
-  for (const [k, v] of Object.entries(req.headers ?? {})) {
-    const lk = k.toLowerCase();
-    if (lk === hName || lk === 'cookie' || lk === 'host') continue;
-    extra[lk] = String(v).slice(0, 1000);
-  }
+  const extra = extraHeaders(c, req);
   const body = req.body != null ? Buffer.from(req.body) : undefined;
-  if (body && !extra['content-type']) extra['content-type'] = /^\s*[[{]/.test(req.body!) ? 'application/json' : 'text/plain';
   try {
     const res = await safeFetch(url.toString(), {
       method: req.method,
@@ -108,12 +102,55 @@ export async function runCredentialFetch(ownerId: string, threadId: string | nul
   }
 }
 
-function fetchCard(c: Credential, req: FetchReq, url: URL) {
-  const detail = [
-    `*Request:* \`${req.method} ${truncate(mrkdwnEscape(url.origin + url.pathname), 300)}\`${url.search ? ' (with query)' : ''}`,
-    `*Why (the agent's words):* ${truncate(mrkdwnEscape(req.purpose), 400)}`,
-  ];
-  if (req.body) detail.push(`*Body:* \`\`\`${truncate(req.body.replace(/```/g, "'''"), 600)}\`\`\``);
+/** Beyond these, a request can't be shown meaningfully on its card: refused up front (fetchTooBig). */
+export const CARD_MAX_URL = 1500;
+export const CARD_MAX_BODY = 3000;
+const CARD_MAX_HEADERS_CHARS = 1000;
+/** Body characters shown on the card (the rest is counted: "first X of N characters shown"). */
+const CARD_BODY_SHOWN = 2800;
+
+/** Code-block safe text (a ``` can't close the block early). */
+const codeBlock = (s: string) => `\`\`\`${s.replace(/```/g, "'''") || ' '}\`\`\``;
+
+/** Why a request is too big for its approval card to show exactly what will be sent (null = fine). */
+export function fetchTooBig(req: Pick<FetchReq, 'url' | 'headers' | 'body'>): string | null {
+  if (req.url.length > CARD_MAX_URL)
+    return `Not sent: the URL is ${req.url.length} characters, more than the ${CARD_MAX_URL} the owner's approval card can show. Use a shorter URL (e.g. move parameters into a body).`;
+  if (req.body != null && req.body.length > CARD_MAX_BODY)
+    return `Not sent: the body is ${req.body.length} characters, more than the ${CARD_MAX_BODY} the owner's approval card can show. Send less per request.`;
+  const headerChars = Object.entries(req.headers ?? {}).reduce((n, [k, v]) => n + k.length + String(v).length + 2, 0);
+  if (headerChars > CARD_MAX_HEADERS_CHARS)
+    return `Not sent: the extra headers are ${headerChars} characters, more than the ${CARD_MAX_HEADERS_CHARS} the owner's approval card can show. Send fewer or shorter headers.`;
+  return null;
+}
+
+/** The extra headers that are actually sent (lowercased; never the credential's own header, cookie or host). */
+function extraHeaders(c: Credential, req: Pick<FetchReq, 'headers' | 'body'>): Record<string, string> {
+  const hName = (c.meta.header || 'authorization').toLowerCase();
+  const extra: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.headers ?? {})) {
+    const lk = k.toLowerCase();
+    if (lk === hName || lk === 'cookie' || lk === 'host') continue;
+    extra[lk] = String(v).slice(0, 1000);
+  }
+  if (req.body != null && !extra['content-type']) extra['content-type'] = /^\s*[[{]/.test(req.body) ? 'application/json' : 'text/plain';
+  return extra;
+}
+
+/** The approval card: exactly what will be sent (the full URL with its query, every extra header, the body). */
+export function fetchCard(c: Credential, req: FetchReq, url: URL) {
+  const full = url.toString();
+  const shownUrl = full.length <= CARD_MAX_URL ? full : `${full.slice(0, CARD_MAX_URL)}… ${full.length - CARD_MAX_URL} more characters not shown`;
+  const detail = [`*Request:* \`${req.method}\` ${codeBlock(shownUrl)}`];
+  const headers = Object.entries(extraHeaders(c, req));
+  if (headers.length) detail.push(`*Extra headers:* ${codeBlock(headers.map(([k, v]) => `${k}: ${v}`).join('\n'))}`);
+  detail.push(`*Your credential goes in the* \`${mrkdwnEscape((c.meta.header || 'authorization').toLowerCase())}\` *header.*`);
+  if (req.body != null) {
+    const n = req.body.length;
+    const all = n <= CARD_BODY_SHOWN;
+    detail.push(`*Body* (${all ? `all ${n} characters` : `first ${CARD_BODY_SHOWN} of ${n} characters shown`}): ${codeBlock(all ? req.body : req.body.slice(0, CARD_BODY_SHOWN))}`);
+  }
+  detail.push(`*Why (the agent's words):* ${truncate(mrkdwnEscape(req.purpose), 400)}`);
   detail.push('The agent sees the response, never the key itself.');
   return { title: `*Use your credential \`${mrkdwnEscape(c.name)}\` for a request to ${mrkdwnEscape(url.hostname)}?*`, detail };
 }
@@ -184,7 +221,7 @@ export function registerVaultTools(): void {
               });
             }
             await audit({ ownerId: id.ownerId, credentialId: saved.id, credentialName: name, action: 'created', tool: 'save_credential', threadId: ctx.threadId, outcome: 'ok', detail: { by: 'agent' } });
-            await noticeOwner(ctx, id.ownerId, `:lock: I saved \`${name}\` to your vault. You can see or delete it in my App Home.`);
+            await noticeOwner(ctx, id.ownerId, `:lock: I saved \`${name}\` to your vault. You can see or delete it in my App Home.`, `saved:${saved.id}`);
             return `Saved "${name}" (${describeCredential(saved)}). Don't repeat the secret anywhere.`;
           } catch (err) {
             return err instanceof VaultError ? err.message : `Couldn't save it: ${errMsg(err)}`;
@@ -279,6 +316,9 @@ export function registerVaultTools(): void {
           const limitErr = await takeLimit('credential_use', id.ownerId, ctx.threadId);
           if (limitErr) return limitErr;
           const req: FetchReq = { credentialId: c.id, url: url.toString(), method: a.method, ...(a.headers ? { headers: a.headers } : {}), ...(a.body != null ? { body: a.body } : {}), purpose: a.purpose };
+          // The card must show exactly what will be sent: refuse what it can't show.
+          const tooBig = fetchTooBig(req);
+          if (tooBig) return tooBig;
           const card = fetchCard(c, req, url);
           const res = await requestApproval({
             ownerId: id.ownerId,
@@ -288,7 +328,7 @@ export function registerVaultTools(): void {
             credentialId: c.id,
             credentialName: c.name,
             tool: 'fetch_with_credential',
-            grantKey: `cred:${c.id}`,
+            grantKey: grantKeyFor(id, `cred:${c.id}`),
             ...card,
             payload: req,
           });
@@ -311,14 +351,17 @@ export function registerVaultTools(): void {
   // Front-agent fetches approved later: run in code on the click, result as an outcome turn.
   registerApprovalExecutor('credential_fetch', async (row: ApprovalRow, payload, decision) => {
     const req = payload as FetchReq | null;
-    if (decision !== 'approved' || !req) return { input: outcomeInput(row, decision, decision === 'denied' ? 'The owner denied the request; nothing was sent.' : 'The approval card expired; nothing was sent.') };
+    const host = req ? safeHost(req.url) : 'the website';
+    if (decision === 'denied') return { input: outcomeInput(row, decision, 'The owner denied the request; nothing was sent.'), fallback: `Denied: nothing was sent to ${host}.` };
+    if (decision === 'expired') return { input: outcomeInput(row, decision, 'The approval card expired; nothing was sent.'), fallback: `Expired: nothing was sent to ${host}.` };
+    if (!req) return { input: outcomeInput(row, 'failed', 'The request details were lost; nothing was sent.'), fallback: 'Failed: nothing was sent.' };
     const { getCredentialById } = await import('./store.js');
     const c = await getCredentialById(row.ownerId, req.credentialId);
-    if (!c) return { input: outcomeInput(row, 'failed', 'The credential was deleted before the request ran.') };
+    if (!c) return { input: outcomeInput(row, 'failed', 'The credential was deleted before the request ran.'), fallback: 'Not sent: the credential was deleted.' };
     try {
-      return { input: outcomeInput(row, 'approved', await runCredentialFetch(row.ownerId, row.threadId, c, req)) };
+      return { input: outcomeInput(row, 'approved', await runCredentialFetch(row.ownerId, row.threadId, c, req)), fallback: `Done: the ${req.method} request to ${host} ran.` };
     } catch (err) {
-      return { input: outcomeInput(row, 'failed', `The request failed: ${err instanceof VaultError ? err.message : errMsg(err)}`) };
+      return { input: outcomeInput(row, 'failed', `The request failed: ${err instanceof VaultError ? err.message : errMsg(err)}`), fallback: `The ${req.method} request to ${host} failed.` };
     }
   });
 
@@ -330,6 +373,15 @@ export function registerVaultTools(): void {
         : decision === 'denied'
           ? 'The owner declined to add the credential.'
           : 'The owner did not add the credential before the card expired.';
-    return { input: outcomeInput(row, decision, body) };
+    const fallback = decision === 'approved' ? 'Done: the credential was added.' : decision === 'denied' ? 'Declined: no credential was added.' : 'Expired: no credential was added.';
+    return { input: outcomeInput(row, decision, body), fallback };
   });
+}
+
+function safeHost(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return 'the website';
+  }
 }

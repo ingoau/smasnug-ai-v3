@@ -35,22 +35,50 @@ Encryption: AES-256-GCM (`src/sandbox/preview/crypto.ts` layout) with a per-user
   prefilled. The secret never appears in the thread. Front agent: an outcome turn says when it was added or declined;
   a subagent waits (up to `limits.vaultWaitMs`).
 
-Identity (`identity.ts`): only Slack-verified identity counts. On the front agent, the author of a **user** turn
-(not reminders, watches, outcome or synthesis turns); in a subagent, its owner. Never a tool argument, a mention, or
-whoever steered the subagent. That last case (anyone may `message_subagent`) is why each use needs the owner's
-approval.
+Identity (`identity.ts`, `vaultIdentity`): only Slack-verified identity counts, never a tool argument or a mention.
+
+- **Front agent**: the author of a **user** turn. Reminders, watches and synthesis turns get nothing. The one
+  non-user exception is an **approval outcome turn** (a scheduled turn whose stored input has source `approval`)
+  whose approval belongs to that turn's author: after "Add it" or an approved request the agent can carry on.
+  front.ts puts the outcome's source and the approval's owner on `FrontTurnState.outcome`.
+- **Subagent**: its owner, and only while the subagent's **provenance** is clean (`subagents.vault_trusted`,
+  migration 357). It is set only when the owner spawns it on their own user turn (not a reminder, watch, outcome or
+  synthesis turn), and cleared for good when anyone else, or any non-user turn, steers or resumes it
+  (`messageSubagent`, in the same transaction as the inbox message or the new run). child.ts hands the run a mutable
+  `VaultTrust` (`VAULT_TRUST_EXTRA`) and clears it as soon as it reads a steer that untrusted the subagent, so the
+  model never acts on such a message with the vault available. Every vault tool (and the sandbox side) then refuses:
+  the owner has to start a new subagent from their own message (seed_from keeps the findings).
+
+Even a trusted use still needs the owner's approval on a card.
 
 ## Approvals (`approvals.ts`)
 
 Every use (a request, a browser fill, a sandbox file, loading a saved session, a connector action in prompt mode)
 posts a card only the owner sees (ephemeral in the thread, else a DM) saying exactly what will happen, with **Allow
-once**, **Allow for 10 min here** (a grant for that credential in that thread only, `vault_grants`) and **Deny**.
-Only the owner's click counts. Cards expire after `limits.vaultApprovalTtlMs`.
+once**, **Allow for 10 min here** and **Deny**. Only the owner's click counts (a suspended owner can still Deny, and
+delete credentials in App Home, but not approve). Cards expire after `limits.vaultApprovalTtlMs`.
+
+`fetch_with_credential`'s card shows exactly what will be sent: the full URL with its query, every extra header with
+its value, which header carries the credential, and the body (with "first X of N characters shown" if it is cut). A
+request too big to show (URL over 1500 characters, body over 3000, extra headers over 1000) is refused before any card.
+
+**Grants** ("Allow for 10 min here", `vault_grants`) are keyed by owner + grant key + thread, and the grant key is
+scoped to who asked: `grantKeyFor(identity, base)` gives `front:<base>` for the front agent (that thread only) and
+`sa:<subagent id>:<base>` for a subagent (that subagent only). A grant earned on the front agent never covers a
+subagent, and one subagent's never covers another's or the front agent's. Vault and sandbox callers build their key
+with it; `base` is `cred:<id>` (fetch), `cred:<id>:fill:<field>` (one login field in the browser) or
+`cred:<id>:session` (loading a saved session). Sandbox files (`sandbox_use_credential`) are Allow once only: no grant.
+Connectors are front-only and use `conn:<slug>:<tool>` (removed on disconnect / reconnect).
 
 - `wait` mode (subagents): the tool polls the row and carries on.
 - `outcome` mode (front agent): the tool returns "awaiting approval"; on the click, code runs the action
   (`registerApprovalExecutor`) and the result reaches the agent as an outcome turn (source `approval`), like
-  send_message. These tools are hidden in `!p` private turns, since the outcome turn answers in the thread.
+  send_message. These tools are hidden in `!p` private turns, since the outcome turn answers in the thread. The
+  outcome turn counts as a mention and carries a code-written fallback ("Done: …", "Denied: …", "Expired: …"), so the
+  thread always shows the result. If no outcome turn may run (thread gone, bot paused, owner suspended…), the action
+  isn't run either. A row decided but never settled (the worker died mid-action) is settled by the expiry sweep after
+  5 minutes as "interrupted: it may or may not have run" and never re-run. Deleting a credential keeps its pending
+  rows (`credential_id` set null); the executor reports the credential gone.
 
 ## Keeping secrets away from the model
 
@@ -63,18 +91,26 @@ Only the owner's click counts. Cards expire after `limits.vaultApprovalTtlMs`.
   get it out; approvals and domain pinning are the real controls.
 - Modal submissions: ingress seals the form state of `vaultm:` / `connm:` modals (`transport.ts`) before queueing,
   because BullMQ keeps finished jobs in Redis.
-- Never logged, never in thread events; the audit log (`vault_audit`) records what, where and when only.
+- Never logged, never in thread events; the audit log (`vault_audit`) records what, where and when only. Secret
+  tool inputs (`save_credential`'s value, password, totp) are redacted (`src/agent/tool-redact.ts`) wherever a tool
+  call is stored or shown again: the `turn_tools` event (the next turn's `<previous_turn_tools>`), traces (front and
+  subagent runs, so eval exports too) and a subagent's stored history. The sandbox-side tools take file paths, never
+  secrets, in their arguments.
 
 ## Retention and privacy
 
 Credentials stay until the owner deletes them. Audit rows: 90 days; decided approvals: 7 days (`pruneAudit`).
 Withdrawing privacy consent (App Home) deletes the user's whole vault, connections and audit log
-(`deleteAllVaultData`, `deleteConnectorData`).
+(`deleteAllVaultData`, `deleteConnectorData`) and cancels their subagents (`handlePrivacyWithdraw`). The sandbox
+sweep (every 30 s) then destroys those subagents' sandboxes and paused snapshots, with any credential files or loaded
+browser sessions in them; a running subagent stops at its next step first, so that takes a few minutes at most. If a
+run happens to finish with a result at that moment, its sandbox is only paused (credential files are removed at run
+end and before every snapshot) and is destroyed when the subagent expires (24 h idle).
 
 ## Risks (accepted for v1)
 
-- A person steering someone else's subagent could try to misuse the owner's credential; the card names the exact
-  site, field or command, and grants are per thread.
+- An approval outcome turn may use the vault although its input includes the fetched response (untrusted data);
+  every further use still needs the owner's click.
 - Inside the sandbox, code can read `/work/.vault` files and send them anywhere; the card says so.
 - A typed browser value briefly appears in agent-browser's own argv inside the sandbox.
 - A DB breach without the master key yields only ciphertext.

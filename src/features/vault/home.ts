@@ -120,7 +120,8 @@ export function credentialModal(meta: Meta, prefill: { name?: string; website?: 
     blocks.push(input('password', 'Password', { max: 1000, hint: 'Slack shows what you type here; nobody else sees this form.' }));
     blocks.push(input('totp', '2FA (TOTP) secret', { optional: true, max: 500, placeholder: 'JBSWY3DPEHPK3PXP or otpauth://totp/…', hint: 'The setup key behind the QR code. The bot generates the 6-digit codes itself.' }));
   } else {
-    blocks.push(input('secret', 'Secret', { max: 8000, multiline: true, hint: 'The API key, token or other secret.' }));
+    // Slack caps plain_text_input max_length at 3000.
+    blocks.push(input('secret', 'Secret', { max: 3000, multiline: true, hint: 'The API key, token or other secret.' }));
     blocks.push(input('header', 'How to send it', { optional: true, initial: prefill.header ?? '', placeholder: 'Authorization: Bearer', hint: 'Header name and prefix for web requests, e.g. "X-Api-Key" or "Authorization: token". Default: Authorization: Bearer.', max: 100 }));
   }
   blocks.push(input('note', 'Note for the agent', { optional: true, initial: prefill.note ?? '', placeholder: 'read-only token for my repos', max: 300 }));
@@ -146,16 +147,20 @@ async function openModal(ctx: ActionContext, view: object): Promise<boolean> {
   }
 }
 
-async function dm(userId: string, text: string) {
-  await slackCall('chat.postMessage', { channel: userId, text }).catch((err) => log.warn({ err }, 'vault DM failed'));
+/** `key`: idempotency key of the triggering interaction (its trigger_id). */
+async function dm(userId: string, text: string, key: string) {
+  await slackCall('chat.postMessage', { channel: userId, text }, { idempotencyKey: `vault-dm:${userId}:${key}` }).catch((err) => log.warn({ err }, 'vault DM failed'));
 }
+
+/** Idempotency key for a DM answering this interaction. */
+const interactionKey = (ctx: ActionContext) => ctx.triggerId ?? `${ctx.actionId}:${ctx.messageTs ?? ''}:${ctx.value ?? ''}`;
 
 /** Block actions with the vault: prefix that aren't approvals. */
 export async function handleVaultHomeAction(ctx: ActionContext, publishHome: PublishHome): Promise<void> {
   if (!vaultConfigured()) return;
   if (ctx.actionId === ADD_LOGIN || ctx.actionId === ADD_KEY) {
     const ok = await openModal(ctx, credentialModal({ type: ctx.actionId === ADD_LOGIN ? 'login' : 'api_key' }));
-    if (!ok) await dm(ctx.userId, "Slack took too long to open the form. Press the button again in a moment.");
+    if (!ok) await dm(ctx.userId, 'Slack took too long to open the form. Press the button again in a moment.', interactionKey(ctx));
     return;
   }
   if (ctx.actionId === DELETE) {
@@ -211,7 +216,7 @@ export async function handleVaultModal(ctx: ActionContext, publishHome: PublishH
   const keep = { name, website: websiteRaw, note, header, username };
   const fail = async (error: string) => {
     // Reopen with the error (secrets are not refilled), else DM.
-    if (!(await openModal(ctx, credentialModal(meta, { ...keep, error })))) await dm(ctx.userId, `Your credential wasn't saved: ${error}`);
+    if (!(await openModal(ctx, credentialModal(meta, { ...keep, error })))) await dm(ctx.userId, `Your credential wasn't saved: ${error}`, interactionKey(ctx));
   };
   if (!validName(name)) return fail('Names use lowercase letters, digits, "-", "_" or "." (up to 40 characters).');
   const domains = parseDomains(websiteRaw);

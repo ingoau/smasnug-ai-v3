@@ -10,6 +10,7 @@ import { execFile } from 'node:child_process';
 import type { ModelMessage } from 'ai';
 import { sql } from '../db/index.js';
 import { log } from '../log.js';
+import { redactToolInput } from './tool-redact.js';
 
 export type TraceCall = { id: string; name: string; input: unknown; output?: string; error?: string; ms?: number };
 export type TraceStep = {
@@ -186,7 +187,8 @@ export class TraceRecorder {
         const s = this.step();
         if (!this.firstChunk) this.firstChunk = this.now();
         this.callStart.set(part.toolCallId, this.now());
-        const input = sanitize(part.input);
+        // Secret inputs (save_credential) are never stored in a trace (front and subagent runs both record here).
+        const input = sanitize(redactToolInput(part.toolName, part.input));
         const size = JSON.stringify(input ?? null).length;
         s.calls.push({ id: part.toolCallId, name: part.toolName, input: size <= this.left ? input : this.spend(JSON.stringify(input)) });
         if (size <= this.left) this.left -= size;

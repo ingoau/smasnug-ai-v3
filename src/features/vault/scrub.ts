@@ -46,7 +46,25 @@ export async function secretsOf(cred: Credential): Promise<ScrubSecret[]> {
     const s = await revealSecret({ ...cred, kind: 'login' });
     return [{ name: `${cred.name}:password`, value: s.password }, ...(s.totp ? [{ name: `${cred.name}:totp-seed`, value: s.totp }] : [])];
   }
+  if (cred.kind === 'browser_session') return sessionSecrets(cred.name, (await revealSecret({ ...cred, kind: 'browser_session' })).state);
   return [];
+}
+
+/**
+ * Token-like values in a saved browser session (Playwright storage state: cookies[].value, origins[].localStorage[].value):
+ * at least 16 characters without whitespace, so ordinary short values ("1", "en-GB", "true") aren't redacted everywhere.
+ */
+export function sessionSecrets(name: string, state: string): ScrubSecret[] {
+  const tokenLike = (v: unknown): v is string => typeof v === 'string' && v.length >= 16 && v.length <= 8192 && !/\s/.test(v);
+  try {
+    const s = JSON.parse(state) as { cookies?: { name?: string; value?: unknown }[]; origins?: { localStorage?: { name?: string; value?: unknown }[] }[] };
+    const out: ScrubSecret[] = [];
+    for (const c of s.cookies ?? []) if (tokenLike(c.value)) out.push({ name: `${name}:cookie`, value: c.value });
+    for (const o of s.origins ?? []) for (const e of o.localStorage ?? []) if (tokenLike(e.value)) out.push({ name: `${name}:storage`, value: e.value });
+    return out.slice(0, 200);
+  } catch {
+    return [];
+  }
 }
 
 const key = (subagentId: string) => `vault:scrub:${subagentId}`;

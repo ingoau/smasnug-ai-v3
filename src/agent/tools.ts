@@ -220,6 +220,8 @@ registerTool({
               title: t.title,
               instructions: t.instructions,
               seedFrom: t.seed_from,
+              // Only the owner's own message turn hands it their vault (not reminders, watches, outcomes, synthesis).
+              vaultTrusted: s.turn.kind === 'user',
             });
             s.cardId = r.cardId;
             s.spawned.add(r.subagentId);

@@ -34,7 +34,7 @@ export interface SafeFetchOptions {
   authOrigin?: string;
   /** With authOrigin: more header names (lower-case) to drop off that origin, besides authorization (vault credentials). */
   authHeaders?: string[];
-  /** Default GET. A request with a body never follows redirects (BlockedUrlError). */
+  /** Default GET. A request with a body never follows redirects (BlockedUrlError); one without: redirectMethod. */
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
   body?: Buffer;
   signal?: AbortSignal;
@@ -128,12 +128,14 @@ export async function safeFetch(rawUrl: string, opts: SafeFetchOptions): Promise
   const deadline = AbortSignal.timeout(opts.timeoutMs);
   const signal = opts.signal ? AbortSignal.any([opts.signal, deadline]) : deadline;
   let current = rawUrl;
+  let method = opts.method ?? 'GET';
   for (let hop = 0; ; hop++) {
     const url = checkUrl(current, opts.allowIPAddressList);
-    const res = await requestOnce(url, opts, agents, signal);
+    const res = await requestOnce(url, method === (opts.method ?? 'GET') ? opts : { ...opts, method }, agents, signal);
     if (res.redirect) {
       if (opts.body) throw new BlockedUrlError('the server redirected a request that has a body; not following it');
       if (hop >= maxRedirects) throw new BlockedUrlError(`too many redirects (>${maxRedirects})`);
+      method = redirectMethod(method, res.status ?? 0);
       current = new URL(res.redirect, url).toString();
       continue;
     }
@@ -141,12 +143,24 @@ export async function safeFetch(rawUrl: string, opts: SafeFetchOptions): Promise
   }
 }
 
+/**
+ * The method to follow a redirect with (a request without a body; one with a body never follows). GET/HEAD keep theirs.
+ * Like browsers, a 303 (any method) and a 301/302 after a POST continue as GET; any other non-GET redirect (a
+ * PUT/PATCH/DELETE on 301/302, or anything on 307/308, which require the same method) is refused rather than replayed
+ * against another URL.
+ */
+export function redirectMethod(method: NonNullable<SafeFetchOptions['method']>, status: number): 'GET' | 'HEAD' {
+  if (method === 'GET' || method === 'HEAD') return method;
+  if (status === 303 || (method === 'POST' && (status === 301 || status === 302))) return 'GET';
+  throw new BlockedUrlError(`the server redirected a ${method} request (HTTP ${status}); not repeating it at another address`);
+}
+
 function requestOnce(
   url: URL,
   opts: SafeFetchOptions,
   agents: { http: http.Agent; https: https.Agent },
   signal: AbortSignal,
-): Promise<{ redirect?: string; result?: SafeFetchResult }> {
+): Promise<{ redirect?: string; status?: number; result?: SafeFetchResult }> {
   return new Promise((resolve, reject) => {
     const isHttps = url.protocol === 'https:';
     const headers: Record<string, string> = {
@@ -172,7 +186,7 @@ function requestOnce(
         const status = res.statusCode ?? 0;
         if (status >= 300 && status < 400 && res.headers.location) {
           res.resume();
-          resolve({ redirect: res.headers.location });
+          resolve({ redirect: res.headers.location, status });
           return;
         }
         const contentType = String(res.headers['content-type'] ?? '');

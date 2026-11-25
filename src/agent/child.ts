@@ -30,6 +30,7 @@ import type { FileAccessContext } from '../files/access.js';
 import { sandboxChildPrompt } from '../sandbox/prompts.js';
 import { SANDBOX_STARTED_EXTRA, sandboxConfigured } from '../sandbox/settings.js';
 import { saveTrace, TraceRecorder } from './trace.js';
+import { VAULT_TRUST_EXTRA, type VaultTrust } from '../features/vault/identity.js';
 
 /** Step cap per run (the token cap applies too). */
 const MAX_STEPS = 50;
@@ -262,6 +263,7 @@ async function runClaimed(run: RunRow): Promise<void> {
     if (id) stepDeferred++;
     return id;
   };
+  const vaultTrust: VaultTrust = { trusted: Boolean(sa.vaultTrusted) };
   const tools = toolsFor('child', {
     threadId: run.threadId,
     channelId,
@@ -277,6 +279,8 @@ async function runClaimed(run: RunRow): Promise<void> {
       [SANDBOX_STARTED_EXTRA]: onSandboxStarted,
       // A private (`!p`) subagent: what it makes (canvases) is for its owner only (turn-state.ts privateViewer).
       ...(sa.privateTo ? { [PRIVATE_TO_EXTRA]: sa.privateTo } : {}),
+      // May it use its owner's vault (vaultIdentity)? Cleared below as soon as a steer that untrusted it is read.
+      [VAULT_TRUST_EXTRA]: vaultTrust,
     },
   });
   tools.wait_for_searches = tool({
@@ -414,6 +418,11 @@ async function runClaimed(run: RunRow): Promise<void> {
         return;
       }
       const inbox = await drainSubagentInbox(sa.id);
+      if (inbox.length && vaultTrust.trusted) {
+        // A steer from someone else (or a non-user turn) cleared vault_trusted in the same transaction as its insert.
+        const [t] = await sql<{ vaultTrusted: boolean }[]>`select vault_trusted from subagents where id = ${sa.id}`;
+        if (!t?.vaultTrusted) vaultTrust.trusted = false;
+      }
       for (const text of inbox) messages.push({ role: 'user', content: `[Orchestrator update] ${text}` });
       for (const text of inbox) trace.note(`[Orchestrator update] ${text}`);
       const background = deferred.take();
