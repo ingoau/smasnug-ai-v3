@@ -2,8 +2,13 @@
  * Per-user connector state (docs/mcp-custom-connectors.md): permission settings (connector_settings, migration 358),
  * the Redis tool-list cache, and the revocation generation that in-flight calls watch.
  */
+
+/** Approval kind of a prompt-mode connector call (vault approvals). */
+export const CONNECTOR_CALL_KIND = 'connector_call';
 import { redis } from '../../core/redis.js';
 import { sql } from '../../db/index.js';
+import { log } from '../../log.js';
+import { decide, loadApproval, replaceCard } from '../vault/approvals.js';
 import { loadCatalog } from './catalog.js';
 import { normalizeSettings, type ConnectorSettings, type Mode, type ToolClass } from './logic.js';
 
@@ -34,11 +39,16 @@ export interface CachedTool {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  /** Argument rules the schema couldn't keep (logic.ts prepareInputSchema), appended to the tool description. */
+  argsNote?: string;
   annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 }
 
 export const TOOLS_CACHE_TTL_S = 10 * 60;
+/** A listing that failed is not retried for this long (per owner + connector), so a down server doesn't slow every turn. */
+export const TOOLS_FAILURE_TTL_S = 2 * 60;
 const toolsKey = (ownerId: string, slug: string) => `conn:tools:${ownerId}:${slug}`;
+const toolsFailKey = (ownerId: string, slug: string) => `conn:toolsfail:${ownerId}:${slug}`;
 
 export async function cachedTools(ownerId: string, slug: string): Promise<CachedTool[] | null> {
   const raw = await redis.get(toolsKey(ownerId, slug)).catch(() => null);
@@ -54,8 +64,17 @@ export async function cacheTools(ownerId: string, slug: string, tools: CachedToo
   await redis.set(toolsKey(ownerId, slug), JSON.stringify(tools), 'EX', TOOLS_CACHE_TTL_S).catch(() => {});
 }
 
+/** The reason of a recent failed listing (negative cache), or null. */
+export async function cachedToolsFailure(ownerId: string, slug: string): Promise<string | null> {
+  return redis.get(toolsFailKey(ownerId, slug)).catch(() => null);
+}
+
+export async function cacheToolsFailure(ownerId: string, slug: string, reason: string): Promise<void> {
+  await redis.set(toolsFailKey(ownerId, slug), reason.slice(0, 300), 'EX', TOOLS_FAILURE_TTL_S).catch(() => {});
+}
+
 export async function invalidateTools(ownerId: string, slug: string): Promise<void> {
-  await redis.del(toolsKey(ownerId, slug)).catch(() => {});
+  await redis.del(toolsKey(ownerId, slug), toolsFailKey(ownerId, slug)).catch(() => {});
 }
 
 // --- revocation -----------------------------------------------------------------------------------------------------
@@ -69,10 +88,28 @@ export async function revocationMark(ownerId: string, slug: string): Promise<str
   return `${a ?? 0}:${b ?? 0}`;
 }
 
-/** Disconnect / reconnect: in-flight calls of this connection (any worker) abort. */
+/**
+ * Disconnect / reconnect / replaced key: in-flight calls of this connection (any worker) abort, its "allow for 10 min"
+ * grants (`conn:<slug>:*`) are deleted and its pending prompt-mode approval cards are cancelled, so nothing approved
+ * for one connection runs on the next. (Approvals also carry the connection generation; the executor re-checks it.)
+ */
 export async function revokeConnection(ownerId: string, slug: string): Promise<void> {
   await redis.multi().incr(genKey(ownerId, slug)).expire(genKey(ownerId, slug), 7 * 24 * 3600).exec();
   await invalidateTools(ownerId, slug);
+  const prefix = `conn:${slug}:`;
+  await sql`delete from vault_grants where owner_id = ${ownerId} and left(grant_key, ${prefix.length}) = ${prefix}`;
+  const pending = await sql<{ id: string }[]>`
+    select id from vault_approvals
+    where owner_id = ${ownerId} and kind = ${CONNECTOR_CALL_KIND} and status = 'pending' and left(grant_key, ${prefix.length}) = ${prefix}`;
+  for (const { id } of pending) {
+    try {
+      const row = await loadApproval(id);
+      const done = row ? await decide(row, 'cancelled') : null;
+      if (done) await replaceCard(null, done, 'cancelled');
+    } catch (err) {
+      log.warn({ err, id }, 'cancelling a connector approval failed');
+    }
+  }
 }
 
 /**

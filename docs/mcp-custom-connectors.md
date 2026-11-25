@@ -55,11 +55,18 @@ Any user who agreed to the privacy policy can connect an enabled connector.
   minutes) with a *Paste code* button. The user approves, copies `<state>.<code>` from the static page, presses
   *Paste code* and pastes it (`connm:code`). The bot checks the state, exchanges the code and stores the tokens.
   Tokens refresh through the same provider on later calls; if a refresh needs a new sign-in, the call says "reconnect
-  in App Home".
-- The connection is one vault credential of kind `connector` named `mcp.<slug>`, meta `{ connector, auth }`. The
-  vault's own UI lists only tokens and logins, so it doesn't show there.
-- **Disconnect** deletes the credential and aborts that connection's in-flight calls on every worker. Settings are
-  kept for a later reconnect. Server-side tokens are not revoked (the user can revoke the app in the service).
+  in App Home". A refresh runs under a per-connection Redis lock (`lock:conn:auth:<user>:<slug>`, taken when the auth
+  flow starts, waited for up to 15 s); the flow first adopts tokens another worker stored meanwhile, and every write
+  re-reads the stored secret and merges only its own change. After an `invalid_grant`, stored tokens are cleared only
+  if they are still the ones that failed.
+- The connection is one vault credential of kind `connector` named `mcp.<slug>`, meta `{ connector, auth, generation }`.
+  The vault's own UI lists only tokens and logins, so it doesn't show there. `generation` is a new random id on every
+  connect or replaced key (the credential row itself keeps its id): pending approvals carry it, and token writes from
+  an older generation are dropped.
+- **Disconnect** (and every connect / replaced key) aborts that connection's in-flight calls on every worker, deletes
+  the user's `conn:<slug>:*` "allow for 10 min" grants and cancels their pending approval cards for that connector
+  (`revokeConnection`). Disconnect also deletes the credential. Settings are kept for a later reconnect. Server-side
+  tokens are not revoked (the user can revoke the app in the service).
 
 ## Identity
 
@@ -76,10 +83,19 @@ Connector tools are added in `src/agent/front.ts` right after `toolsFor('front',
 - Name `<slug>__<tool>`, sanitized to `[a-zA-Z0-9_-]`, ≤ 64 characters, unique (`_2`, `_3`…).
 - Description: the connector name, whose account it is, the action class and how the mode behaves, then the server's
   own description (untrusted: control characters stripped, capped).
-- Input schema: the server's JSON schema if it is an object schema under 12 KB, else a permissive object.
+- Input schema (`prepareInputSchema`): the server's JSON schema without `$schema` / `$id` / `$comment`, a top-level
+  `$ref` into its own `$defs` resolved. Top-level `anyOf` / `oneOf` / `allOf` / `not` / `if` / `then` / `else` (which
+  Anthropic's API refuses there) are dropped, the schema becomes `additionalProperties: true`, and the dropped rules
+  are appended to the tool description (trimmed, untrusted). A non-object schema, one over 12 KB or an unresolvable
+  `$ref` becomes a permissive object, again with the schema described in the description.
 - At most `maxTools` per connector (default 25) and 60 per turn. Tool lists are cached in Redis per (user, connector)
-  for 10 minutes (`conn:tools:<user>:<slug>`); connect, disconnect and settings changes invalidate it. A server that
-  can't be listed (10 s timeout) just contributes no tools that turn.
+  for 10 minutes (`conn:tools:<user>:<slug>`); connect, disconnect and settings changes invalidate it. A failed listing
+  (10 s timeout) is remembered for 2 minutes (`conn:toolsfail:<user>:<slug>`) so a down server isn't retried every
+  turn; App Home's *Edit actions* ignores that and retries.
+- **Latency:** the listings start before the turn's context is built; once it is built, the turn waits at most
+  `CONNECTOR_TOOLS_GRACE_MS` (1.5 s) more. A connector that isn't listed by then (or failed) sits the turn out: it's
+  logged, the turn message gets one `<connector_note>` saying it was unavailable, and a listing still running finishes
+  in the background and fills the cache for the next turn.
 - Classification: the catalog's `tools` override, else MCP annotations (`readOnlyHint` → read, `destructiveHint` →
   delete), else write.
 
@@ -99,16 +115,21 @@ Defaults: read = auto, write = prompt, delete = always_block. The mode is re-rea
 Home applies even to a turn that already built its tools.
 
 - **auto** (`verifier.ts`): the main prompt-injection defense. A second, cheap model judges the proposed call
-  (connector, tool, description, arguments) against the **raw** recent thread (the last 15 stored Slack messages,
-  rendered like the relevance gate's input), not the agent's summary, and answers "did the owner themself ask for this
-  exact action?". Other people's messages, pasted/forwarded content, link previews, files, tool output and the bot's
-  own messages don't count. Same stack as the relevance gate: OpenRouter's Decisions API with `GATE_MODEL`
+  (connector, tool, description, arguments) against the **raw** recent thread (the last 15 stored Slack messages), not
+  the agent's summary, and answers "did the owner themself ask for this exact action?". The transcript
+  (`renderForVerifier`) is one JSON object per message (`{"n","from","owner","trigger","text","shared","files"}`), so
+  newlines in a message can't forge another author's line; `owner` comes from the Slack user id (never a bot), and
+  `trigger` marks the messages of the turn being answered. Only the owner's own messages can authorize; other people's
+  messages, pasted/forwarded content, link previews, files, tool output and the bot's own messages don't count. Same stack as the relevance gate: OpenRouter's Decisions API with `GATE_MODEL`
   (probability ≥ 0.8 = yes), or the gate chat model (`MODEL_GATE`, must answer exactly YES) when `GATE_MODEL=luna`.
   **Fail closed:** an error, timeout or unclear answer refuses, with no fallback model. Usage is recorded per user.
 - **prompt:** `requestApproval({ mode: 'outcome', kind: 'connector_call', grantKey: 'conn:<slug>:<tool>' })`. The
-  owner sees the tool and its arguments on a private card (Allow once / Allow for 10 min in this thread / Deny). The
-  agent's tool returns "awaiting approval" at once; on approval the executor makes the call in code and the result
-  reaches the agent as an outcome turn. Outcome turns aren't private, so prompt-mode tools are left out of `!p` turns.
+  owner sees the tool and **all** of its arguments on a private card (Allow once / Allow for 10 min in this thread /
+  Deny). Arguments whose escaped preview doesn't fit the card in full (`ARGS_PREVIEW_MAX`, 2,600 characters) are
+  refused before any card, with a note to the model: a cut preview would hide part of what runs. The agent's tool
+  returns "awaiting approval" at once; on approval the executor makes the call in code and the result reaches the
+  agent as an outcome turn. The approval payload holds the connection generation: if the connection was replaced or
+  reconnected since, the executor refuses. Outcome turns aren't private, so prompt-mode tools are left out of `!p` turns.
 - **always_allow:** calls directly. Writes are not forced to prompt. **Risk:** anything that can steer the agent in a
   turn where the owner is the speaker (a pasted document, a web page it read, another person's message in the same
   thread) can then make it act on the owner's account without a check. App Home says what each mode does; prefer
@@ -124,13 +145,15 @@ Home applies even to a turn that already built its tools.
   answered 405 locally: only request/response calls are made.
 - **Timeouts:** 10 s for listing tools, 30 s per call.
 - **Limits:** every call takes one `credential_use` (shared with the vault's credential uses).
-- **Revocation:** a call snapshots a Redis counter per (user, connector) and per user and polls it every second;
-  disconnect, reconnect and privacy withdrawal bump it, so a call running on any worker aborts.
+- **Revocation:** a call snapshots a Redis counter per (user, connector) and per user (before it reads the connection)
+  and polls it every second; disconnect, reconnect and privacy withdrawal bump it, so a call running on any worker
+  aborts.
 - **Audit:** every call (and refusal) goes to `vault_audit` with action `connector_call`, tool `<slug>:<tool>`, mode
   and outcome, never the arguments. Users see recent uses in App Home's vault section.
 - **Untrusted results:** only text items and text resources are kept (images, audio and binary resources are counted),
   structured content when there is no text; capped at 20,000 characters, scrubbed of the connection's key / tokens
-  (`scrubText`) and wrapped with `untrusted()`.
+  (`scrubText`) and wrapped with `untrusted()`. So is the server's error text (JSON-RPC errors, HTTP bodies) when a
+  call fails.
 - **Privacy withdrawal** (`handlePrivacyWithdraw`): `deleteAllVaultData` removes the connections and audit rows;
   `deleteConnectorData` removes their `connector_settings`, cached tool lists, and aborts their in-flight calls.
 
@@ -153,7 +176,10 @@ pagination of very large tool lists (first page only).
 ## Tests
 
 - `src/features/connectors/logic.test.ts`: catalog parsing, classification, mode resolution, tool-name sanitizing,
-  origin pinning, OAuth paste blob, verifier answers, result rendering, schema sanitizing.
+  origin pinning, OAuth paste blob, verifier answers and transcript (a forged owner line stays its author's), result
+  rendering, schema preparation (top-level combinators, `$ref`).
 - `src/features/connectors/connectors.int.test.ts` (`INTEGRATION=1`): an in-process MCP server on 127.0.0.1 with the
   real vault, Postgres and Redis: build-time filtering by identity and mode, always_allow / auto / prompt, scrubbing,
-  mode changes after build, abort on disconnect, egress pinning.
+  mode changes after build, abort on disconnect, over-long prompt arguments, untrusted server errors, reconnect
+  (grants, pending cards, generation check), the OAuth refresh lock and merge, the failure cache and the turn's wait
+  cap, egress pinning.

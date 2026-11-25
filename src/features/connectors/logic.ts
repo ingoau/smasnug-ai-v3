@@ -4,6 +4,7 @@
  * Unit-tested in logic.test.ts.
  */
 import { z } from 'zod';
+import type { StoredMessage } from '../../core/types.js';
 import { checkUrl } from '../../tools/safe-fetch.js';
 
 export type ToolClass = 'read' | 'write' | 'delete';
@@ -217,6 +218,40 @@ export function parseOAuthBlob(raw: string): { state: string; code: string } | n
   return { state, code };
 }
 
+/**
+ * The auto-mode verifier's transcript: one JSON object per message, so a message's text (newlines and all, escaped by
+ * JSON.stringify) can never pass for another line or another author. Authorship comes from Slack's user / bot ids only:
+ * `owner` is true only for the connection owner's own (non-bot) messages, and `trigger` marks the messages of the turn
+ * being answered (the owner's latest request). Forwarded content and link previews go in `shared`, files are counted.
+ */
+export function renderForVerifier(
+  msgs: Pick<StoredMessage, 'ts' | 'userId' | 'botId' | 'username' | 'text' | 'files' | 'attachments'>[],
+  o: { ownerId: string; botUserId: string; botId?: string | null; botName: string; triggerTs?: readonly string[] },
+): string {
+  const trigger = new Set(o.triggerTs ?? []);
+  return msgs
+    .map((m, i) => {
+      const own = m.userId === o.botUserId || (o.botId ? m.botId === o.botId : !!m.botId && !m.userId);
+      const isBot = own || Boolean(m.botId);
+      const from = own ? `${o.botName} (bot)` : m.botId ? `${m.username ?? m.userId ?? 'app'} (bot)` : `<@${m.userId ?? 'unknown'}>`;
+      let text = (m.text ?? '').replaceAll(`<@${o.botUserId}>`, `@${o.botName}`);
+      if (text.length > 1200) text = `${text.slice(0, 1200)}…`;
+      const shared = (m.attachments ?? [])
+        .filter((a) => a.text && !m.text.includes(a.text))
+        .map((a) => ({ kind: a.kind === 'link' ? 'link preview' : a.kind, text: a.text!.length > 300 ? `${a.text!.slice(0, 300)}…` : a.text }));
+      return JSON.stringify({
+        n: i + 1,
+        from,
+        owner: !isBot && m.userId === o.ownerId,
+        ...(trigger.has(m.ts) ? { trigger: true } : {}),
+        text,
+        ...(shared.length ? { shared } : {}),
+        ...(m.files?.length ? { files: m.files.length } : {}),
+      });
+    })
+    .join('\n');
+}
+
 /** The chat-model verifier's answer: approves only on a leading YES (anything else, including nothing, refuses). */
 export function parseVerifierAnswer(text: string | null | undefined): boolean {
   const first = (text ?? '').trim().toLowerCase().replace(/^[^a-z]+/, '');
@@ -229,21 +264,86 @@ export function decisionApproves(p: unknown, threshold: number): boolean {
   return Number.isFinite(n) && n >= threshold;
 }
 
-/** A tool's input schema as the model APIs need it: a JSON-schema object, not too big. */
-export function sanitizeInputSchema(schema: unknown, maxChars = 12_000): Record<string, unknown> {
-  const fallback = { type: 'object', properties: {}, additionalProperties: true };
-  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return fallback;
-  let json: string;
+/**
+ * Top-level keywords the model APIs refuse in a tool's input schema (Anthropic rejects anyOf / oneOf / allOf at the top
+ * level; not and if/then/else are no better). They are dropped and described in the tool description instead.
+ */
+const TOP_LEVEL_UNSUPPORTED = ['anyOf', 'oneOf', 'allOf', 'not', 'if', 'then', 'else'] as const;
+/** Top-level keywords that only identify the document; dropped. */
+const TOP_LEVEL_DROPPED = ['$schema', '$id', '$comment'] as const;
+
+export interface PreparedSchema {
+  /** Always an object schema the model APIs accept. */
+  schema: Record<string, unknown>;
+  /** Argument rules that couldn't stay in `schema` (untrusted server text, trimmed), for the tool description. */
+  argsNote?: string;
+}
+
+function jsonText(v: unknown): string | null {
   try {
-    json = JSON.stringify(schema);
+    return JSON.stringify(v);
   } catch {
-    return fallback;
+    return null;
   }
-  if (json.length > maxChars) return fallback;
-  const s = JSON.parse(json) as Record<string, unknown>;
-  if (s.type !== undefined && s.type !== 'object') return fallback;
-  delete s.$schema;
-  return { ...s, type: 'object', properties: s.properties && typeof s.properties === 'object' ? s.properties : {} };
+}
+
+/** A top-level `$ref` into the schema's own `$defs` / `definitions` (one level), else null. */
+function resolveTopRef(s: Record<string, unknown>): Record<string, unknown> | null {
+  const ref = s.$ref;
+  if (typeof ref !== 'string') return null;
+  const m = /^#\/(\$defs|definitions)\/([^/]+)$/.exec(ref);
+  const defs = m ? (s[m[1]!] as Record<string, unknown> | undefined) : undefined;
+  const target = m && defs && typeof defs === 'object' ? defs[m[2]!] : undefined;
+  if (!target || typeof target !== 'object' || Array.isArray(target) || '$ref' in (target as object)) return null;
+  const { $ref: _ref, ...rest } = s;
+  return { ...rest, ...(target as Record<string, unknown>) };
+}
+
+/**
+ * A tool's input schema as the model APIs need it: an object schema without top-level combinators, not too big.
+ * Whatever can't stay (combinators, a non-object or oversized schema, an unresolvable top-level $ref) becomes a
+ * permissive object schema plus `argsNote` describing the expected arguments.
+ */
+export function prepareInputSchema(schema: unknown, o: { maxChars?: number; noteMax?: number } = {}): PreparedSchema {
+  const maxChars = o.maxChars ?? 12_000;
+  const noteMax = o.noteMax ?? 1500;
+  const permissive = { type: 'object', properties: {}, additionalProperties: true };
+  const note = (label: string, v: unknown): string | undefined => {
+    const t = jsonText(v);
+    if (!t || t === '{}') return undefined;
+    return `${label}: ${t.length > noteMax ? `${t.slice(0, noteMax - 1)}…` : t}`;
+  };
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return { schema: permissive };
+  const json = jsonText(schema);
+  if (json === null) return { schema: permissive };
+  let s = JSON.parse(json) as Record<string, unknown>;
+  for (const k of TOP_LEVEL_DROPPED) delete s[k];
+  if (s.$ref !== undefined) {
+    const resolved = resolveTopRef(s);
+    if (!resolved) return { schema: permissive, argsNote: note('Expected arguments (JSON schema, not enforced)', s) };
+    s = resolved;
+    for (const k of TOP_LEVEL_DROPPED) delete s[k];
+  }
+  if (json.length > maxChars || (s.type !== undefined && s.type !== 'object')) {
+    return { schema: permissive, argsNote: note('Expected arguments (JSON schema, not enforced)', s) };
+  }
+  const dropped: Record<string, unknown> = {};
+  for (const k of TOP_LEVEL_UNSUPPORTED) {
+    if (k in s) {
+      dropped[k] = s[k];
+      delete s[k];
+    }
+  }
+  const properties = s.properties && typeof s.properties === 'object' && !Array.isArray(s.properties) ? s.properties : {};
+  if (Object.keys(dropped).length > 0) {
+    return { schema: { ...s, type: 'object', properties, additionalProperties: true }, argsNote: note('Argument rules (JSON schema, not enforced)', dropped) };
+  }
+  return { schema: { ...s, type: 'object', properties } };
+}
+
+/** prepareInputSchema's schema alone. */
+export function sanitizeInputSchema(schema: unknown, maxChars = 12_000): Record<string, unknown> {
+  return prepareInputSchema(schema, { maxChars }).schema;
 }
 
 /** Untrusted server text for a description: one line-ish, no control characters, capped. */

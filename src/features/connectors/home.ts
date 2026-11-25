@@ -122,6 +122,9 @@ export async function connectorsAdminBlocks(): Promise<unknown[]> {
 
 // --- modals ---------------------------------------------------------------------------------------------------------
 
+/** Slack's limit for a plain_text_input's max_length. */
+const PLAIN_TEXT_INPUT_MAX = 3000;
+
 function input(blockId: string, label: string, o: { hint?: string; placeholder?: string; multiline?: boolean; max?: number } = {}) {
   return {
     type: 'input',
@@ -133,7 +136,7 @@ function input(blockId: string, label: string, o: { hint?: string; placeholder?:
       action_id: 'v',
       ...(o.placeholder ? { placeholder: { type: 'plain_text', text: o.placeholder } } : {}),
       ...(o.multiline ? { multiline: true } : {}),
-      ...(o.max ? { max_length: o.max } : {}),
+      ...(o.max ? { max_length: Math.min(o.max, PLAIN_TEXT_INPUT_MAX) } : {}),
     },
   };
 }
@@ -153,7 +156,7 @@ export function keyModal(def: ConnectorDef, error?: string) {
     blocks: [
       ...errorBlock(error),
       { type: 'section', text: { type: 'mrkdwn', text: truncate(`${help ? `${mrkdwnEscape(help)}\n\n` : ''}Your key is stored encrypted and only ever sent to ${mrkdwnEscape(new URL(def.url).host)}. The agent never sees it.`, 2900) } },
-      input('key', 'API key', { max: 4000, hint: 'Slack shows what you type here; nobody else sees this form.' }),
+      input('key', 'API key', { max: PLAIN_TEXT_INPUT_MAX, hint: 'Slack shows what you type here; nobody else sees this form.' }),
     ],
   };
 }
@@ -172,7 +175,7 @@ export function codeModal(def: ConnectorDef, authUrl: string | null, error?: str
         type: 'section',
         text: { type: 'mrkdwn', text: `After you approve access${authUrl ? ` on <${authUrl}|the sign-in page>` : ''}, you land on a page that shows a code. Copy it and paste it here.` },
       },
-      input('code', 'Code', { max: 4000, placeholder: 'abc123….xyz' }),
+      input('code', 'Code', { max: PLAIN_TEXT_INPUT_MAX, placeholder: 'abc123….xyz' }),
     ],
   };
 }
@@ -190,7 +193,8 @@ function actionsModalBase(def: ConnectorDef, blocks: unknown[], withSubmit: bool
 }
 
 async function actionsModal(userId: string, def: ConnectorDef, conn: Connection) {
-  const [tools, s] = await Promise.all([connectorTools(userId, def, conn), getSettings(userId, def.slug)]);
+  // fresh: the owner asked now, so a remembered failed listing is retried.
+  const [tools, s] = await Promise.all([connectorTools(userId, def, conn, undefined, { fresh: true }), getSettings(userId, def.slug)]);
   if (tools.length === 0) return actionsModalBase(def, [ctxBlock('This server lists no actions.')], false);
   const blocks: unknown[] = [ctxBlock('Each action uses the setting for its kind (reading / changing / deleting) unless you pick something else here.')];
   for (const t of tools.slice(0, MODAL_TOOLS_SHOWN)) {
