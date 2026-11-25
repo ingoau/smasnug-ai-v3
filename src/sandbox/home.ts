@@ -74,6 +74,12 @@ export async function sandboxAdminBlocks(userId: string): Promise<unknown[]> {
     );
   out.push(
     section(
+      settings.browserDisabled ? '*Browser tools are off* (browser_open, browser_click, …; logins from the vault too).' : 'Browser tools are *on*.',
+      settings.browserDisabled ? btn('sbx:browser_on', 'Turn on', 'on', { style: 'primary' }) : btn('sbx:browser_off', 'Turn off', 'off'),
+    ),
+  );
+  out.push(
+    section(
       settings.accessMode === 'allowlist_only' ? '*Access:* allowlist only (Hack Club verification is not consulted).' : '*Access:* verified Hack Club identity, or on the allowlist.',
       settings.accessMode === 'allowlist_only' ? btn('sbx:mode_hca', 'Allow verified users', 'hca') : btn('sbx:mode_allowlist', 'Allowlist only', 'allowlist'),
     ),
@@ -110,6 +116,12 @@ export async function handleSandboxAdminAction(ctx: ActionContext, publishHome: 
       break;
     case 'sbx:previews_off':
       await setSandboxSetting('previewsDisabled', true);
+      break;
+    case 'sbx:browser_on':
+      await setSandboxSetting('browserDisabled', false);
+      break;
+    case 'sbx:browser_off':
+      await setSandboxSetting('browserDisabled', true);
       break;
     case 'sbx:mode_hca':
       await setSandboxSetting('accessMode', 'hca_or_allowlist');

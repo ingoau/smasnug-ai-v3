@@ -202,6 +202,40 @@ export function describeToolStep(toolName: string, input: unknown, opts: { fileN
       return q('name') || q('path') ? `Exporting ${(q('name') || q('path')).split('/').pop()}` : 'Exporting a file';
     case 'request_preview':
       return 'Preparing a live preview';
+    case 'browser_open':
+      return typeof i.url === 'string' && i.url.trim() ? `Opening ${siteOf(i.url.trim())}` : 'Opening a page';
+    case 'browser_snapshot':
+      return 'Looking at the page';
+    case 'browser_click':
+      return 'Clicking on the page';
+    case 'browser_fill':
+      return 'Filling in a form';
+    case 'browser_press':
+      return q('key') ? `Pressing ${q('key')}` : 'Pressing a key';
+    case 'browser_select':
+      return 'Choosing an option';
+    case 'browser_scroll':
+      return 'Scrolling the page';
+    case 'browser_wait':
+      return 'Waiting for the page';
+    case 'browser_read':
+      return 'Reading the page';
+    case 'browser_screenshot':
+      return 'Taking a screenshot';
+    case 'browser_back':
+      return 'Going back';
+    case 'browser_close':
+      return 'Closing the browser';
+    case 'browser_fill_credential':
+      return q('credential') ? `Logging in with ${q('credential')}` : 'Logging in';
+    case 'browser_save_session':
+      return 'Saving the browser login';
+    case 'browser_load_session':
+      return q('name') ? `Loading the saved login ${q('name')}` : 'Loading a saved login';
+    case 'sandbox_use_credential':
+      return q('credential') ? `Using the credential ${q('credential')}` : 'Using a credential';
+    case 'sandbox_save_credential':
+      return q('name') ? `Saving ${q('name')} to the vault` : 'Saving a credential';
     case 'load_skill':
       return 'Checking its notes';
     default: {

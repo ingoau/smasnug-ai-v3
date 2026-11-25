@@ -9,7 +9,33 @@ import { setSetting } from '../features/state.js';
 const CACHE_TTL_MS = 3000;
 
 /** The sandbox tools (registered in tools.ts when the feature is configured; every subagent has them). */
-export const SANDBOX_TOOL_NAMES = ['sandbox_exec', 'sandbox_read_file', 'sandbox_write_file', 'sandbox_import', 'sandbox_export', 'request_preview'] as const;
+export const SANDBOX_TOOL_NAMES = [
+  'sandbox_exec',
+  'sandbox_read_file',
+  'sandbox_write_file',
+  'sandbox_import',
+  'sandbox_export',
+  'request_preview',
+  // The browser (src/sandbox/browser/tools.ts): agent-browser inside the sandbox.
+  'browser_open',
+  'browser_snapshot',
+  'browser_click',
+  'browser_fill',
+  'browser_press',
+  'browser_select',
+  'browser_scroll',
+  'browser_wait',
+  'browser_read',
+  'browser_screenshot',
+  'browser_back',
+  'browser_close',
+  // Vault, sandbox side (src/sandbox/browser/vault.ts): only when the vault is configured too.
+  'browser_fill_credential',
+  'browser_save_session',
+  'browser_load_session',
+  'sandbox_use_credential',
+  'sandbox_save_credential',
+] as const;
 
 /** ToolContext.extras key: called (no arguments) once a subagent may use its sandbox; child.ts raises the run cap. */
 export const SANDBOX_STARTED_EXTRA = 'onSandboxStarted';
@@ -21,6 +47,8 @@ export interface SandboxSettings {
   disabled: boolean;
   /** No new preview deploys; live ones stay up until expiry unless taken down. */
   previewsDisabled: boolean;
+  /** The browser_* tools refuse (agent-browser through sandbox_exec is the model's own code and isn't covered). */
+  browserDisabled: boolean;
   /** `allowlist_only` is the gating kill switch: HCA is not consulted, access fails closed to the allowlist. */
   accessMode: AccessMode;
 }
@@ -28,6 +56,7 @@ export interface SandboxSettings {
 export const SETTING_KEYS = {
   disabled: 'sandbox_disabled',
   previewsDisabled: 'sandbox_previews_disabled',
+  browserDisabled: 'sandbox_browser_disabled',
   accessMode: 'sandbox_access_mode',
 } as const;
 
@@ -49,6 +78,7 @@ async function load(): Promise<SandboxSettings> {
   return {
     disabled: get(SETTING_KEYS.disabled) === true,
     previewsDisabled: get(SETTING_KEYS.previewsDisabled) === true,
+    browserDisabled: get(SETTING_KEYS.browserDisabled) === true,
     accessMode: get(SETTING_KEYS.accessMode) === 'allowlist_only' ? 'allowlist_only' : 'hca_or_allowlist',
   };
 }

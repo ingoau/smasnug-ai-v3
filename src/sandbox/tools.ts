@@ -19,6 +19,8 @@ import { createFileFromStaged, LargeFileRefusedError, largeGate, stageStream, st
 import { log } from '../log.js';
 import { processImage } from '../tools/image-process.js';
 import { errMsg, untrusted } from '../tools/util.js';
+import { scrubForSubagent } from '../features/vault/scrub.js';
+import { VAULT_DIR } from './browser/vault-files.js';
 import { accessModelText, canUseSandbox, firstUseNotice, notifyAccess } from './access.js';
 import { EXEC_SCRIPT, formatExecResult, importFailedText, isImagePath, safeBaseName } from './format.js';
 import { SandboxRefused, withSandbox } from './lifecycle.js';
@@ -31,7 +33,7 @@ import { deployInline } from './preview/flow.js';
 const NOT_ENABLED = 'Sandbox tools are only available to subagents.';
 
 /** Access and kill switches. Returns the model-facing refusal, or null to go ahead. */
-async function gate(ctx: ToolContext): Promise<string | null> {
+export async function gate(ctx: ToolContext): Promise<string | null> {
   if (ctx.role !== 'child' || !ctx.subagentId) return NOT_ENABLED;
   const access = await canUseSandbox(ctx.speakerId);
   if (!access.ok) {
@@ -49,10 +51,13 @@ async function markStarted(ctx: ToolContext): Promise<void> {
   if (typeof started === 'function') (started as () => void)();
 }
 
-const owner = (ctx: ToolContext) => ({ subagentId: ctx.subagentId!, threadId: ctx.threadId, ownerId: ctx.speakerId });
+export const owner = (ctx: ToolContext) => ({ subagentId: ctx.subagentId!, threadId: ctx.threadId, ownerId: ctx.speakerId });
 
-/** Run a tool body against the sandbox with the shared checks and error handling. */
-async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<string>): Promise<string> {
+/**
+ * Run a tool body against the sandbox with the shared checks and error handling. What it returns is scrubbed of every
+ * vault secret this subagent was handed (src/features/vault/scrub.ts: a file in /work/.vault, a filled password).
+ */
+export async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<string>): Promise<string> {
   const refusal = await gate(ctx);
   if (refusal) return refusal;
   try {
@@ -60,7 +65,8 @@ async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<st
       await markStarted(ctx);
       return fn(h);
     });
-    return note ? `[Note: ${note}]\n${value}` : value;
+    const text = note ? `[Note: ${note}]\n${value}` : value;
+    return text ? await scrubForSubagent(ctx.subagentId, text) : text;
   } catch (err) {
     if (err instanceof SandboxRefused) return err.message;
     if (err instanceof FileError) return `${name} failed: ${err.message}`;
@@ -69,11 +75,15 @@ async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<st
   }
 }
 
-const p = () => sandboxProvider();
+export const p = () => sandboxProvider();
 
-function badPath(path: string) {
+export function badPath(path: string) {
   return `Bad path "${path.slice(0, 120)}": use a path under /work (absolute, or relative to /work), without "..".`;
 }
+
+/** Vault files (sandbox_use_credential, src/sandbox/browser/vault.ts) are never read, exported or published. */
+export const inVaultDir = (abs: string) => abs === VAULT_DIR || abs.startsWith(`${VAULT_DIR}/`);
+const VAULT_PATH_REFUSAL = `${VAULT_DIR} holds credentials from the owner's vault: reference the files in commands (e.g. "$(cat ${VAULT_DIR}/name)"), never read, print or export them.`;
 
 // ---------- sandbox_exec ----------
 
@@ -128,6 +138,7 @@ reg('sandbox_read_file', (ctx) =>
     execute: async ({ path, offset }): Promise<ReadOut> => {
       const abs = workPath(path);
       if (!abs) return badPath(path);
+      if (inVaultDir(abs)) return VAULT_PATH_REFUSAL;
       let out: ReadOut = '';
       const text = await run(ctx, 'sandbox_read_file', async (h) => {
         const { bytes, size } = await p().readFile(h, abs, { maxBytes: limits.sandboxReadMaxBytes });
@@ -238,6 +249,7 @@ reg('sandbox_export', (ctx) =>
     execute: async ({ path, name, description }) => {
       const abs = workPath(path);
       if (!abs) return badPath(path);
+      if (inVaultDir(abs)) return VAULT_PATH_REFUSAL;
       return run(ctx, 'sandbox_export', async (h) => {
         const { bytes, size } = await p().readFile(h, abs, { maxBytes: limits.sandboxExportMaxBytes });
         if (size > limits.sandboxExportMaxBytes) return exportLarge(ctx, h, abs, size, name, description);
@@ -308,6 +320,7 @@ if (previewsConfigured())
       execute: async ({ dir, title }, opts) => {
         const abs = workPath(dir);
         if (!abs) return badPath(dir);
+        if (abs === '/work' || inVaultDir(abs)) return `Put the site in its own directory under /work (e.g. /work/site), not ${abs}.`;
         if ((await sandboxSettings()).previewsDisabled) return 'Live previews are turned off right now. You may tell the user that plainly; export the files instead.';
         if (!ctx.runId) return 'request_preview only works inside a subagent run.';
         const counts = await previewCountsToday(ctx.speakerId);
@@ -358,6 +371,6 @@ if (previewsConfigured())
     }),
   );
 
-function reg(name: string, build: (ctx: ToolContext) => Tool) {
+export function reg(name: string, build: (ctx: ToolContext) => Tool) {
   registerTool({ name, roles: ['child'], build });
 }

@@ -481,6 +481,8 @@ export const limits = {
    */
   sandboxExportMaxBytes: 20 * 1024 * 1024,
   userSandboxExecsPerHour: 200,
+  /** browser_* tool calls (src/sandbox/browser/), per user per hour. */
+  userBrowserActionsPerHour: 400,
   userCredentialUsesPerHour: 60,
   userLiveSandboxes: 2,
   globalLiveSandboxes: 8,
