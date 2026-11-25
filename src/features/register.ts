@@ -21,6 +21,7 @@ import { registerCodeChannelTools } from './code-channels/tools.js';
 import { sweepCodeChannels } from './code-channels/lifecycle.js';
 import { processCodeChannelStatus } from './code-channels/status.js';
 import { registerVault, vaultMaintenance } from './vault/register.js';
+import { registerConnectors } from './connectors/register.js';
 
 // Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user, report_failure
 registerMemoryTools();
@@ -53,6 +54,9 @@ registerAction('sched:', (ctx) => handleScheduleAction(ctx, publishHome));
 // Vault (docs/vault.md; off without VAULT_SECRET_KEY): list_credentials, save_credential, request_credential,
 // fetch_with_credential, approval cards and the App Home credential modal.
 registerVault(publishHome);
+// MCP connectors (docs/mcp-custom-connectors.md; off without VAULT_SECRET_KEY or an enabled catalog entry): App Home
+// connect / settings, the prompt-mode approval executor. Tools are loaded per front user turn (src/agent/front.ts).
+registerConnectors(publishHome);
 registerAppHome(publishHome);
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {

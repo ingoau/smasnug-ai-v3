@@ -16,6 +16,7 @@ import { scheduleHomeBlocks } from './schedule/home.js';
 import { hasAgreed, PRIVACY_READ_ACTION, withdrawButton } from './privacy.js';
 import { sandboxAdminBlocks, sandboxDisclosureBlocks, sandboxUserLimitLines } from '../sandbox/home.js';
 import { vaultHomeBlocks } from './vault/home.js';
+import { connectorsAdminBlocks, connectorsHomeBlocks } from './connectors/home.js';
 
 const MAX_BLOCKS = 100;
 const USER_FACTS_SHOWN = 25;
@@ -68,6 +69,7 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
 
   blocks.push(...(await scheduleHomeBlocks(userId).catch((err) => (log.warn({ err }, 'schedule home blocks failed'), []))));
   blocks.push(...(await vaultHomeBlocks(userId).catch((err) => (log.warn({ err }, 'vault home blocks failed'), []))));
+  blocks.push(...(await connectorsHomeBlocks(userId).catch((err) => (log.warn({ err }, 'connector home blocks failed'), []))));
   blocks.push(...sandboxDisclosureBlocks());
   const agreed = await hasAgreed(userId).catch(() => true);
   blocks.push(
@@ -79,6 +81,7 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
   );
   if (isAdmin(userId)) {
     blocks.push(...(await adminBlocks()));
+    blocks.push(...(await connectorsAdminBlocks().catch((err) => (log.warn({ err }, 'connector admin blocks failed'), []))));
     blocks.push(...(await limitsBlocks(userId).catch((err) => (log.warn({ err }, 'limits home blocks failed'), []))));
     blocks.push(...(await sandboxAdminBlocks(userId).catch((err) => (log.warn({ err }, 'sandbox home blocks failed'), []))));
   }

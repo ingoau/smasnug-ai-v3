@@ -50,6 +50,7 @@ import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
 import { previewsOfRuns, type PreviewRow } from '../sandbox/preview/store.js';
 import { postUnannouncedPreviews } from '../sandbox/preview/reply-blocks.js';
 import { offersMoveButton } from '../features/code-channels/logic.js';
+import { loadConnectorTools } from '../features/connectors/tools.js';
 import { hiddenToolsFor, loadCodeChannelTurnContext, NO_CODE_CHANNELS, renderChildrenSection, renderHereSection, type CodeChannelTurnContext } from '../features/code-channels/turn-context.js';
 
 export interface TurnIO {
@@ -844,6 +845,10 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, abortSignal: stopAbort.signal, extras });
   for (const name of hiddenToolsFor(codeChannels)) delete tools[name];
   if (privateTo) for (const name of PRIVATE_HIDDEN_TOOLS) delete tools[name];
+  // MCP connectors (docs/mcp-custom-connectors.md): the speaker's own connected services, on their own user turns only
+  // (filtered at build time; prompt-mode tools left out of private turns). Never replaces a built-in tool. Loaded while
+  // the context is built (a cold tool list is a network call); merged before the model runs. Never throws.
+  const connectorTools = loadConnectorTools({ turn, speakerId: turn.authorId, abortSignal: stopAbort.signal, taken: Object.keys(tools) });
   recordReactVisibility(tools, state);
   // Coding agents change the bot's own code: only offered in the admin's own message turns when configured (not in
   // synthesis / scheduled turns, whose input is other content; re-checked on use).
@@ -857,6 +862,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   ]);
   const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId), moveToChannel: offersMoveButton({ enabled: codeChannels.enabled, inCodeChannel: Boolean(codeChannels.here) }) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
   timing.mark('context_built');
+  Object.assign(tools, await connectorTools);
   timing.set('prompt_chars', system.length + built.text.length);
   const messages: ModelMessage[] = [{ role: 'user', content: built.text }];
   const ph: { current: 'tools' | 'final' } = { current: 'tools' };

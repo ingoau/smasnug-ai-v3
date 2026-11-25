@@ -32,6 +32,7 @@ import type { BatchReason } from './rules.js';
 import { showIntakeStatus } from './session-status.js';
 import type { SlackMessage } from './store.js';
 import { deleteAllVaultData } from '../features/vault/store.js';
+import { deleteConnectorData } from '../features/connectors/settings.js';
 
 const PROMPT_THROTTLE_S = 10 * 60;
 export const HOLD_REPLAY_MS = 60 * 60 * 1000;
@@ -220,6 +221,8 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
     log.warn({ err, userId }, 'privacy withdraw: deleting their vault failed');
     return 0;
   });
+  // Their connector permission settings and cached tool lists; aborts their in-flight connector calls.
+  await deleteConnectorData(userId).catch((err) => log.warn({ err, userId }, 'privacy withdraw: deleting their connector settings failed'));
   // Theirs anywhere, and everything (the bot's replies too) in their DMs with the bot.
   const msgs = await sql<{ channelId: string; ts: string; threadId: string | null; userId: string | null }[]>`
     select channel_id, ts, thread_id, user_id from messages
