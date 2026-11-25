@@ -10,6 +10,7 @@ smasnug ai is a Slack bot run by Ingo Wolf (@inw) as a personal project. This po
 - **Your earlier conversations with the bot.** When you refer back to something, it can search its stored copies of conversations you had with it (about the last 30 days). A DM or private conversation only shows up in that same conversation, or, for private channels you're still a member of, in your DM with the bot; never in a public channel.
 - **Public directory data.** To find people and channels, it keeps a copy of public Slack profile fields (names, handle, title, pronouns, status, time zone) and public channel details (name, topic, purpose). It does not store emails, phone numbers or avatars there. When someone asks it to look at a person's profile picture, it downloads that picture into the conversation's files, which are deleted like other files it makes.
 - **Records of how it answered.** For each answer, the steps it took: the conversation context it was given, its working notes, the tools it used and what they returned, and how long and how much it cost. Also notes on where an answer went wrong (wrong information, a missed question, an unfinished task), with short quotes of the messages that show it: the bot can note its own mistakes, and an automatic review of finished conversations notes ones that look like they went wrong. These exist to find mistakes and make the bot better.
+- **Credentials and connections you choose to store.** Logins (with 2FA keys), API keys, saved browser sessions and connections to other services (connectors) that you add in the App Home or ask the bot to save. They're encrypted with a key kept outside the bot's database and only ever used for you, for an action you approve (or set to run without asking). Each use is logged (what, where and when, never the secret) so you can see it in the App Home.
 - **Usage and moderation records.** Rate-limit counters, model usage, messages it sends on your behalf (with who asked), and reports.
 
 ## How it's used
@@ -23,6 +24,7 @@ Answering means sending parts of the conversation to these services:
 - **AI model providers.** [Hack Club AI](https://ai.hackclub.com) (which relays to [OpenRouter](https://openrouter.ai) and model providers), the [Anthropic API](https://www.anthropic.com), and OpenRouter directly as a fallback. Reviews of past conversations use [Anthropic](https://www.anthropic.com)'s Claude.
 - **Search.** [Exa](https://exa.ai) (through Hack Club's proxy or directly) and Anthropic's web search.
 - **Code sandboxes**, only if you ask for code to run: files and code run on [Modal](https://modal.com) in the US. Live previews are published on Cloudflare, and only after you accept Cloudflare's own terms.
+- **Services you connect or log in to**, only when you set that up: a connector's service receives the requests the bot makes for you, and websites you have the bot log in to receive your login.
 - **Slack**, where everything the bot posts lives.
 
 These services handle the data under their own privacy policies.
@@ -35,12 +37,13 @@ These services handle the data under their own privacy policies.
 - Memory facts: until you delete them, or after about **6 months** without being used.
 - Directory data: kept up to date from Slack and removed when the profile or channel is removed.
 - Messages sent on your behalf and reports: kept so reports stay accurate.
+- Credentials, saved sessions and connections: until you delete them. Their usage log: about **90 days**.
 
 ## Your choices
 
 - See and delete what the bot remembers about you in its App Home.
 - Delete your messages in Slack to remove them from the bot.
-- **Withdraw your consent and delete your data** with the button in the bot's App Home. The bot stops answering you until you agree again, and right away deletes what it remembers about you, the messages and files of yours it has stored, its stored copy of your DMs with it, your reminders and watches, conversation summaries that include your messages, and the records of how it answered in those conversations. Copies that ended up elsewhere (for example in records of answers in other channels) are deleted within 30 days. Messages it sent on your behalf and reports are kept so reports stay accurate, your public directory entry follows your Slack profile, and nothing in Slack itself is touched. After withdrawing, messages you write in conversations the bot is part of are stored as context again, like anyone else's.
+- **Withdraw your consent and delete your data** with the button in the bot's App Home. The bot stops answering you until you agree again, and right away deletes what it remembers about you, the messages and files of yours it has stored, its stored copy of your DMs with it, your reminders and watches, your stored credentials, connections and their usage log, conversation summaries that include your messages, and the records of how it answered in those conversations. Copies that ended up elsewhere (for example in records of answers in other channels) are deleted within 30 days. Messages it sent on your behalf and reports are kept so reports stay accurate, your public directory entry follows your Slack profile, and nothing in Slack itself is touched. After withdrawing, messages you write in conversations the bot is part of are stored as context again, like anyone else's.
 - Stop using the bot at any time, or ask Ingo to delete your data.
 
 ## Changes to this policy
