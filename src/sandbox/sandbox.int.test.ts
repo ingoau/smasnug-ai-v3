@@ -150,7 +150,8 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       expect(out).toMatch(/told why privately/);
       expect(out).not.toMatch(/verif/i);
       await vi.waitFor(async () => {
-        const eph = (await callsSince(n)).filter((c) => c.method === 'chat.postEphemeral');
+        // The fake Slack log is shared with other integration files running at the same time: only this user's.
+        const eph = (await callsSince(n)).filter((c) => c.method === 'chat.postEphemeral' && c.args.user === stranger);
         expect(eph).toHaveLength(1);
         expect(eph[0]!.args.user).toBe(stranger);
         expect(eph[0]!.args.text).toMatch(/auth\.hackclub\.com/);
@@ -158,7 +159,7 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
       // At most one explanation per cooldown.
       await call(ctxOf(t, stranger, sa2), 'sandbox_exec', { command: 'ls' });
       await new Promise((r) => setTimeout(r, 200));
-      expect((await callsSince(n)).filter((c) => c.method === 'chat.postEphemeral')).toHaveLength(1);
+      expect((await callsSince(n)).filter((c) => c.method === 'chat.postEphemeral' && c.args.user === stranger)).toHaveLength(1);
     } finally {
       H.hcaClient.check = prev;
     }
@@ -607,7 +608,8 @@ describe.skipIf(!INTEGRATION)('code sandboxes', () => {
         }
         expect(pv.status).toBe('awaiting_terms');
         expect(new Date(pv.inlineUntil).getTime()).toBeGreaterThan(Date.now());
-        const eph = (await callsSince(n)).filter((c) => c.method === 'chat.postEphemeral');
+        // The fake Slack log is shared with other integration files running at the same time: only this user's.
+        const eph = (await callsSince(n)).filter((c) => c.method === 'chat.postEphemeral' && c.args.user === u);
         expect(eph).toHaveLength(1);
         expect(JSON.stringify(eph[0]!.args.blocks)).toContain('preview:terms_accept');
         // Someone else can't accept.

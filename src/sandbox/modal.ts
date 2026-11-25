@@ -28,6 +28,8 @@ const BASE_ENV = {
   PLAYWRIGHT_BROWSERS_PATH: '/ms-playwright',
   // agent-browser (image.ts): Playwright's Chromium; the default session saves cookies + localStorage under
   // /work/.agent-browser (every 30 s and on close, see pause()), so a login survives a pause; no update check.
+  // That file is plaintext and protected by path instead (protected.ts); a login from the vault is cleared at run end.
+  // No AGENT_BROWSER_ENCRYPTION_KEY: the key would sit in this same sandbox, readable by anything that can read the file.
   AGENT_BROWSER_EXECUTABLE_PATH: '/usr/local/bin/chromium',
   AGENT_BROWSER_RESTORE: 'default',
   AGENT_BROWSER_NO_VERSION_CHECK: '1',
@@ -157,8 +159,9 @@ export class ModalProvider implements SandboxProvider {
     const sb = await this.sandbox(h);
     // agent-browser's daemons (they outlive sandbox_exec calls) don't survive the snapshot: close them so each session
     // saves its cookies + localStorage first (AGENT_BROWSER_RESTORE). Best effort; skipped when none is running.
-    // Vault files (sandbox_use_credential, /work/.vault) never go into a snapshot.
-    await this.exec(h, ['bash', '-c', 'rm -rf /work/.vault; compgen -G "$HOME/.agent-browser/*.pid" >/dev/null && agent-browser close --all >/dev/null 2>&1; true'], {
+    // Vault files (sandbox_use_credential, /work/.vault) and the last command's full output (/work/.last, which can
+    // hold a secret) never go into a snapshot. A browser logged in from the vault is cleared before (lifecycle.ts).
+    await this.exec(h, ['bash', '-c', 'rm -rf /work/.vault /work/.last; compgen -G "$HOME/.agent-browser/*.pid" >/dev/null && agent-browser close --all >/dev/null 2>&1; true'], {
       timeoutMs: 10_000, // a healthy close takes ~1 s; pause holds the row lock (LOCK_TTL_MS) throughout
       maxOutputBytes: 1024,
     }).catch((err) => {

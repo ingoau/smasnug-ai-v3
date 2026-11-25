@@ -16,7 +16,8 @@ nothing at startup):
   stop, 80 % notice. `settings.ts`: kill switches. `hca.ts` + `access.ts`: the access decision and ephemerals.
 - `tools.ts`: `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_import`, `sandbox_export`,
   `request_preview` (children only). `browser/`: the `browser_*` tools and the vault's sandbox side (§3.9).
-  `hooks.ts`: run end → idle clock, vault files removed, preview hand-off. `prompts.ts`: prompt
+  `protected.ts`: paths that never leave the sandbox as files (`/work/.vault`, `/work/.agent-browser`, `/work/.last`).
+  `hooks.ts`: run end → idle clock, vault material removed, preview hand-off. `prompts.ts`: prompt
   sections. `home.ts`: App Home disclosure + admin section.
 - `preview/`: `tar.ts` (minimal tar reader/writer), `bundle.ts` (limits, form scan, banner, `_headers`, the Worker,
   wrangler config), `deploy.ts` (fresh-sandbox `wrangler deploy --temporary`, output parsing, takedown), `crypto.ts`
@@ -78,7 +79,9 @@ Deviations from the plan below (all decided 2026-10-07 unless noted):
   `sandbox_exec` is a new hourly `LimitKind`.
 - **Reports** of a preview go to the mod channel with a Take down button (admin only), like other reports.
 - **Exec output:** the full output stays in `/work/.last/{stdout,stderr}`; the model gets the head (2k chars) and
-  tail (10k chars) with a cut note.
+  tail (10k chars) with a cut note. `/work/.last` can hold a secret (e.g. `curl -v` with an auth header): it is a
+  protected path (§3.9: readable with `sandbox_read_file`, scrubbed; never exported, published or opened in the
+  browser), removed before every pause snapshot, and at run end when vault material was used.
 - **Snapshots** get a 7-day TTL (Modal's default is 30 days) and are deleted when the sandbox is destroyed.
 
 ## 1. Goals and non-goals
@@ -243,7 +246,11 @@ command: it detaches into its own session, so the exec's process-group kill and 
 Playwright's Chromium (linked as `/usr/local/bin/chromium`, no second browser download). Its config is env in
 `modal.ts` `BASE_ENV`: `AGENT_BROWSER_EXECUTABLE_PATH`, `AGENT_BROWSER_RESTORE=default` (the default session saves
 cookies + localStorage under `/work/.agent-browser` every 30 s and on close, and reloads them when it starts) and
-`AGENT_BROWSER_NO_VERSION_CHECK`. The daemon doesn't survive a pause, so `ModalProvider.pause` runs
+`AGENT_BROWSER_NO_VERSION_CHECK`. The saved session is plaintext. `AGENT_BROWSER_ENCRYPTION_KEY` (encryption at rest,
+per agent-browser's docs) is deliberately not set: the key would live in the same sandbox (its env), so anything that
+can read the file (the model's own code via `sandbox_exec`, a file tool) can read the key too, and a Modal snapshot
+holds both. Instead the directory is a protected path (§3.9) and a login from the vault is cleared at run end and
+before a pause. The daemon doesn't survive a pause, so `ModalProvider.pause` runs
 `agent-browser close --all` before the snapshot (skipped when no daemon is running): after a resume the next command
 starts a fresh browser with the saved cookies, but open pages are gone. The daemon exits by itself after an hour idle.
 Children drive it through the `browser_*` tools (§3.9); raw `agent-browser` through `sandbox_exec` stays as a fallback.
@@ -474,59 +481,94 @@ The feature is off unless the Modal tokens are set, like Cursor.
 
 **Browser tools** (`browser/tools.ts`, registered with the sandbox tools, children only). They wrap agent-browser's
 default session inside the subagent's own sandbox, so the browser dies with it and cookies persist as they do for
-agent-browser via `sandbox_exec` (`AGENT_BROWSER_RESTORE=default`). Every call is one exec (`browser/cli.ts`): the
-action, a short `wait --load domcontentloaded`, then `get url` / `get title` and usually `snapshot -i -c`, each
-section behind a marker line, so one round trip returns the new state. Tools: `browser_open(url)`,
-`browser_snapshot(text?, selector?)`, `browser_click(ref)`, `browser_fill(ref, text, submit?)`,
-`browser_press(key, ref?)`, `browser_select(ref, value)`, `browser_scroll(direction?, pixels?, ref?)`,
-`browser_wait(ref | text | url | seconds)`, `browser_read(ref?, offset?)` (rendered text, 16k-character pages),
-`browser_screenshot(full_page?, annotate?)` (an image to the model; the PNG goes to /tmp and is deleted),
-`browser_back`, `browser_close`. Output: a status line, then title, URL and the snapshot trimmed to 3.5k
-characters (14k for `browser_snapshot`) as untrusted content, with a note when lines were cut.
+agent-browser via `sandbox_exec` (`AGENT_BROWSER_RESTORE=default`). Five tools, so a subagent that never browses pays
+little for them:
+- `browser_open(url)`;
+- `browser_act(action: click | fill | press | select | scroll | wait | back, ref?, text?, submit?, key?, direction?,
+  pixels?, url?, seconds?)`: `fill` clears and types (`submit` presses Enter), `select` takes the option in `text`,
+  `scroll` a direction or a ref into view, `wait` exactly one of ref / text / url glob / seconds;
+- `browser_read(mode: snapshot | text, selector?, ref?, offset?)`: the interactive elements (scoped by a CSS
+  selector), or the rendered text of the page or one element in 16k-character pages;
+- `browser_screenshot(full_page?, annotate?)` (an image to the model; the PNG goes to /tmp and is deleted);
+- `browser_close`.
+
+Every call is one exec (`browser/cli.ts`): the action, a short `wait --load domcontentloaded`, then `get url` /
+`get title`, usually `snapshot -i -c`, and `get url` again after any page content was captured. Each section sits
+behind a marker line with a random per-call nonce, and only the first marker of each section counts, so page text
+(`read`, `get text`, a snapshot) can't fake a section such as the URL used for the domain check. Output: a status
+line, then title, URL and the snapshot trimmed to 3.5k characters (14k for `browser_read` snapshot) as untrusted
+content, with a note when lines were cut.
 
 Control point (`browser/page.ts`, `browser/policy.ts`):
 - **Domains:** `checkUrl` (no private / local addresses, no credentials in URLs), then `BROWSER_DENY_DOMAINS` and
-  `BROWSER_ALLOW_DOMAINS` (comma-separated, subdomains included; deny wins). `file://` only under /work,
-  `about:blank`; other schemes are refused. Checked before `browser_open` and on the URL after every action: a page
-  that ended up somewhere refused is left for `about:blank` and the model is told why.
+  `BROWSER_ALLOW_DOMAINS` (comma-separated, subdomains included; deny wins). `file://` only under /work and never a
+  protected path (below; the path is decoded once and normalised like Chromium does, and `browser_open` resolves
+  symlinks and hard links in the sandbox before opening), `about:blank`; other schemes are refused. Checked before
+  `browser_open` and on the URL after every action, both before and after the content is captured: a page that ended
+  up somewhere refused is left for `about:blank`, its content dropped, and the model is told why. Content whose URL
+  couldn't be read isn't shown.
 - **Kill switch:** `sandbox_browser_disabled` (App Home admin toggle). It stops the tools, not agent-browser run by
   the model's own code through `sandbox_exec`.
 - **Rate limit:** `takeLimit('browser_action')`, `limits.userBrowserActionsPerHour` (400) per user.
 - **Log:** a `browser_action` thread event per call: `{ runId, action, host, path (no query), ref, rc?, blocked? }`;
   typed text only as `textLength`, never the text.
-- `browser_fill` refuses `type=password` fields (checked in the sandbox): passwords only come from the vault.
+- `browser_act` `fill` refuses `type=password` fields (checked in the sandbox): passwords only come from the vault.
+
+**Protected paths** (`protected.ts`): `/work/.vault` (vault files), `/work/.agent-browser` (agent-browser's saved
+session: cookies + localStorage in plaintext, including logins from the vault) and `/work/.last` (raw command
+output). `sandbox_export`, `request_preview` and `browser_open file://` refuse them, also through a symlink or a hard
+link (`realpath` / `find -samefile`, and `pwd -P` + shared inodes for a preview dir, checked in the sandbox).
+`sandbox_read_file` refuses the first two; `/work/.last` it may show (scrubbed like any command output).
 
 **Vault, sandbox side** (`browser/vault.ts`; only when the vault is configured). Credentials are the subagent
-owner's (`ctx.speakerId`), and every use waits for the owner's approval card (wait mode), because anyone in the
+owner's (`vaultIdentity`), and every use waits for the owner's approval card (wait mode), because anyone in the
 thread can steer a subagent. Before a secret enters the sandbox it is registered for scrubbing (`registerScrub`):
 everything the sandbox and browser tools return (`run` in `tools.ts`, incl. `sandbox_exec`) is scrubbed of the
-subagent's secrets. Every use is audited.
+subagent's secrets. Every use is audited. "Allow for 10 min here" grants are per subagent (`grantKeyFor`) and per use.
 - `browser_fill_credential(ref, credential, field: username | password | totp)`: a login whose domains match the
-  current page's host, https only. The card names the site, page path, field and ref; grant key `cred:<id>` (shared
-  with `fetch_with_credential`). The value goes over stdin (read into a shell variable first; agent-browser gets it
-  as an argument inside the sandbox, never in the exec's argv or env); right before typing, the sandbox checks the
-  page is still on the approved origin, and a password only goes into a `type=password` field. TOTP: the current
-  code (`totpCode`), waiting for the next period when < 4 s are left.
+  current page's host, https only. Before the card, the ref is focused and `eval` reads `document.activeElement` of
+  the top document (`browser/fields.ts`): it must be an `INPUT` of a type that fits the field (password →
+  `password`; username → text/email/tel/url/search; totp → text/tel/number/password). A ref inside an iframe leaves
+  the `IFRAME` as the active element and is refused, so a value never goes into a frame (possibly another site). The
+  card names the site, page path, the field and its label. Grant key `cred:<id>:fill:<field>` (per subagent): allowing
+  the username doesn't allow the password, nor `fetch_with_credential`. The value goes over stdin (read into a shell
+  variable first; agent-browser gets it as an argument inside the sandbox, never in the exec's argv or env); in the
+  same exec, right before typing, the sandbox checks the page is still on the approved origin and repeats the field
+  check. TOTP: the current code (`totpCode`), waiting for the next period when < 4 s are left.
 - `sandbox_use_credential(credential, purpose)`: writes `/work/.vault/<name>` (token) or `<name>.username`,
-  `.password`, `.totp` (the current code) as the sandbox user, dir 700 / files 600, over stdin. Own grant key
-  `cred:<id>:sandbox` (a file is not pinned to the credential's websites like a request or fill is). The directory
-  is removed when the run ends (`hooks.ts`, if the subagent was given files) and before every pause snapshot
-  (`ModalProvider.pause`). `sandbox_read_file`, `sandbox_export` and `request_preview` refuse it.
+  `.password`, `.totp` (the current code) as the sandbox user, dir 700 / files 600, over stdin. Always "Allow once"
+  (no grant: a file is not pinned to the credential's websites like a request or fill is, and code can send it
+  anywhere).
 - `sandbox_save_credential(name, type, website?, file | username_file + password_file + totp_file?)`: stores a
   secret the agent produced from file(s) without it passing through the model, deletes the files, never overwrites,
   tells the owner (ephemeral in the thread, else DM). Files under `/work/.vault` are refused.
 - **Saved browser sessions** (kind `browser_session`): `browser_save_session(name, website?, purpose)` exports
   `agent-browser state save` (cookies + localStorage, storageState shape) to stdout, keeps only the website's
   cookies and origins (`browser/state.ts`; parent-domain cookies the site receives included), domains from the
-  website or else the state's cookie / origin hosts, and stores it after the owner approves (no grant).
-  `browser_load_session(name, purpose)` (grant key `cred:<id>`) pipes the state over stdin into a temp file,
-  `state load`s it and deletes the file. `browser_open` mentions the owner's stored logins and saved sessions for
-  the host (names only), since `list_credentials` doesn't list sessions.
+  website or else the state's cookie / origin hosts, and stores it after the owner approves (no grant). The cookies go
+  from the browser to the vault by code, not through the model's tool output.
+  `browser_load_session(name, purpose)` (grant key `cred:<id>:session`, per subagent) pipes the state over stdin into
+  a temp file, `state load`s it and deletes the file. `browser_open` mentions the owner's stored logins and saved
+  sessions for the host (names only), since `list_credentials` doesn't list sessions.
+
+**Vault material lives for one run** (`browser/vault-files.ts`). Redis flags per subagent record that vault files
+went into the sandbox (`sandbox_use_credential`, `sandbox_save_credential`) or that the browser was logged in from
+the vault (`browser_fill_credential`, `browser_load_session`). When the run ends (`hooks.ts`) and before a pause
+snapshot (`lifecycle.pauseSandbox`), a flagged sandbox gets: `agent-browser close --all` and `rm -rf
+/work/.agent-browser` (the browser's cookies and storage, so a later run, maybe steered by someone else, isn't still
+logged in as the owner without a new approval; the agent's own non-vault logins in that browser go too), and `rm -rf
+/work/.vault /work/.last`. `ModalProvider.pause` also always removes `/work/.vault` and `/work/.last`. A failed
+cleanup keeps the flags, so the next run end or pause retries.
 
 Known gaps: a value typed into a page is visible to the page's own scripts and to `agent-browser get value`;
 outputs are scrubbed, but a model that transforms a secret (or code in the sandbox that sends a `/work/.vault` file
-somewhere) can still leak it: the approval card says so. The fill value is briefly in agent-browser's argv inside
-the sandbox. Modal datacenter IPs are blocked by some sites; routing through a fetch service / proxy is not built.
+somewhere) can still leak it: the approval card says so. Cookies of a loaded session aren't scrubbed from output yet
+(the vault's scrub set covers tokens and logins only), and the model's own code can read the browser's cookies
+(`agent-browser cookies`, `cat`) through `sandbox_exec` during the run; the protected paths only keep them from
+leaving as files. A page under /work that the model wrote can still embed a protected file (an iframe or a link
+followed later): only the top-level `browser_open` target is resolved in the sandbox. The fill value is briefly in
+agent-browser's argv inside the sandbox. Modal datacenter IPs are blocked by some sites; routing through a fetch
+service / proxy is not built.
 
 ## 4. Access control, quotas and budget
 
@@ -647,7 +689,8 @@ App Home admin additions:
   the encrypted columns.
 - The child prompt says not to copy tokens or secrets seen in the thread into the sandbox. That is prompt-level only.
 - The one exception is the owner's vault, one approved use at a time (§3.9): a login typed into a page, a file in
-  `/work/.vault` for the rest of the run (never in a snapshot), or a saved browser session loaded into the browser.
+  `/work/.vault`, or a saved browser session loaded into the browser, each for the rest of that run only (never in a
+  snapshot; the browser is logged out again at run end).
 
 ### 5.4 Untrusted output and prompt injection
 - Stdout/stderr, read files and anything fetched from inside the sandbox are wrapped as untrusted content, the same

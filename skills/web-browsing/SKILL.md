@@ -11,21 +11,22 @@ The `browser_*` tools drive a headless Chromium in your sandbox that stays open 
 Use fetch_url or web search for plain reading; use the browser when a page needs JavaScript, clicks, typing,
 scrolling or a login.
 
-**The loop:** `browser_open` → act on a ref from the elements it returned → look at the new elements the action
-returned → act again. Every action (`browser_click`, `browser_fill`, `browser_press`, `browser_select`,
-`browser_scroll`, `browser_back`, `browser_wait`) comes back with the page's title, URL and its interactive
-elements, each with a ref like `@e12`, so you rarely need `browser_snapshot` on its own. Refs go stale after the
-page changes: use the ones from the latest result.
+**The loop:** `browser_open` → act on a ref from the elements it returned (`browser_act`) → look at the new
+elements the action returned → act again. Every `browser_act` (`click`, `fill`, `press`, `select`, `scroll`, `wait`,
+`back`) comes back with the page's title, URL and its interactive elements, each with a ref like `@e12`, so you rarely
+need `browser_read` on its own. Refs go stale after the page changes: use the ones from the latest result.
 
-- `browser_fill` with `submit: true` types and presses Enter in one call (search boxes, simple forms).
+- `fill` with `submit: true` types and presses Enter in one call (search boxes, simple forms).
 - A click that fails is usually covered (cookie banner, dialog): the error names the cover; dismiss it, then retry.
-- Waiting: `browser_wait` for a ref, some text or a URL pattern (`**/dashboard`) instead of repeated snapshots.
-- Long or cut snapshots: `browser_snapshot` with a CSS `selector` (e.g. `main`), `text: true` for the text too,
-  or `browser_read` for the rendered page text (paged with `offset`).
+- Waiting: `wait` for a ref, some `text` or a `url` pattern (`**/dashboard`) instead of repeated snapshots.
+- Long or cut snapshots: `browser_read` with `mode: "snapshot"` and a CSS `selector` (e.g. `main`), or
+  `mode: "text"` for the rendered page text (paged with `offset`).
 - `browser_screenshot` only to see layout, images, charts or canvas (`annotate: true` labels refs on it).
 - Pages you built: `browser_open file:///work/site/index.html`.
 - `browser_close` when you're done or before a heavy job (memory). Cookies are kept; open pages are lost when the
   sandbox pauses, so `browser_open` the URL again after a follow-up.
+- The browser keeps its cookies and site storage in `/work/.agent-browser`: never read, copy, export or publish it
+  (or `/work/.last`, the raw output of your last command); the tools refuse those paths.
 - Some sites are blocked by the bot (private addresses, the admin's list): when a tool says a page is refused,
   don't try to reach it another way.
 
@@ -33,10 +34,13 @@ page changes: use the ones from the latest result.
 - `browser_open` says when the owner has a stored login or a saved browser login for that site.
 - Saved browser login: `browser_load_session`, then `browser_open` the page again.
 - Stored login: snapshot the login form, then `browser_fill_credential` for `username`, `password` and, when the
-  site asks for a one-time code, `totp`; then click the sign-in button yourself. The owner approves each use on a
-  private card (you wait; they may take a few minutes). You never see the password.
-- You never type a password, one-time code or payment detail yourself (`browser_fill` refuses password fields).
+  site asks for a one-time code, `totp`; then click the sign-in button yourself. The owner approves each field on a
+  private card (you wait; they may take a few minutes). The value is kept out of your tool output. Fields inside an
+  embedded frame are refused: the login must be on the page itself.
+- You never type a password, one-time code or payment detail yourself (`fill` refuses password fields).
   If there's no stored login, `request_credential` asks the owner to add one; otherwise say you couldn't log in.
+- A login from the vault lasts for this run only: when your run ends the browser is logged out (cookies and site
+  storage cleared), and a later run asks the owner again.
 - When a login should carry over to later tasks, `browser_save_session` (one site, the owner approves).
 
 **Rules:** never buy, post, send, sign up, change settings or submit anything on a real site unless your

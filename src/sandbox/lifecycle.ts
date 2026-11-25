@@ -19,6 +19,7 @@ import { workImage } from './image.js';
 import { SandboxGoneError, type Handle, type Paused, type SandboxSpec } from './provider.js';
 import { baseTags, sandboxProvider } from './providers.js';
 import { sandboxSettings } from './settings.js';
+import { clearVaultMaterial } from './browser/vault-files.js';
 
 export type SandboxState = 'creating' | 'running' | 'pausing' | 'paused' | 'resuming' | 'destroying' | 'destroyed' | 'lost';
 
@@ -259,6 +260,8 @@ export async function pauseSandbox(sandboxId: string, o: { generation?: number; 
     if (!claimed) return 'skipped';
     const provider = sandboxProvider();
     try {
+      // Vault material (a browser logged in from the vault, /work/.vault, /work/.last) never goes into a snapshot.
+      if (row.subagentId) await clearVaultMaterial(row.subagentId, { providerId: row.providerId });
       const paused = await provider.pause({ providerId: row.providerId });
       const [done] = await sql`update sandboxes set state = 'paused', provider_id = null, paused_ref = ${paused.ref}, paused_expires_at = ${paused.expiresAt}, idle_since = null
                                where id = ${row.id} and state = 'pausing' returning id`;

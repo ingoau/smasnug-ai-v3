@@ -2,6 +2,7 @@
 import type { ModelMessage } from 'ai';
 import { sliceUnits } from '../tools/util.js';
 import { activityForTool, DEFAULT_ACTIVITY } from './activity.js';
+import { hasSecretInputs, redactToolInput } from './tool-redact.js';
 
 // ---------- Reply delivery ----------
 
@@ -124,7 +125,8 @@ export function compactHistory(messages: ModelMessage[]): ModelMessage[] {
         ...m,
         content: m.content
           .filter((p) => p.type !== 'reasoning' && p.type !== 'reasoning-file')
-          .map((p) => (p.type === 'file' ? { type: 'text' as const, text: '[file omitted]' } : p)),
+          // Secret tool inputs (save_credential) never go into the stored history (tool-redact.ts).
+          .map((p) => (p.type === 'file' ? { type: 'text' as const, text: '[file omitted]' } : p.type === 'tool-call' && hasSecretInputs(p.toolName) ? { ...p, input: redactToolInput(p.toolName, p.input) } : p)),
       };
     }
     if (m.role === 'user' && Array.isArray(m.content)) {
@@ -204,38 +206,42 @@ export function describeToolStep(toolName: string, input: unknown, opts: { fileN
       return 'Preparing a live preview';
     case 'browser_open':
       return typeof i.url === 'string' && i.url.trim() ? `Opening ${siteOf(i.url.trim())}` : 'Opening a page';
-    case 'browser_snapshot':
-      return 'Looking at the page';
-    case 'browser_click':
-      return 'Clicking on the page';
-    case 'browser_fill':
-      return 'Filling in a form';
-    case 'browser_press':
-      return q('key') ? `Pressing ${q('key')}` : 'Pressing a key';
-    case 'browser_select':
-      return 'Choosing an option';
-    case 'browser_scroll':
-      return 'Scrolling the page';
-    case 'browser_wait':
-      return 'Waiting for the page';
+    case 'browser_act':
+      switch (q('action')) {
+        case 'click':
+          return 'Clicking on the page';
+        case 'fill':
+          return 'Filling in a form';
+        case 'press':
+          return 'Pressing a key';
+        case 'select':
+          return 'Choosing an option';
+        case 'scroll':
+          return 'Scrolling the page';
+        case 'wait':
+          return 'Waiting for the page';
+        case 'back':
+          return 'Going back';
+        default:
+          return 'Using the browser';
+      }
     case 'browser_read':
-      return 'Reading the page';
+      return q('mode') === 'text' ? 'Reading the page' : 'Looking at the page';
     case 'browser_screenshot':
       return 'Taking a screenshot';
-    case 'browser_back':
-      return 'Going back';
     case 'browser_close':
       return 'Closing the browser';
+    // Credential and vault steps never name the credential: the plan card is public in the thread.
     case 'browser_fill_credential':
-      return q('credential') ? `Logging in with ${q('credential')}` : 'Logging in';
+      return 'Logging in';
     case 'browser_save_session':
       return 'Saving the browser login';
     case 'browser_load_session':
-      return q('name') ? `Loading the saved login ${q('name')}` : 'Loading a saved login';
+      return 'Loading a saved login';
     case 'sandbox_use_credential':
-      return q('credential') ? `Using the credential ${q('credential')}` : 'Using a credential';
+      return 'Using a stored credential';
     case 'sandbox_save_credential':
-      return q('name') ? `Saving ${q('name')} to the vault` : 'Saving a credential';
+      return 'Saving a credential';
     case 'load_skill':
       return 'Checking its notes';
     default: {

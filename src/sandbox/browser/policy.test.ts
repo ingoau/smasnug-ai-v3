@@ -51,6 +51,28 @@ describe('urlVerdict', () => {
       expect(urlVerdict(u, open).ok, u).toBe(false);
     }
   });
+  it('never opens a protected path (vault files, browser cookies, raw command output), however it is spelled', () => {
+    for (const u of [
+      'file:///work/.vault/github',
+      'file:///work/.vault',
+      'file:///work/%2Evault/github',
+      'file:///work/%2evault/github',
+      'file:///work/x/../.vault/github',
+      'file:///work/x/%2E%2E/.vault/github',
+      'file:///work//.vault/github',
+      'file:///work/./.agent-browser/sessions/default.json',
+      'file:///work/.agent-browser%2Fsessions%2Fdefault.json',
+      'file:///work/.last/stdout',
+      'FILE:///work/.last/stderr',
+    ]) {
+      const v = urlVerdict(u, open);
+      expect(v.ok, u).toBe(false);
+      if (!v.ok) expect(v.reason, u).toMatch(/never opened/);
+    }
+    // Look-alikes are fine.
+    expect(urlVerdict('file:///work/.vaults/x.html', open).ok).toBe(true);
+    expect(urlVerdict('file:///work/site/.last/x.html', open).ok).toBe(true);
+  });
 });
 
 describe('originOf', () => {

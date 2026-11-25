@@ -74,7 +74,7 @@ export async function sandboxAdminBlocks(userId: string): Promise<unknown[]> {
     );
   out.push(
     section(
-      settings.browserDisabled ? '*Browser tools are off* (browser_open, browser_click, …; logins from the vault too).' : 'Browser tools are *on*.',
+      settings.browserDisabled ? '*Browser tools are off* (browser_open, browser_act, …; logins from the vault too).' : 'Browser tools are *on*.',
       settings.browserDisabled ? btn('sbx:browser_on', 'Turn on', 'on', { style: 'primary' }) : btn('sbx:browser_off', 'Turn off', 'off'),
     ),
   );

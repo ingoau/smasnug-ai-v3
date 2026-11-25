@@ -20,7 +20,7 @@ import { log } from '../log.js';
 import { processImage } from '../tools/image-process.js';
 import { errMsg, untrusted } from '../tools/util.js';
 import { scrubForSubagent } from '../features/vault/scrub.js';
-import { VAULT_DIR } from './browser/vault-files.js';
+import { PROTECTED_DIRS, PROTECTED_MARKER, protectedCheckBash, protectedDir, protectedRefusal, BROWSER_STATE_DIR, VAULT_DIR } from './protected.js';
 import { accessModelText, canUseSandbox, firstUseNotice, notifyAccess } from './access.js';
 import { EXEC_SCRIPT, formatExecResult, importFailedText, isImagePath, safeBaseName } from './format.js';
 import { SandboxRefused, withSandbox } from './lifecycle.js';
@@ -81,9 +81,15 @@ export function badPath(path: string) {
   return `Bad path "${path.slice(0, 120)}": use a path under /work (absolute, or relative to /work), without "..".`;
 }
 
-/** Vault files (sandbox_use_credential, src/sandbox/browser/vault.ts) are never read, exported or published. */
-export const inVaultDir = (abs: string) => abs === VAULT_DIR || abs.startsWith(`${VAULT_DIR}/`);
-const VAULT_PATH_REFUSAL = `${VAULT_DIR} holds credentials from the owner's vault: reference the files in commands (e.g. "$(cat ${VAULT_DIR}/name)"), never read, print or export them.`;
+/** Vault files (sandbox_use_credential, src/sandbox/browser/vault.ts). Every protected path: protected.ts. */
+export const inVaultDir = (abs: string) => protectedDir(abs, [VAULT_DIR]) !== null;
+
+/** In the sandbox: is `abs` a symlink or hard link into a protected directory? (A path check can't see that.) */
+async function linksToProtected(h: Handle, abs: string): Promise<boolean> {
+  const r = await p().exec(h, ['bash', '-c', `${protectedCheckBash(shq(abs))}\necho OK`], { timeoutMs: 20_000, maxOutputBytes: 1024 });
+  return r.stdout.toString('utf8').includes(PROTECTED_MARKER);
+}
+const LINKED_REFUSAL = (abs: string) => `${abs} points to a file in ${PROTECTED_DIRS.join(', ')} (secrets, cookies or raw command output), which never leave the sandbox.`;
 
 // ---------- sandbox_exec ----------
 
@@ -138,7 +144,9 @@ reg('sandbox_read_file', (ctx) =>
     execute: async ({ path, offset }): Promise<ReadOut> => {
       const abs = workPath(path);
       if (!abs) return badPath(path);
-      if (inVaultDir(abs)) return VAULT_PATH_REFUSAL;
+      // /work/.last may be read: like any command output it is scrubbed of vault secrets.
+      const pd = protectedDir(abs, [VAULT_DIR, BROWSER_STATE_DIR]);
+      if (pd) return protectedRefusal(pd);
       let out: ReadOut = '';
       const text = await run(ctx, 'sandbox_read_file', async (h) => {
         const { bytes, size } = await p().readFile(h, abs, { maxBytes: limits.sandboxReadMaxBytes });
@@ -249,8 +257,10 @@ reg('sandbox_export', (ctx) =>
     execute: async ({ path, name, description }) => {
       const abs = workPath(path);
       if (!abs) return badPath(path);
-      if (inVaultDir(abs)) return VAULT_PATH_REFUSAL;
+      const pd = protectedDir(abs);
+      if (pd) return protectedRefusal(pd);
       return run(ctx, 'sandbox_export', async (h) => {
+        if (await linksToProtected(h, abs)) return LINKED_REFUSAL(abs);
         const { bytes, size } = await p().readFile(h, abs, { maxBytes: limits.sandboxExportMaxBytes });
         if (size > limits.sandboxExportMaxBytes) return exportLarge(ctx, h, abs, size, name, description);
         const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
@@ -320,7 +330,7 @@ if (previewsConfigured())
       execute: async ({ dir, title }, opts) => {
         const abs = workPath(dir);
         if (!abs) return badPath(dir);
-        if (abs === '/work' || inVaultDir(abs)) return `Put the site in its own directory under /work (e.g. /work/site), not ${abs}.`;
+        if (abs === '/work' || protectedDir(abs)) return `Put the site in its own directory under /work (e.g. /work/site), not ${abs}.`;
         if ((await sandboxSettings()).previewsDisabled) return 'Live previews are turned off right now. You may tell the user that plainly; export the files instead.';
         if (!ctx.runId) return 'request_preview only works inside a subagent run.';
         const counts = await previewCountsToday(ctx.speakerId);
@@ -330,7 +340,7 @@ if (previewsConfigured())
         const packed = await run(ctx, 'request_preview', async (h) => {
           const check = await p().exec(
             h,
-            ['bash', '-c', `cd ${shq(abs)} 2>/dev/null || { echo NODIR; exit 0; }; test -f index.html && echo INDEX; echo FILES $(find . -type f | wc -l); echo LINKS $(find . -type l | wc -l); echo TOTAL $(find . -type f -printf '%s\\n' | awk '{s+=$1} END {print s+0}'); echo MAX $(find . -type f -printf '%s %p\\n' | sort -n | tail -1)`],
+            ['bash', '-c', `cd ${shq(abs)} 2>/dev/null || { echo NODIR; exit 0; }; test -f index.html && echo INDEX; echo REAL $(pwd -P); echo SHARED $(find . -type f -links +1 -printf '%i\\n' | sort -u | comm -12 - <(find ${PROTECTED_DIRS.map(shq).join(' ')} -xdev -type f -printf '%i\\n' 2>/dev/null | sort -u) | wc -l); echo FILES $(find . -type f | wc -l); echo LINKS $(find . -type l | wc -l); echo TOTAL $(find . -type f -printf '%s\\n' | awk '{s+=$1} END {print s+0}'); echo MAX $(find . -type f -printf '%s %p\\n' | sort -n | tail -1)`],
             { timeoutMs: 30_000, maxOutputBytes: 8192 },
           );
           const out = check.stdout.toString('utf8');
@@ -338,6 +348,10 @@ if (previewsConfigured())
           if (!out.includes('INDEX')) return `${abs} has no index.html at its top level.`;
           const num = (k: string) => Number(new RegExp(`${k} (\\d+)`).exec(out)?.[1] ?? 0);
           if (num('LINKS') > 0) return `${abs} contains symlinks; previews take regular files only.`;
+          // The directory itself may be a symlink, and a file in it a hard link to a protected one.
+          const real = /REAL (\S+)/.exec(out)?.[1] ?? abs;
+          if (real === '/work' || protectedDir(real)) return `Put the site in its own directory under /work (e.g. /work/site), not ${real}.`;
+          if (num('SHARED') > 0) return LINKED_REFUSAL(abs);
           if (num('FILES') > limits.previewMaxFiles) return `Too many files (${num('FILES')}; limit ${limits.previewMaxFiles}).`;
           if (num('TOTAL') > limits.previewMaxTotalBytes) return `The site is ${formatBytes(num('TOTAL'))}; the limit is 25 MiB.`;
           if (num('MAX') > limits.previewMaxFileBytes) return `A file is larger than 5 MiB (${/MAX \d+ (.*)/.exec(out)?.[1]?.slice(0, 100)}).`;

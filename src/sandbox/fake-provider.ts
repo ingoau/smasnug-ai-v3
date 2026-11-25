@@ -88,10 +88,12 @@ export class FakeProvider implements SandboxProvider {
       b.files.set(cat[1]!, Buffer.from(o.stdin ?? Buffer.alloc(0)));
       return res(0);
     }
-    // rm -rf -- '/dir' (vault cleanup)
-    const rm = /^rm -rf -- '([^']+)'$/.exec(script);
-    if (rm) {
-      for (const k of [...b.files.keys()]) if (k === rm[1] || k.startsWith(`${rm[1]}/`)) b.files.delete(k);
+    // rm -rf -- '/dir' ['/dir2' …] anywhere in the script (vault cleanup)
+    const rms = [...script.matchAll(/rm -rf -- ((?:'[^']+' ?)+)/g)];
+    if (rms.length) {
+      for (const m of rms)
+        for (const dir of [...m[1]!.matchAll(/'([^']+)'/g)].map((x) => x[1]!))
+          for (const k of [...b.files.keys()]) if (k === dir || k.startsWith(`${dir}/`)) b.files.delete(k);
       return res(0);
     }
     // request_preview's check
@@ -103,7 +105,7 @@ export class FakeProvider implements SandboxProvider {
       const total = files.reduce((s, [, d]) => s + d.length, 0);
       const max = files.reduce((m, [p, d]) => (d.length > m[0] ? ([d.length, p] as [number, string]) : m), [0, ''] as [number, string]);
       const index = b.files.has(`${dir}/index.html`) ? 'INDEX\n' : '';
-      return res(0, `${index}FILES ${files.length}\nLINKS 0\nTOTAL ${total}\nMAX ${max[0]} ${max[1]}\n`);
+      return res(0, `${index}REAL ${dir}\nSHARED 0\nFILES ${files.length}\nLINKS 0\nTOTAL ${total}\nMAX ${max[0]} ${max[1]}\n`);
     }
     const tar = /tar --format=gnu -cf (\S+) -C '([^']+)' \.$/.exec(script);
     if (tar) {

@@ -2,13 +2,15 @@
  * Where the browser tools may go (docs/sandbox.md §3.9). Pure: unit-tested in policy.test.ts.
  * - http(s): checkUrl (no private / local addresses, no credentials in the URL), then the admin's lists from env
  *   (BROWSER_DENY_DOMAINS, BROWSER_ALLOW_DOMAINS; subdomains included).
- * - file:// only under /work (the agent's own files, e.g. a page it built); about:blank and Chromium's error page.
+ * - file:// only under /work (the agent's own files, e.g. a page it built), never a protected path (/work/.vault,
+ *   /work/.agent-browser, /work/.last; protected.ts), however it is spelled; about:blank and Chromium's error page.
  * - Anything else (data:, javascript:, chrome:, view-source:…) is refused.
  * Checked before browser_open and after every action (a click or a script can navigate anywhere).
  */
 import { env } from '../../config.js';
 import { hostAllowed, parseDomains } from '../../features/vault/store.js';
 import { checkUrl } from '../../tools/safe-fetch.js';
+import { protectedDir } from '../protected.js';
 import { workPath } from '../provider.js';
 
 export interface DomainPolicy {
@@ -48,11 +50,15 @@ export function urlVerdict(raw: string, policy: DomainPolicy): Verdict {
   if (u.protocol === 'file:') {
     let p: string | null = null;
     try {
+      // Chromium decodes a file URL's path once (%2E → ".", %2F → "/"); workPath then drops "." / ".." / "//".
       p = u.host ? null : workPath(decodeURIComponent(u.pathname));
     } catch {
       p = null;
     }
-    return p ? { ok: true, host: null, path: p, https: false } : { ok: false, reason: 'only files under /work can be opened (file:///work/…)', host: null };
+    if (!p) return { ok: false, reason: 'only files under /work can be opened (file:///work/…)', host: null };
+    const pd = protectedDir(p);
+    if (pd) return { ok: false, reason: `${pd} holds secrets, cookies or raw command output and is never opened in the browser`, host: null };
+    return { ok: true, host: null, path: p, https: false };
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, reason: `${u.protocol} URLs can't be opened`, host: null };
   const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase().replace(/\.$/, '');

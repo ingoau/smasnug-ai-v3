@@ -18,16 +18,9 @@ export const SANDBOX_TOOL_NAMES = [
   'request_preview',
   // The browser (src/sandbox/browser/tools.ts): agent-browser inside the sandbox.
   'browser_open',
-  'browser_snapshot',
-  'browser_click',
-  'browser_fill',
-  'browser_press',
-  'browser_select',
-  'browser_scroll',
-  'browser_wait',
+  'browser_act',
   'browser_read',
   'browser_screenshot',
-  'browser_back',
   'browser_close',
   // Vault, sandbox side (src/sandbox/browser/vault.ts): only when the vault is configured too.
   'browser_fill_credential',

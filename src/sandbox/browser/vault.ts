@@ -4,12 +4,17 @@
  * anyone in the thread can steer a subagent (message_subagent). Secrets go into the sandbox over stdin, never argv,
  * env or the model, and are registered for output scrubbing (registerScrub) before they get there.
  * - browser_fill_credential: type a stored login's username / password / current TOTP code into a field, only on a
- *   page whose host the login is tied to (re-checked in the sandbox right before typing).
- * - sandbox_use_credential: a stored secret as files in /work/.vault, for commands (removed at run end and before a
- *   pause snapshot).
+ *   page whose host the login is tied to, and only into an input of the page itself (not an embedded frame) of the
+ *   right type (both re-checked in the sandbox right before typing).
+ * - sandbox_use_credential: a stored secret as files in /work/.vault, for commands (always "Allow once"; removed at
+ *   run end and before a pause snapshot).
  * - sandbox_save_credential: store a secret the agent produced in the sandbox (from files) without reading it.
  * - browser_save_session / browser_load_session: a logged-in browser state (cookies + localStorage) saved to the
  *   owner's vault and loaded into a later subagent's browser.
+ * A browser logged in from the vault (a fill or a load) is logged out again when the run ends and before a pause
+ * (vault-files.ts), so a later run, maybe steered by someone else, needs a new approval.
+ * Grants ("Allow for 10 min here") are per subagent (grantKeyFor) and per use: a fill grant covers one field of one
+ * login, never the other fields or fetch_with_credential.
  */
 import { tool } from 'ai';
 import { z } from 'zod';
@@ -21,7 +26,7 @@ import { mrkdwnEscape, truncate } from '../../features/util.js';
 import { requestApproval, waitForApproval } from '../../features/vault/approvals.js';
 import { audit } from '../../features/vault/audit.js';
 import { vaultConfigured } from '../../features/vault/crypto.js';
-import { vaultIdentity } from '../../features/vault/identity.js';
+import { grantKeyFor, vaultIdentity } from '../../features/vault/identity.js';
 import { registerScrub } from '../../features/vault/scrub.js';
 import {
   describeCredential,
@@ -43,11 +48,12 @@ import { log } from '../../log.js';
 import { errMsg } from '../../tools/util.js';
 import { shq, workPath, type Handle } from '../provider.js';
 import { badPath, inVaultDir, p, reg, run } from '../tools.js';
-import { ab, normRef, pageScript, parseSections, shortError, STDIN_VALUE } from './cli.js';
-import { abExec, browserRefusal, leavePage, leftText, logAction, pageCall, verdictOf } from './page.js';
+import { ab, normRef, shortError, STDIN_VALUE } from './cli.js';
+import { abExec, browserRefusal, checkPage, execPage, logAction, pageCall, refusePage } from './page.js';
 import { originOf } from './policy.js';
 import { filterState, parseState, stateCounts, stateDomains } from './state.js';
-import { markVaultFiles, VAULT_DIR } from './vault-files.js';
+import { FIELD_TYPES, fieldProbe, fieldRefusal, parseField } from './fields.js';
+import { markVaultBrowser, markVaultFiles, VAULT_DIR } from './vault-files.js';
 
 const SECRET_FILE_MAX = 16 * 1024;
 
@@ -98,7 +104,7 @@ export function registerSandboxVaultTools(): void {
   reg('browser_fill_credential', (ctx) =>
     tool({
       description:
-        "Type part of a login from the vault of the person you're working for into a field of the current page: its username, its password, or the current one-time code (TOTP). Only on a site the login is tied to; the owner approves each use on a private card (or for 10 minutes in this thread). You never see the password. Get the field's ref from a snapshot first; then click the login button yourself.",
+        "Type part of a login from the vault of the person you're working for (username, password or current one-time code) into a field of the current page: only on a site the login is tied to, only into the page itself (not an embedded frame). The owner approves each field. The value is kept out of your tool output. Get the field's ref from a snapshot first; click the sign-in button yourself afterwards.",
       inputSchema: z.object({
         ref: z.string().min(1).max(20).describe('The field, e.g. "@e4"'),
         credential: z.string().min(1).max(40).describe('Login name (list_credentials)'),
@@ -116,19 +122,18 @@ export function registerSandboxVaultTools(): void {
         if (!c || c.kind !== 'login') return `No login called "${normalizeName(credential)}". ${await noneOf(id.ownerId, ['login'], 'logins')}`;
         if (!c.meta.domains?.length) return `"${c.name}" isn't tied to a website, so it can't be typed into a page. The owner can add its website in App Home.`;
         if (field === 'totp' && !c.meta.totp) return `"${c.name}" has no one-time code (TOTP) set up; ask the owner for the code instead.`;
-        // Where is the browser now? (Approval is asked outside the sandbox call: it can take minutes.)
-        const found: { page?: { url: string; host: string; origin: string; title?: string } } = {};
+        // Where is the browser now, and what is the field? (Approval is asked outside the sandbox call: it can take minutes.)
+        const found: { page?: { url: string; host: string; origin: string; title?: string; label: string } } = {};
         const looked = await run(ctx, 'browser_fill_credential', async (h) => {
-          const res = await abExec(ctx, h, pageScript({}));
-          const s = parseSections(res.stdout.toString('utf8'));
-          const v = verdictOf(s);
-          if (v && !v.ok) {
-            await leavePage(ctx, h);
-            return leftText(v);
-          }
+          const { s } = await execPage(ctx, h, { probe: fieldProbe(r) });
+          const { v, refused } = checkPage(s);
+          if (refused) return refusePage(ctx, h, 'fill_credential', refused, { ref: r });
           const origin = s.url ? originOf(s.url) : null;
           if (!s.url || !v?.ok || !v.host || !origin) return 'No web page is open: browser_open the login page first.';
-          found.page = { url: s.url, host: v.host, origin, ...(s.title ? { title: s.title } : {}) };
+          const f = parseField(s.probe);
+          const bad = fieldRefusal(f, field, r);
+          if (bad) return bad;
+          found.page = { url: s.url, host: v.host, origin, ...(s.title ? { title: s.title } : {}), label: f!.label };
           return '';
         });
         const where = found.page;
@@ -157,18 +162,20 @@ export function registerSandboxVaultTools(): void {
           c,
           name: c.name,
           tool: 'browser_fill_credential',
-          grantKey: `cred:${c.id}`,
+          // One field of one login, for this subagent only: allowing the username doesn't allow the password.
+          grantKey: grantKeyFor(id, `cred:${c.id}:fill:${field}`),
           title: `*Type the ${fieldLabel} of your login \`${mrkdwnEscape(c.name)}\` into ${mrkdwnEscape(where.host)}?*`,
           detail: [
-            `*Page:* \`${truncate(mrkdwnEscape(where.origin + path), 300)}\`${where.title ? ` (“${truncate(mrkdwnEscape(where.title), 120)}”)` : ''}`,
-            `*Field:* the page's element ${r}, ${fieldLabel}`,
+            `*Site:* ${mrkdwnEscape(where.host)}, page \`${truncate(mrkdwnEscape(where.origin + path), 300)}\`${where.title ? ` (“${truncate(mrkdwnEscape(where.title), 120)}”)` : ''}`,
+            `*Field:* the ${fieldLabel} box${where.label ? ` labelled “${truncate(mrkdwnEscape(where.label), 80)}”` : ''} (${r}) in that page itself, not an embedded frame`,
             ...(purpose ? [why(purpose)] : []),
-            'It is typed by code inside the agent’s browser; the agent never sees it.',
+            'It is typed by code inside the agent’s browser and kept out of the agent’s tool output. The browser is logged out again when this run ends.',
           ],
         });
         if (denied) return denied;
-        // Register for scrubbing before the secret reaches the sandbox.
+        // Register for scrubbing before the secret reaches the sandbox; log the browser out at run end.
         await registerScrub(ctx.subagentId!, id.ownerId, c.id);
+        await markVaultBrowser(ctx.subagentId!);
         let value: string;
         try {
           const s = await revealSecret({ ...c, kind: 'login' });
@@ -192,22 +199,27 @@ export function registerSandboxVaultTools(): void {
             action: 'fill_credential',
             ref: r,
             logExtra: { credential: c.name, field },
-            // Same page as approved (origin), and a password goes only into a password field. The value comes on stdin.
+            // Same page as approved (origin), and the ref is an input of the top document of the right type (not in an
+            // iframe), checked in the same exec right before typing. The value comes on stdin.
             script: {
               guard: [
                 // The value first (nothing else may read stdin), then the checks with stdin closed.
                 'IFS= read -r -d "" SBX_VALUE || true',
                 `case "$(timeout 15 agent-browser get url </dev/null 2>/dev/null | tail -n 1)" in "$SBX_ORIGIN"|"$SBX_ORIGIN"/*) ;; *) echo ORIGIN_CHANGED; exit 3;; esac`,
-                ...(field === 'password' ? [`t=$(timeout 10 agent-browser get attr ${shq(r)} type </dev/null 2>/dev/null | tail -n 1 | tr -d '[:space:]"'); if [ "$t" != password ]; then echo NOT_PASSWORD_FIELD; exit 3; fi`] : []),
+                `f=$(${fieldProbe(r)})`,
+                'case "$f" in "ABFIELD INPUT "*) ;; *) echo FIELD_NOT_IN_PAGE; exit 3;; esac',
+                't=${f#ABFIELD INPUT }; t=${t%% *}',
+                'case " $SBX_TYPES " in *" $t "*) ;; *) echo FIELD_TYPE; exit 3;; esac',
               ].join('\n'),
               actions: [['fill', r, '--', STDIN_VALUE]],
               snapshot: 'interactive',
             },
             stdin: Buffer.from(`${value}\0`),
-            env: { SBX_ORIGIN: where.origin },
+            env: { SBX_ORIGIN: where.origin, SBX_TYPES: FIELD_TYPES[field].join(' ') },
             guards: {
               ORIGIN_CHANGED: `The page changed since the owner approved (it is no longer on ${where.origin}); nothing was typed. Open the login page again and retry.`,
-              NOT_PASSWORD_FIELD: `${r} isn't a password field; nothing was typed. Snapshot again and pick the password field.`,
+              FIELD_NOT_IN_PAGE: `${r} is no longer an input field of the page itself (it may be inside an embedded frame, or gone); nothing was typed. Look at the page again and retry.`,
+              FIELD_TYPE: field === 'password' ? `${r} isn't a password field; nothing was typed. Look at the page again and pick the password field.` : `${r} isn't a ${field} field; nothing was typed.`,
             },
             ok: `Typed the ${fieldLabel} of "${c.name}" into ${r} (hidden from you). Now continue the login (e.g. click the sign-in button).`,
             failed: `Typing into ${r} failed`,
@@ -227,7 +239,7 @@ export function registerSandboxVaultTools(): void {
 
   reg('sandbox_use_credential', (ctx) =>
     tool({
-      description: `Put a credential from the vault of the person you're working for into your sandbox as files, for commands (e.g. an API key for a script, a token for git): an API key → ${VAULT_DIR}/<name>; a login → ${VAULT_DIR}/<name>.username, .password and .totp (the current one-time code). Reference them in commands, e.g. "$(cat ${VAULT_DIR}/github)"; never print, cat, log or export them. The owner approves each use; the files are deleted when this run ends. For a website login in the browser use browser_fill_credential instead.`,
+      description: `Put a credential from the vault of the person you're working for into your sandbox as files, for commands (e.g. an API key for a script, a token for git): an API key → ${VAULT_DIR}/<name>; a login → ${VAULT_DIR}/<name>.username, .password and .totp (the current one-time code). Reference them in commands, e.g. "$(cat ${VAULT_DIR}/github)"; never print, cat, log or export them. The owner approves each use; the files are deleted when this run ends. For a website login use browser_fill_credential instead.`,
       inputSchema: z.object({ credential: z.string().min(1).max(40), purpose: purposeField }),
       execute: async ({ credential, purpose }) => {
         const id = vaultIdentity(ctx);
@@ -243,8 +255,9 @@ export function registerSandboxVaultTools(): void {
           c,
           name: c.name,
           tool: 'sandbox_use_credential',
-          // Its own grant: a file in the sandbox isn't pinned to the credential's websites like a request or a fill is.
-          grantKey: `cred:${c.id}:sandbox`,
+          // Never a 10-minute grant: a file in the sandbox isn't pinned to the credential's websites like a request or a
+          // fill is, and code there can send it anywhere, so the owner allows each use once.
+          grantKey: null,
           title: `*Give the agent's code sandbox your credential \`${mrkdwnEscape(c.name)}\`?*`,
           detail: [
             `*As:* ${files.map((f) => `\`${f}\``).join(', ')}, for commands the agent runs there.`,
@@ -340,6 +353,8 @@ export function registerSandboxVaultTools(): void {
           }
           result.saved = saved;
           await registerScrub(ctx.subagentId!, id.ownerId, saved.id);
+          // The secret may also be in /work/.last (the command that made it): removed at run end.
+          await markVaultFiles(ctx.subagentId!);
           await p()
             .exec(h, ['bash', '-c', `rm -f -- ${Object.values(paths).map(shq).join(' ')}`], { timeoutMs: 20_000, maxOutputBytes: 1024 })
             .catch((err) => log.warn({ err }, 'deleting saved secret files failed'));
@@ -360,7 +375,7 @@ export function registerSandboxVaultTools(): void {
   reg('browser_save_session', (ctx) =>
     tool({
       description:
-        "Save your browser's logged-in state (cookies + local storage) for a website to the vault of the person you're working for, so later subagents of theirs can continue logged in (browser_load_session). Only after they logged in (or you did with browser_fill_credential) for a task that needs it again. The owner approves; you never see the cookies.",
+        "Save your browser's logged-in state (cookies + local storage) for a website to the vault of the person you're working for, so later subagents of theirs can continue logged in (browser_load_session). Only after a login for a task that needs it again. The owner approves. The cookies go from the browser to the vault by code, not through your tool output.",
       inputSchema: z.object({
         name: z.string().min(1).max(40).describe('Short name, e.g. "github-session"'),
         website: z.string().max(300).optional().describe('Domain(s) to keep, e.g. "github.com"; default: every site the browser has cookies for (keep it to the one you need)'),
@@ -426,7 +441,7 @@ export function registerSandboxVaultTools(): void {
   reg('browser_load_session', (ctx) =>
     tool({
       description:
-        "Load a saved browser login (browser_save_session) of the person you're working for into your browser, so you're logged in to that site. The owner approves. Then browser_open the page you need.",
+        "Load a saved browser login (browser_save_session) of the person you're working for into your browser, so you're logged in to that site. The owner approves; the cookies are kept out of your tool output and files, and the browser is logged out again when this run ends. Then browser_open the page you need.",
       inputSchema: z.object({ name: z.string().min(1).max(40), purpose: purposeField }),
       execute: async ({ name, purpose }) => {
         const id = vaultIdentity(ctx);
@@ -444,9 +459,9 @@ export function registerSandboxVaultTools(): void {
           c,
           name: c.name,
           tool: 'browser_load_session',
-          grantKey: `cred:${c.id}`,
+          grantKey: grantKeyFor(id, `cred:${c.id}:session`),
           title: `*Log the agent's browser in with your saved login \`${mrkdwnEscape(c.name)}\` (${mrkdwnEscape(sites)})?*`,
-          detail: [why(purpose), `The agent's browser will be logged in as you on ${mrkdwnEscape(sites)} for this task. Its sandbox is deleted 24 h after the task goes idle.`],
+          detail: [why(purpose), `The agent's browser will be logged in as you on ${mrkdwnEscape(sites)} until this run ends (then it is logged out again).`],
         });
         if (denied) return denied;
         let state: string;
@@ -455,6 +470,9 @@ export function registerSandboxVaultTools(): void {
         } catch (err) {
           return err instanceof VaultError ? err.message : `Couldn't open it: ${errMsg(err)}`;
         }
+        // Scrubbed from output (once the vault's scrub set covers sessions) and logged out at run end.
+        await registerScrub(ctx.subagentId!, id.ownerId, c.id);
+        await markVaultBrowser(ctx.subagentId!);
         const done = { ok: false };
         const text = await run(ctx, 'browser_load_session', async (h) => {
           const res = await abExec(ctx, h, `f=$(mktemp); cat > "$f"; ${ab('state', 'load')} "$f" 2>&1; rc=$?; rm -f "$f"; exit $rc`, { stdin: Buffer.from(state), timeoutS: 60, maxBytes: 64 * 1024 });
