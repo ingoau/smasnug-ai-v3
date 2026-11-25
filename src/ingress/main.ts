@@ -8,6 +8,7 @@ import { log } from '../log.js';
 import { markMessage, slackTsMs } from '../core/timing.js';
 import type { SlackEnvelopeJob } from '../pipeline/slack-events.js';
 import { slimSlackUser } from '../tools/directory/fields.js';
+import { sealViewState } from '../features/vault/transport.js';
 
 interface SocketEvent {
   ack: (response?: Record<string, unknown>) => Promise<void>;
@@ -43,6 +44,8 @@ export async function handleEnvelope(e: SocketEvent, receivedAt = Date.now()) {
   // Profile events: only the fields the directory stores are queued (no email, phone, avatars…).
   const pev = e.body?.event;
   if ((pev?.type === 'user_change' || pev?.type === 'team_join') && pev.user) pev.user = slimSlackUser(pev.user);
+  // Vault / connector modals carry secrets: seal their form state so Redis (BullMQ keeps finished jobs) never holds it.
+  sealViewState(e.body);
   try {
     await enqueue(QUEUE.slackEvents, { kind, body: e.body, receivedAt } satisfies SlackEnvelopeJob, { jobId: `se-${key.replaceAll(':', '_')}` });
     const ev = e.body?.event;

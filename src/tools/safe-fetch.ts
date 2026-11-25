@@ -32,6 +32,11 @@ export interface SafeFetchOptions {
   headers?: Record<string, string>;
   /** Headers only sent to this exact origin (e.g. Slack auth for file downloads); dropped on cross-origin redirects. */
   authOrigin?: string;
+  /** With authOrigin: more header names (lower-case) to drop off that origin, besides authorization (vault credentials). */
+  authHeaders?: string[];
+  /** Default GET. A request with a body never follows redirects (BlockedUrlError). */
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
+  body?: Buffer;
   signal?: AbortSignal;
   /**
    * Stream the body here instead of buffering it (big downloads, src/files/large.ts): `body` comes back empty and
@@ -127,6 +132,7 @@ export async function safeFetch(rawUrl: string, opts: SafeFetchOptions): Promise
     const url = checkUrl(current, opts.allowIPAddressList);
     const res = await requestOnce(url, opts, agents, signal);
     if (res.redirect) {
+      if (opts.body) throw new BlockedUrlError('the server redirected a request that has a body; not following it');
       if (hop >= maxRedirects) throw new BlockedUrlError(`too many redirects (>${maxRedirects})`);
       current = new URL(res.redirect, url).toString();
       continue;
@@ -149,11 +155,14 @@ function requestOnce(
       'accept-encoding': 'gzip, deflate, br',
       ...(opts.headers ?? {}),
     };
-    if (opts.authOrigin && url.origin !== opts.authOrigin) delete headers.authorization;
+    if (opts.authOrigin && url.origin !== opts.authOrigin) {
+      delete headers.authorization;
+      for (const h of opts.authHeaders ?? []) delete headers[h];
+    }
     const req = (isHttps ? https : http).request(
       url,
       {
-        method: 'GET',
+        method: opts.method ?? 'GET',
         headers,
         agent: isHttps ? agents.https : agents.http,
         signal,
@@ -247,7 +256,7 @@ function requestOnce(
       },
     );
     req.on('error', (err) => reject(classify(err)));
-    req.end();
+    req.end(opts.body);
   });
 }
 

@@ -31,6 +31,7 @@ import { redirectGroupPing } from './guideline-actions.js';
 import type { BatchReason } from './rules.js';
 import { showIntakeStatus } from './session-status.js';
 import type { SlackMessage } from './store.js';
+import { deleteAllVaultData } from '../features/vault/store.js';
 
 const PROMPT_THROTTLE_S = 10 * 60;
 export const HOLD_REPLAY_MS = 60 * 60 * 1000;
@@ -214,6 +215,11 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   await sql`delete from thread_summaries where thread_id in (select distinct thread_id from messages where user_id = ${userId} and thread_id is not null)`;
   // Code-channel seed summaries and briefs they asked for or that cover threads they wrote in (before their messages go).
   const codeChannelSeeds = await forgetUserCodeChannelData(userId);
+  // Their vault: credentials, connector connections, saved browser sessions, approvals and the audit log.
+  const credentials = await deleteAllVaultData(userId).catch((err) => {
+    log.warn({ err, userId }, 'privacy withdraw: deleting their vault failed');
+    return 0;
+  });
   // Theirs anywhere, and everything (the bot's replies too) in their DMs with the bot.
   const msgs = await sql<{ channelId: string; ts: string; threadId: string | null; userId: string | null }[]>`
     select channel_id, ts, thread_id, user_id from messages
@@ -241,12 +247,13 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   });
   // Again, for a failure review that loaded their messages before they were deleted and filed after the first pass.
   await sql`delete from failure_reports where speaker_id = ${userId} or evidence @> ${sql.json([{ userId }] as any)}`;
-  log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length, files, codeChannelSeeds }, 'privacy: consent withdrawn, data deleted');
+  log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length, files, codeChannelSeeds, credentials }, 'privacy: consent withdrawn, data deleted');
   await publishHome(userId);
   const text =
     (wasAgreed ? "Done: you've withdrawn your consent to my privacy policy. I won't answer you until you agree again. " : 'Done. ') +
     `I deleted ${facts} remembered fact${facts === 1 ? '' : 's'}, ${deleted} stored message${deleted === 1 ? '' : 's'} of yours (with their files), ${files} file${files === 1 ? '' : 's'} I made for you or stored from your uploads, our DMs, ` +
-    'your reminders and watches, and the records of my answers in those conversations. Other copies go within 30 days. Messages in Slack itself are untouched.';
+    `your reminders and watches, ${credentials} stored credential${credentials === 1 ? '' : 's'} and connection${credentials === 1 ? '' : 's'} with their usage log, and the records of my answers in those conversations.` +
+    ' Other copies go within 30 days. Messages in Slack itself are untouched.';
   await slackCall('chat.postMessage', { channel: userId, text }, { idempotencyKey: `privacy-withdraw:${userId}:${ctx.triggerId ?? ctx.messageTs ?? Date.now()}` }).catch((err) =>
     log.warn({ err }, 'privacy withdraw DM failed'),
   );

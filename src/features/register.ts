@@ -20,6 +20,7 @@ import { djMaintenance, processHuddleFm, registerDjTools } from './huddlefm/regi
 import { registerCodeChannelTools } from './code-channels/tools.js';
 import { sweepCodeChannels } from './code-channels/lifecycle.js';
 import { processCodeChannelStatus } from './code-channels/status.js';
+import { registerVault, vaultMaintenance } from './vault/register.js';
 
 // Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user, report_failure
 registerMemoryTools();
@@ -49,6 +50,9 @@ registerAction('mem:', handleMemoryAction);
 registerAction('admin:', handleAdminAction);
 registerAction('slash:/smasnug', handleSlash);
 registerAction('sched:', (ctx) => handleScheduleAction(ctx, publishHome));
+// Vault (docs/vault.md; off without VAULT_SECRET_KEY): list_credentials, save_credential, request_credential,
+// fetch_with_credential, approval cards and the App Home credential modal.
+registerVault(publishHome);
 registerAppHome(publishHome);
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
@@ -67,6 +71,7 @@ export const maintenance: Record<string, { everyMs: number; run: () => Promise<v
   'features:code-channel-sweep': { everyMs: 60 * 60 * 1000, run: async () => void (await sweepCodeChannels()) },
   ...scheduleMaintenance,
   ...djMaintenance,
+  ...vaultMaintenance,
 };
 
 /** Called on SIGTERM before the worker exits. */
