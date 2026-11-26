@@ -17,12 +17,16 @@ import { hasAgreed, PRIVACY_READ_ACTION, withdrawButton } from './privacy.js';
 import { sandboxAdminBlocks, sandboxDisclosureBlocks, sandboxUserLimitLines } from '../sandbox/home.js';
 import { vaultHomeBlocks } from './vault/home.js';
 import { connectorsAdminBlocks, connectorsHomeBlocks } from './connectors/home.js';
+import { homeListBlocks, moreNote, registerHomeList } from './home-lists.js';
 
 const MAX_BLOCKS = 100;
-const USER_FACTS_SHOWN = 25;
-const PENDING_FACTS_SHOWN = 8;
-const APPROVED_FACTS_SHOWN = 15;
-const BLOCKS_SHOWN = 10;
+// Most items a "View all" dialog shows (a modal holds 100 blocks; pending facts and blocked users take two each).
+const USER_FACTS_SHOWN = 95;
+const PENDING_FACTS_SHOWN = 45;
+const APPROVED_FACTS_SHOWN = 95;
+const BLOCKS_SHOWN = 45;
+const BLOCKS_INLINE = 3;
+const FACTS_INLINE = 3;
 const KIND_LABELS: Record<FactKind, string> = { preference: 'preference', about: 'about you', project: 'project' };
 
 const btn = (action_id: string, text: string, value: string, extra: object = {}) => ({
@@ -36,26 +40,41 @@ const section = (text: string, accessory?: object) => ({ type: 'section', text: 
 const context = (text: string) => ({ type: 'context', elements: [{ type: 'mrkdwn', text }] });
 const header = (text: string) => ({ type: 'header', text: { type: 'plain_text', text } });
 
+/** Every fact the user has, newest first (the memory dialog). */
+async function memoryListBlocks(userId: string): Promise<unknown[]> {
+  const facts = (await listFacts(userId)).sort((a, b) => new Date(b.statedAt).getTime() - new Date(a.statedAt).getTime() || b.id - a.id);
+  const out: unknown[] = [];
+  for (const f of facts.slice(0, USER_FACTS_SHOWN)) {
+    const age = factAge(f.statedAt);
+    const meta = `_${KIND_LABELS[f.kind]}${age ? `, ${age}` : ''}_`;
+    out.push(section(`\`${factLabel(f.id)}\` ${truncate(mrkdwnEscape(f.text), 2800)}\n${meta}`, btn('mem:delete', 'Delete', String(f.id))));
+  }
+  return [...out, ...moreNote(facts.length, USER_FACTS_SHOWN)];
+}
+
+registerHomeList({ key: 'memory', title: 'What I remember', build: memoryListBlocks });
+
 export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
   const blocks: unknown[] = [];
-  // Newest first, so the hidden tail (over USER_FACTS_SHOWN) is the oldest.
-  const facts = (await listFacts(userId)).sort((a, b) => new Date(b.statedAt).getTime() - new Date(a.statedAt).getTime() || b.id - a.id);
+  const facts = await listFacts(userId);
 
   blocks.push(header('What I remember about you'));
   blocks.push(
     context(
-      `Facts ${env.BOT_DISPLAY_NAME} uses to personalise answers to you. Only you can see this list. ` +
+      `Facts ${env.BOT_DISPLAY_NAME} uses to personalise answers to you. Only you can see them. ` +
         'Deleting is permanent. You can also say "forget …" in a conversation.',
     ),
   );
   if (facts.length === 0) blocks.push(section("_I don't remember anything about you yet._"));
-  for (const f of facts.slice(0, USER_FACTS_SHOWN)) {
-    const age = factAge(f.statedAt);
-    const meta = `_${KIND_LABELS[f.kind]}${age ? `, ${age}` : ''}_`;
-    blocks.push(section(`\`${factLabel(f.id)}\` ${truncate(mrkdwnEscape(f.text), 2800)}\n${meta}`, btn('mem:delete', 'Delete', String(f.id))));
-  }
-  if (facts.length > USER_FACTS_SHOWN) blocks.push(context(`…and ${facts.length - USER_FACTS_SHOWN} more (older ones not shown).`));
-  if (facts.length > 0) {
+  else {
+    blocks.push(
+      ...homeListBlocks({
+        key: 'memory',
+        count: facts.length,
+        summary: `I remember *${facts.length}* thing${facts.length === 1 ? '' : 's'} about you.`,
+        buttonText: 'View and delete',
+      }),
+    );
     blocks.push({
       type: 'actions',
       elements: [
@@ -117,34 +136,56 @@ async function adminBlocks(): Promise<unknown[]> {
     ),
   );
 
-  if (pending.length) {
-    out.push(section('*Workspace facts awaiting approval*'));
-    for (const f of pending.slice(0, PENDING_FACTS_SHOWN)) {
-      out.push(section(`${truncate(mrkdwnEscape(f.text), 2800)}\n_proposed by <@${f.proposerId}>${f.channelId ? ` · only in <#${f.channelId}>` : ''}_`));
-      out.push({
-        type: 'actions',
-        elements: [btn('fact:approve', 'Approve', String(f.id), { style: 'primary' }), btn('fact:reject', 'Reject', String(f.id))],
-      });
-    }
-    if (pending.length > PENDING_FACTS_SHOWN) out.push(context(`…and ${pending.length - PENDING_FACTS_SHOWN} more.`));
-  }
-
-  out.push(section(`*Workspace facts* (${approved.length})`));
-  if (approved.length === 0) out.push(context('None yet.'));
-  for (const f of approved.slice(-APPROVED_FACTS_SHOWN)) {
+  if (pending.length)
     out.push(
-      section(
-        `${truncate(mrkdwnEscape(f.text), 2800)}${f.channelId ? `\n_only in <#${f.channelId}>_` : ''}`,
-        btn('fact:delete', 'Delete', String(f.id), {
-          confirm: confirmDialog('Delete workspace fact?', truncate(f.text, 280), 'Delete'),
-        }),
-      ),
+      ...homeListBlocks({
+        key: 'facts_pending',
+        count: pending.length,
+        summary: `*Workspace facts awaiting approval:* ${pending.length}`,
+        buttonText: `Review (${pending.length})`,
+        inline: () => [section('*Workspace facts awaiting approval*'), ...pendingFactBlocks(pending)],
+        inlineMax: FACTS_INLINE,
+      }),
     );
-  }
-  if (approved.length > APPROVED_FACTS_SHOWN) out.push(context(`Showing the newest ${APPROVED_FACTS_SHOWN}.`));
+  out.push(
+    ...(approved.length
+      ? homeListBlocks({ key: 'facts', count: approved.length, summary: `*Workspace facts:* ${approved.length}`, inline: () => [section('*Workspace facts*'), ...approvedFactBlocks(approved)], inlineMax: FACTS_INLINE })
+      : [section('*Workspace facts:* none yet.')]),
+  );
+  out.push(
+    ...(blocked.length
+      ? homeListBlocks({ key: 'blocked', count: blocked.length, summary: `*Blocked users:* ${blocked.length}`, inline: () => [section('*Blocked users*'), ...blockedUserBlocks(blocked)], inlineMax: BLOCKS_INLINE })
+      : [section('*Blocked users:* nobody is suspended or blocked.')]),
+  );
+  return out;
+}
 
-  out.push(section(`*Blocked users* (${blocked.length})`));
-  if (blocked.length === 0) out.push(context('Nobody is suspended or blocked.'));
+function pendingFactBlocks(pending: Awaited<ReturnType<typeof listWorkspaceFacts>>): unknown[] {
+  const out: unknown[] = [];
+  for (const f of pending.slice(0, PENDING_FACTS_SHOWN)) {
+    out.push(section(`${truncate(mrkdwnEscape(f.text), 2800)}\n_proposed by <@${f.proposerId}>${f.channelId ? ` · only in <#${f.channelId}>` : ''}_`));
+    out.push({
+      type: 'actions',
+      elements: [btn('fact:approve', 'Approve', String(f.id), { style: 'primary' }), btn('fact:reject', 'Reject', String(f.id))],
+    });
+  }
+  return [...out, ...moreNote(pending.length, PENDING_FACTS_SHOWN)];
+}
+
+function approvedFactBlocks(approved: Awaited<ReturnType<typeof listWorkspaceFacts>>): unknown[] {
+  // Newest first.
+  const newest = approved.slice(-APPROVED_FACTS_SHOWN).reverse();
+  const out = newest.map((f) =>
+    section(
+      `${truncate(mrkdwnEscape(f.text), 2800)}${f.channelId ? `\n_only in <#${f.channelId}>_` : ''}`,
+      btn('fact:delete', 'Delete', String(f.id), { confirm: confirmDialog('Delete workspace fact?', truncate(f.text, 280), 'Delete') }),
+    ),
+  );
+  return [...out, ...moreNote(approved.length, APPROVED_FACTS_SHOWN)];
+}
+
+function blockedUserBlocks(blocked: Awaited<ReturnType<typeof listBlocks>>): unknown[] {
+  const out: unknown[] = [];
   for (const b of blocked.slice(0, BLOCKS_SHOWN)) {
     const what = [b.suspended && 'suspended', b.sendBlocked && 'blocked from sending'].filter(Boolean).join(', ');
     out.push(section(`<@${b.userId}> — ${what}${b.reason ? `\n_${truncate(mrkdwnEscape(b.reason), 200)}_` : ''}`));
@@ -153,9 +194,12 @@ async function adminBlocks(): Promise<unknown[]> {
     if (b.sendBlocked) elements.push(btn('mod:unblock_send', 'Allow sending', b.userId));
     out.push({ type: 'actions', elements });
   }
-  if (blocked.length > BLOCKS_SHOWN) out.push(context(`…and ${blocked.length - BLOCKS_SHOWN} more.`));
-  return out;
+  return [...out, ...moreNote(blocked.length, BLOCKS_SHOWN)];
 }
+
+registerHomeList({ key: 'facts_pending', title: 'Proposed facts', admin: true, build: async () => pendingFactBlocks(await listWorkspaceFacts('pending')) });
+registerHomeList({ key: 'facts', title: 'Workspace facts', admin: true, build: async () => approvedFactBlocks(await listWorkspaceFacts('approved')) });
+registerHomeList({ key: 'blocked', title: 'Blocked users', admin: true, build: async () => blockedUserBlocks(await listBlocks()) });
 
 /** The user an admin picked in "User limits" (per admin, kept for a day). */
 const limitsUserKey = (adminId: string) => `home:limits_user:${adminId}`;

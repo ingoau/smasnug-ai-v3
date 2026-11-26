@@ -6,6 +6,7 @@
 /** Approval kind of a prompt-mode connector call (vault approvals). */
 export const CONNECTOR_CALL_KIND = 'connector_call';
 import { redis } from '../../core/redis.js';
+import { deleteCustomConnectors } from './custom.js';
 import { sql } from '../../db/index.js';
 import { log } from '../../log.js';
 import { decide, loadApproval, replaceCard } from '../vault/approvals.js';
@@ -26,6 +27,11 @@ export async function setKnob(ownerId: string, slug: string, cls: ToolClass, mod
 }
 
 /** Stored as [[tool, mode], …] (see normalizeSettings). */
+/** One connector's settings row (removing a custom connector). */
+export async function deleteSettings(ownerId: string, slug: string): Promise<void> {
+  await sql`delete from connector_settings where owner_id = ${ownerId} and slug = ${slug}`;
+}
+
 export async function setOverrides(ownerId: string, slug: string, overrides: Record<string, Mode>): Promise<void> {
   await sql`
     insert into connector_settings (owner_id, slug, overrides) values (${ownerId}, ${slug}, ${sql.json(Object.entries(overrides) as any)})
@@ -113,13 +119,15 @@ export async function revokeConnection(ownerId: string, slug: string): Promise<v
 }
 
 /**
- * Privacy withdrawal (src/pipeline/consent.ts): their permission rows, cached tool lists, and abort anything in flight.
+ * Privacy withdrawal (src/pipeline/consent.ts): their permission rows, custom connectors, cached tool lists, and abort
+ * anything in flight.
  * The vault rows (the connections themselves) go with deleteAllVaultData.
  */
 export async function deleteConnectorData(ownerId: string): Promise<void> {
   const rows = await sql<{ slug: string }[]>`delete from connector_settings where owner_id = ${ownerId} returning slug`;
+  const custom = await deleteCustomConnectors(ownerId);
   await redis.multi().incr(ownerGenKey(ownerId)).expire(ownerGenKey(ownerId), 7 * 24 * 3600).exec();
-  const slugs = new Set([...rows.map((r) => r.slug), ...(await loadCatalog().catch(() => null))?.defs.map((d) => d.slug) ?? []]);
+  const slugs = new Set([...rows.map((r) => r.slug), ...custom, ...((await loadCatalog().catch(() => null))?.defs.map((d) => d.slug) ?? [])]);
   for (const slug of slugs) await invalidateTools(ownerId, slug);
 }
 

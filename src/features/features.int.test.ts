@@ -579,9 +579,21 @@ describe.skipIf(!INTEGRATION)('features integration', () => {
       const view = (await callsSince(m)).find((c) => c.method === 'views.publish')?.args;
       expect(view.user_id).toBe(a);
       const s = JSON.stringify(view.view.blocks);
-      expect(s).toContain('likes cats');
+      // The facts themselves are behind a dialog: Home shows the count and a button.
+      expect(s).not.toContain('likes cats');
+      expect(s).toContain('I remember *2* things about you.');
+      expect(s).toContain('"action_id":"homelist:open"');
       expect(s).toContain('mem:forget_all');
       expect(s).not.toContain('Admin');
+      const lists = await import('./home-lists.js');
+      const dialog = JSON.stringify(await lists.homeListView('memory', a));
+      expect(dialog).toContain('likes cats');
+      expect(dialog).toContain('likes dogs');
+      expect(dialog).toContain('mem:delete');
+      expect(dialog).not.toContain('b fact');
+      // Admin-only lists stay closed to everyone else.
+      expect(await lists.homeListView('facts', a)).toBeNull();
+      expect(JSON.stringify(await lists.homeListView('facts', 'UADMIN'))).toContain('homelistv:facts');
       await home.handleMemoryAction(action({ userId: a, actionId: 'mem:delete', value: String(bf!.id) }));
       expect((await sql`select id from user_memory where id = ${bf!.id}`).length).toBe(1);
       await home.handleMemoryAction(action({ userId: a, actionId: 'mem:forget_all', value: 'all' }));

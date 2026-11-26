@@ -43,6 +43,30 @@ credentials, prompt-mode approvals are vault approval cards, every call lands in
 
 There are no user-pasted URLs: only the admin decides which servers exist. Only remote HTTP servers (no stdio).
 
+## Custom connectors ("Add connector")
+
+Besides the admin's catalog, anyone can add a remote MCP server of their own: App Home → Connectors → **Add connector**
+(`src/features/connectors/custom.ts`, migration 359). The modal asks for a name, the server URL, an optional "what it
+is for" (becomes the definition's description, which the agent sees), and how to sign in: **Sign in (OAuth)** or **API
+key or token** with an optional header (empty = `Authorization: Bearer <key>`; another header gets the bare key).
+
+- Validated like a catalog entry (`parseCatalog`: public `https://` URL without credentials or fragment, header
+  name), and the egress pinning, SSRF checks, verifier, approval cards and scrubbing all apply unchanged.
+- Stored per owner in `custom_connectors` with a slug `u-<name>-<4 random hex>` (max 24), never reused, so a removed
+  connector's leftovers (cached tools, a connection whose delete failed) can't attach to one added later. Catalog entries can't use
+  `u-` slugs (`loadCatalog` skips them with an error), so settings, connections (`mcp.<slug>`), grants and caches never
+  collide with the catalog's. `enabledConnectors(ownerId)` / `enabledConnector(slug, ownerId)` return the enabled
+  catalog definitions plus that user's own; nobody else ever sees or gets someone's custom connector.
+- Same default modes as catalog connectors (read auto, write prompt, delete never).
+- After **Add**, it goes straight on to connecting: the API key modal, or the OAuth sign-in DM.
+- Up to 10 per person (`MAX_CUSTOM_CONNECTORS`; counted under a per-owner advisory lock). Each call re-reads the
+  definition and refuses if its URL or auth type differs from the one the turn's tools were built from. **Remove** (confirm) deletes the connection, grants, settings,
+  cached tools and the row; it works even while the feature is off.
+- **Admin switch** (App Home, `connectors_custom_off` in `settings`): on by default. Off hides the Add button and makes
+  every custom connector unusable (kept, back when it's on again). A failed settings read counts as off.
+- Risk: the server is unvetted. Its tool descriptions and results are untrusted data like any connector's, and its tools
+  load only on the owner's own turns, but the owner may be in a shared thread when they do.
+
 ## Connecting (App Home → Connectors)
 
 Any user who agreed to the privacy policy can connect an enabled connector.
@@ -167,14 +191,18 @@ Home applies even to a turn that already built its tools.
   connect shows *Open sign-in page* and *Paste code*. Connected: three selects (Reading / Changing / Deleting) and
   *Edit actions*, a modal with one select per server tool (Default or a mode). The modal opens with "Loading…" and is
   filled in with `views.update`, because listing tools can take longer than a trigger id lives (3 s).
-- **Admin:** catalog file status, skipped entries, and Enable / Disable per definition.
+- Up to 10 catalog connectors, then all of the user's own, which carry "added by you · <host>" and a **Remove** button
+  (deleting the connection by name, even if it can't be decrypted); **Add connector** comes last
+  (while the admin allows it and the user has fewer than 10).
+- **Admin:** the "Add connector" switch, catalog file status, skipped entries, and Enable / Disable per definition.
 - Action ids use the `conn:` prefix, modals `connm:` (sealed in transit). Modal errors reopen the modal with the
   submission's trigger id, else DM.
 
 ## Not in v1
 
 Subagents (children) using connectors; reminders / watches calling them; per-workspace catalogs (no team id);
-server-initiated notifications and sampling/elicitation; stdio servers; revoking tokens at the server on disconnect;
+server-initiated notifications and sampling/elicitation; stdio servers; servers without any auth (custom connectors
+need OAuth or a key); revoking tokens at the server on disconnect;
 pagination of very large tool lists (first page only).
 
 ## Tests

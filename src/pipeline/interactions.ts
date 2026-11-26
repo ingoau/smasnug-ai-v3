@@ -1,5 +1,5 @@
 /** Interactivity dispatch: block_actions, view_submission, shortcuts, slash commands, App Home. */
-import { findActionHandler, getAppHomeHandler, type ActionContext } from '../core/actions.js';
+import { findActionHandler, findViewRefresher, getAppHomeHandler, type ActionContext } from '../core/actions.js';
 import { log } from '../log.js';
 import { guardEntry } from './entry.js';
 
@@ -11,7 +11,7 @@ async function dispatch(ctx: ActionContext) {
   }
   // Not a conversation turn: don't count it, and don't pass the channel (channel disable must not block
   // `/smasnug on`). Suspended users keep what only removes or refuses something of theirs: deleting their memory,
-  // deleting a stored credential, denying a vault card (never approving one).
+  // deleting a stored credential, denying a vault card (never approving one), and opening a "View all" list to do so.
   const entry = await guardEntry(ctx.userId, undefined, { countMessage: false, allowSuspended: allowedWhileSuspended(ctx.actionId) });
   if (!entry.ok) return;
   try {
@@ -19,11 +19,16 @@ async function dispatch(ctx: ActionContext) {
   } catch (err) {
     log.error({ err, actionId: ctx.actionId, userId: ctx.userId }, 'interaction handler failed');
   }
+  // A button inside a modal that lists things (App Home's "View all"): re-render it so it shows the change.
+  if (ctx.body?.type === 'block_actions' && ctx.body?.view?.type === 'modal') {
+    const refresh = findViewRefresher(ctx.body.view.callback_id);
+    if (refresh) await refresh(ctx).catch((err) => log.warn({ err, actionId: ctx.actionId }, 'modal refresh failed'));
+  }
 }
 
 /** Actions a suspended user may still take. */
 export function allowedWhileSuspended(actionId: string): boolean {
-  return actionId.startsWith('mem:') || actionId === 'vault:delete' || actionId === 'vault:deny';
+  return actionId.startsWith('mem:') || actionId === 'homelist:open' || actionId === 'vault:delete' || actionId === 'vault:deny';
 }
 
 export async function handleInteractive(body: any) {

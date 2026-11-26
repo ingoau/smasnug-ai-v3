@@ -247,7 +247,11 @@ function buildTool(o: {
       if (!isConnected(conn)) return `Not done: ${def.name} isn't connected for <@${ownerId}> anymore.`;
       const auditBase = { ownerId, credentialId: conn.cred.id, credentialName: conn.cred.name, action: 'connector_call', tool: `${def.slug}:${t.name}`, threadId };
       // The owner may have changed the settings (or the admin disabled it) since the tool list was built.
-      if (!(await enabledConnector(def.slug))) return `Not done: the ${def.name} connector was switched off.`;
+      // The definition must still be the one these tools were built from (a custom connector's URL never changes, but
+      // check anyway so a key can never go to a server other than the one now stored).
+      const current = await enabledConnector(def.slug, ownerId);
+      if (!current) return `Not done: the ${def.name} connector was switched off.`;
+      if (current.url !== def.url || current.auth.type !== def.auth.type) return `Not done: the ${def.name} connector changed since this conversation started. Ask again.`;
       const mode = resolveMode(await getSettings(ownerId, def.slug), t.name, cls);
       if (mode === 'always_block') {
         await audit({ ...auditBase, outcome: 'refused', detail: { mode, connector: def.slug, tool: t.name } });
@@ -318,7 +322,7 @@ export function startConnectorTools(o: { turn: LoadTurn; speakerId: string; abor
   const fallbacks = new Set<string>();
   type Listed = { def: ConnectorDef; tools: CachedTool[]; settings: Awaited<ReturnType<typeof getSettings>> } | null;
   const prep: Promise<{ def: ConnectorDef; listed: Promise<Listed> }[]> = (async () => {
-    const defs = await enabledConnectors();
+    const defs = await enabledConnectors(ownerId);
     if (defs.length === 0) return [];
     const conns = await Promise.all(defs.map((d) => getConnection(ownerId, d.slug).catch(() => null)));
     const connected = defs.map((def, i) => ({ def, conn: conns[i] })).filter((x): x is { def: ConnectorDef; conn: Connection } => isConnected(x.conn));
@@ -407,7 +411,7 @@ export function connectorsUnavailableNote(names: readonly string[]): string {
 export const connectorExecutor = async (row: ApprovalRow, payload: unknown, decision: 'approved' | 'denied' | 'expired') => {
   const p = payload as { slug: string; tool: string; cls: ToolClass; args: Record<string, unknown>; generation?: string | null } | null;
   if (decision !== 'approved' || !p) return { input: outcomeInput(row, decision, decision === 'denied' ? 'The owner denied the action; nothing ran.' : 'The approval card expired; nothing ran.') };
-  const def = await enabledConnector(p.slug);
+  const def = await enabledConnector(p.slug, row.ownerId);
   if (!def) return { input: outcomeInput(row, 'failed', 'The connector was switched off before the action ran.') };
   const mode = resolveMode(await getSettings(row.ownerId, def.slug), p.tool, p.cls);
   if (mode === 'always_block') return { input: outcomeInput(row, 'failed', 'The owner has since blocked this action; nothing ran.') };
