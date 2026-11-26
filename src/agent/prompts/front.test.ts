@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { frontSystemPrompt } from './front.js';
+import { DEFAULT_VOICE, frontSystemPrompt } from './front.js';
+import { theoVoice } from './theo.js';
 
 describe('frontSystemPrompt About you', () => {
   const p = frontSystemPrompt('smasnug ai');
@@ -203,5 +204,22 @@ describe('frontSystemPrompt: responding without words, and stated preferences', 
     expect(p).toMatch(/How they want you to treat them \("just react to my reminders", "don't ping me"\) is a preference: save it and keep to it/);
     expect(p).toMatch(/A rule the admin or the channel's creator sets for everyone .* goes to propose_workspace_fact \(scope channel or workspace\)/);
     expect(p).toMatch(/<rules> \(this channel's rules, who asked not to be pinged\)/);
+  });
+});
+
+describe('frontSystemPrompt voice (Theo mode)', () => {
+  it('uses the default voice unless one is passed', () => {
+    expect(frontSystemPrompt('smasnug ai')).toContain(`${DEFAULT_VOICE}\n\n# Formatting\n`);
+  });
+
+  it('swaps the whole "# Voice" section for theo.md and keeps the rest', () => {
+    const p = frontSystemPrompt('smasnug ai', { voice: theoVoice() });
+    expect(p).not.toContain(DEFAULT_VOICE);
+    expect(p).toContain('# Voice\nYou\'re a web dev who spent years as an engineer at Twitch');
+    expect(p).toContain('\n## How you sound\n');
+    expect(p).not.toMatch(/^# How you sound/m);
+    expect(p).toContain('# About you');
+    expect(p).toMatch(/\n\n# Formatting\n/);
+    expect(p.match(/^# Voice$/gm)).toHaveLength(1);
   });
 });
