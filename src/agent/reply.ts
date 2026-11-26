@@ -42,6 +42,7 @@ import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
 import { forgetOpenActivity, recordOpenActivity } from './activity-registry.js';
 import { privateThreadTs, savePrivateReply, sendFilesToDm, shareActions } from './private-reply.js';
 import { sql } from '../db/index.js';
+import { noteSelfDeleted } from '../pipeline/store.js';
 
 /** Coalescing interval for appends once the stream is open. */
 const FLUSH_MS = 250;
@@ -198,6 +199,8 @@ export const editRetry = { delaysMs: [300, 1000] };
 
 /** A chat.update / chat.delete of a reply message, retried briefly on transient errors. Throws the last error. */
 async function editMessage(method: 'chat.update' | 'chat.delete', args: Record<string, unknown>): Promise<void> {
+  // The bot tidying up its own message (an empty or unfinished stream): its deletion keeps the turn's trace.
+  if (method === 'chat.delete') await noteSelfDeleted(String(args.channel), String(args.ts));
   for (let attempt = 0; ; attempt++) {
     try {
       await slackCall(method, args);

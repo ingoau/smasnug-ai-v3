@@ -32,6 +32,8 @@ const h = vi.hoisted(() => ({
   titleJobs: [] as unknown[][],
   /** maybeSynthesize calls (subagents.ts): [cardId, opts]. */
   synth: [] as unknown[][],
+  /** The speaker's connector tools this turn (startConnectorTools). */
+  connectorTools: {} as Record<string, unknown>,
 }));
 
 vi.mock('../db/index.js', () => {
@@ -40,6 +42,10 @@ vi.mock('../db/index.js', () => {
   sql.begin = async (fn: any) => fn(sql);
   return { sql };
 });
+vi.mock('../features/connectors/tools.js', async (orig) => ({
+  ...(await orig<typeof import('../features/connectors/tools.js')>()),
+  startConnectorTools: () => ({ collect: async () => ({ tools: h.connectorTools, unavailable: [] }) }),
+}));
 vi.mock('../core/redis.js', () => ({ redis: { get: async () => null, set: async () => 'OK' }, bullConnection: () => ({}) }));
 vi.mock('../core/slack.js', () => ({
   userbotConfigured: () => false,
@@ -111,7 +117,8 @@ vi.mock('../context/users.js', () => ({
 }));
 
 const { MockLanguageModelV4 } = await import('ai/test');
-const { simulateReadableStream } = await import('ai');
+const { simulateReadableStream, tool } = await import('ai');
+const { z } = await import('zod');
 await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
@@ -191,6 +198,7 @@ beforeEach(() => {
   h.activeRuns = 0;
   h.slackHook = undefined;
   h.sqlHook = undefined;
+  h.connectorTools = {};
   h.postedCards = [];
   h.retired = [];
   h.ctx = {};
@@ -271,16 +279,18 @@ describe('runFrontTurn (mock model)', () => {
     expect(h.events.some((e) => e.type === 'reply' && e.payload?.contentFiltered)).toBe(true);
   });
 
-  it('a mention that ended on an approval card (connector/vault) gets no fallback', async () => {
-    h.sqlHook = (q) => (q.includes('from vault_approvals') ? [{ n: 1 }] : undefined);
-    try {
-      h.model = mockModel([textStep('')]);
-      await runFrontTurn(turn({ id: 84 }), io(true).io);
-      expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
-      expect(h.events.some((e) => e.type === 'reply' && e.payload?.fallback)).toBe(false);
-    } finally {
-      h.sqlHook = undefined;
-    }
+  it('a mention that ended on its own approval card (connector) gets no fallback', async () => {
+    h.connectorTools = {
+      t3__launch: tool({
+        description: 'launch',
+        inputSchema: z.object({}),
+        execute: async () => 'Awaiting approval: <@U1> sees a private card for this T3 action (Allow once / Allow for 10 min / Deny). Nothing ran yet.',
+      }),
+    };
+    h.model = mockModel([toolStep(['t3__launch', {}]), textStep('')]);
+    await runFrontTurn(turn({ id: 84 }), io(true).io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+    expect(h.events.some((e) => e.type === 'reply' && e.payload?.fallback)).toBe(false);
   });
 
   it('a skipped reaction on a mention still gets the fallback (nothing was visible)', async () => {

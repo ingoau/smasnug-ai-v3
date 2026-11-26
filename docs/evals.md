@@ -30,8 +30,8 @@ Each trace has a size budget (`TRACE_CLIP.total`), and strings are made safe for
 
 Retention (`src/features/retention.ts`): traces cascade with their thread and go after the retention window (30
 days). When a message is deleted in Slack, every trace in its channel that ran after the message was posted goes at
-once (`applyDelete`; the turn input holds channel context, not just the thread), unless it is the bot's own message
-(activity messages and empty streams it removes itself; stored without `deleted_at`). A trace still in flight is checked
+once (`applyDelete`; the turn input holds channel context, not just the thread), unless the bot removed its own transient
+message (an activity message or empty stream, marked by `noteSelfDeleted`; stored without `deleted_at`). A trace still in flight is checked
 when saved (`messages.deleted_at`), and the daily pass catches stragglers. A copy inside a tool result from another
 channel (search, read_channel) only goes with the window. Unreferenced prompt versions go after the window too.
 `PRIVACY.md` describes all this to users.

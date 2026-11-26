@@ -1,7 +1,7 @@
 /** Stored copies of Slack messages and thread rows. */
 import { sql, type Sql } from '../db/index.js';
 import type { MessageAttachment, SlackFileRef, StoredMessage } from '../core/types.js';
-import { getBotIdentity } from '../core/slack.js';
+import { redis } from '../core/redis.js';
 import { attachmentsFromSlack, slackFileRefs } from '../context/normalize.js';
 import { removeMessageFiles } from '../files/store.js';
 import { log } from '../log.js';
@@ -137,13 +137,12 @@ export async function applyEdit(channelId: string, m: SlackMessage): Promise<{ t
 
 /** Retention: a deleted Slack message clears our stored copy (and traces that may hold one), and its uploads leave the file store. */
 export async function applyDelete(channelId: string, ts: string): Promise<{ threadId: string | null; userId: string | null } | undefined> {
-  const [before] = await sql<{ files: SlackFileRef[]; userId: string | null; botId: string | null }[]>`
-    select files, user_id, bot_id from messages where channel_id = ${channelId} and ts = ${ts}`;
-  // The bot's own messages (activity messages, empty streams it removes itself, its replies) hold only its own output:
-  // their deletion never drops traces or failure reports, or every turn that tidies up its activity message would lose
-  // its trace. A person's message the bot quoted is covered by that message's own deletion. Stored without deleted_at,
-  // so saveTrace and the retention pass don't match it either.
-  const own = before ? await isOwnMessage(before) : false;
+  const [before] = await sql<{ files: SlackFileRef[] }[]>`select files from messages where channel_id = ${channelId} and ts = ${ts}`;
+  // A message the bot removed itself (its activity message, an empty stream; noteSelfDeleted) holds only its own
+  // transient output: its deletion drops no traces or failure reports, or every turn that tidies up its activity
+  // message would lose its trace. Stored without deleted_at, so saveTrace and the retention pass skip it too. Any other
+  // deletion (a person's message, a bot message a moderator or the privacy withdrawal removes) drops as before.
+  const own = await takeSelfDeleted(channelId, ts);
   const [row] = await sql<{ threadId: string | null; userId: string | null }[]>`
     update messages set text = '', files = '[]'::jsonb, attachments = '[]'::jsonb, deleted = true,
       deleted_at = ${own ? sql`deleted_at` : sql`coalesce(deleted_at, now())`}
@@ -266,10 +265,18 @@ export async function isRunRequester(threadId: string, authorId: string, withinM
   return Boolean(row?.yes);
 }
 
-/** Whether a stored message was posted by this bot (its user id or bot id). Unknown identity: not its own. */
-async function isOwnMessage(m: { userId: string | null; botId: string | null }): Promise<boolean> {
-  if (!m.userId && !m.botId) return false;
-  const bot = await getBotIdentity().catch(() => null);
-  if (!bot) return false;
-  return (Boolean(m.userId) && m.userId === bot.userId) || (Boolean(m.botId) && m.botId === bot.botId);
+const selfDeletedKey = (channelId: string, ts: string) => `self-deleted:${channelId}:${ts}`;
+
+/** Call right before the bot deletes one of its own transient messages (chat.delete): see applyDelete. Never throws. */
+export async function noteSelfDeleted(channelId: string, ts: string): Promise<void> {
+  await redis.set(selfDeletedKey(channelId, ts), '1', 'EX', 3600).catch((err: unknown) => log.warn({ err }, 'noteSelfDeleted failed'));
+}
+
+async function takeSelfDeleted(channelId: string, ts: string): Promise<boolean> {
+  try {
+    return (await redis.getdel(selfDeletedKey(channelId, ts))) === '1';
+  } catch (err) {
+    log.warn({ err }, 'reading the self-deleted mark failed');
+    return false;
+  }
 }
