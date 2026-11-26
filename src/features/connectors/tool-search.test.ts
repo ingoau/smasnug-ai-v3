@@ -108,6 +108,9 @@ describe('checkArgs', () => {
     expect(callArgs(schema, { title: 'x', priority: null, labels: undefined })).toEqual({ title: 'x' });
     expect(checkArgs(schema, { title: null })).toEqual(['`title` must be string']);
     expect(callArgs(schema, { title: null })).toEqual({ title: null });
+    // Kept when the schema allows null (clearing a field) or gives no type.
+    expect(checkArgs(schema, { title: 'x', due: null })).toEqual([]);
+    expect(callArgs(schema, { title: 'x', due: null, other: null })).toEqual({ title: 'x', due: null, other: null });
   });
 
   it('allows unknown keys unless additionalProperties is false', () => {

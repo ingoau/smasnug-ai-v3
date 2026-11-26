@@ -160,7 +160,7 @@ export function checkArgs(schema: JsonSchema, args: Record<string, unknown>, max
   for (const k of required) if (args[k] === undefined) problems.push(`missing required argument \`${k}\``);
   for (const [k, v] of Object.entries(args)) {
     // Some models send null for an optional argument they mean to leave out: the call drops it (callArgs).
-    if (v === undefined || (v === null && !required.includes(k))) continue;
+    if (v === undefined || droppedNull(schema, k, v)) continue;
     const p = props[k];
     if (!p || typeof p !== 'object') {
       if (schema.additionalProperties === false) problems.push(`unknown argument \`${k}\``);
@@ -173,10 +173,23 @@ export function checkArgs(schema: JsonSchema, args: Record<string, unknown>, max
   return problems.slice(0, max);
 }
 
-/** The arguments as sent to the tool: null optional arguments dropped (see checkArgs). */
+/**
+ * Whether `null` for this argument means "left out": it's optional and its schema has types, none of them null. Kept
+ * when the schema allows null (often how an API clears a field) or says nothing about the type.
+ */
+function droppedNull(schema: JsonSchema, key: string, v: unknown): boolean {
+  if (v !== null) return false;
+  if (Array.isArray(schema.required) && schema.required.includes(key)) return false;
+  const props = schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties) ? (schema.properties as Record<string, JsonSchema>) : {};
+  const p = props[key];
+  if (!p || typeof p !== 'object') return false;
+  const types = typeof p.type === 'string' ? [p.type] : Array.isArray(p.type) ? p.type : [];
+  return types.length > 0 && !types.includes('null') && !(Array.isArray(p.enum) && p.enum.includes(null));
+}
+
+/** The arguments as sent to the tool: nulls that mean "left out" dropped (see droppedNull, checkArgs). */
 export function callArgs(schema: JsonSchema, args: Record<string, unknown>): Record<string, unknown> {
-  const required = Array.isArray(schema.required) ? schema.required : [];
-  return Object.fromEntries(Object.entries(args).filter(([k, v]) => v !== undefined && !(v === null && !required.includes(k))));
+  return Object.fromEntries(Object.entries(args).filter(([k, v]) => v !== undefined && !droppedNull(schema, k, v)));
 }
 
 /** use_connector's `arguments`: an object, or a JSON object in a string (some models send that). Null otherwise. */

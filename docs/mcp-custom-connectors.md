@@ -140,8 +140,8 @@ characters of descriptions + schemas, ~3k tokens) in a turn, the connector tools
   next to `tool` are refused (not silently dropped); `arguments` may be a JSON string;
 - it checks the arguments against the tool's schema first (required keys, top-level types and enums, no unknown keys
   when the schema forbids them: with the tools listed directly the provider does this; a `null` optional argument is
-  dropped), then calls the tool's own built tool, so identity, mode, verifier, approval cards, limits, audit and
-  scrubbing are unchanged. Its refusals start `Not run:` (counted as tool errors by the eval detectors);
+  dropped unless its schema allows null), then calls the tool's own built tool, so identity, mode, verifier, approval
+  cards, limits, audit and scrubbing are unchanged. Its refusals start `Not run:` (counted as tool errors by the eval detectors);
 - the same build-time filters apply: `always_block` tools aren't in the index, prompt-mode tools aren't in a `!p`
   turn's index and `use_connector` doesn't find them.
 
