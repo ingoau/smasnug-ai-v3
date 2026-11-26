@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { formatSubagentResult, type ResultRun, type ResultSubagent } from './subagent-result.js';
 
-const sa: ResultSubagent = { id: 'sa_1', title: 'Run the benchmark', status: 'idle', ownerId: 'U1', kind: 'model', sandbox: true, summary: 'benchmarked' };
+const sa: ResultSubagent = { id: 'sa_1', title: 'Run the benchmark', status: 'idle', ownerId: 'U1', sandbox: true, summary: 'benchmarked' };
 const run = (over: Partial<ResultRun>): ResultRun => ({
   id: 1,
   status: 'complete',

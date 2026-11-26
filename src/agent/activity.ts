@@ -41,7 +41,6 @@ const LABELS: Record<string, string> = {
   create_watch: 'Setting up a watch…',
   list_watches: 'Checking watches…',
   cancel_watch: 'Cancelling a watch…',
-  spawn_coding_agent: 'Preparing a coding agent…',
   huddle_dj_mode: 'Asking for the aux…',
   huddle_dj: 'Working the decks…',
   huddle_dj_settings: 'Changing DJ settings…',

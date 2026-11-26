@@ -32,7 +32,6 @@ export const PRIVATE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   'unreact',
   'leave_thread',
   'send_message',
-  'spawn_coding_agent',
   'upload_emoji',
   'set_reminder',
   'create_watch',

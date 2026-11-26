@@ -16,7 +16,7 @@
  *   user-chosen title is never overwritten afterwards; one that lands while our rename is in flight is re-applied.
  * - Statuses: `suspended` = "the agent cannot make progress until the user intervenes, for example when the agent
  *   needs user clarification or a tool approval" → a DM turn that leaves a confirmation pending (a send_message
- *   preview, or a coding-agent launch preview) ends `suspended`, and resolving it (Send / Launch / Cancel / expiry)
+ *   preview) ends `suspended`, and resolving it (Send / Cancel / expiry)
  *   sets `active` (or the outcome turn it starts does, src/features/outcome-turn.ts). `closed` = "the agent has closed the session
  *   and will no longer respond on it" → leave_thread in a DM ends the turn `closed`; a later message in the thread
  *   sets `processing` again like any turn (the bot always answers DMs).
@@ -262,10 +262,9 @@ export async function requestSessionClose(threadId: string, turnId: number): Pro
   return rows.length > 0;
 }
 
-/** Whether thread `t` has a confirmation the user still has to answer: a send_message or coding-agent launch preview. */
+/** Whether thread `t` has a confirmation the user still has to answer: a send_message preview. */
 const AWAITING_USER = sql`(
-  exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now())
-  or exists (select 1 from pending_coding_agents c where c.thread_id = t.id and c.status = 'pending' and c.expires_at > now()))`;
+  exists (select 1 from pending_sends p where p.thread_id = t.id and p.status = 'pending' and p.expires_at > now()))`;
 
 /**
  * The status a turn leaves its session in. DMs: `suspended` while a confirmation from this thread is pending
@@ -310,10 +309,7 @@ const SUSPENDED_KEY = 'sessions:suspended';
 export async function noteSessionSuspended(threadId: string): Promise<void> {
   try {
     const [row] = await sql<{ at: Date | null }[]>`
-      select min(expires_at) as at from (
-        select expires_at from pending_sends where thread_id = ${threadId} and status = 'pending' and expires_at > now()
-        union all
-        select expires_at from pending_coding_agents where thread_id = ${threadId} and status = 'pending' and expires_at > now()) w`;
+      select min(expires_at) as at from pending_sends where thread_id = ${threadId} and status = 'pending' and expires_at > now()`;
     if (row?.at) await redis.zadd(SUSPENDED_KEY, new Date(row.at).getTime(), threadId);
   } catch (err) {
     log.warn({ err, threadId }, 'noting a suspended session failed');

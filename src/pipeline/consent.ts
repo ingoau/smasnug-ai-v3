@@ -202,10 +202,10 @@ export async function retryStaleReplays(): Promise<void> {
  * them are dropped / stopped (without treating a thread root as gone: it is still in Slack). Messages they write
  * afterwards are stored as context again, as for anyone who hasn't agreed. Ends with a DM saying what was deleted.
  */
-/** Cancel the user's active subagents (not coding agents: they have no sandbox or vault). Returns how many. */
+/** Cancel the user's active subagents. Returns how many. */
 async function cancelOwnSubagents(userId: string): Promise<number> {
   const rows = await sql<{ id: string; threadId: string }[]>`
-    select id, thread_id from subagents where owner_id = ${userId} and status in ('running', 'idle') and kind <> 'cursor'`;
+    select id, thread_id from subagents where owner_id = ${userId} and status in ('running', 'idle')`;
   let n = 0;
   for (const r of rows) {
     try {

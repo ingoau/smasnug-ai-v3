@@ -475,7 +475,7 @@ Env:
 - `PREVIEW_TERMS_VERSION`;
 - `WRANGLER_VERSION`.
 
-The feature is off unless the Modal tokens are set, like Cursor.
+The feature is off unless the Modal tokens are set.
 
 ### 3.9 Browser tools and credentials (`src/sandbox/browser/`, issues #36, #37)
 
@@ -702,7 +702,7 @@ App Home admin additions:
   uploaded to Slack as a file (Slack now renders HTML files).
 - Only the subagent's owner can be the preview requester. A steer from someone else in the thread can't redirect
   the claim. `request_preview` records `subagents.owner_id`, not the steerer.
-- Synthesis and scheduled turns can spawn sandbox subagents (unlike coding agents). They are bounded by the owner's
+- Synthesis and scheduled turns can spawn sandbox subagents. They are bounded by the owner's
   access, quotas and the budget, so no extra rule is needed.
 
 ### 5.5 Abuse

@@ -4,7 +4,6 @@
  * the turn that started it.
  */
 import type { ModelMessage } from 'ai';
-import type { TransactionSql } from 'postgres';
 import { sql } from '../db/index.js';
 import type { TurnRow } from '../core/types.js';
 import { appendEvent, shortId } from '../core/events.js';
@@ -16,7 +15,6 @@ import { log } from '../log.js';
 import { ensureTurnCard, renderCardNow, scheduleCardRender } from './cards.js';
 import { enqueueCardTitle } from './titles.js';
 import { deriveSteerNote, oneLine } from './util.js';
-import { cancelCodingAgentNow, cursorRefusal, isCursorAdmin, messageCodingAgent } from './cursor/agents.js';
 
 export type SubagentStatus = 'running' | 'idle' | 'cancelled' | 'expired';
 
@@ -33,10 +31,6 @@ export interface SubagentRow {
   seededFrom: string | null;
   createdAt: Date;
   lastActiveAt: Date;
-  /** 'cursor' = a coding agent backed by a Cursor Cloud Agent (src/agent/cursor/). */
-  kind?: 'model' | 'cursor';
-  cursorAgentId?: string | null;
-  cursorAgentUrl?: string | null;
   /** Has used a code sandbox (set on its first allowed sandbox tool call): sandbox model, longer run cap (src/sandbox/). */
   sandbox?: boolean;
   /**
@@ -144,7 +138,7 @@ export async function spawnSubagent(opts: {
 }
 
 export type MessageResult =
-  | { mode: 'steered'; runId: number; cardId: number | null; note: string; /** coding agents: delivered when the current run ends */ queued?: boolean }
+  | { mode: 'steered'; runId: number; cardId: number | null; note: string }
   | { mode: 'resumed'; runId: number; cardId: number };
 
 /**
@@ -155,7 +149,7 @@ export type MessageResult =
 export async function messageSubagent(opts: {
   threadId: string;
   turnId: number;
-  /** Kind of the calling turn: coding agents only take messages from the admin's own ('user') turns. */
+  /** Kind of the calling turn: a non-user turn (or another speaker) revokes the subagent's vault trust. */
   turnKind?: TurnRow['kind'];
   speakerId: string;
   subagentId: string;
@@ -164,7 +158,6 @@ export async function messageSubagent(opts: {
 }): Promise<MessageResult> {
   const [pre] = await sql<SubagentRow[]>`select * from subagents where id = ${opts.subagentId} and thread_id = ${opts.threadId}`;
   if (!pre) throw new ToolError(`No subagent ${opts.subagentId} in this thread. Use spawn_subagent to start one.`);
-  if (pre.kind === 'cursor') return messageCodingAgent(opts, pre);
   if (pre.status === 'cancelled') throw new ToolError(`Subagent ${pre.id} was cancelled. Spawn a new one with spawn_subagent.`);
   if (pre.status === 'expired')
     throw new ToolError(`Subagent ${pre.id} has expired. Spawn a new one with spawn_subagent and seed_from: "${pre.id}" to carry over its summary.`);
@@ -211,12 +204,6 @@ export async function messageSubagent(opts: {
 
 /** Request cancellation: queued runs are cancelled immediately; running ones stop at their next step boundary. */
 export async function cancelSubagent(opts: { threadId: string; subagentId: string; actor: string; /** the front turn that cancelled it (events) */ turnId?: number }): Promise<string> {
-  const [kind] = await sql<{ kind: string }[]>`select kind from subagents where id = ${opts.subagentId} and thread_id = ${opts.threadId}`;
-  const coding = kind?.kind === 'cursor';
-  if (coding) {
-    const refusal = cursorRefusal(opts.actor);
-    if (refusal) throw new ToolError(refusal);
-  }
   const out = await sql.begin(async (tx) => {
     const [sa] = await tx<SubagentRow[]>`select * from subagents where id = ${opts.subagentId} and thread_id = ${opts.threadId} for update`;
     if (!sa) return { error: `No subagent ${opts.subagentId} in this thread.` };
@@ -241,19 +228,9 @@ export async function cancelSubagent(opts: { threadId: string; subagentId: strin
   });
   if ('error' in out) throw new ToolError(out.error);
   await appendEvent(opts.threadId, 'cancel', opts.actor, { subagentId: opts.subagentId, ...(opts.turnId ? { turnId: opts.turnId } : {}) });
-  // Coding agents have no loop that checks the flag: stop the Cursor run now (the poller retries if this fails).
-  if (coding) await cancelCodingAgentNow(opts.subagentId);
   for (const c of new Set(out.cards)) await scheduleCardRender(c);
   for (const c of new Set((out as any).queuedCards ?? [])) await maybeSynthesize(c as number);
   return out.msg;
-}
-
-/**
- * Bulk cancels (old "Stop all" buttons, a deleted thread root) only reach coding agents (Cursor) when the admin did
- * it: cancelling one is admin-only. Their cancel flag is acted on by the Cursor poller.
- */
-function codingAgentsFilter(actor: string) {
-  return isCursorAdmin(actor) ? sql`true` : sql`not exists (select 1 from subagents s where s.id = runs.subagent_id and s.kind = 'cursor')`;
 }
 
 /** "Stop all" on a card: cancel every active run on it. */
@@ -268,7 +245,7 @@ export async function cancelCardRuns(cardId: number, actor: string): Promise<voi
                and not exists (select 1 from runs where subagent_id = ${q.subagentId} and status = 'running')`;
     }
     const running = await tx<{ threadId: string }[]>`
-      update runs set cancel_requested = true where card_id = ${cardId} and status = 'running' and ${codingAgentsFilter(actor)} returning thread_id`;
+      update runs set cancel_requested = true where card_id = ${cardId} and status = 'running' returning thread_id`;
     return [...queued, ...running];
   });
   if (rows[0]) await appendEvent(rows[0].threadId, 'stop_all', actor, { cardId });
@@ -290,7 +267,7 @@ export async function cancelThreadRuns(threadId: string, actor: string): Promise
                and not exists (select 1 from runs where subagent_id = ${q.subagentId} and status = 'running')`;
     }
     const running = await tx<{ cardId: number | null }[]>`
-      update runs set cancel_requested = true where thread_id = ${threadId} and status = 'running' and ${codingAgentsFilter(actor)} returning card_id`;
+      update runs set cancel_requested = true where thread_id = ${threadId} and status = 'running' returning card_id`;
     return [...queued, ...running];
   });
   const cards = [...new Set(rows.map((r) => Number(r.cardId)).filter(Boolean))];
@@ -319,17 +296,12 @@ export async function finishRun(
   extra: {
     tokens?: number;
     history?: ModelMessage[];
-    /** Finish even with unseen steers (they are dropped like a failed run's): a cancelled coding agent, a bounded retry. */
-    dropInbox?: boolean;
-    /** Checked inside the transaction (after the subagent lock); false → 'gone', nothing written (e.g. a lost claim). */
-    guard?: (tx: TransactionSql<{}>) => Promise<boolean>;
   } = {},
 ): Promise<'ok' | 'inbox' | 'gone'> {
   let finalStatus: RunOutcome['status'] = outcome.status;
   const res = await sql.begin(async (tx) => {
     await tx`select id from subagents where id = ${run.subagentId} for update`;
-    if (extra.guard && !(await extra.guard(tx))) return 'gone' as const;
-    if (outcome.status === 'complete' && !extra.dropInbox) {
+    if (outcome.status === 'complete') {
       // A run that finished despite a cancel request still reports its result; the front agent decides what to say.
       const [p] = await tx<{ n: number }[]>`select count(*)::int as n from subagent_inbox where subagent_id = ${run.subagentId} and consumed_at is null`;
       if ((p?.n ?? 0) > 0) return 'inbox' as const;

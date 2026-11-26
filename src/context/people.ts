@@ -64,12 +64,12 @@ export function speakerDetailLines(u: UserInfo | null | undefined, now: Date): s
 
 /**
  * The <speaker> `Privileges:` line: bot-level roles first (code-derived: `botAdmin` = ADMIN_USER_ID, which runs
- * moderation, the kill switches and, when configured, coding agents), then the Slack workspace role (from users.info;
+ * moderation and the kill switches), then the Slack workspace role (from users.info;
  * it grants nothing in the bot). "none" for everyone else, so the model never guesses.
  */
-export function privilegesLine(u: Pick<UserInfo, 'isAdmin' | 'isOwner'> | null | undefined, opts: { botAdmin: boolean; codingAgents: boolean }): string {
+export function privilegesLine(u: Pick<UserInfo, 'isAdmin' | 'isOwner'> | null | undefined, opts: { botAdmin: boolean }): string {
   const parts: string[] = [];
-  if (opts.botAdmin) parts.push(`bot admin (runs this bot: moderation, kill switches${opts.codingAgents ? '; can launch coding agents' : ''})`);
+  if (opts.botAdmin) parts.push('bot admin (runs this bot: moderation, kill switches)');
   const role = u ? workspaceRole(u) : undefined;
   if (role) parts.push(role);
   return `Privileges: ${parts.length ? parts.join(', ') : 'none'}`;
