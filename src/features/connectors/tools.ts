@@ -247,7 +247,11 @@ function buildTool(o: {
       if (!isConnected(conn)) return `Not done: ${def.name} isn't connected for <@${ownerId}> anymore.`;
       const auditBase = { ownerId, credentialId: conn.cred.id, credentialName: conn.cred.name, action: 'connector_call', tool: `${def.slug}:${t.name}`, threadId };
       // The owner may have changed the settings (or the admin disabled it) since the tool list was built.
-      if (!(await enabledConnector(def.slug, ownerId))) return `Not done: the ${def.name} connector was switched off.`;
+      // The definition must still be the one these tools were built from (a custom connector's URL never changes, but
+      // check anyway so a key can never go to a server other than the one now stored).
+      const current = await enabledConnector(def.slug, ownerId);
+      if (!current) return `Not done: the ${def.name} connector was switched off.`;
+      if (current.url !== def.url || current.auth.type !== def.auth.type) return `Not done: the ${def.name} connector changed since this conversation started. Ask again.`;
       const mode = resolveMode(await getSettings(ownerId, def.slug), t.name, cls);
       if (mode === 'always_block') {
         await audit({ ...auditBase, outcome: 'refused', detail: { mode, connector: def.slug, tool: t.name } });

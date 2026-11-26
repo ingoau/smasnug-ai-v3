@@ -26,6 +26,7 @@ const PENDING_FACTS_SHOWN = 45;
 const APPROVED_FACTS_SHOWN = 95;
 const BLOCKS_SHOWN = 45;
 const BLOCKS_INLINE = 3;
+const FACTS_INLINE = 3;
 const KIND_LABELS: Record<FactKind, string> = { preference: 'preference', about: 'about you', project: 'project' };
 
 const btn = (action_id: string, text: string, value: string, extra: object = {}) => ({
@@ -136,10 +137,19 @@ async function adminBlocks(): Promise<unknown[]> {
   );
 
   if (pending.length)
-    out.push(...homeListBlocks({ key: 'facts_pending', count: pending.length, summary: `*Workspace facts awaiting approval:* ${pending.length}`, buttonText: `Review (${pending.length})` }));
+    out.push(
+      ...homeListBlocks({
+        key: 'facts_pending',
+        count: pending.length,
+        summary: `*Workspace facts awaiting approval:* ${pending.length}`,
+        buttonText: `Review (${pending.length})`,
+        inline: () => [section('*Workspace facts awaiting approval*'), ...pendingFactBlocks(pending)],
+        inlineMax: FACTS_INLINE,
+      }),
+    );
   out.push(
     ...(approved.length
-      ? homeListBlocks({ key: 'facts', count: approved.length, summary: `*Workspace facts:* ${approved.length}` })
+      ? homeListBlocks({ key: 'facts', count: approved.length, summary: `*Workspace facts:* ${approved.length}`, inline: () => [section('*Workspace facts*'), ...approvedFactBlocks(approved)], inlineMax: FACTS_INLINE })
       : [section('*Workspace facts:* none yet.')]),
   );
   out.push(

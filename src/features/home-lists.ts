@@ -76,8 +76,18 @@ async function open(ctx: ActionContext): Promise<void> {
   const list = lists.get(ctx.value ?? '');
   if (!list || !ctx.triggerId) return;
   if (list.admin && !(await requireAdmin(ctx))) return;
+  // Open at once (a trigger id lives 3 s and the click already waited in the queue), then fill it in.
+  let viewId: string | undefined;
+  try {
+    const res = await slackCall<any>('views.open', { trigger_id: ctx.triggerId, view: modal(list, [context('Loading…')]) });
+    viewId = res?.view?.id;
+  } catch (err) {
+    log.warn({ err, key: list.key }, 'home list modal open failed');
+    await slackCall('chat.postMessage', { channel: ctx.userId, text: `Slack took too long to open “${list.title}”. Press the button in my App Home again.` }).catch(() => {});
+    return;
+  }
   const view = await homeListView(list.key, ctx.userId);
-  if (view) await slackCall('views.open', { trigger_id: ctx.triggerId, view }).catch((err) => log.warn({ err, key: list.key }, 'home list modal open failed'));
+  if (viewId && view) await slackCall('views.update', { view_id: viewId, view }).catch((err) => log.warn({ err, key: list.key }, 'home list modal fill failed'));
 }
 
 async function refresh(ctx: ActionContext): Promise<void> {

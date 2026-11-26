@@ -16,7 +16,7 @@ import { hasAgreed } from '../privacy.js';
 import { confirmDialog } from '../reports.js';
 import { mrkdwnEscape, requireAdmin, truncate } from '../util.js';
 import { audit } from '../vault/audit.js';
-import { deleteCredential, VaultError } from '../vault/store.js';
+import { deleteCredential, getCredential, VaultError } from '../vault/store.js';
 import { openViewState } from '../vault/transport.js';
 import { catalogWithFlags, connectorsConfigured, enabledConnector, enabledConnectors, setConnectorEnabled } from './catalog.js';
 import { addCustomConnector, customConnectorsAllowed, isCustomSlug, MAX_CUSTOM_CONNECTORS, removeCustomConnector, setCustomConnectorsAllowed, type CustomInput } from './custom.js';
@@ -42,7 +42,8 @@ const KEY_MODAL = 'connm:key';
 const CODE_MODAL = 'connm:code';
 const ACTIONS_MODAL = 'connm:actions';
 
-const CONNECTORS_SHOWN = 20;
+// Catalog connectors shown on Home; the user's own (at most MAX_CUSTOM_CONNECTORS) are always shown after them.
+const CONNECTORS_SHOWN = 10;
 const ADMIN_DEFS_SHOWN = 15;
 const MODAL_TOOLS_SHOWN = 90;
 
@@ -65,8 +66,10 @@ function authLabel(def: ConnectorDef): string {
 export async function connectorsHomeBlocks(userId: string): Promise<unknown[]> {
   if (!connectorsConfigured()) return [];
   const all = await enabledConnectors(userId);
-  const defs = all.slice(0, CONNECTORS_SHOWN);
-  const canAdd = (await customConnectorsAllowed()) && all.filter((d) => isCustomSlug(d.slug)).length < MAX_CUSTOM_CONNECTORS;
+  const catalogDefs = all.filter((d) => !isCustomSlug(d.slug));
+  const customDefs = all.filter((d) => isCustomSlug(d.slug));
+  const defs = [...catalogDefs.slice(0, CONNECTORS_SHOWN), ...customDefs];
+  const canAdd = (await customConnectorsAllowed()) && customDefs.length < MAX_CUSTOM_CONNECTORS;
   if (defs.length === 0 && !canAdd) return [];
   const out: unknown[] = [
     { type: 'divider' },
@@ -105,7 +108,7 @@ export async function connectorsHomeBlocks(userId: string): Promise<unknown[]> {
       out.push({ type: 'actions', elements: [...TOOL_CLASSES.map((c) => knobSelect(def.slug, c, s[c])), btn(EDIT_ACTIONS, n ? `Edit actions (${n} set)` : 'Edit actions', def.slug), ...remove] });
     } else if (remove.length) out.push({ type: 'actions', elements: remove });
   }
-  if (all.length > defs.length) out.push(ctxBlock(`…and ${all.length - defs.length} more not shown.`));
+  if (catalogDefs.length > CONNECTORS_SHOWN) out.push(ctxBlock(`…and ${catalogDefs.length - CONNECTORS_SHOWN} more connectors not shown.`));
   if (canAdd)
     out.push(
       { type: 'actions', elements: [btn(ADD, 'Add connector', 'add')] },
@@ -333,10 +336,11 @@ async function connectOAuth(ctx: ActionContext, def: ConnectorDef, publishHome: 
 
 /** Remove one of the user's own connectors: its connection (vault credential), grants, settings, caches and the row. */
 async function removeCustom(userId: string, slug: string): Promise<void> {
-  const conn = await getConnection(userId, slug).catch(() => null);
-  if (conn) {
-    await deleteCredential(userId, conn.cred.id);
-    await audit({ ownerId: userId, credentialId: conn.cred.id, credentialName: conn.cred.name, action: 'connector_disconnected', outcome: 'ok', detail: { connector: slug } });
+  // By name, without decrypting: an unreadable connection is deleted too.
+  const cred = await getCredential(userId, `mcp.${slug}`);
+  if (cred) {
+    await deleteCredential(userId, cred.id);
+    await audit({ ownerId: userId, credentialId: cred.id, credentialName: cred.name, action: 'connector_disconnected', outcome: 'ok', detail: { connector: slug } });
   }
   await revokeConnection(userId, slug);
   await deleteSettings(userId, slug);
