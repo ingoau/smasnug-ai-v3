@@ -160,6 +160,38 @@ describe.skipIf(!INTEGRATION)('connectors integration', () => {
     expect(row).toMatchObject({ kind: 'connector_call', grantKey: 'conn:notes:add.note', status: 'pending' });
   });
 
+  it('deferred: many tools sit behind find_connector_tools / use_connector, every check intact', async () => {
+    await settings.setKnob(owner, 'notes', 'read', 'always_allow');
+    const inlineLimits = { tools: 1, chars: 100_000 };
+    const r = await tools.startConnectorTools({ turn, speakerId: owner, taken: [], inlineLimits }).collect();
+    expect(Object.keys(r.tools).sort()).toEqual(['find_connector_tools', 'use_connector']);
+    expect(r.index).toContain('- Notes (`notes`, 3 tools): get_note, add_note, slow');
+    const found = String(await exec(r.tools.find_connector_tools, { query: 'read note' }));
+    expect(found).toContain('### notes__get_note');
+    expect(found).toContain('"id":{"type":"string"}');
+    expect(String(await exec(r.tools.find_connector_tools, { names: ['add.note', 'zzz'] }))).toMatch(/### notes__add_note[\s\S]*Not found: zzz/);
+    const before = srv.calls.length;
+    expect(String(await exec(r.tools.use_connector, { tool: 'notes__get_note', arguments: { id: 5 } }))).toMatch(/^Not run: `id` must be string/);
+    expect(String(await exec(r.tools.use_connector, { tool: 'nope' }))).toMatch(/^No connector tool named/);
+    expect(srv.calls.length).toBe(before);
+    const out = String(await exec(r.tools.use_connector, { tool: 'get_note', arguments: '{"id":"n2"}' }));
+    expect(out).toContain('called get_note {"id":"n2"}');
+    expect(out).not.toContain(KEY);
+    // Prompt mode still asks on a card, with the result prefix front.ts looks for.
+    expect(String(await exec(r.tools.use_connector, { tool: 'notes__add_note', arguments: { text: 'hi' } }))).toMatch(/^Awaiting approval/);
+    expect(srv.calls.length).toBe(before + 1);
+    // !p: prompt-mode tools are neither listed nor callable.
+    const p = await tools.startConnectorTools({ turn: { ...turn, ephemeral: true }, speakerId: owner, taken: [], inlineLimits }).collect();
+    expect(p.index).toContain('get_note');
+    expect(p.index).not.toContain('add_note');
+    expect(String(await exec(p.tools.use_connector, { tool: 'notes__add_note', arguments: { text: 'hi' } }))).toMatch(/^No connector tool named/);
+    // Below the limits: the tools themselves, no index.
+    const inline = await tools.startConnectorTools({ turn, speakerId: owner, taken: [] }).collect();
+    expect(inline.index).toBe('');
+    expect(Object.keys(inline.tools).sort()).toEqual(['notes__add_note', 'notes__get_note', 'notes__slow']);
+    await sql`delete from vault_approvals where owner_id = ${owner}`;
+  });
+
   it('a setting changed to Never after the build refuses at call time', async () => {
     const t = await tools.loadConnectorTools({ turn, speakerId: owner, taken: [] });
     await settings.setOverrides(owner, 'notes', { get_note: 'always_block' });

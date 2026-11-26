@@ -45,10 +45,13 @@ export interface ConnectorSettings {
 
 export const DEFAULT_SETTINGS: ConnectorSettings = { read: 'auto', write: 'prompt', delete: 'always_block', overrides: {} };
 
-/** Tools offered per connector unless the definition says otherwise, the hard cap, and the cap per turn. */
+/**
+ * Tools offered per connector unless the definition says otherwise, the hard cap, and the cap per turn (more than a
+ * few are deferred behind tool search, tool-search.ts, so the per-turn cap bounds the index, not the tool list).
+ */
 export const CONNECTOR_TOOLS_DEFAULT = 25;
 export const CONNECTOR_TOOLS_MAX = 60;
-export const TURN_CONNECTOR_TOOLS_MAX = 60;
+export const TURN_CONNECTOR_TOOLS_MAX = 120;
 /** Longest tool name the model APIs accept. */
 export const TOOL_NAME_MAX = 64;
 

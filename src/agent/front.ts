@@ -875,7 +875,9 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   }
   const connectors = await connectorLoad.collect(CONNECTOR_TOOLS_GRACE_MS);
   Object.assign(tools, connectors.tools);
-  const connectorNote = connectorsUnavailableNote(connectors.unavailable);
+  // Many/large connector tool sets are deferred: an index in the turn message (not the system prompt, so the cached
+  // prefix stays the same for every speaker) and two fixed tools that look them up and run them (tool-search.ts).
+  const connectorNote = [connectors.index, connectorsUnavailableNote(connectors.unavailable)].filter(Boolean).join('\n\n');
   const turnText = connectorNote ? `${built.text}\n\n${connectorNote}` : built.text;
   timing.set('prompt_chars', system.length + turnText.length);
   const messages: ModelMessage[] = [{ role: 'user', content: turnText }];

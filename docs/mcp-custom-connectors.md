@@ -112,7 +112,7 @@ Connector tools are added in `src/agent/front.ts` right after `toolsFor('front',
   Anthropic's API refuses there) are dropped, the schema becomes `additionalProperties: true`, and the dropped rules
   are appended to the tool description (trimmed, untrusted). A non-object schema, one over 12 KB or an unresolvable
   `$ref` becomes a permissive object, again with the schema described in the description.
-- At most `maxTools` per connector (default 25) and 60 per turn. Tool lists are cached in Redis per (user, connector)
+- At most `maxTools` per connector (default 25) and 120 per turn. Tool lists are cached in Redis per (user, connector)
   for 10 minutes (`conn:tools:<user>:<slug>`); connect, disconnect and settings changes invalidate it. A failed listing
   (10 s timeout) is remembered for 2 minutes (`conn:toolsfail:<user>:<slug>`) so a down server isn't retried every
   turn; App Home's *Edit actions* ignores that and retries.
@@ -122,6 +122,28 @@ Connector tools are added in `src/agent/front.ts` right after `toolsFor('front',
   in the background and fills the cache for the next turn.
 - Classification: the catalog's `tools` override, else MCP annotations (`readOnlyHint` → read, `destructiveHint` →
   delete), else write.
+
+### Tool search (deferred tools)
+
+A few small tool sets are offered directly. Above `INLINE_MAX_TOOLS` (8) tools or `INLINE_MAX_CHARS` (12,000
+characters of descriptions + schemas, ~3k tokens) in a turn, the connector tools stay out of the tool list
+(`src/features/connectors/tool-search.ts`):
+
+- the turn message (not the system prompt) gets a `<connectors>` index: one line per connector with its tools' short
+  names (sanitized, so nothing from the server but names reaches it);
+- two fixed tools stand in for them: `find_connector_tools` (a keyword query, or names from the index, optionally one
+  connector) returns up to 5 matching tools in full (description as above + argument schema, as untrusted data; no
+  query lists every tool with a short description), and `use_connector({ tool, arguments })` runs one;
+- `use_connector` checks the arguments against the tool's schema first (required keys, top-level types and enums, no
+  unknown keys when the schema forbids them: with the tools listed directly the provider does this), then calls the
+  tool's own built tool, so identity, mode, verifier, approval cards, limits, audit and scrubbing are unchanged;
+- the same build-time filters apply: `always_block` tools aren't in the index, prompt-mode tools aren't in a `!p`
+  turn's index and `use_connector` doesn't find them.
+
+Why: dozens of third-party tool definitions in every step cost latency, make the (Haiku, low effort) front agent pick
+the wrong tool more often, and, since they differ per speaker and sit before the system prompt in the cached prefix,
+rewrite the prompt cache whenever speakers alternate. The two stand-ins never change. A provider's native tool search
+isn't used: it would only work on one tier of `chatModel()`.
 
 ## Permissions
 
