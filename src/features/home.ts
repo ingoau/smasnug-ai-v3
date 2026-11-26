@@ -10,6 +10,7 @@ import { deleteAllFacts, deleteFact, factLabel, listFacts, parseFactId, type Fac
 import { pendingBotReportsCount } from './bot-reports.js';
 import { confirmDialog, pendingReportsCount } from './reports.js';
 import { getState, listBlocks, setPaused } from './state.js';
+import { setTheoMode, theoModeEnabled } from './theo-mode.js';
 import { isAdmin, mrkdwnEscape, requireAdmin, truncate } from './util.js';
 import { listWorkspaceFacts } from './workspace.js';
 import { scheduleHomeBlocks } from './schedule/home.js';
@@ -108,8 +109,9 @@ export async function buildHomeBlocks(userId: string): Promise<unknown[]> {
 }
 
 async function adminBlocks(): Promise<unknown[]> {
-  const [state, reports, botReports, pending, approved, blocked] = await Promise.all([
+  const [state, theo, reports, botReports, pending, approved, blocked] = await Promise.all([
     getState(),
+    theoModeEnabled(),
     pendingReportsCount(),
     pendingBotReportsCount(),
     listWorkspaceFacts('pending'),
@@ -127,6 +129,12 @@ async function adminBlocks(): Promise<unknown[]> {
             style: 'danger',
             confirm: confirmDialog('Pause the bot?', 'The bot stops responding to everyone except you until resumed.', 'Pause'),
           }),
+    ),
+  );
+  out.push(
+    section(
+      theo ? '*Theo mode is on:* replies use the Theo voice (`src/agent/prompts/theo.md`).' : 'Theo mode is *off* (the default voice).',
+      theo ? btn('admin:theo_off', 'Turn off', 'off') : btn('admin:theo_on', 'Turn on', 'on'),
     ),
   );
   out.push(
@@ -259,12 +267,15 @@ export async function handleMemoryAction(ctx: ActionContext) {
   await publishHome(ctx.userId);
 }
 
-/** admin:pause / admin:resume / admin:limits_user (users_select) / admin:limits_reset / admin:limits_refresh */
+/** admin:pause / admin:resume / admin:theo_on / admin:theo_off / admin:limits_user (users_select) / admin:limits_reset / admin:limits_refresh */
 export async function handleAdminAction(ctx: ActionContext) {
   if (!(await requireAdmin(ctx))) return;
   if (ctx.actionId === 'admin:pause') await setPaused(true);
   else if (ctx.actionId === 'admin:resume') await setPaused(false);
-  else if (ctx.actionId === 'admin:limits_user' && ctx.value) await redis.set(limitsUserKey(ctx.userId), ctx.value, 'EX', 24 * 60 * 60);
+  else if (ctx.actionId === 'admin:theo_on' || ctx.actionId === 'admin:theo_off') {
+    await setTheoMode(ctx.actionId === 'admin:theo_on');
+    log.info({ adminId: ctx.userId, enabled: ctx.actionId === 'admin:theo_on' }, 'admin toggled theo mode');
+  } else if (ctx.actionId === 'admin:limits_user' && ctx.value) await redis.set(limitsUserKey(ctx.userId), ctx.value, 'EX', 24 * 60 * 60);
   else if (ctx.actionId === 'admin:limits_reset' && ctx.value) {
     await resetUserLimits(ctx.value);
     log.info({ adminId: ctx.userId, userId: ctx.value }, 'admin reset user limits');

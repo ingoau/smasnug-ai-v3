@@ -30,6 +30,8 @@ import { freezeCard, retireOldButtons } from './cards.js';
 import { enqueueCardTitle, enqueueSessionTitle } from './titles.js';
 import { TurnCard } from './turn-card.js';
 import { frontSystemPrompt, MOVE_TO_CHANNEL_PROMPT } from './prompts/front.js';
+import { theoVoice } from './prompts/theo.js';
+import { theoModeEnabled } from '../features/theo-mode.js';
 import { skillsPrompt } from './skills.js';
 import { placeTargetFor } from './reply-buttons-store.js';
 import { ReplyManager, markdownMessage } from './reply.js';
@@ -152,8 +154,11 @@ function frontModelNames(): { model: string; fallbackModel?: string } {
 }
 
 async function buildSystem(opts: { moveToChannel?: boolean } = {}): Promise<string> {
-  const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
-  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, privacyConsent: env.PRIVACY_CONSENT === 'on', ...frontModelNames() });
+  const [factsText, theo] = await Promise.all([renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), '')), theoModeEnabled()]);
+  const facts = factsText.trim();
+  // Theo mode (admin setting, App Home) swaps the "# Voice" section for prompts/theo.md.
+  const voice = theo ? theoVoice() : undefined;
+  let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, privacyConsent: env.PRIVACY_CONSENT === 'on', voice, ...frontModelNames() });
   // HuddleFM and sandbox instructions are skills (skills/huddle-dj, skills/code-sandboxes), listed only when configured.
   const skillIndex = skillsPrompt('front');
   if (skillIndex) system = `${system}\n\n${skillIndex}`;
