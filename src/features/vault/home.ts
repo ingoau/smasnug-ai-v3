@@ -7,6 +7,7 @@
 import type { ActionContext } from '../../core/actions.js';
 import { slackCall } from '../../core/slack.js';
 import { log } from '../../log.js';
+import { homeListBlocks, moreNote, registerHomeList } from '../home-lists.js';
 import { confirmDialog } from '../reports.js';
 import { mrkdwnEscape, respond, truncate } from '../util.js';
 import { decide, loadApproval, replaceCard } from './approvals.js';
@@ -45,9 +46,29 @@ function credentialLine(c: Credential): string {
   return `\`${mrkdwnEscape(c.name)}\` · ${type} · ${mrkdwnEscape(where)}\n_${ago(c.lastUsedAt)}${by}_`;
 }
 
+const CREDENTIALS_INLINE = 3;
+const CREDENTIALS_SHOWN = 95;
+
+function credentialBlocks(creds: Credential[]): unknown[] {
+  return [
+    ...creds.slice(0, CREDENTIALS_SHOWN).map((c) => ({
+      type: 'section',
+      text: { type: 'mrkdwn', text: credentialLine(c) },
+      accessory: btn(DELETE, 'Delete', c.id, { style: 'danger', confirm: confirmDialog(`Delete ${c.name}?`, 'The agent can no longer use it. This is permanent.', 'Delete') }),
+    })),
+    ...moreNote(creds.length, CREDENTIALS_SHOWN),
+  ];
+}
+
+registerHomeList({
+  key: 'credentials',
+  title: 'Your credentials',
+  build: async (userId) => (vaultConfigured() ? credentialBlocks(await listCredentials(userId, ['token', 'login'])) : []),
+});
+
 export async function vaultHomeBlocks(userId: string): Promise<unknown[]> {
   if (!vaultConfigured()) return [];
-  const creds = (await listCredentials(userId, ['token', 'login'])).slice(0, 15);
+  const creds = await listCredentials(userId, ['token', 'login']);
   const uses = await recentAudit(userId, 5);
   const out: unknown[] = [
     { type: 'divider' },
@@ -65,13 +86,16 @@ export async function vaultHomeBlocks(userId: string): Promise<unknown[]> {
     },
   ];
   if (creds.length === 0) out.push({ type: 'section', text: { type: 'mrkdwn', text: '_No credentials yet._' } });
-  for (const c of creds) {
-    out.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: credentialLine(c) },
-      accessory: btn(DELETE, 'Delete', c.id, { style: 'danger', confirm: confirmDialog(`Delete ${c.name}?`, 'The agent can no longer use it. This is permanent.', 'Delete') }),
-    });
-  }
+  else
+    out.push(
+      ...homeListBlocks({
+        key: 'credentials',
+        count: creds.length,
+        summary: `You have *${creds.length}* credentials.`,
+        inline: () => credentialBlocks(creds),
+        inlineMax: CREDENTIALS_INLINE,
+      }),
+    );
   out.push({ type: 'actions', elements: [btn(ADD_LOGIN, 'Add login', 'login'), btn(ADD_KEY, 'Add API key / secret', 'api_key')] });
   if (uses.length) {
     const lines = uses.map((u) => {

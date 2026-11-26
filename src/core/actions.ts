@@ -35,3 +35,19 @@ export function registerAppHome(handler: AppHomeHandler) {
 export function getAppHomeHandler() {
   return appHomeHandler;
 }
+
+/**
+ * Modal refreshers by callback_id prefix: after a block action inside a modal with a matching callback_id is handled,
+ * the dispatcher calls the refresher (e.g. App Home's "View all" lists re-render after a Delete inside them).
+ */
+type ViewRefresher = (ctx: ActionContext) => Promise<void>;
+const viewRefreshers: [string, ViewRefresher][] = [];
+
+export function registerViewRefresher(callbackPrefix: string, fn: ViewRefresher) {
+  viewRefreshers.push([callbackPrefix, fn]);
+}
+
+export function findViewRefresher(callbackId: string | undefined): ViewRefresher | undefined {
+  if (!callbackId) return undefined;
+  return viewRefreshers.find(([p]) => callbackId.startsWith(p))?.[1];
+}

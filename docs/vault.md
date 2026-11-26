@@ -26,8 +26,8 @@ Encryption: AES-256-GCM (`src/sandbox/preview/crypto.ts` layout) with a per-user
 ## Who can save and use them
 
 - **The user**, in App Home: "Add login" / "Add API key / secret" open a modal (name, website, username + password
-  + optional 2FA key, or secret + how to send it, a note for the agent). Delete per credential; the last uses are
-  listed under it.
+  + optional 2FA key, or secret + how to send it, a note for the agent). Delete per credential (more than three: a
+  count and a **View all** dialog); the last uses are listed under it.
 - **The agent**: `save_credential` (a secret already in the conversation; never overwrites) and, in a subagent,
   `sandbox_save_credential` (from a sandbox file, so the value never passes through the model). The owner gets a
   private notice either way.

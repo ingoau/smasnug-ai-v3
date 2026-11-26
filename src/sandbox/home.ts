@@ -5,6 +5,7 @@
  */
 import type { ActionContext } from '../core/actions.js';
 import { sql } from '../db/index.js';
+import { homeListBlocks, moreNote, registerHomeList } from '../features/home-lists.js';
 import { confirmDialog } from '../features/reports.js';
 import { isAdmin, mrkdwnEscape, requireAdmin, truncate } from '../features/util.js';
 import { env, limits } from '../config.js';
@@ -13,7 +14,8 @@ import { handleTakedown } from './preview/flow.js';
 import { livePreviews, previewCountsToday } from './preview/store.js';
 import { previewsConfigured, sandboxConfigured, sandboxSettings, setSandboxSetting } from './settings.js';
 
-const ALLOWLIST_SHOWN = 15;
+const ALLOWLIST_INLINE = 3;
+const ALLOWLIST_SHOWN = 95;
 const PREVIEWS_SHOWN = 8;
 
 const btn = (action_id: string, text: string, value: string, extra: object = {}) => ({ type: 'button', action_id, text: { type: 'plain_text', text }, value, ...extra });
@@ -42,13 +44,25 @@ export function sandboxDisclosureBlocks(): unknown[] {
   ];
 }
 
+type AllowRow = { userId: string; addedBy: string; note: string | null };
+const allowlist = () => sql<AllowRow[]>`select user_id, added_by, note from sandbox_allowlist order by created_at desc`;
+
+function allowlistBlocks(allow: AllowRow[]): unknown[] {
+  return [
+    ...allow.slice(0, ALLOWLIST_SHOWN).map((a) => section(`<@${a.userId}>${a.note ? ` — _${truncate(mrkdwnEscape(a.note), 200)}_` : ''}`, btn('sbx:allow_remove', 'Remove', a.userId))),
+    ...moreNote(allow.length, ALLOWLIST_SHOWN),
+  ];
+}
+
+registerHomeList({ key: 'sandbox_allowlist', title: 'Sandbox allowlist', admin: true, build: async () => allowlistBlocks(await allowlist()) });
+
 export async function sandboxAdminBlocks(userId: string): Promise<unknown[]> {
   if (!sandboxConfigured() || !isAdmin(userId)) return [];
   const [settings, budget, [live], allow, previews] = await Promise.all([
     sandboxSettings(),
     budgetStatus(),
     sql<{ n: number }[]>`select count(*)::int as n from sandboxes where state in ('creating', 'running', 'resuming')`,
-    sql<{ userId: string; addedBy: string; note: string | null }[]>`select user_id, added_by, note from sandbox_allowlist order by created_at desc`,
+    allowlist(),
     previewsConfigured() ? livePreviews(PREVIEWS_SHOWN) : Promise.resolve([]),
   ]);
   const usd = (n: number | null) => (n == null ? 'n/a' : `$${n.toFixed(2)}`);
@@ -86,8 +100,7 @@ export async function sandboxAdminBlocks(userId: string): Promise<unknown[]> {
   );
   out.push(section(`*Allowlist* (${allow.length})`, { type: 'users_select', action_id: 'sbx:allow_add', placeholder: { type: 'plain_text', text: 'Add someone' } }));
   if (!allow.length) out.push(context('Nobody yet.'));
-  for (const a of allow.slice(0, ALLOWLIST_SHOWN)) out.push(section(`<@${a.userId}>${a.note ? ` — _${truncate(mrkdwnEscape(a.note), 200)}_` : ''}`, btn('sbx:allow_remove', 'Remove', a.userId)));
-  if (allow.length > ALLOWLIST_SHOWN) out.push(context(`…and ${allow.length - ALLOWLIST_SHOWN} more.`));
+  else out.push(...homeListBlocks({ key: 'sandbox_allowlist', count: allow.length, summary: `${allow.length} people on the allowlist.`, inline: () => allowlistBlocks(allow), inlineMax: ALLOWLIST_INLINE }));
   if (previewsConfigured()) {
     out.push(section(`*Live previews* (${previews.length})`));
     for (const p of previews)

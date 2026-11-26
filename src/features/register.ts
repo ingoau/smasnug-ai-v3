@@ -22,6 +22,7 @@ import { sweepCodeChannels } from './code-channels/lifecycle.js';
 import { processCodeChannelStatus } from './code-channels/status.js';
 import { registerVault, vaultMaintenance } from './vault/register.js';
 import { registerConnectors } from './connectors/register.js';
+import { registerHomeListActions } from './home-lists.js';
 
 // Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user, report_failure
 registerMemoryTools();
@@ -48,6 +49,8 @@ registerAction('mod:dismiss_bot_report', (ctx) => handleBotReportModAction(ctx, 
 registerAction('mod:', (ctx) => handleModAction(ctx, publishHome));
 registerAction('fact:', (ctx) => handleFactAction(ctx, publishHome));
 registerAction('mem:', handleMemoryAction);
+// App Home "View all" dialogs (memories, workspace facts, credentials, reminders…): src/features/home-lists.ts
+registerHomeListActions();
 registerAction('admin:', handleAdminAction);
 registerAction('slash:/smasnug', handleSlash);
 registerAction('sched:', (ctx) => handleScheduleAction(ctx, publishHome));
