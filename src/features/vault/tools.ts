@@ -150,7 +150,7 @@ export function fetchCard(c: Credential, req: FetchReq, url: URL) {
     const all = n <= CARD_BODY_SHOWN;
     detail.push(`*Body* (${all ? `all ${n} characters` : `first ${CARD_BODY_SHOWN} of ${n} characters shown`}): ${codeBlock(all ? req.body : req.body.slice(0, CARD_BODY_SHOWN))}`);
   }
-  detail.push(`*Why (the agent's words):* ${truncate(mrkdwnEscape(req.purpose), 400)}`);
+  detail.push(`*Why:* ${truncate(mrkdwnEscape(req.purpose), 400)}`);
   detail.push('The agent sees the response, never the key itself.');
   return { title: `*Use your credential \`${mrkdwnEscape(c.name)}\` for a request to ${mrkdwnEscape(url.hostname)}?*`, detail };
 }
@@ -252,14 +252,13 @@ export function registerVaultTools(): void {
           const existing = await getCredential(id.ownerId, name);
           if (existing) return `They already have "${name}": ${describeCredential(existing)}.`;
           const domains = parseDomains(a.website);
-          const typeLabel = a.type === 'login' ? 'login' : 'API key / secret';
           const res = await requestApproval({
             ownerId: id.ownerId,
             threadId: ctx.threadId,
             kind: 'credential_request',
             mode: id.role === 'child' ? 'wait' : 'outcome',
-            title: `*The agent asks you to add a ${typeLabel} called \`${mrkdwnEscape(name)}\`${domains.length ? ` for ${mrkdwnEscape(domains.join(', '))}` : ''}.*`,
-            detail: [`*Why (the agent's words):* ${truncate(mrkdwnEscape(a.why), 400)}`, 'You type it in a private form; it is stored encrypted and never shown in the thread.'],
+            title: `*The agent asks you to add ${a.type === 'login' ? 'a login' : 'an API key / secret'} called \`${mrkdwnEscape(name)}\`${domains.length ? ` for ${mrkdwnEscape(domains.join(', '))}` : ''}.*`,
+            detail: [`*Why:* ${truncate(mrkdwnEscape(a.why), 400)}`, 'You type it in a private form; it is stored encrypted and never shown in the thread.'],
             payload: { name, type: a.type, domains },
             buttons: (approvalId) => [
               { type: 'button', action_id: ADD_REQUESTED_ACTION, text: { type: 'plain_text', text: 'Add it' }, style: 'primary', value: approvalId },

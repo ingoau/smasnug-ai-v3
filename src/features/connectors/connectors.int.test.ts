@@ -130,15 +130,25 @@ describe.skipIf(!INTEGRATION)('connectors integration', () => {
     expect(JSON.stringify(a!.detail)).not.toContain('n1');
   });
 
-  it('auto mode refuses when the verifier says no (fail closed)', async () => {
+  it('auto mode: a refusal asks the owner on a warning card (once per tool per turn); never calls', async () => {
     await settings.setKnob(owner, 'notes', 'read', 'auto');
     h.verifierApproves = false;
     const before = srv.calls.length;
     const t = await tools.loadConnectorTools({ turn, speakerId: owner, taken: [] });
-    expect(String(await exec(t.notes__get_note, {}))).toMatch(/^Not done: the safety check/);
+    expect(String(await exec(t.notes__get_note, { id: 'x' }))).toMatch(/^Awaiting approval: the safety check couldn't confirm/);
+    const [row] = await sql`select kind, grant_key, allow_window, detail from vault_approvals where owner_id = ${owner} order by created_at desc limit 1`;
+    expect(row).toMatchObject({ kind: 'connector_call', grantKey: null, allowWindow: false });
+    expect(JSON.stringify(row!.detail)).toContain("auto-check couldn't confirm");
+    // The same tool again in this turn: refused, no second card.
+    expect(String(await exec(t.notes__get_note, { id: 'y' }))).toMatch(/^Not done: the safety check.*already asked/);
+    expect((await sql`select 1 from vault_approvals where owner_id = ${owner}`).length).toBe(1);
+    // A private (!p) turn has nowhere to ask: refused.
+    const p = await tools.loadConnectorTools({ turn: { ...turn, ephemeral: true }, speakerId: owner, taken: [] });
+    expect(String(await exec(p.notes__get_note, {}))).toMatch(/^Not done: the safety check.*private !p/);
     expect(srv.calls.length).toBe(before);
     h.verifierApproves = true;
     expect(String(await exec(t.notes__get_note, {}))).toContain('called get_note');
+    await sql`delete from vault_approvals where owner_id = ${owner}`;
   });
 
   it('prompt mode posts a card and does not call', async () => {

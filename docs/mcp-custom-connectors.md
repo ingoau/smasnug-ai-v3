@@ -108,7 +108,7 @@ override wins, else the knob for the tool's class. Stored in `connector_settings
 |---|---|---|
 | `always_block` ("Never") | omitted | refuse |
 | `always_allow` | present | identity + limits + egress, then call |
-| `auto` ("Auto-check") | present | verifier on the raw thread; refuse unless it approves |
+| `auto` ("Auto-check") | present | verifier on the raw thread; if it doesn't approve, a warning card (as prompt) |
 | `prompt` ("Ask me") | present (not in `!p` turns) | private approval card before the call |
 
 Defaults: read = auto, write = prompt, delete = always_block. The mode is re-read at call time, so a change in App
@@ -123,6 +123,10 @@ Home applies even to a turn that already built its tools.
   messages, pasted/forwarded content, link previews, files, tool output and the bot's own messages don't count. Same stack as the relevance gate: OpenRouter's Decisions API with `GATE_MODEL`
   (probability ≥ 0.8 = yes), or the gate chat model (`MODEL_GATE`, must answer exactly YES) when `GATE_MODEL=luna`.
   **Fail closed:** an error, timeout or unclear answer refuses, with no fallback model. Usage is recorded per user.
+  A refusal isn't a dead end: the owner gets the prompt-mode card with a warning ("the auto-check couldn't confirm
+  that you asked for this…") and **Allow once / Deny** only (no grant key, so it neither uses nor creates a 10-minute
+  grant). At most one such card per tool per turn (a second refused call of the same tool is just refused), and none in
+  `!p` turns (refused, as there is nowhere to ask). The audit row records the refusal with `fallback: 'card'`.
 - **prompt:** `requestApproval({ mode: 'outcome', kind: 'connector_call', grantKey: 'conn:<slug>:<tool>' })`. The
   owner sees the tool and **all** of its arguments on a private card (Allow once / Allow for 10 min in this thread /
   Deny). Arguments whose escaped preview doesn't fit the card in full (`ARGS_PREVIEW_MAX`, 2,600 characters) are

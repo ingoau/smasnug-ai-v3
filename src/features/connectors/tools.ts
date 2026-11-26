@@ -4,7 +4,8 @@
  * no connection → no tool; `always_block` → no tool; prompt-mode tools are left out of `!p` private turns (their
  * outcome turn isn't private). Each call re-checks identity, mode and limits, then:
  * - always_allow: calls;
- * - auto: the verifier (verifier.ts) must approve against the raw thread, else refused (fail closed);
+ * - auto: the verifier (verifier.ts) must approve against the raw thread; if it doesn't (no, unsure, error), the owner
+ *   gets a prompt-mode card with a warning instead (Allow once / Deny only, one per tool per turn; refused in `!p`);
  * - prompt: the owner approves on a private card (vault approvals, outcome mode); the executor makes the call.
  * Every call is audited (tool, mode, outcome — never the arguments), rate-limited (credential_use), time-limited,
  * aborted on disconnect, and its result is reduced to text, scrubbed of the credential and wrapped as untrusted.
@@ -91,7 +92,7 @@ export async function connectorTools(ownerId: string, def: ConnectorDef, conn: C
 }
 
 function modeHint(mode: Mode): string {
-  if (mode === 'auto') return 'Runs only if a separate check of the thread confirms the speaker themself asked for this action.';
+  if (mode === 'auto') return "Runs at once if a separate check of the thread confirms the speaker themself asked for this action; otherwise they're asked on a private card.";
   if (mode === 'prompt') return 'The speaker approves each call on a private card; the result arrives in a later turn.';
   return '';
 }
@@ -172,8 +173,15 @@ export function argsPreview(args: Record<string, unknown>, conn: Connection | nu
   return block.length <= max ? block : null;
 }
 
-/** Ask the owner (prompt mode). Returns the tool result text for the agent. */
-async function promptCall(spec: CallSpec, conn: Connection, signal?: AbortSignal): Promise<string> {
+/** Warning on the card when auto mode's check refused and the owner is asked instead. */
+export const AUTO_FALLBACK_WARNING =
+  "*Heads up:* the auto-check couldn't confirm that you asked for this. The request may have come from someone else's message, a link or a file in this thread. Only allow it if you meant it.";
+
+/**
+ * Ask the owner (prompt mode, or auto mode after the check refused: `fallback`, which adds a warning and offers no
+ * "Allow for 10 min", so one doubtful approval never covers later calls). Returns the tool result text for the agent.
+ */
+async function promptCall(spec: CallSpec, conn: Connection, signal?: AbortSignal, fallback = false): Promise<string> {
   const preview = argsPreview(spec.args, conn);
   if (preview === null) {
     await audit({ ownerId: spec.ownerId, credentialId: conn.cred.id, credentialName: conn.cred.name, action: 'connector_call', tool: `${spec.def.slug}:${spec.tool}`, threadId: spec.threadId, outcome: 'refused', detail: { mode: 'prompt', connector: spec.def.slug, tool: spec.tool, reason: 'args_too_long' } });
@@ -191,19 +199,36 @@ async function promptCall(spec: CallSpec, conn: Connection, signal?: AbortSignal
     credentialId: conn.cred.id,
     credentialName: conn.cred.name,
     tool: `${spec.def.slug}:${spec.tool}`,
-    grantKey: `conn:${spec.def.slug}:${spec.tool}`,
+    // A fallback card neither uses nor creates a grant: always asked, Allow once only.
+    grantKey: fallback ? null : `conn:${spec.def.slug}:${spec.tool}`,
     title: `Let me use your *${mrkdwnEscape(spec.def.name)}* connection to run \`${mrkdwnEscape(spec.tool)}\`?`,
-    detail: [`_${CLASS_LABELS[spec.cls]} action. Arguments:_`, preview],
+    detail: [...(fallback ? [AUTO_FALLBACK_WARNING] : []), `_${CLASS_LABELS[spec.cls]} action. Arguments:_`, preview],
     payload: { slug: spec.def.slug, tool: spec.tool, cls: spec.cls, args: spec.args, generation },
   });
   if (res.status === 'failed') return `Not done: couldn't ask the owner for approval (${res.reason}).`;
   if (res.status === 'pending')
-    return `Awaiting approval: <@${spec.ownerId}> sees a private card for this ${spec.def.name} action (Allow once / Allow for 10 min / Deny). Nothing ran yet. An outcome turn (<approval_outcome>) brings the result; unless something else needs an answer, end the turn.`;
+    return (
+      (fallback
+        ? `Awaiting approval: the safety check couldn't confirm that <@${spec.ownerId}> themself asked for this ${spec.def.name} action, so they see a private card for it (Allow once / Deny). `
+        : `Awaiting approval: <@${spec.ownerId}> sees a private card for this ${spec.def.name} action (Allow once / Allow for 10 min / Deny). `) +
+      'Nothing ran yet. An outcome turn (<approval_outcome>) brings the result; unless something else needs an answer, end the turn.'
+    );
   return runConnectorCall({ ...spec, generation }, 'prompt', signal);
 }
 
 /** Build one model tool for a server tool. */
-function buildTool(o: { ownerId: string; threadId: string; triggerTs?: readonly string[]; def: ConnectorDef; t: CachedTool; cls: ToolClass; mode: Mode; privateTurn: boolean }): Tool {
+function buildTool(o: {
+  ownerId: string;
+  threadId: string;
+  triggerTs?: readonly string[];
+  def: ConnectorDef;
+  t: CachedTool;
+  cls: ToolClass;
+  mode: Mode;
+  privateTurn: boolean;
+  /** Tools (`<slug>:<tool>`) that already fell back to a card this turn (shared by the turn's tools). */
+  fallbacks: Set<string>;
+}): Tool {
   const { ownerId, threadId, def, t, cls } = o;
   const hint = modeHint(o.mode);
   const description =
@@ -235,9 +260,17 @@ function buildTool(o: { ownerId: string; threadId: string; triggerTs?: readonly 
         if (mode === 'auto') {
           const v = await verifyConnectorCall({ ownerId, threadId, triggerTs: o.triggerTs, connectorName: def.name, toolName: t.name, toolDescription: t.description ?? '', args });
           if (!v.approved) {
-            await audit({ ...auditBase, outcome: 'refused', detail: { mode, connector: def.slug, tool: t.name, verifier: v.reason.slice(0, 120) } });
+            // Ask the owner instead (a warning card), unless there's nowhere to ask (!p) or this tool already did this turn.
+            const key = `${def.slug}:${t.name}`;
+            const card = !o.privateTurn && !o.fallbacks.has(key);
+            await audit({ ...auditBase, outcome: 'refused', detail: { mode, connector: def.slug, tool: t.name, verifier: v.reason.slice(0, 120), ...(card ? { fallback: 'card' } : {}) } });
+            if (card) {
+              o.fallbacks.add(key);
+              return await promptCall(spec, conn, options?.abortSignal, true);
+            }
             return (
-              `Not done: the safety check didn't find that <@${ownerId}> themself asked for this ${def.name} action (${t.name}), so it was refused. ` +
+              `Not done: the safety check didn't find that <@${ownerId}> themself asked for this ${def.name} action (${t.name}), so it was refused` +
+              (o.privateTurn ? " (and their approval isn't available in a private !p answer). " : ' (they were already asked about it on a card this turn). ') +
               "Don't retry it as is. If they do want it, they can say so explicitly in this thread, or change the setting in App Home."
             );
           }
@@ -282,6 +315,7 @@ export function startConnectorTools(o: { turn: LoadTurn; speakerId: string; abor
   if (turn.kind !== 'user' || !turn.authorId || turn.authorId !== o.speakerId) return NONE;
   const ownerId = turn.authorId;
   const taken = new Set(o.taken);
+  const fallbacks = new Set<string>();
   type Listed = { def: ConnectorDef; tools: CachedTool[]; settings: Awaited<ReturnType<typeof getSettings>> } | null;
   const prep: Promise<{ def: ConnectorDef; listed: Promise<Listed> }[]> = (async () => {
     const defs = await enabledConnectors();
@@ -340,7 +374,7 @@ export function startConnectorTools(o: { turn: LoadTurn; speakerId: string; abor
             if (mode === 'prompt' && turn.ephemeral) continue;
             const name = connectorToolName(l.def.slug, t.name, taken);
             out[name] = abortGuarded(
-              buildTool({ ownerId, threadId: turn.threadId, triggerTs: turn.messageTs, def: l.def, t, cls, mode, privateTurn: Boolean(turn.ephemeral) }),
+              buildTool({ ownerId, threadId: turn.threadId, triggerTs: turn.messageTs, def: l.def, t, cls, mode, privateTurn: Boolean(turn.ephemeral), fallbacks }),
               o.abortSignal,
             );
             n++;

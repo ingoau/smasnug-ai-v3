@@ -89,7 +89,7 @@ async function approve(ctx: ToolContext, o: { ownerId: string; kind: string; c?:
 }
 
 const purposeField = z.string().min(1).max(300).describe("What it's for, in a sentence; shown to the owner on the approval card");
-const why = (purpose: string) => `*Why (the agent's words):* ${truncate(mrkdwnEscape(purpose), 400)}`;
+const why = (purpose: string) => `*Why:* ${truncate(mrkdwnEscape(purpose), 400)}`;
 
 async function noneOf(ownerId: string, kinds: Credential['kind'][], label: string): Promise<string> {
   const list = await listCredentials(ownerId, kinds);

@@ -53,7 +53,7 @@ Even a trusted use still needs the owner's approval on a card.
 
 ## Approvals (`approvals.ts`)
 
-Every use (a request, a browser fill, a sandbox file, loading a saved session, a connector action in prompt mode)
+Every use (a request, a browser fill, a sandbox file, loading a saved session, a connector action in prompt mode, or in auto mode when the check refuses)
 posts a card only the owner sees (ephemeral in the thread, else a DM) saying exactly what will happen, with **Allow
 once**, **Allow for 10 min here** and **Deny**. Only the owner's click counts (a suspended owner can still Deny, and
 delete credentials in App Home, but not approve). Cards expire after `limits.vaultApprovalTtlMs`.
