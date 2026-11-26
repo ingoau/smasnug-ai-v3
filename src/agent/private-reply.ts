@@ -64,6 +64,10 @@ export const PRIVATE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'cancel_subagent',
   'read_subagent_result',
   'load_skill',
+  // Deferred MCP connector tools (features/connectors/tools.ts): prompt-mode tools are left out of private turns and
+  // refused there, as when the tools are listed directly.
+  'find_connector_tools',
+  'use_connector',
   'search_past_conversations',
   'read_canvas',
   'create_canvas',

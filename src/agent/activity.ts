@@ -58,6 +58,8 @@ const RESPONDING = new Set(['reply', 'react', 'unreact', 'search_emojis', 'end_t
 RESPONDING.add('leave_thread');
 /** Reading a skill's instructions (src/agent/skills.ts) is preparation, not visible work. */
 RESPONDING.add('load_skill');
+/** Looking up a connector tool's definition (deferred connector tools) is preparation too. */
+RESPONDING.add('find_connector_tools');
 /** Tools that must stay invisible in the thread (report_user is never hinted at). */
 const SILENT = new Set(['report_user']);
 

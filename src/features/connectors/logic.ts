@@ -31,7 +31,7 @@ export interface ConnectorDef {
   auth: ConnectorAuth;
   /** Class overrides by server tool name (the server's own annotations otherwise). */
   tools?: Record<string, ToolClass>;
-  /** At most this many of the server's tools are offered (default CONNECTOR_TOOLS_DEFAULT). */
+  /** At most this many of the server's tools are offered (default: all of them, up to CONNECTOR_TOOLS_MAX). */
   maxTools?: number;
 }
 
@@ -45,10 +45,13 @@ export interface ConnectorSettings {
 
 export const DEFAULT_SETTINGS: ConnectorSettings = { read: 'auto', write: 'prompt', delete: 'always_block', overrides: {} };
 
-/** Tools offered per connector unless the definition says otherwise, the hard cap, and the cap per turn. */
-export const CONNECTOR_TOOLS_DEFAULT = 25;
-export const CONNECTOR_TOOLS_MAX = 60;
-export const TURN_CONNECTOR_TOOLS_MAX = 60;
+/**
+ * Every tool a server lists is offered (a definition's `maxTools` may limit it). More than a few are deferred behind
+ * tool search (tool-search.ts), so these are only safety ceilings against a server listing absurdly many: tools kept
+ * from one listing (and cached), and tools offered in one turn.
+ */
+export const CONNECTOR_TOOLS_MAX = 500;
+export const TURN_CONNECTOR_TOOLS_MAX = 500;
 /** Longest tool name the model APIs accept. */
 export const TOOL_NAME_MAX = 64;
 

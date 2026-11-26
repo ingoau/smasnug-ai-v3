@@ -79,9 +79,9 @@ function duplicates(keys: string[]): string[] {
   return [...seen].filter(([, n]) => n > 1).map(([k, n]) => `${n}× ${k.length > 160 ? `${k.slice(0, 159)}…` : k}`);
 }
 
-/** Tool results that report a failure: an "Error…" string, or a JSON object with `error` / `ok: false`. */
+/** Tool results that report a failure: an "Error…" / "Not run:" string, or a JSON object with `error` / `ok: false`. */
 export const looksLikeError = (output: string | undefined) =>
-  !!output && (/^"?(?:error|failed|could not|couldn't|unable to)\b/i.test(output) || /^\{"(?:error"\s*:\s*(?!null|false)|ok"\s*:\s*false)/.test(output) || /^\{.{0,200}"ok"\s*:\s*false/.test(output));
+  !!output && (/^"?(?:(?:error|failed|could not|couldn't|unable to)\b|not run:)/i.test(output) || /^\{"(?:error"\s*:\s*(?!null|false)|ok"\s*:\s*false)/.test(output) || /^\{.{0,200}"ok"\s*:\s*false/.test(output));
 
 export function detect(t: EvalTurn): Flag[] {
   const flags: Flag[] = [];

@@ -16,7 +16,7 @@ import { checkUrl } from '../../tools/safe-fetch.js';
 import { getCredential, getCredentialById, revealSecret, saveCredential, updateSecret, type Credential, type CredentialMeta } from '../vault/store.js';
 import type { ScrubSecret } from '../vault/scrub.js';
 import { pinnedFetch } from './egress.js';
-import { connectionName, type ConnectorDef, type EgressPolicy } from './logic.js';
+import { connectionName, CONNECTOR_TOOLS_MAX, type ConnectorDef, type EgressPolicy } from './logic.js';
 
 export type ApiKeySecret = { type: 'api_key'; apiKey: string };
 export interface OAuthSecret {
@@ -43,6 +43,8 @@ export interface Connection {
 /** How long a pasted code may take after "Connect". */
 export const OAUTH_PENDING_MS = 30 * 60 * 1000;
 const LIST_TIMEOUT_MS = 10_000;
+/** Most tools/list pages one listing reads. */
+const LIST_PAGES_MAX = 20;
 const AUTH_TIMEOUT_MS = 20_000;
 
 const REFRESH_LOCK_TTL_MS = 30_000;
@@ -329,8 +331,20 @@ export async function listServerTools(def: ConnectorDef, c: Connection, parent?:
   const signal = parent ? AbortSignal.any([parent, AbortSignal.timeout(LIST_TIMEOUT_MS)]) : AbortSignal.timeout(LIST_TIMEOUT_MS);
   const oc = await openClient(def, c, { signal, timeoutMs: LIST_TIMEOUT_MS });
   try {
-    const res = await oc.client.listTools({ options: { signal, timeout: LIST_TIMEOUT_MS } });
-    return res.tools;
+    // Every page (tools/list is paginated by cursor), within the listing timeout, up to CONNECTOR_TOOLS_MAX tools and
+    // LIST_PAGES_MAX pages; a repeated cursor ends it.
+    type Listed = Awaited<ReturnType<typeof oc.client.listTools>>['tools'];
+    const tools: Listed = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < LIST_PAGES_MAX; page++) {
+      const res = await oc.client.listTools({ ...(cursor ? { params: { cursor } } : {}), options: { signal, timeout: LIST_TIMEOUT_MS } });
+      tools.push(...(res.tools ?? []));
+      cursor = typeof res.nextCursor === 'string' && res.nextCursor ? res.nextCursor : undefined;
+      if (!cursor || seen.has(cursor) || tools.length >= CONNECTOR_TOOLS_MAX) break;
+      seen.add(cursor);
+    }
+    return tools;
   } catch (err) {
     if (oc.provider?.needsReauth) throw new ConnectorError(`Your ${def.name} sign-in expired. Reconnect it in my App Home.`);
     throw err;

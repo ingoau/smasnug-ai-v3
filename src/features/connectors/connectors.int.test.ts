@@ -17,7 +17,7 @@ const h = vi.hoisted(() => {
     process.env.LOG_LEVEL = 'silent';
   }
   process.env.OPENROUTER_KEY ||= 'test';
-  return { def: null as ConnectorDef | null, verifierApproves: false, slowListMs: 0 };
+  return { def: null as ConnectorDef | null, verifierApproves: false, slowListMs: 0, manyTools: 0 };
 });
 
 vi.mock('./catalog.js', async (orig) => ({
@@ -46,6 +46,13 @@ function startServer(): Promise<{ server: http.Server; url: string; calls: strin
       const reply = (result: unknown) => res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'sess-1' }).end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }));
       if (msg.method === 'initialize') return reply({ protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'test', version: '1' } });
       if (msg.method === 'tools/list' && h.slowListMs) await new Promise((r) => setTimeout(r, h.slowListMs));
+      if (msg.method === 'tools/list' && h.manyTools) {
+        // Paginated: 25 per page, cursor = the next offset.
+        const from = Number(msg.params?.cursor ?? 0);
+        const to = Math.min(from + 25, h.manyTools);
+        const tools = Array.from({ length: to - from }, (_, i) => ({ name: `tool_${from + i}`, description: `Tool number ${from + i}`, inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }));
+        return reply({ tools, ...(to < h.manyTools ? { nextCursor: String(to) } : {}) });
+      }
       if (msg.method === 'tools/list')
         return reply({
           tools: [
@@ -158,6 +165,71 @@ describe.skipIf(!INTEGRATION)('connectors integration', () => {
     expect(srv.calls.length).toBe(before);
     const [row] = await sql`select kind, grant_key, status from vault_approvals where owner_id = ${owner} order by created_at desc limit 1`;
     expect(row).toMatchObject({ kind: 'connector_call', grantKey: 'conn:notes:add.note', status: 'pending' });
+  });
+
+  it('deferred: many tools sit behind find_connector_tools / use_connector, every check intact', async () => {
+    await settings.setKnob(owner, 'notes', 'read', 'always_allow');
+    const inlineLimits = { tools: 1, chars: 100_000 };
+    const r = await tools.startConnectorTools({ turn, speakerId: owner, taken: [], inlineLimits }).collect();
+    expect(Object.keys(r.tools).sort()).toEqual(['find_connector_tools', 'use_connector']);
+    expect(r.index).toContain('- Notes (`notes`, 3 tools): get_note, add_note, slow');
+    const found = String(await exec(r.tools.find_connector_tools, { query: 'read note' }));
+    expect(found).toContain('### notes__get_note');
+    expect(found).toContain('"id":{"type":"string"}');
+    expect(String(await exec(r.tools.find_connector_tools, { names: ['add.note', 'zzz'] }))).toMatch(/### notes__add_note[\s\S]*Not found: zzz/);
+    // The input schema (what the SDK validates before execute) takes a JSON string and keeps stray keys.
+    const schema = (r.tools.use_connector as any).inputSchema;
+    expect(schema.safeParse({ tool: 'x', arguments: '{"a":1}' }).success).toBe(true);
+    expect(schema.parse({ tool: 'x', id: 'n1' })).toEqual({ tool: 'x', id: 'n1' });
+    const before = srv.calls.length;
+    const bad = String(await exec(r.tools.use_connector, { tool: 'notes__get_note', arguments: { id: 5 } }));
+    expect(bad).toMatch(/^Not run: the arguments don't match notes__get_note's schema\.\n<untrusted_content/);
+    expect(bad).toContain('`id` must be string');
+    expect(String(await exec(r.tools.use_connector, { tool: 'nope' }))).toMatch(/^Not run: no connector tool named/);
+    // Only the exact full name runs; a short name is a suggestion.
+    expect(String(await exec(r.tools.use_connector, { tool: 'get_note', arguments: { id: 'n2' } }))).toMatch(/^Not run: use the full name\. Did you mean `notes__get_note`/);
+    expect(String(await exec(r.tools.use_connector, { tool: 'notes__get_note', id: 'n2' }))).toMatch(/^Not run: put notes__get_note's arguments inside `arguments`/);
+    expect(srv.calls.length).toBe(before);
+    const out = String(await exec(r.tools.use_connector, { tool: 'notes__get_note', arguments: '{"id":"n2"}' }));
+    expect(out).toContain('called get_note {"id":"n2"}');
+    expect(out).not.toContain(KEY);
+    // Prompt mode still asks on a card, with the result prefix front.ts looks for.
+    expect(String(await exec(r.tools.use_connector, { tool: 'notes__add_note', arguments: { text: 'hi' } }))).toMatch(/^Awaiting approval/);
+    expect(srv.calls.length).toBe(before + 1);
+    // Auto mode: the verifier's refusal still becomes a warning card.
+    await settings.setKnob(owner, 'notes', 'read', 'auto');
+    h.verifierApproves = false;
+    const a = await tools.startConnectorTools({ turn, speakerId: owner, taken: [], inlineLimits }).collect();
+    expect(String(await exec(a.tools.use_connector, { tool: 'notes__get_note', arguments: { id: 'n3' } }))).toMatch(/^Awaiting approval: the safety check couldn't confirm/);
+    expect(srv.calls.length).toBe(before + 1);
+    h.verifierApproves = true;
+    await settings.setKnob(owner, 'notes', 'read', 'always_allow');
+    // !p: prompt-mode tools are neither listed nor callable.
+    const p = await tools.startConnectorTools({ turn: { ...turn, ephemeral: true }, speakerId: owner, taken: [], inlineLimits }).collect();
+    expect(p.index).toContain('get_note');
+    expect(p.index).not.toContain('add_note');
+    expect(String(await exec(p.tools.use_connector, { tool: 'notes__add_note', arguments: { text: 'hi' } }))).toMatch(/^Not run: no connector tool named/);
+    // Below the limits: the tools themselves, no index.
+    const inline = await tools.startConnectorTools({ turn, speakerId: owner, taken: [] }).collect();
+    expect(inline.index).toBe('');
+    expect(Object.keys(inline.tools).sort()).toEqual(['notes__add_note', 'notes__get_note', 'notes__slow']);
+    await sql`delete from vault_approvals where owner_id = ${owner}`;
+  });
+
+  it('offers every tool the server lists, across tools/list pages (no default cap)', async () => {
+    await settings.setKnob(owner, 'notes', 'read', 'always_allow');
+    h.manyTools = 75;
+    await settings.invalidateTools(owner, 'notes');
+    try {
+      const r = await tools.startConnectorTools({ turn, speakerId: owner, taken: [] }).collect();
+      expect(Object.keys(r.tools).sort()).toEqual(['find_connector_tools', 'use_connector']);
+      expect(r.index).toContain('(`notes`, 75 tools)');
+      expect(r.index).toContain('tool_74');
+      expect(String(await exec(r.tools.use_connector, { tool: 'notes__tool_74', arguments: {} }))).toContain('called tool_74');
+    } finally {
+      h.manyTools = 0;
+      await settings.invalidateTools(owner, 'notes');
+    }
   });
 
   it('a setting changed to Never after the build refuses at call time', async () => {
