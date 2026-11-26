@@ -271,6 +271,18 @@ describe('runFrontTurn (mock model)', () => {
     expect(h.events.some((e) => e.type === 'reply' && e.payload?.contentFiltered)).toBe(true);
   });
 
+  it('a mention that ended on an approval card (connector/vault) gets no fallback', async () => {
+    h.sqlHook = (q) => (q.includes('from vault_approvals') ? [{ n: 1 }] : undefined);
+    try {
+      h.model = mockModel([textStep('')]);
+      await runFrontTurn(turn({ id: 84 }), io(true).io);
+      expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+      expect(h.events.some((e) => e.type === 'reply' && e.payload?.fallback)).toBe(false);
+    } finally {
+      h.sqlHook = undefined;
+    }
+  });
+
   it('a skipped reaction on a mention still gets the fallback (nothing was visible)', async () => {
     h.slackHook = (method) => {
       if (method === 'reactions.add') throw Object.assign(new Error('no_permission'), { data: { ok: false, error: 'no_permission' } });

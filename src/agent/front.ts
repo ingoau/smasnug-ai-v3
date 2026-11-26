@@ -1149,6 +1149,12 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     }
   }
 
+  /**
+   * The turn ended by asking the speaker to approve an action (a connector or vault card: "Awaiting approval… end the
+   * turn"): the card is their answer for now, not a silent turn.
+   */
+  const askedForApproval = () => turnApprovalCards(turn.threadId, turn.authorId, startedAt).catch((err) => (log.warn({ err, turnId }, 'turnApprovalCards failed'), false));
+
   /** A code-written reply (outcome, canvas link, fallback) is a bot reply too: idle clock and partner, never awaited. */
   const noteCodeReply = async (ts: unknown) =>
     privateTo ? undefined : noteBotReply(turn.threadId, { ts: typeof ts === 'string' ? ts : null, partnerId: turn.authorId, awaitsReply: false }).catch((err) => log.warn({ err }, 'noteBotReply failed'));
@@ -1209,8 +1215,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (outcome) return void (await postOutcomeFallback());
     if (previewPostedOnFailure) return;
     // A reaction (or other non-reply visible effect) already answered the user: don't throw, or the pipeline posts
-    // "Something broke" on top of it.
-    if (state.visible.size > 0) return;
+    // "Something broke" on top of it. An approval card counts too: its outcome turn reports back.
+    if (state.visible.size > 0 || (await askedForApproval())) return;
     throw failed;
   }
 
@@ -1233,7 +1239,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   else if (state.visible.size === 0 && !previewPosted && silenceRequested && turn.kind !== 'synthesis' && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
     // Asked not to respond: no fallback, but leave a trace of it (evals can spot a misused flag).
     await appendEvent(turn.threadId, 'reply_skipped', 'bot', { turnId, noReplyRequested: true });
-  } else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
+  } else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke) && !(await askedForApproval())) {
+    // (Not when the speaker was shown an approval card: that answers them for now, and its outcome turn reports back.)
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
@@ -1248,6 +1255,14 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
 }
 
 class TurnStopped extends Error {}
+
+/** Whether an approval card for `ownerId` was shown in this thread since `since` (vault_approvals, card posted). */
+async function turnApprovalCards(threadId: string, ownerId: string, since: Date): Promise<boolean> {
+  const [r] = await sql<{ n: number }[]>`
+    select count(*)::int as n from vault_approvals
+    where thread_id = ${threadId} and owner_id = ${ownerId} and created_at >= ${since} and card_channel is not null and status <> 'cancelled'`;
+  return (r?.n ?? 0) > 0;
+}
 
 /** Canvases this turn created (create_canvas records them in bot_canvases with the turn id). */
 async function turnCanvases(turnId: number): Promise<{ title: string; permalink: string }[]> {

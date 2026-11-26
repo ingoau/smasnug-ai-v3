@@ -22,7 +22,13 @@ const DECISIONS_URL = 'https://openrouter.ai/api/alpha/decisions';
 const DECISIONS_TIMEOUT_MS = 6000;
 const CHAT_TIMEOUT_MS = 15_000;
 const TRANSCRIPT_MESSAGES = 15;
-const THRESHOLD = 0.8;
+/**
+ * Calibrated on real threads (2026-11-26): the owner's own plain requests scored 0.71–0.97 (follow-ups like "get it to
+ * merge the pr" with assistant-written arguments at the low end); someone else's request, injected text, scope creep or
+ * a wrong target ≤ 0.41; repeating an earlier, already-done request after an unrelated message ~0.62. Wording changes
+ * to the criteria moved the adversarial cases up more than the genuine ones, so the threshold is the lever.
+ */
+const THRESHOLD = 0.7;
 
 export interface VerifyRequest {
   ownerId: string;
