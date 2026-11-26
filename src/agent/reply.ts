@@ -28,7 +28,7 @@ import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import type { TurnTiming } from '../core/timing.js';
 import { uploadFiles, uploadPrivateFiles, type OutgoingFile } from './files.js';
-import { recordFilePosts } from '../files/store.js';
+import { FileError, recordFilePosts } from '../files/store.js';
 import { extractPartialString } from './partial-json.js';
 import { broadcastSafePrefix, neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chooseDelivery, type DeliveryMode } from './util.js';
@@ -42,6 +42,7 @@ import { ActivityTrail, type AdoptedActivity } from './activity-trail.js';
 import { forgetOpenActivity, recordOpenActivity } from './activity-registry.js';
 import { privateThreadTs, savePrivateReply, sendFilesToDm, shareActions } from './private-reply.js';
 import { sql } from '../db/index.js';
+import { noteSelfDeleted } from '../pipeline/store.js';
 
 /** Coalescing interval for appends once the stream is open. */
 const FLUSH_MS = 250;
@@ -56,6 +57,9 @@ const streamOff = (buf: string) => /^\s*\{\s*"stream"\s*:\s*false\b/.test(buf);
 /** Blocks a stream may carry (50 per message, one kept free for the buttons at stopStream). */
 const MAX_STREAM_BLOCKS = MAX_MESSAGE_BLOCKS - 1;
 /** A later reply in a turn is held back until this many chars arrived, so it can be checked for duplication first. */
+/** In a reply result: the reply's text went out but its files didn't (tools.ts then asks the model to correct it). */
+export const FILES_NOT_ATTACHED = 'the files were NOT attached';
+
 export const EMPTY_RESULT = 'Not posted: the reply was empty. To stay silent, call end_turn.';
 
 export interface ReplyTarget {
@@ -195,6 +199,8 @@ export const editRetry = { delaysMs: [300, 1000] };
 
 /** A chat.update / chat.delete of a reply message, retried briefly on transient errors. Throws the last error. */
 async function editMessage(method: 'chat.update' | 'chat.delete', args: Record<string, unknown>): Promise<void> {
+  // The bot tidying up its own message (an empty or unfinished stream): its deletion keeps the turn's trace.
+  if (method === 'chat.delete') await noteSelfDeleted(String(args.channel), String(args.ts));
   for (let attempt = 0; ; attempt++) {
     try {
       await slackCall(method, args);
@@ -773,6 +779,8 @@ export class ReplyManager {
         log.warn({ err }, 'creating reply buttons failed; replying without them');
         return null;
       });
+      // A late retry of this turn after a newer turn retired its buttons: they stay retired (left out).
+      if (btnRow?.expiredAt && !btnRow.pressedAt) btnRow = null;
     }
     const actions = btnRow ? buttonsActions(btnRow) : undefined;
     // The response time: from the triggering message to now, when the complete reply goes out (after the stream
@@ -873,7 +881,7 @@ export class ReplyManager {
       } catch (err) {
         log.warn({ err }, 'reply file upload failed');
         await appendEvent(this.t.threadId, 'reply', 'bot', { turnId: this.t.turnId, index: e.index, mode: delivered, text, filesError: String(err) });
-        return `Replied (${delivered}), but uploading the files failed.${chartSuffix()}`;
+        return `Replied (${delivered}), but ${FILES_NOT_ATTACHED} (${err instanceof FileError ? err.message : 'uploading them failed'}).${chartSuffix()}`;
       }
     }
     await appendEvent(this.t.threadId, 'reply', 'bot', {
@@ -1154,7 +1162,7 @@ export class ReplyManager {
       const full = placeText(row.replyText != null ? withoutMarkers(row.replyText) : null, text, target.place);
       const card = await this.cardBlock();
       // Without new buttons the message keeps the press's note (a plan card render would put it back anyway).
-      const tail = actions ?? buttonsBlock(toButtonsState(row));
+      const tail = actions ?? buttonsBlock(toButtonsState(row)) ?? undefined;
       // The earlier card goes first, so a render of it that is due can't write the old layout over this reply.
       detached = await detachMessageCards(this.t.channelId, target.ts, this.t.turnId);
       await this.updateLayout(target.ts, () => replyLayout(full, tail, card, extras), extras);

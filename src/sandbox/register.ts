@@ -19,6 +19,8 @@ const enabled = sandboxConfigured();
 
 if (enabled) {
   await import('./tools.js');
+  await import('./browser/tools.js');
+  (await import('./browser/vault.js')).registerSandboxVaultTools();
   registerAction('sbx:', (ctx) => handleSandboxAdminAction(ctx, publishHome));
   if (previewsConfigured()) {
     registerAction('preview:terms_accept', handleTermsAccept);

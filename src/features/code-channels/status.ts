@@ -61,7 +61,6 @@ export async function processCodeChannelStatus(job: Job): Promise<void> {
 interface RunRow {
   title: string;
   sandbox: boolean | null;
-  kind: string | null;
   status: StatusRunState;
   cancelRequested: boolean;
   startedAt: Date | null;
@@ -96,7 +95,7 @@ async function originPermalink(row: CodeChannel): Promise<string | null> {
 /** Everything the tab shows (DB reads + one cached permalink lookup). */
 export async function loadStatusInput(row: CodeChannel): Promise<StatusInput> {
   const ch = row.channelId;
-  const runCols = sql`s.title, s.sandbox, s.kind, r.status, r.cancel_requested, r.started_at, r.created_at, r.finished_at, r.thread_id`;
+  const runCols = sql`s.title, s.sandbox, r.status, r.cancel_requested, r.started_at, r.created_at, r.finished_at, r.thread_id`;
   const [active, finished, [thread], [sends], permalink] = await Promise.all([
     sql<RunRow[]>`
       select ${runCols} from runs r join subagents s on s.id = r.subagent_id

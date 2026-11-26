@@ -78,20 +78,6 @@ const Env = z.object({
    */
   CHILD_REASONING_EFFORT: z.enum(['default', 'none', 'minimal', 'low', 'medium', 'high']).default('medium'),
   /**
-   * Coding agents (Cursor Cloud Agents, src/agent/cursor/): admin-only background agents that change the bot's own repo
-   * and open a PR. Off unless both CURSOR_API_KEY and CURSOR_REPO are set. Never logged.
-   */
-  CURSOR_API_KEY: z.string().optional(),
-  /** GitHub URL of the bot's repository, e.g. https://github.com/ingoau/smasnug-ai-v3. */
-  CURSOR_REPO: z.string().optional(),
-  /** Branch (or commit) the coding agent starts from; its PR targets this. */
-  CURSOR_REF: z.string().default('main'),
-  /** Cursor model id (GET /v1/models); unset = the Cursor account's default model. */
-  CURSOR_MODEL: z.string().optional(),
-  CURSOR_API_URL: z.string().default('https://api.cursor.com'),
-  /** Optional read-only GitHub token: lets the post-run check list a private repo's PR files (public repos need none). */
-  CURSOR_GITHUB_TOKEN: z.string().optional(),
-  /**
    * HuddleFM DJ mode (src/features/huddlefm): the Slack user id of the HuddleFM bot user. The bot talks to it through
    * HuddleFM's bot API (JSON DMs); its own user id must be in HuddleFM's INTEGRATION_USER_IDS. Unset → no DJ tools.
    */
@@ -138,6 +124,28 @@ const Env = z.object({
    * Needs the manifest's `features.code_channels.enabled` and the `code_channels:manage` scope.
    */
   CODE_CHANNELS: z.enum(['0', '1']).default('0'),
+  /**
+   * Vault (per-user credentials, docs/vault.md, src/features/vault/): master key for AES-256-GCM (32 bytes, base64;
+   * `openssl rand -base64 32`). Each user's secrets use a key derived from it (HKDF over the user id). Keep it outside
+   * Postgres. Unset = no vault, no connectors, no saved browser sessions.
+   */
+  VAULT_SECRET_KEY: z.string().optional(),
+  /**
+   * MCP connectors (docs/mcp-custom-connectors.md): the admin-curated catalog, a JSON file (array of definitions).
+   * Relative paths resolve from the working directory. Missing file = empty catalog.
+   */
+  CONNECTORS_FILE: z.string().default('connectors.json'),
+  /**
+   * The static OAuth callback page (oauth/index.html, hosted anywhere): the redirect URI connectors register with
+   * dynamic client registration. Unset = OAuth connectors can't be connected (API-key ones still work).
+   */
+  MCP_OAUTH_REDIRECT_URL: z.string().url().optional(),
+  /**
+   * Browser tools (src/sandbox/browser/): domains the agent may never open (comma-separated; subdomains included),
+   * on top of the built-in private-address block. `BROWSER_ALLOW_DOMAINS` set = only those domains.
+   */
+  BROWSER_DENY_DOMAINS: z.string().optional(),
+  BROWSER_ALLOW_DOMAINS: z.string().optional(),
 });
 
 export const env = Env.parse(process.env);
@@ -246,6 +254,16 @@ export const limits = {
   cardCoalesceMs: 1500,
   cardTitleMaxChars: 40,
   pendingSendTtlMs: 5 * 60 * 1000,
+  /** Vault: how long an owner's approval card stays clickable. */
+  vaultApprovalTtlMs: 10 * 60 * 1000,
+  /** Vault: "Allow for 10 minutes in this thread". */
+  vaultGrantMs: 10 * 60 * 1000,
+  /** Vault: how long a subagent's tool waits for the owner to click before giving up. */
+  vaultWaitMs: 5 * 60 * 1000,
+  /** Vault: credentials per user. */
+  vaultMaxCredentials: 25,
+  /** Vault: largest secret (a saved browser session can be big). */
+  vaultMaxSecretBytes: 512 * 1024,
   memoryExtractIdleMs: 30 * 60 * 1000,
   /** Threads quiet for longer than this are never extracted (a backlog would spend the model budget on stale talk). */
   memoryExtractMaxAgeMs: 14 * 24 * 60 * 60 * 1000,
@@ -354,25 +372,6 @@ export const limits = {
   /** A slack_search watch check that found the search rate limiter busy is retried after this (capped at its interval). */
   watchBusyRetryMs: 10 * 60_000,
   scheduleTickMs: 60_000,
-  // coding agents (Cursor, src/agent/cursor/)
-  /**
-   * How often running Cursor agents are polled (maintenance task + per-run next_poll_at).
-   * 10 s: under the Cloud Agents API default of 20 req/min per endpoint per key (each steady-state poll is one
-   * getRun). At limits.cursorMaxActive (3) that is ~18 getRun/min — a little headroom for bursts (e.g. several runs
-   * becoming due together, or an immediate cancel poll). 5 s would be ~36/min and hit 429s when several agents run.
-   */
-  cursorPollMs: 10_000,
-  /** A poller's lease on one Cursor run while it checks it (exactly-once handling across workers); renewed before slow steps, well above the worst-case handling time (a few API calls with 20 s timeouts + GitHub). */
-  cursorPollLeaseMs: 10 * 60_000,
-  /** Cursor runs get their own max duration (the subagent run limit / heartbeat sweeper don't apply). */
-  cursorRunMaxMs: 3 * 60 * 60 * 1000,
-  /** Coding agents running at once (all users; it's admin-only anyway). */
-  cursorMaxActive: 3,
-  cursorApiTimeoutMs: 20_000,
-  /** Consecutive failed polls (backing off up to 5 min) before the run is marked failed. */
-  cursorMaxPollErrors: 30,
-  /** How long the admin's Launch / Cancel confirmation for a new coding agent stays valid. */
-  cursorConfirmTtlMs: 15 * 60_000,
   // HuddleFM DJ mode (src/features/huddlefm)
   /** How long a command waits for HuddleFM's threaded reply. */
   djReplyTimeoutMs: 20_000,
@@ -449,6 +448,9 @@ export const limits = {
    */
   sandboxExportMaxBytes: 20 * 1024 * 1024,
   userSandboxExecsPerHour: 200,
+  /** browser_* tool calls (src/sandbox/browser/), per user per hour. */
+  userBrowserActionsPerHour: 400,
+  userCredentialUsesPerHour: 60,
   userLiveSandboxes: 2,
   globalLiveSandboxes: 8,
   /** Live sandbox minutes per user per UTC day (sum of usage segments). */

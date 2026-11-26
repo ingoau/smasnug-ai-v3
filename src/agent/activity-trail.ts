@@ -35,6 +35,7 @@
 import { threadTsArg } from '../core/events.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
+import { noteSelfDeleted } from '../pipeline/store.js';
 
 /** At most one activity update per this many ms. */
 export const ACTIVITY_MIN_INTERVAL_MS = 1000;
@@ -387,6 +388,7 @@ export class ActivityTrail {
       }
     }
     try {
+      await noteSelfDeleted(this.t.channelId, ts);
       await slackCall('chat.delete', { channel: this.t.channelId, ts });
     } catch (err) {
       log.warn({ err, code: slackErrorCode(err), ts }, 'deleting the activity message failed');

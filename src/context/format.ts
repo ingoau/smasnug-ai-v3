@@ -37,6 +37,8 @@ export interface RenderMsg {
     actions?: (string | null)[];
     /** What the pressed action button's call did. */
     outcome?: { ok: boolean; text: string } | null;
+    /** Left unpressed and retired (the bot answered a newer message): no longer shown or pressable. */
+    retired?: boolean;
   };
   /** This "message" is a quick-reply button press (its text is the label). */
   viaButton?: boolean;
@@ -165,7 +167,8 @@ export function reactionsLabel(reactions: MessageReaction[] | undefined, env: Fo
 
 /**
  * `[buttons: Yes | No]`, or `[buttons: Yes | No; <@U1|Ingo> pressed "Yes"]` once pressed. Action buttons say what they
- * run (`Upload it (runs upload_emoji)`) and, once pressed, how it went (`→ done: …` / `→ failed`).
+ * run (`Upload it (runs upload_emoji)`) and, once pressed, how it went (`→ done: …` / `→ failed`). Retired ones (left
+ * unpressed when the bot answered a newer message) say so: `[buttons (retired, no longer shown): Yes | No]`.
  */
 export function buttonsLabel(b: RenderMsg['buttons'], env: FormatEnv): string {
   if (!b?.labels.length) return '';
@@ -173,6 +176,7 @@ export function buttonsLabel(b: RenderMsg['buttons'], env: FormatEnv): string {
   const labels = b.labels.map((l, i) => (b.actions?.[i] ? `${l} (runs ${b.actions[i]})` : l));
   // A failure's text can carry user-chosen names / raw errors: only the agent's outcome turn sees it (quoted as untrusted).
   const outcome = b.outcome ? (b.outcome.ok ? ` → done: ${b.outcome.text.slice(0, 300)}` : ' → failed') : '';
+  if (b.retired && !b.pressedBy) return `[buttons (retired, no longer shown): ${labels.join(' | ')}]`;
   return `[buttons: ${labels.join(' | ')}${b.pressedBy && b.pressedLabel != null ? `; ${who} pressed "${b.pressedLabel}"${outcome}` : ''}]`;
 }
 

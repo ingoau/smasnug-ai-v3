@@ -22,7 +22,7 @@ export type StatusRunState = 'queued' | 'running' | 'complete' | 'error' | 'canc
 
 export interface StatusRun {
   title: string;
-  /** 'subagent' | 'sandbox' | 'coding agent'. */
+  /** 'subagent' | 'sandbox'. */
   kind: string;
   status: StatusRunState;
   cancelRequested?: boolean;
@@ -145,8 +145,6 @@ export function renderStatusBlocks(i: StatusInput): unknown[] {
 }
 
 /** Plain-text summary of the run kind for a subagent row. */
-export function runKindLabel(s: { sandbox?: boolean | null; kind?: string | null }): string {
-  if (s.sandbox) return 'sandbox';
-  if (s.kind === 'cursor') return 'coding agent';
-  return 'subagent';
+export function runKindLabel(s: { sandbox?: boolean | null }): string {
+  return s.sandbox ? 'sandbox' : 'subagent';
 }

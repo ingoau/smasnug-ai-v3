@@ -1,0 +1,23 @@
+[
+  {
+    "slug": "todoist",
+    "name": "Todoist",
+    "description": "Your Todoist tasks and projects.",
+    "url": "https://ai.todoist.net/mcp",
+    "auth": { "type": "oauth" },
+    "maxTools": 25
+  },
+  {
+    "slug": "twenty",
+    "name": "Twenty CRM",
+    "description": "Records in our Twenty workspace.",
+    "url": "https://crm.example.com/mcp",
+    "auth": {
+      "type": "api_key",
+      "header": "Authorization",
+      "scheme": "Bearer",
+      "help": "Create an API key in Twenty: Settings → APIs & Webhooks → Create key."
+    },
+    "tools": { "find_records": "read", "group_records": "read", "delete_records": "delete" }
+  }
+]

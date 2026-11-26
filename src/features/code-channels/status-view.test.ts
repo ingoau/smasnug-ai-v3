@@ -80,8 +80,8 @@ describe('status tab rendering', () => {
     expect(firstLine('\n  a   b \nc', 10)).toBe('a b');
     expect(firstLine('abcdefghijkl', 5)).toBe('abcd…');
     expect(escapeMrkdwn('<a&b>')).toBe('&lt;a&amp;b&gt;');
-    expect(runKindLabel({ sandbox: true, kind: 'model' })).toBe('sandbox');
-    expect(runKindLabel({ sandbox: false, kind: 'cursor' })).toBe('coding agent');
+    expect(runKindLabel({ sandbox: true })).toBe('sandbox');
+    expect(runKindLabel({ sandbox: false })).toBe('subagent');
     expect(runKindLabel({})).toBe('subagent');
   });
 });

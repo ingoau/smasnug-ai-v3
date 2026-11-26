@@ -11,12 +11,10 @@ process.env.HUDDLEFM_USER_ID ||= 'UHUDDLEFM';
 process.env.MODAL_TOKEN_ID ||= 'x';
 process.env.MODAL_TOKEN_SECRET ||= 'x';
 process.env.PREVIEW_SECRET_KEY ||= Buffer.alloc(32).toString('base64');
-process.env.CURSOR_API_KEY ||= 'x';
-process.env.CURSOR_REPO ||= 'https://github.com/example/repo';
 const out = process.argv[2] ?? 'prompt-dump';
 mkdirSync(out, { recursive: true });
 const { asSchema } = await import('ai');
-const { frontSystemPrompt, CODING_AGENTS_PROMPT } = await import('../src/agent/prompts/front.js');
+const { frontSystemPrompt } = await import('../src/agent/prompts/front.js');
 const { childSystemPrompt } = await import('../src/agent/prompts/child.js');
 const { sandboxChildPrompt } = await import('../src/sandbox/prompts.js');
 const { skillsPrompt } = await import('../src/agent/skills.js');
@@ -29,7 +27,6 @@ const { toolsFor } = await import('../src/core/tools.js');
 
 writeFileSync(`${out}/front.txt`, frontSystemPrompt('smasnug ai'));
 writeFileSync(`${out}/front_skills.txt`, skillsPrompt('front'));
-writeFileSync(`${out}/front_coding.txt`, CODING_AGENTS_PROMPT);
 writeFileSync(`${out}/child.txt`, childSystemPrompt(new Date('2026-10-07T00:00:00Z')));
 writeFileSync(`${out}/child_sandbox.txt`, sandboxChildPrompt({ previews: true }));
 for (const role of ['front', 'child'] as const) {

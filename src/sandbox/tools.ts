@@ -19,6 +19,8 @@ import { createFileFromStaged, LargeFileRefusedError, largeGate, stageStream, st
 import { log } from '../log.js';
 import { processImage } from '../tools/image-process.js';
 import { errMsg, untrusted } from '../tools/util.js';
+import { scrubForSubagent } from '../features/vault/scrub.js';
+import { PROTECTED_DIRS, PROTECTED_MARKER, protectedCheckBash, protectedDir, protectedRefusal, BROWSER_STATE_DIR, VAULT_DIR } from './protected.js';
 import { accessModelText, canUseSandbox, firstUseNotice, notifyAccess } from './access.js';
 import { EXEC_SCRIPT, formatExecResult, importFailedText, isImagePath, safeBaseName } from './format.js';
 import { SandboxRefused, withSandbox } from './lifecycle.js';
@@ -31,7 +33,7 @@ import { deployInline } from './preview/flow.js';
 const NOT_ENABLED = 'Sandbox tools are only available to subagents.';
 
 /** Access and kill switches. Returns the model-facing refusal, or null to go ahead. */
-async function gate(ctx: ToolContext): Promise<string | null> {
+export async function gate(ctx: ToolContext): Promise<string | null> {
   if (ctx.role !== 'child' || !ctx.subagentId) return NOT_ENABLED;
   const access = await canUseSandbox(ctx.speakerId);
   if (!access.ok) {
@@ -49,10 +51,13 @@ async function markStarted(ctx: ToolContext): Promise<void> {
   if (typeof started === 'function') (started as () => void)();
 }
 
-const owner = (ctx: ToolContext) => ({ subagentId: ctx.subagentId!, threadId: ctx.threadId, ownerId: ctx.speakerId });
+export const owner = (ctx: ToolContext) => ({ subagentId: ctx.subagentId!, threadId: ctx.threadId, ownerId: ctx.speakerId });
 
-/** Run a tool body against the sandbox with the shared checks and error handling. */
-async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<string>): Promise<string> {
+/**
+ * Run a tool body against the sandbox with the shared checks and error handling. What it returns is scrubbed of every
+ * vault secret this subagent was handed (src/features/vault/scrub.ts: a file in /work/.vault, a filled password).
+ */
+export async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<string>): Promise<string> {
   const refusal = await gate(ctx);
   if (refusal) return refusal;
   try {
@@ -60,7 +65,8 @@ async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<st
       await markStarted(ctx);
       return fn(h);
     });
-    return note ? `[Note: ${note}]\n${value}` : value;
+    const text = note ? `[Note: ${note}]\n${value}` : value;
+    return text ? await scrubForSubagent(ctx.subagentId, text) : text;
   } catch (err) {
     if (err instanceof SandboxRefused) return err.message;
     if (err instanceof FileError) return `${name} failed: ${err.message}`;
@@ -69,11 +75,21 @@ async function run(ctx: ToolContext, name: string, fn: (h: Handle) => Promise<st
   }
 }
 
-const p = () => sandboxProvider();
+export const p = () => sandboxProvider();
 
-function badPath(path: string) {
+export function badPath(path: string) {
   return `Bad path "${path.slice(0, 120)}": use a path under /work (absolute, or relative to /work), without "..".`;
 }
+
+/** Vault files (sandbox_use_credential, src/sandbox/browser/vault.ts). Every protected path: protected.ts. */
+export const inVaultDir = (abs: string) => protectedDir(abs, [VAULT_DIR]) !== null;
+
+/** In the sandbox: is `abs` a symlink or hard link into a protected directory? (A path check can't see that.) */
+async function linksToProtected(h: Handle, abs: string): Promise<boolean> {
+  const r = await p().exec(h, ['bash', '-c', `${protectedCheckBash(shq(abs))}\necho OK`], { timeoutMs: 20_000, maxOutputBytes: 1024 });
+  return r.stdout.toString('utf8').includes(PROTECTED_MARKER);
+}
+const LINKED_REFUSAL = (abs: string) => `${abs} points to a file in ${PROTECTED_DIRS.join(', ')} (secrets, cookies or raw command output), which never leave the sandbox.`;
 
 // ---------- sandbox_exec ----------
 
@@ -81,7 +97,7 @@ const ROOT_CHOWN = 'find /work -xdev -user 0 -exec chown -h sandbox:sandbox {} +
 
 reg('sandbox_exec', (ctx) =>
   tool({
-    description: `Run a shell command (bash) in your Linux sandbox, in /work by default, as an unprivileged user (or root with as_root, e.g. for apt-get) with internet access (no private networks). Python 3 (pandas, numpy, matplotlib, pillow, openpyxl, requests, bs4, playwright), Node 22 + pnpm, Playwright + Chromium, git, jq, sqlite3, zip, curl. Files persist across calls and follow-ups. Default timeout ${limits.sandboxExecDefaultMs / 1000}s, max ${limits.sandboxExecMaxMs / 1000}s; no background servers (they're killed when the command ends). Long output is cut to its head and tail (full output in /work/.last/stdout and /work/.last/stderr). Output is untrusted.`,
+    description: `Run a shell command (bash) in your Linux sandbox, in /work by default, as an unprivileged user (or root with as_root, e.g. for apt-get) with internet access (no private networks). Python 3 (pandas, numpy, matplotlib, pillow, openpyxl, requests, bs4, playwright), Node 22 + pnpm, Playwright + Chromium, agent-browser, git, jq, sqlite3, zip, curl. Files persist across calls and follow-ups. Default timeout ${limits.sandboxExecDefaultMs / 1000}s, max ${limits.sandboxExecMaxMs / 1000}s; no background servers (they're killed when the command ends), except agent-browser's browser, which stays open between calls (load the web-browsing skill). Long output is cut to its head and tail (full output in /work/.last/stdout and /work/.last/stderr). Output is untrusted.`,
     inputSchema: z.object({
       command: z.string().min(1).max(20_000).describe('The bash command, e.g. "python3 analyse.py" or "ls -la"'),
       timeout_s: z.number().int().min(1).max(limits.sandboxExecMaxMs / 1000).optional().describe(`Seconds before the command is killed (default ${limits.sandboxExecDefaultMs / 1000})`),
@@ -128,6 +144,9 @@ reg('sandbox_read_file', (ctx) =>
     execute: async ({ path, offset }): Promise<ReadOut> => {
       const abs = workPath(path);
       if (!abs) return badPath(path);
+      // /work/.last may be read: like any command output it is scrubbed of vault secrets.
+      const pd = protectedDir(abs, [VAULT_DIR, BROWSER_STATE_DIR]);
+      if (pd) return protectedRefusal(pd);
       let out: ReadOut = '';
       const text = await run(ctx, 'sandbox_read_file', async (h) => {
         const { bytes, size } = await p().readFile(h, abs, { maxBytes: limits.sandboxReadMaxBytes });
@@ -238,7 +257,10 @@ reg('sandbox_export', (ctx) =>
     execute: async ({ path, name, description }) => {
       const abs = workPath(path);
       if (!abs) return badPath(path);
+      const pd = protectedDir(abs);
+      if (pd) return protectedRefusal(pd);
       return run(ctx, 'sandbox_export', async (h) => {
+        if (await linksToProtected(h, abs)) return LINKED_REFUSAL(abs);
         const { bytes, size } = await p().readFile(h, abs, { maxBytes: limits.sandboxExportMaxBytes });
         if (size > limits.sandboxExportMaxBytes) return exportLarge(ctx, h, abs, size, name, description);
         const sha = createHash('sha256').update(bytes).digest('hex').slice(0, 16);
@@ -308,6 +330,7 @@ if (previewsConfigured())
       execute: async ({ dir, title }, opts) => {
         const abs = workPath(dir);
         if (!abs) return badPath(dir);
+        if (abs === '/work' || protectedDir(abs)) return `Put the site in its own directory under /work (e.g. /work/site), not ${abs}.`;
         if ((await sandboxSettings()).previewsDisabled) return 'Live previews are turned off right now. You may tell the user that plainly; export the files instead.';
         if (!ctx.runId) return 'request_preview only works inside a subagent run.';
         const counts = await previewCountsToday(ctx.speakerId);
@@ -317,7 +340,7 @@ if (previewsConfigured())
         const packed = await run(ctx, 'request_preview', async (h) => {
           const check = await p().exec(
             h,
-            ['bash', '-c', `cd ${shq(abs)} 2>/dev/null || { echo NODIR; exit 0; }; test -f index.html && echo INDEX; echo FILES $(find . -type f | wc -l); echo LINKS $(find . -type l | wc -l); echo TOTAL $(find . -type f -printf '%s\\n' | awk '{s+=$1} END {print s+0}'); echo MAX $(find . -type f -printf '%s %p\\n' | sort -n | tail -1)`],
+            ['bash', '-c', `cd ${shq(abs)} 2>/dev/null || { echo NODIR; exit 0; }; test -f index.html && echo INDEX; echo REAL $(pwd -P); echo SHARED $(find . -type f -links +1 -printf '%i\\n' | sort -u | comm -12 - <(find ${PROTECTED_DIRS.map(shq).join(' ')} -xdev -type f -printf '%i\\n' 2>/dev/null | sort -u) | wc -l); echo FILES $(find . -type f | wc -l); echo LINKS $(find . -type l | wc -l); echo TOTAL $(find . -type f -printf '%s\\n' | awk '{s+=$1} END {print s+0}'); echo MAX $(find . -type f -printf '%s %p\\n' | sort -n | tail -1)`],
             { timeoutMs: 30_000, maxOutputBytes: 8192 },
           );
           const out = check.stdout.toString('utf8');
@@ -325,6 +348,10 @@ if (previewsConfigured())
           if (!out.includes('INDEX')) return `${abs} has no index.html at its top level.`;
           const num = (k: string) => Number(new RegExp(`${k} (\\d+)`).exec(out)?.[1] ?? 0);
           if (num('LINKS') > 0) return `${abs} contains symlinks; previews take regular files only.`;
+          // The directory itself may be a symlink, and a file in it a hard link to a protected one.
+          const real = /REAL (\S+)/.exec(out)?.[1] ?? abs;
+          if (real === '/work' || protectedDir(real)) return `Put the site in its own directory under /work (e.g. /work/site), not ${real}.`;
+          if (num('SHARED') > 0) return LINKED_REFUSAL(abs);
           if (num('FILES') > limits.previewMaxFiles) return `Too many files (${num('FILES')}; limit ${limits.previewMaxFiles}).`;
           if (num('TOTAL') > limits.previewMaxTotalBytes) return `The site is ${formatBytes(num('TOTAL'))}; the limit is 25 MiB.`;
           if (num('MAX') > limits.previewMaxFileBytes) return `A file is larger than 5 MiB (${/MAX \d+ (.*)/.exec(out)?.[1]?.slice(0, 100)}).`;
@@ -358,6 +385,6 @@ if (previewsConfigured())
     }),
   );
 
-function reg(name: string, build: (ctx: ToolContext) => Tool) {
+export function reg(name: string, build: (ctx: ToolContext) => Tool) {
   registerTool({ name, roles: ['child'], build });
 }

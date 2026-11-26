@@ -33,7 +33,7 @@ vi.mock('./reply-buttons-store.js', () => ({
 }));
 
 const { ReplyManager } = await import('./reply.js');
-const { MAX_BUTTONS, MAX_FIXED_REPLY_CHARS, MAX_LABEL_CHARS, SLACK_BUTTON_TEXT_MAX, REPLY_CHOICE_ACTION, REPLY_QUIET_ACTION, buttonPlace, buttonWho, buttonsActions, buttonsBlock, normalizeButtonLabels, normalizeButtons, parseButtonOutcome, parseButtonResponse, placeText, pressedText } = await import('./reply-buttons.js');
+const { MAX_BUTTONS, MAX_FIXED_REPLY_CHARS, MAX_LABEL_CHARS, SLACK_BUTTON_TEXT_MAX, REPLY_CHOICE_ACTION, REPLY_QUIET_ACTION, buttonPlace, buttonWho, buttonsActions, buttonsBlock, buttonsOnlyBlock, normalizeButtonLabels, normalizeButtons, parseButtonOutcome, parseButtonResponse, placeText, pressedText } = await import('./reply-buttons.js');
 const { prepareButtonActions, registerButtonAction, runButtonAction } = await import('./button-actions.js');
 const { renderActionFailure } = await import('./reply-quiet.js');
 const { renderCard } = await import('./card-render.js');
@@ -103,6 +103,13 @@ describe('reply buttons: labels and schema', () => {
     expect(block.elements.map((e) => e.text.text)).toEqual(['ESP32', 'Pico', 'Arduino']);
     const pressed = buttonsBlock({ id: 9, labels: ['ESP32', 'Pico'], pressedBy: 'U7', pressedLabel: 'Pi*co <x>' });
     expect(pressed).toEqual({ type: 'context', block_id: 'reply_9_pressed', elements: [{ type: 'mrkdwn', text: '<@U7> pressed *Pico &lt;x&gt;*' }] });
+  });
+
+  it('retired (expired) buttons render nothing; pressed ones keep their note; a buttons-only message keeps the labels', () => {
+    expect(buttonsBlock({ id: 9, labels: ['ESP32', 'Pico'], expired: true })).toBeNull();
+    expect(buttonsBlock({ id: 9, labels: ['ESP32', 'Pico'], pressedBy: 'U7', pressedLabel: 'Pico', expired: true })).toMatchObject({ type: 'context', block_id: 'reply_9_pressed' });
+    expect(buttonsOnlyBlock({ id: 9, labels: ['A <b>', 'C'], expired: true })).toEqual({ type: 'context', block_id: 'reply_9_buttons', elements: [{ type: 'mrkdwn', text: 'Options: A &lt;b&gt; | C' }] });
+    expect(buttonsOnlyBlock({ id: 9, labels: ['A'] })).toMatchObject({ type: 'actions' });
   });
 });
 

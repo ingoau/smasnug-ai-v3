@@ -30,6 +30,11 @@ export interface FrontTurnState {
    * new channel and a link went into this thread): the turn ends after the current step.
    */
   endRequested?: boolean;
+  /**
+   * An outcome turn (turn.kind 'scheduled' with a stored outcome input, src/features/outcome-turn.ts): its source and
+   * ref. For source 'approval', the vault approval's owner (vaultIdentity lets that owner's own outcome turn carry on).
+   */
+  outcome?: { source: string; sourceRef: string | null; approvalOwnerId?: string | null };
 }
 
 export function turnState(ctx: ToolContext): FrontTurnState {

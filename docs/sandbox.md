@@ -15,7 +15,9 @@ nothing at startup):
   reconcile (orphans, lost rows), retention. `budget.ts`: usage segments, monthly estimate, Modal metered cost, hard
   stop, 80 % notice. `settings.ts`: kill switches. `hca.ts` + `access.ts`: the access decision and ephemerals.
 - `tools.ts`: `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`, `sandbox_import`, `sandbox_export`,
-  `request_preview` (children only). `hooks.ts`: run end → idle clock + preview hand-off. `prompts.ts`: prompt
+  `request_preview` (children only). `browser/`: the `browser_*` tools and the vault's sandbox side (§3.9).
+  `protected.ts`: paths that never leave the sandbox as files (`/work/.vault`, `/work/.agent-browser`, `/work/.last`).
+  `hooks.ts`: run end → idle clock, vault material removed, preview hand-off. `prompts.ts`: prompt
   sections. `home.ts`: App Home disclosure + admin section.
 - `preview/`: `tar.ts` (minimal tar reader/writer), `bundle.ts` (limits, form scan, banner, `_headers`, the Worker,
   wrangler config), `deploy.ts` (fresh-sandbox `wrangler deploy --temporary`, output parsing, takedown), `crypto.ts`
@@ -77,7 +79,9 @@ Deviations from the plan below (all decided 2026-10-07 unless noted):
   `sandbox_exec` is a new hourly `LimitKind`.
 - **Reports** of a preview go to the mod channel with a Take down button (admin only), like other reports.
 - **Exec output:** the full output stays in `/work/.last/{stdout,stderr}`; the model gets the head (2k chars) and
-  tail (10k chars) with a cut note.
+  tail (10k chars) with a cut note. `/work/.last` can hold a secret (e.g. `curl -v` with an auth header): it is a
+  protected path (§3.9: readable with `sandbox_read_file`, scrubbed; never exported, published or opened in the
+  browser), removed before every pause snapshot, and at run end when vault material was used.
 - **Snapshots** get a 7-day TTL (Modal's default is 30 days) and are deleted when the sandbox is destroyed.
 
 ## 1. Goals and non-goals
@@ -86,7 +90,8 @@ Deviations from the plan below (all decided 2026-10-07 unless noted):
 - Subagents can run code in an isolated Linux sandbox to:
   - build files (HTML, scripts, CSVs, charts/images);
   - run Python/Node for analysis, including on files users uploaded to the thread;
-  - drive a headless browser (Chromium/Playwright), e.g. to screenshot and check an HTML page they built.
+  - drive a headless browser (Chromium/Playwright), e.g. to screenshot and check an HTML page they built, or browse
+    real sites interactively with agent-browser (§3.3).
 - Outputs land in the thread's file store and are posted by the front agent. Users' uploaded files can be imported
   into the sandbox.
 - Live previews of static sites, as Cloudflare temporary deploys that the requester can claim.
@@ -234,9 +239,25 @@ Built: Modal's image builder (`fromRegistry` + `dockerfileCommands`), defined in
 from `mcr.microsoft.com/playwright:v1.56.1-noble`; the deploy image from `node:22-bookworm-slim` + `wrangler@4.148.0`.
 `pnpm sandbox:images` builds both (first work build ~13 min, then cached).
 
+**agent-browser** (`agent-browser@0.43.0`, `AGENT_BROWSER_VERSION`; skill `skills/web-browsing`): a CLI whose daemon
+keeps a headless browser open between `sandbox_exec` calls, so a child can snapshot a page (elements with refs like
+`@e1`), act on a ref and look again, one short call per step. It is the one background process allowed to outlive a
+command: it detaches into its own session, so the exec's process-group kill and `timeout` don't reach it. It drives
+Playwright's Chromium (linked as `/usr/local/bin/chromium`, no second browser download). Its config is env in
+`modal.ts` `BASE_ENV`: `AGENT_BROWSER_EXECUTABLE_PATH`, `AGENT_BROWSER_RESTORE=default` (the default session saves
+cookies + localStorage under `/work/.agent-browser` every 30 s and on close, and reloads them when it starts) and
+`AGENT_BROWSER_NO_VERSION_CHECK`. The saved session is plaintext. `AGENT_BROWSER_ENCRYPTION_KEY` (encryption at rest,
+per agent-browser's docs) is deliberately not set: the key would live in the same sandbox (its env), so anything that
+can read the file (the model's own code via `sandbox_exec`, a file tool) can read the key too, and a Modal snapshot
+holds both. Instead the directory is a protected path (§3.9) and a login from the vault is cleared at run end and
+before a pause. The daemon doesn't survive a pause, so `ModalProvider.pause` runs
+`agent-browser close --all` before the snapshot (skipped when no daemon is running): after a resume the next command
+starts a fresh browser with the saved cookies, but open pages are gone. The daemon exits by itself after an hour idle.
+Children drive it through the `browser_*` tools (§3.9); raw `agent-browser` through `sandbox_exec` stays as a fallback.
+
 - **Work image** (pinned tag, built once per version, referenced by digest):
   - Debian slim; Python 3.12 with numpy, pandas, matplotlib, pillow, openpyxl, requests, beautifulsoup4;
-  - Node 22 + pnpm; Playwright + Chromium (~2 GiB);
+  - Node 22 + pnpm; Playwright + Chromium (~2 GiB); agent-browser (above);
   - git, curl, jq, sqlite3, zip/unzip, ffmpeg (optional, if size allows);
   - user `sandbox`, `/work` owned by it.
 - **Deploy image:** Node 22 + `wrangler@<pinned>`, nothing else. It is only used by the preview deploy (§3.6).
@@ -454,7 +475,100 @@ Env:
 - `PREVIEW_TERMS_VERSION`;
 - `WRANGLER_VERSION`.
 
-The feature is off unless the Modal tokens are set, like Cursor.
+The feature is off unless the Modal tokens are set.
+
+### 3.9 Browser tools and credentials (`src/sandbox/browser/`, issues #36, #37)
+
+**Browser tools** (`browser/tools.ts`, registered with the sandbox tools, children only). They wrap agent-browser's
+default session inside the subagent's own sandbox, so the browser dies with it and cookies persist as they do for
+agent-browser via `sandbox_exec` (`AGENT_BROWSER_RESTORE=default`). Five tools, so a subagent that never browses pays
+little for them:
+- `browser_open(url)`;
+- `browser_act(action: click | fill | press | select | scroll | wait | back, ref?, text?, submit?, key?, direction?,
+  pixels?, url?, seconds?)`: `fill` clears and types (`submit` presses Enter), `select` takes the option in `text`,
+  `scroll` a direction or a ref into view, `wait` exactly one of ref / text / url glob / seconds;
+- `browser_read(mode: snapshot | text, selector?, ref?, offset?)`: the interactive elements (scoped by a CSS
+  selector), or the rendered text of the page or one element in 16k-character pages;
+- `browser_screenshot(full_page?, annotate?)` (an image to the model; the PNG goes to /tmp and is deleted);
+- `browser_close`.
+
+Every call is one exec (`browser/cli.ts`): the action, a short `wait --load domcontentloaded`, then `get url` /
+`get title`, usually `snapshot -i -c`, and `get url` again after any page content was captured. Each section sits
+behind a marker line with a random per-call nonce, and only the first marker of each section counts, so page text
+(`read`, `get text`, a snapshot) can't fake a section such as the URL used for the domain check. Output: a status
+line, then title, URL and the snapshot trimmed to 3.5k characters (14k for `browser_read` snapshot) as untrusted
+content, with a note when lines were cut.
+
+Control point (`browser/page.ts`, `browser/policy.ts`):
+- **Domains:** `checkUrl` (no private / local addresses, no credentials in URLs), then `BROWSER_DENY_DOMAINS` and
+  `BROWSER_ALLOW_DOMAINS` (comma-separated, subdomains included; deny wins). `file://` only under /work and never a
+  protected path (below; the path is decoded once and normalised like Chromium does, and `browser_open` resolves
+  symlinks and hard links in the sandbox before opening), `about:blank`; other schemes are refused. Checked before
+  `browser_open` and on the URL after every action, both before and after the content is captured: a page that ended
+  up somewhere refused is left for `about:blank`, its content dropped, and the model is told why. Content whose URL
+  couldn't be read isn't shown.
+- **Kill switch:** `sandbox_browser_disabled` (App Home admin toggle). It stops the tools, not agent-browser run by
+  the model's own code through `sandbox_exec`.
+- **Rate limit:** `takeLimit('browser_action')`, `limits.userBrowserActionsPerHour` (400) per user.
+- **Log:** a `browser_action` thread event per call: `{ runId, action, host, path (no query), ref, rc?, blocked? }`;
+  typed text only as `textLength`, never the text.
+- `browser_act` `fill` refuses `type=password` fields (checked in the sandbox): passwords only come from the vault.
+
+**Protected paths** (`protected.ts`): `/work/.vault` (vault files), `/work/.agent-browser` (agent-browser's saved
+session: cookies + localStorage in plaintext, including logins from the vault) and `/work/.last` (raw command
+output). `sandbox_export`, `request_preview` and `browser_open file://` refuse them, also through a symlink or a hard
+link (`realpath` / `find -samefile`, and `pwd -P` + shared inodes for a preview dir, checked in the sandbox).
+`sandbox_read_file` refuses the first two; `/work/.last` it may show (scrubbed like any command output).
+
+**Vault, sandbox side** (`browser/vault.ts`; only when the vault is configured). Credentials are the subagent
+owner's (`vaultIdentity`), and every use waits for the owner's approval card (wait mode), because anyone in the
+thread can steer a subagent. Before a secret enters the sandbox it is registered for scrubbing (`registerScrub`):
+everything the sandbox and browser tools return (`run` in `tools.ts`, incl. `sandbox_exec`) is scrubbed of the
+subagent's secrets. Every use is audited. "Allow for 10 min here" grants are per subagent (`grantKeyFor`) and per use.
+- `browser_fill_credential(ref, credential, field: username | password | totp)`: a login whose domains match the
+  current page's host, https only. Before the card, the ref is focused and `eval` reads `document.activeElement` of
+  the top document (`browser/fields.ts`): it must be an `INPUT` of a type that fits the field (password →
+  `password`; username → text/email/tel/url/search; totp → text/tel/number/password). A ref inside an iframe leaves
+  the `IFRAME` as the active element and is refused, so a value never goes into a frame (possibly another site). The
+  card names the site, page path, the field and its label. Grant key `cred:<id>:fill:<field>` (per subagent): allowing
+  the username doesn't allow the password, nor `fetch_with_credential`. The value goes over stdin (read into a shell
+  variable first; agent-browser gets it as an argument inside the sandbox, never in the exec's argv or env); in the
+  same exec, right before typing, the sandbox checks the page is still on the approved origin and repeats the field
+  check. TOTP: the current code (`totpCode`), waiting for the next period when < 4 s are left.
+- `sandbox_use_credential(credential, purpose)`: writes `/work/.vault/<name>` (token) or `<name>.username`,
+  `.password`, `.totp` (the current code) as the sandbox user, dir 700 / files 600, over stdin. Always "Allow once"
+  (no grant: a file is not pinned to the credential's websites like a request or fill is, and code can send it
+  anywhere).
+- `sandbox_save_credential(name, type, website?, file | username_file + password_file + totp_file?)`: stores a
+  secret the agent produced from file(s) without it passing through the model, deletes the files, never overwrites,
+  tells the owner (ephemeral in the thread, else DM). Files under `/work/.vault` are refused.
+- **Saved browser sessions** (kind `browser_session`): `browser_save_session(name, website?, purpose)` exports
+  `agent-browser state save` (cookies + localStorage, storageState shape) to stdout, keeps only the website's
+  cookies and origins (`browser/state.ts`; parent-domain cookies the site receives included), domains from the
+  website or else the state's cookie / origin hosts, and stores it after the owner approves (no grant). The cookies go
+  from the browser to the vault by code, not through the model's tool output.
+  `browser_load_session(name, purpose)` (grant key `cred:<id>:session`, per subagent) pipes the state over stdin into
+  a temp file, `state load`s it and deletes the file. `browser_open` mentions the owner's stored logins and saved
+  sessions for the host (names only), since `list_credentials` doesn't list sessions.
+
+**Vault material lives for one run** (`browser/vault-files.ts`). Redis flags per subagent record that vault files
+went into the sandbox (`sandbox_use_credential`, `sandbox_save_credential`) or that the browser was logged in from
+the vault (`browser_fill_credential`, `browser_load_session`). When the run ends (`hooks.ts`) and before a pause
+snapshot (`lifecycle.pauseSandbox`), a flagged sandbox gets: `agent-browser close --all` and `rm -rf
+/work/.agent-browser` (the browser's cookies and storage, so a later run, maybe steered by someone else, isn't still
+logged in as the owner without a new approval; the agent's own non-vault logins in that browser go too), and `rm -rf
+/work/.vault /work/.last`. `ModalProvider.pause` also always removes `/work/.vault` and `/work/.last`. A failed
+cleanup keeps the flags, so the next run end or pause retries.
+
+Known gaps: a value typed into a page is visible to the page's own scripts and to `agent-browser get value`;
+outputs are scrubbed, but a model that transforms a secret (or code in the sandbox that sends a `/work/.vault` file
+somewhere) can still leak it: the approval card says so. Cookies of a loaded session aren't scrubbed from output yet
+(the vault's scrub set covers tokens and logins only), and the model's own code can read the browser's cookies
+(`agent-browser cookies`, `cat`) through `sandbox_exec` during the run; the protected paths only keep them from
+leaving as files. A page under /work that the model wrote can still embed a protected file (an iframe or a link
+followed later): only the top-level `browser_open` target is resolved in the sandbox. The fill value is briefly in
+agent-browser's argv inside the sandbox. Modal datacenter IPs are blocked by some sites; routing through a fetch
+service / proxy is not built.
 
 ## 4. Access control, quotas and budget
 
@@ -535,6 +649,7 @@ without asking first (a single file is `create_file`; research needs no sandbox)
 
 - `sandbox_disabled`: the whole feature. Running sandboxes get paused.
 - `sandbox_previews_disabled`: no new deploys. Live previews stay up until expiry, unless taken down.
+- `sandbox_browser_disabled`: the `browser_*` tools (incl. the vault's browser fills and sessions) refuse (§3.9).
 - `sandbox_access_mode`: `hca_or_allowlist` (default) | `allowlist_only`. `allowlist_only` is the gating kill
   switch: if HCA misbehaves, access fails closed to the allowlist.
 - The global pause, channel disable and suspension apply as they already do (`checkEntry`).
@@ -573,6 +688,9 @@ App Home admin additions:
 - Preview deploys run with an empty `HOME`. Cloudflare tokens exist only inside that sandbox's temporary toml and in
   the encrypted columns.
 - The child prompt says not to copy tokens or secrets seen in the thread into the sandbox. That is prompt-level only.
+- The one exception is the owner's vault, one approved use at a time (§3.9): a login typed into a page, a file in
+  `/work/.vault`, or a saved browser session loaded into the browser, each for the rest of that run only (never in a
+  snapshot; the browser is logged out again at run end).
 
 ### 5.4 Untrusted output and prompt injection
 - Stdout/stderr, read files and anything fetched from inside the sandbox are wrapped as untrusted content, the same
@@ -584,7 +702,7 @@ App Home admin additions:
   uploaded to Slack as a file (Slack now renders HTML files).
 - Only the subagent's owner can be the preview requester. A steer from someone else in the thread can't redirect
   the claim. `request_preview` records `subagents.owner_id`, not the steerer.
-- Synthesis and scheduled turns can spawn sandbox subagents (unlike coding agents). They are bounded by the owner's
+- Synthesis and scheduled turns can spawn sandbox subagents. They are bounded by the owner's
   access, quotas and the budget, so no extra rule is needed.
 
 ### 5.5 Abuse
@@ -602,6 +720,7 @@ App Home admin additions:
 ### 5.6 Logging
 - pino `redact` for `apiToken`, `api_token*`, `claim*`, `*Token`.
 - `sandbox_exec` thread events store the command (≤ 500 chars), exit code and duration. Never stdout.
+- `browser_action` thread events store the action, host, path without the query, ref and typed-text length (§3.9).
 - Wrangler output is never logged raw.
 
 ## 6. Privacy and retention
@@ -636,7 +755,7 @@ demand). It says:
 - How:
   - short commands with timeouts;
   - for longer work, write a script, then run it;
-  - no background servers;
+  - no background servers (agent-browser's browser excepted; the `web-browsing` skill covers it);
   - parallel independent calls are fine.
 - Deliverables: `sandbox_export` each one with a description, and list the `file_…` ids + one line each in the
   final message.

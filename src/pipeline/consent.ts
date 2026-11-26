@@ -31,6 +31,9 @@ import { redirectGroupPing } from './guideline-actions.js';
 import type { BatchReason } from './rules.js';
 import { showIntakeStatus } from './session-status.js';
 import type { SlackMessage } from './store.js';
+import { deleteAllVaultData } from '../features/vault/store.js';
+import { deleteConnectorData } from '../features/connectors/settings.js';
+import { cancelSubagent } from '../agent/subagents.js';
 
 const PROMPT_THROTTLE_S = 10 * 60;
 export const HOLD_REPLAY_MS = 60 * 60 * 1000;
@@ -199,6 +202,22 @@ export async function retryStaleReplays(): Promise<void> {
  * them are dropped / stopped (without treating a thread root as gone: it is still in Slack). Messages they write
  * afterwards are stored as context again, as for anyone who hasn't agreed. Ends with a DM saying what was deleted.
  */
+/** Cancel the user's active subagents. Returns how many. */
+async function cancelOwnSubagents(userId: string): Promise<number> {
+  const rows = await sql<{ id: string; threadId: string }[]>`
+    select id, thread_id from subagents where owner_id = ${userId} and status in ('running', 'idle')`;
+  let n = 0;
+  for (const r of rows) {
+    try {
+      await cancelSubagent({ threadId: r.threadId, subagentId: r.id, actor: userId });
+      n++;
+    } catch (err) {
+      log.warn({ err, userId, subagentId: r.id }, 'privacy withdraw: cancelling a subagent failed');
+    }
+  }
+  return n;
+}
+
 export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   const userId = ctx.userId;
   const wasAgreed = await hasAgreed(userId);
@@ -214,6 +233,16 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   await sql`delete from thread_summaries where thread_id in (select distinct thread_id from messages where user_id = ${userId} and thread_id is not null)`;
   // Code-channel seed summaries and briefs they asked for or that cover threads they wrote in (before their messages go).
   const codeChannelSeeds = await forgetUserCodeChannelData(userId);
+  // Their vault: credentials, connector connections, saved browser sessions, approvals and the audit log.
+  const credentials = await deleteAllVaultData(userId).catch((err) => {
+    log.warn({ err, userId }, 'privacy withdraw: deleting their vault failed');
+    return 0;
+  });
+  // Their connector permission settings and cached tool lists; aborts their in-flight connector calls.
+  await deleteConnectorData(userId).catch((err) => log.warn({ err, userId }, 'privacy withdraw: deleting their connector settings failed'));
+  // Their subagents: cancelled, so the sandbox sweep (docs/sandbox.md, every 30 s) destroys their sandboxes and paused
+  // snapshots, with any credential files or loaded browser sessions in them. A running one stops at its next step.
+  const subagents = await cancelOwnSubagents(userId).catch((err) => (log.warn({ err, userId }, 'privacy withdraw: cancelling their subagents failed'), 0));
   // Theirs anywhere, and everything (the bot's replies too) in their DMs with the bot.
   const msgs = await sql<{ channelId: string; ts: string; threadId: string | null; userId: string | null }[]>`
     select channel_id, ts, thread_id, user_id from messages
@@ -241,12 +270,14 @@ export async function handlePrivacyWithdraw(ctx: ActionContext): Promise<void> {
   });
   // Again, for a failure review that loaded their messages before they were deleted and filed after the first pass.
   await sql`delete from failure_reports where speaker_id = ${userId} or evidence @> ${sql.json([{ userId }] as any)}`;
-  log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length, files, codeChannelSeeds }, 'privacy: consent withdrawn, data deleted');
+  log.info({ userId, wasAgreed, facts, messages: deleted, of: msgs.length, files, codeChannelSeeds, credentials, subagents }, 'privacy: consent withdrawn, data deleted');
   await publishHome(userId);
   const text =
     (wasAgreed ? "Done: you've withdrawn your consent to my privacy policy. I won't answer you until you agree again. " : 'Done. ') +
     `I deleted ${facts} remembered fact${facts === 1 ? '' : 's'}, ${deleted} stored message${deleted === 1 ? '' : 's'} of yours (with their files), ${files} file${files === 1 ? '' : 's'} I made for you or stored from your uploads, our DMs, ` +
-    'your reminders and watches, and the records of my answers in those conversations. Other copies go within 30 days. Messages in Slack itself are untouched.';
+    `your reminders and watches, ${credentials} stored credential${credentials === 1 ? '' : 's'} and connection${credentials === 1 ? '' : 's'} with their usage log, and the records of my answers in those conversations.` +
+    (subagents ? ` I stopped ${subagents} background task${subagents === 1 ? '' : 's'} of yours; their code sandboxes (with any credentials or logins loaded into them) are deleted within a few minutes.` : '') +
+    ' Other copies go within 30 days. Messages in Slack itself are untouched.';
   await slackCall('chat.postMessage', { channel: userId, text }, { idempotencyKey: `privacy-withdraw:${userId}:${ctx.triggerId ?? ctx.messageTs ?? Date.now()}` }).catch((err) =>
     log.warn({ err }, 'privacy withdraw DM failed'),
   );

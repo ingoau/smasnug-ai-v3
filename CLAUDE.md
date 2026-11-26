@@ -2,6 +2,7 @@
 
 Workspace Slack agent. Full spec: `docs/design.md` (read the sections relevant to your work).
 Traces + evals: `docs/evals.md`. Code sandboxes: `docs/sandbox.md`. Code channels: `docs/code-channels.md`.
+Vault (per-user credentials): `docs/vault.md`. MCP connectors: `docs/mcp-custom-connectors.md`.
 
 ## Stack
 TypeScript (ESM, NodeNext — imports use `.js` suffix), Node 22+, pnpm. AI SDK v7 (`ai`, docs in
@@ -52,9 +53,9 @@ TEST_REDIS_URL are set, `<test db>_<name>` + the test Redis db plus an offset (s
 | pipeline | `src/ingress/**`, `src/worker/**`, `src/pipeline/**` | event intake, message storage, rules, gate, disengagement, debounce, thread lock + turn scheduling, inbox push, status indicator, interaction dispatch, process lifecycle |
 | tools | `src/tools/**`, `src/context/**`, `src/files/**` | fetch_url, web search, slack search, read_thread/read_channel, read_file/ask_file, search_emojis, react, download_emoji / upload_emoji (`docs/emoji.md`), thread context rendering, images, file store (create_file/read_file/ask_file), workspace directory + profile store (`src/tools/directory/`: crawl, events, find_people/find_channels; `getUserInfo` reads it) |
 | agent | `src/agent/**`, `skills/**` | front agent loop, reply tool + streaming, subagents/runs/inbox, plan cards (turn steps + runs), skills (`load_skill`), background card / DM session titles (`titles.ts`), lookup guard, sweeper, expiry, compaction, synthesis |
-| features | `src/features/**`, `slack-manifest.yml` | memory + extraction + memory tools, workspace facts, App Home, send_message + confirmation + attribution, reports/suspension/moderation, report_user (bot reports, `bot-reports.ts`), limits/guard, kill switches, retention, HuddleFM DJ mode (`huddlefm/`), code channels (`code-channels/`, `docs/code-channels.md`; intake side in `src/pipeline/code-channel-intake.ts`) |
+| features | `src/features/**`, `slack-manifest.yml` | memory + extraction + memory tools, workspace facts, App Home, send_message + confirmation + attribution, reports/suspension/moderation, report_user (bot reports, `bot-reports.ts`), limits/guard, kill switches, retention, HuddleFM DJ mode (`huddlefm/`), code channels (`code-channels/`, `docs/code-channels.md`; intake side in `src/pipeline/code-channel-intake.ts`), vault (`vault/`, `docs/vault.md`: credentials, owner approvals, audit), MCP connectors (`connectors/`, `docs/mcp-custom-connectors.md`; catalog + "Add connector"), App Home "View all" dialogs for long lists (`home-lists.ts`) |
 | evals | `src/eval/**`, `scripts/eval-export.ts`, `src/agent/trace.ts` | traces (recording, retention), detectors, eval export (docs/evals.md) |
-| sandbox | `src/sandbox/**` | code sandboxes (docs/sandbox.md): provider (Modal) + lifecycle, sandbox tools (every child, sandbox started on first use), HCA access + allowlist, budget/quotas, live previews (Cloudflare) |
+| sandbox | `src/sandbox/**` | code sandboxes (docs/sandbox.md): provider (Modal) + lifecycle, sandbox tools (every child, sandbox started on first use), HCA access + allowlist, budget/quotas, live previews (Cloudflare), browser tools (`browser/`: browser_*, sandbox credential files, saved browser sessions) |
 
 Cross-module contracts are stub files with final signatures — implement yours, call others', don't change a
 signature without coordinating: `src/pipeline/scheduler.ts` (requestTurn), `src/agent/front.ts` (runFrontTurn,
@@ -85,6 +86,9 @@ Queue processors: export `processors: Partial<Record<QueueName, (job) => Promise
 - Agent knowledge and procedures that only some requests need go in a skill (`skills/<name>/SKILL.md`, see
   `skills/README.md`; loader `src/agent/skills.ts`), not the system prompt: only names + descriptions are in the prompt and
   the agent calls `load_skill`.
+- Credentials (`docs/vault.md`): only the turn author (user turns) or a subagent's owner may use theirs, each use behind
+  the owner's approval card; secrets reach one request / browser field / sandbox file by code, never the model, a log
+  or a thread event. Modals that take secrets use a `vaultm:` / `connm:` callback id (sealed before queueing).
 - `report_user` (bot reports) stays invisible in the user's thread (no post, no status label) and never feeds auto-suspension.
 - Tests next to code as `*.test.ts`; unit-test pure logic, keep live API tests behind `LIVE=1`.
 - Commit early and often with focused messages.

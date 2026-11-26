@@ -83,6 +83,26 @@ describe('describeToolStep', () => {
     expect(describeToolStep('set_reminder', { text: 'x' })).toBe('Setting a reminder');
     expect(describeToolStep('mystery', { secret: 'internal' })).toBe('Working…');
   });
+
+  it('labels browser steps by action and never names a credential (the plan card is public)', () => {
+    expect(describeToolStep('browser_open', { url: 'https://github.com/login?x=1' })).toBe('Opening github.com');
+    expect(describeToolStep('browser_act', { action: 'click', ref: '@e3' })).toBe('Clicking on the page');
+    expect(describeToolStep('browser_act', { action: 'fill', ref: '@e3', text: 'hi' })).toBe('Filling in a form');
+    expect(describeToolStep('browser_read', { mode: 'text' })).toBe('Reading the page');
+    expect(describeToolStep('browser_read', { mode: 'snapshot' })).toBe('Looking at the page');
+    const secretName = 'acme-prod-admin';
+    for (const [tool, input] of [
+      ['browser_fill_credential', { ref: '@e4', credential: secretName, field: 'password' }],
+      ['browser_load_session', { name: secretName, purpose: 'x' }],
+      ['browser_save_session', { name: secretName, purpose: 'x' }],
+      ['sandbox_use_credential', { credential: secretName, purpose: 'x' }],
+      ['sandbox_save_credential', { name: secretName, type: 'api_key' }],
+    ] as const)
+      expect(describeToolStep(tool, input)).not.toContain(secretName);
+    expect(describeToolStep('browser_fill_credential', { credential: secretName })).toBe('Logging in');
+    expect(describeToolStep('sandbox_use_credential', { credential: secretName })).toBe('Using a stored credential');
+    expect(describeToolStep('browser_load_session', { name: secretName })).toBe('Loading a saved login');
+  });
 });
 
 describe('isNearDuplicate', () => {

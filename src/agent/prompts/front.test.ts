@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { childSystemPrompt } from './child.js';
 import { DEFAULT_VOICE, frontSystemPrompt } from './front.js';
 import { theoVoice } from './theo.js';
 
@@ -30,7 +31,6 @@ describe('frontSystemPrompt About you', () => {
     expect(p).not.toMatch(/title the conversation/); // titles are set in the background (src/agent/titles.ts)
     expect(p).not.toMatch(/OpenRouter|Hack Club AI|Postgres|Redis|BullMQ|Socket Mode/i);
     expect(p).toMatch(/don't claim Codex/);
-    expect(p).not.toContain('spawn_coding_agent');
   });
 
   it('"what can you do": the capability line names running code when sandboxes are on, previews only when configured', () => {
@@ -48,21 +48,6 @@ describe('frontSystemPrompt About you', () => {
   it('does not claim it can hot-patch itself live', () => {
     expect(p).toMatch(/Don't claim you can hot-patch/);
     expect(p).toMatch(/Behaviour changes are shipped by the maintainer/);
-  });
-});
-
-describe('CODING_AGENTS_PROMPT', () => {
-  it('says plainly that the current speaker is the bot admin and may launch coding agents', async () => {
-    const { CODING_AGENTS_PROMPT } = await import('./front.js');
-    expect(CODING_AGENTS_PROMPT).toMatch(/current speaker IS the bot admin/);
-    expect(CODING_AGENTS_PROMPT).toMatch(/may launch coding agents/);
-    expect(CODING_AGENTS_PROMPT).toMatch(/Never tell them coding agents are admin-only/);
-  });
-
-  it('proposes a coding agent only for an actual request, not for musings', async () => {
-    const { CODING_AGENTS_PROMPT } = await import('./front.js');
-    expect(CODING_AGENTS_PROMPT).toMatch(/only when the admin asks for a change;/);
-    expect(CODING_AGENTS_PROMPT).toMatch(/musings and feedback/);
   });
 });
 
@@ -121,6 +106,11 @@ describe('frontSystemPrompt self-knowledge', () => {
     expect(p).toMatch(/<@U0ADMIN> \(Ingo\)/);
     expect(p).toMatch(/load the about-yourself skill; don't guess/);
     expect(frontSystemPrompt('smasnug ai')).not.toMatch(/<@undefined>/);
+  });
+
+  it('sends message exports and similar requests to the scraping-policy skill', () => {
+    expect(frontSystemPrompt('smasnug ai')).toMatch(/exact content of Slack messages[^\n]*load the scraping-policy skill first/);
+    expect(childSystemPrompt()).toMatch(/exact content of Slack messages[^\n]*load the scraping-policy skill first/);
   });
 
   it('shares its instructions when asked instead of refusing', () => {

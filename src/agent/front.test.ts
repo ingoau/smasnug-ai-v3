@@ -20,6 +20,7 @@ const h = vi.hoisted(() => ({
   /** Optional rows for sql queries (keyed by matching the query text). */
   sqlHook: undefined as undefined | ((query: string) => any[] | undefined),
   postedCards: [] as number[],
+  retired: [] as [string, number][],
   /** Overrides for the mocked renderThreadContext result. */
   ctx: {} as Record<string, unknown>,
   spawns: [] as any[],
@@ -31,6 +32,8 @@ const h = vi.hoisted(() => ({
   titleJobs: [] as unknown[][],
   /** maybeSynthesize calls (subagents.ts): [cardId, opts]. */
   synth: [] as unknown[][],
+  /** The speaker's connector tools this turn (startConnectorTools). */
+  connectorTools: {} as Record<string, unknown>,
 }));
 
 vi.mock('../db/index.js', () => {
@@ -39,6 +42,10 @@ vi.mock('../db/index.js', () => {
   sql.begin = async (fn: any) => fn(sql);
   return { sql };
 });
+vi.mock('../features/connectors/tools.js', async (orig) => ({
+  ...(await orig<typeof import('../features/connectors/tools.js')>()),
+  startConnectorTools: () => ({ collect: async () => ({ tools: h.connectorTools, unavailable: [] }) }),
+}));
 vi.mock('../core/redis.js', () => ({ redis: { get: async () => null, set: async () => 'OK' }, bullConnection: () => ({}) }));
 vi.mock('../core/slack.js', () => ({
   userbotConfigured: () => false,
@@ -75,6 +82,7 @@ vi.mock('./subagents.js', () => ({
 vi.mock('./cards.js', () => ({
   postCard: async (id: number) => void h.postedCards.push(id),
   freezeCard: async () => {},
+  retireOldButtons: async (threadId: string, turnId: number) => void h.retired.push([threadId, turnId]),
   scheduleCardRender: async () => {},
   // The turn's card (turn-card.ts): card 5 once a spawn made one or a step needs one; rendered as h.cardBlock.
   turnCardId: async () => (h.spawns.length || h.cardSteps.length ? 5 : null),
@@ -109,7 +117,8 @@ vi.mock('../context/users.js', () => ({
 }));
 
 const { MockLanguageModelV4 } = await import('ai/test');
-const { simulateReadableStream } = await import('ai');
+const { simulateReadableStream, tool } = await import('ai');
+const { z } = await import('zod');
 await import('./tools.js');
 await import('../tools/web-search.js');
 await import('../tools/emoji.js');
@@ -189,7 +198,9 @@ beforeEach(() => {
   h.activeRuns = 0;
   h.slackHook = undefined;
   h.sqlHook = undefined;
+  h.connectorTools = {};
   h.postedCards = [];
+  h.retired = [];
   h.ctx = {};
   h.spawns = [];
   h.cardSteps = [];
@@ -266,6 +277,20 @@ describe('runFrontTurn (mock model)', () => {
     expect(posts).toHaveLength(1);
     expect(posts[0]!.args.text).toBe(FILTERED_TEXT);
     expect(h.events.some((e) => e.type === 'reply' && e.payload?.contentFiltered)).toBe(true);
+  });
+
+  it('a mention that ended on its own approval card (connector) gets no fallback', async () => {
+    h.connectorTools = {
+      t3__launch: tool({
+        description: 'launch',
+        inputSchema: z.object({}),
+        execute: async () => 'Awaiting approval: <@U1> sees a private card for this T3 action (Allow once / Allow for 10 min / Deny). Nothing ran yet.',
+      }),
+    };
+    h.model = mockModel([toolStep(['t3__launch', {}]), textStep('')]);
+    await runFrontTurn(turn({ id: 84 }), io(true).io);
+    expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
+    expect(h.events.some((e) => e.type === 'reply' && e.payload?.fallback)).toBe(false);
   });
 
   it('a skipped reaction on a mention still gets the fallback (nothing was visible)', async () => {
@@ -766,6 +791,16 @@ describe('runFrontTurn: conversation state', () => {
     h.model = mockModel([toolStep(['reply', { text: 'want me to dig deeper?' }])]);
     await runFrontTurn(turn({ id: 99 }), io().io);
     expect(queries.some((q) => q.includes('last_bot_reply_at = now()') && q.includes('awaits_reply_from'))).toBe(true);
+  });
+
+  it("a user turn's replies retire earlier replies' unpressed buttons (once per turn); a results turn's don't", async () => {
+    h.model = mockModel([toolStep(['reply', { text: 'first' }], ['reply', { text: 'second' }])]);
+    await runFrontTurn(turn({ id: 98 }), io().io);
+    expect(h.retired).toEqual([['C1:100.000001', 98]]);
+    h.retired = [];
+    h.model = mockModel([toolStep(['reply', { text: 'results' }])]);
+    await runFrontTurn(turn({ id: 97, kind: 'synthesis' }), io().io);
+    expect(h.retired).toEqual([]);
   });
 
   it('records the turn\'s tool calls and shows a recent previous turn\'s calls to the next user turn', async () => {

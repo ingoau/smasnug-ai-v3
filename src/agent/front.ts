@@ -20,15 +20,16 @@ import { renderTurnRules } from '../features/memory/rules.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
 import { OUTCOME_SOURCES, outcomeObsolete, renderOutcomeFallback } from '../features/outcome-turn.js';
 import { loadPendingActions, renderPendingActions } from '../features/pending.js';
+import { isAdmin } from '../features/util.js';
 import { renderDjState } from '../features/huddlefm/render.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chatModel, isClaude, modelDisplayName, MODELS, modelOptions } from '../models.js';
 import { log } from '../log.js';
 import { TurnTiming } from '../core/timing.js';
-import { freezeCard } from './cards.js';
+import { freezeCard, retireOldButtons } from './cards.js';
 import { enqueueCardTitle, enqueueSessionTitle } from './titles.js';
 import { TurnCard } from './turn-card.js';
-import { CODING_AGENTS_PROMPT, frontSystemPrompt, MOVE_TO_CHANNEL_PROMPT } from './prompts/front.js';
+import { frontSystemPrompt, MOVE_TO_CHANNEL_PROMPT } from './prompts/front.js';
 import { theoVoice } from './prompts/theo.js';
 import { theoModeEnabled } from '../features/theo-mode.js';
 import { skillsPrompt } from './skills.js';
@@ -38,7 +39,6 @@ import { PRIVATE_HIDDEN_TOOLS, postPrivateNote } from './private-reply.js';
 import { activeRunsInThread, maybeSynthesize } from './subagents.js';
 import { renderBatchStatus, renderOpenBatches } from './batch-status.js';
 import { loadSinceRound, renderSinceRound, type SinceItem } from './round-since.js';
-import { cursorInstructRefusal, cursorRefusal, isCursorAdmin } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
 import { decidePlainText, endsTurnAfterStep, PLAIN_TEXT_NUDGE_NOTE, postablePlainText, replyEndsWithLookups, REPLY_WITH_LOOKUPS_NOTE, type StepCall, type StepResultPart } from './turn-end.js';
 import { countLookupSteps, LOOKUP_RESTRICT_NOTE, LOOKUP_TOOLS, lookupGuard, lookupNudgeNote, nonLookupTools, type LookupGuard } from './lookup-guard.js';
@@ -47,11 +47,14 @@ import { noteBotReply } from '../pipeline/store.js';
 import { awaitsReply } from '../pipeline/rules.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
+import { redactToolInput } from './tool-redact.js';
+import { approvalOwner } from '../features/vault/identity.js';
 import { saveTrace, TraceRecorder } from './trace.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
 import { previewsOfRuns, type PreviewRow } from '../sandbox/preview/store.js';
 import { postUnannouncedPreviews } from '../sandbox/preview/reply-blocks.js';
 import { offersMoveButton } from '../features/code-channels/logic.js';
+import { CONNECTOR_TOOLS_GRACE_MS, connectorsUnavailableNote, startConnectorTools } from '../features/connectors/tools.js';
 import { hiddenToolsFor, loadCodeChannelTurnContext, NO_CODE_CHANNELS, renderChildrenSection, renderHereSection, type CodeChannelTurnContext } from '../features/code-channels/turn-context.js';
 
 export interface TurnIO {
@@ -113,6 +116,8 @@ const FALLBACK_TEXT = "Sorry, I couldn't come up with a reply to that. Could you
 export const FILTERED_TEXT =
   "I can't respond to that: the model's safety filter blocked it (probably something in the conversation or what I read). Try asking differently.";
 const ERROR_NOTE = '_Something broke, try again._';
+/** How a tool result starts when it put up an approval card (connectors/tools.ts promptCall, vault/tools.ts). */
+const AWAITING_APPROVAL = 'Awaiting approval:';
 
 /** Tool names (from any module) whose successful result is visible to users. reply/react record their own. */
 const VISIBLE_TOOLS: Record<string, VisibleAction> = {
@@ -148,7 +153,7 @@ function frontModelNames(): { model: string; fallbackModel?: string } {
   return { model: modelDisplayName(MODELS.front), ...(isClaude(MODELS.front) ? { fallbackModel: modelDisplayName(env.MODEL_LUNA) } : {}) };
 }
 
-async function buildSystem(opts: { codingAgents?: boolean; moveToChannel?: boolean } = {}): Promise<string> {
+async function buildSystem(opts: { moveToChannel?: boolean } = {}): Promise<string> {
   const [factsText, theo] = await Promise.all([renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), '')), theoModeEnabled()]);
   const facts = factsText.trim();
   // Theo mode (admin setting, App Home) swaps the "# Voice" section for prompts/theo.md.
@@ -159,8 +164,6 @@ async function buildSystem(opts: { codingAgents?: boolean; moveToChannel?: boole
   if (skillIndex) system = `${system}\n\n${skillIndex}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
   if (opts.moveToChannel) system = `${system}\n\n${MOVE_TO_CHANNEL_PROMPT}`;
-  // Admin-only section last: the shared prefix stays the same for everyone.
-  if (opts.codingAgents) system = `${system}\n\n${CODING_AGENTS_PROMPT}`;
   return system;
 }
 
@@ -194,7 +197,7 @@ export async function renderParticipantsSection(ids: string[] | undefined, speak
  * so this section stays the same from turn to turn.
  */
 export function renderSpeaker(authorId: string, speaker: Speaker, now: Date, viewingChannelId?: string | null): string {
-  const privileges = privilegesLine(speaker.info, { botAdmin: isCursorAdmin(authorId), codingAgents: !cursorRefusal(authorId) });
+  const privileges = privilegesLine(speaker.info, { botAdmin: isAdmin(authorId) });
   const lines = [personRef(authorId, profileText(speaker.name)), ...speakerDetailLines(speaker.info, now), privileges, `Time zone: ${speaker.tz || 'UTC'}`];
   if (viewingChannelId) lines.push(`User is currently viewing <#${viewingChannelId}> (e.g. "this channel").`);
   return lines.join('\n');
@@ -227,8 +230,8 @@ export function formatLocalTime(now: Date, tz: string | undefined): string {
 /** The thread's subagents (running + idle; expired/cancelled excluded) for the front agent. */
 /** `viewer`: the user of a private (`!p`) turn, who also sees their private subagents (others never do). */
 export async function renderSnapshot(threadId: string, viewer: string | null = null): Promise<string> {
-  const rows = await sql<{ id: string; ownerId: string; title: string; status: string; summary: string | null; current: string | null; lastError: string | null; runStatus: string | null; kind: string; sandbox: boolean }[]>`
-    select s.id, s.owner_id, s.title, s.status, s.summary, s.kind, s.sandbox,
+  const rows = await sql<{ id: string; ownerId: string; title: string; status: string; summary: string | null; current: string | null; lastError: string | null; runStatus: string | null; sandbox: boolean }[]>`
+    select s.id, s.owner_id, s.title, s.status, s.summary, s.sandbox,
       (select coalesce(r.details, r.status) from runs r where r.subagent_id = s.id and r.status in ('queued', 'running') order by r.id desc limit 1) as current,
       (select r.error from runs r where r.subagent_id = s.id and r.status not in ('queued', 'running') order by r.id desc limit 1) as last_error
     from subagents s where s.thread_id = ${threadId} and s.status in ('running', 'idle')
@@ -240,7 +243,7 @@ export async function renderSnapshot(threadId: string, viewer: string | null = n
       // An idle subagent whose last run failed keeps its older summary: say it failed, or the failure is invisible here.
       const failed = r.lastError ? ` (last run FAILED: ${oneLine(r.lastError, 80)})` : '';
       const state = r.status === 'running' ? `running${r.current ? `: ${oneLine(r.current, 80)}` : ''}` : `idle${failed}${r.summary ? `: ${oneLine(r.summary, 120)}` : ''}`;
-      return `- ${r.id} "${r.title}"${r.kind === 'cursor' ? ' [coding agent, Cursor]' : r.sandbox ? ' [sandbox]' : ''} (owner <@${r.ownerId}>) — ${state}`;
+      return `- ${r.id} "${r.title}"${r.sandbox ? ' [sandbox]' : ''} (owner <@${r.ownerId}>) — ${state}`;
     })
     .join('\n');
 }
@@ -353,7 +356,8 @@ export function summarizeToolCalls(calls: { tool: string; args: unknown }[]): { 
     .map((c) => {
       let args = '';
       try {
-        args = JSON.stringify(c.args ?? {});
+        // Secret inputs (save_credential's value / password / totp) never reach the event or the next turn.
+        args = JSON.stringify(redactToolInput(c.tool, c.args) ?? {});
       } catch {
         args = '{}';
       }
@@ -505,8 +509,8 @@ async function buildTurnMessage(
     parts.push(SYNTHESIS_INSTRUCTION);
     if (queued) parts.push(queued);
   } else if (turn.kind === 'scheduled') {
-    // A fired reminder or watch notification (src/features/schedule), a confirmation outcome (send_message /
-    // coding-agent launch, src/features/outcome-turn.ts) or a HuddleFM DJ notice (src/features/huddlefm/notices.ts):
+    // A fired reminder or watch notification (src/features/schedule), a confirmation outcome (send_message,
+    // live previews, vault approvals…, src/features/outcome-turn.ts) or a HuddleFM DJ notice (src/features/huddlefm/notices.ts):
     // its stored input replaces new messages.
     const sched = await scheduledTurnInput(turn.id).catch((err) => (log.warn({ err }, 'scheduledTurnInput failed'), null));
     const isOutcome = Boolean(sched && OUTCOME_SOURCES.includes(sched.source));
@@ -556,8 +560,7 @@ const MAX_UNHANDLED = 10;
 
 /**
  * For a non-user turn: people's messages it must leave alone. (1) User turns already queued in this thread (messages
- * that arrived meanwhile): they run right after this one with their speaker's own tools (e.g. the admin's
- * spawn_coding_agent, never offered in a results turn). (2) Human messages stored after the bot's last reply (within
+ * that arrived meanwhile): they run right after this one with their speaker's own identity and permissions. (2) Human messages stored after the bot's last reply (within
  * the last 15 minutes) that are in no turn yet: still in their debounce window or at the relevance gate. They get a
  * turn of their own if they're meant for the bot, so a results / reminder turn that starts meanwhile must not answer
  * them too (prod: a results turn answered a question that its own turn then answered again).
@@ -773,6 +776,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     turn.kind === 'user' ? await placeTargetFor(turn.threadId, turn.messageTs ?? []).catch((err) => (log.warn({ err }, 'placeTargetFor failed'), null)) : null;
   /** The model that answered the latest model call (chatModel's onServed): a fallback shows in the reply footer. */
   let servedModel: string | null = null;
+  let buttonsRetired = false;
   const replies = new ReplyManager({
     placeTarget: privateTo ? null : placeTarget,
     privateTo,
@@ -804,7 +808,17 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     // Every delivered reply (any turn kind) restarts the thread's idle clock, names the speaker as the bot's
     // conversation partner and records whether it waits for their answer (pipeline/rules.ts awaitsReply).
     // A private answer isn't in the thread: no partner / awaited-reply state from it.
-    onDelivered: privateTo ? undefined : (r) => noteBotReply(turn.threadId, { ts: r.ts, partnerId: turn.authorId, awaitsReply: awaitsReply(r.text, r.buttons) }),
+    // A reply to a user's message also retires earlier replies' unpressed quick-reply buttons (the conversation moved
+    // on), once per turn and in the background.
+    onDelivered: privateTo
+      ? undefined
+      : async (r) => {
+          await noteBotReply(turn.threadId, { ts: r.ts, partnerId: turn.authorId, awaitsReply: awaitsReply(r.text, r.buttons) });
+          if (turn.kind === 'user' && !buttonsRetired) {
+            buttonsRetired = true;
+            void retireOldButtons(turn.threadId, turnId);
+          }
+        },
   });
   turn = { ...turn, id: turnId, cardId: turn.cardId != null ? Number(turn.cardId) : null, messageTs: turn.messageTs ?? [] };
   const state: FrontTurnState = {
@@ -838,10 +852,12 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, abortSignal: stopAbort.signal, extras });
   for (const name of hiddenToolsFor(codeChannels)) delete tools[name];
   if (privateTo) for (const name of PRIVATE_HIDDEN_TOOLS) delete tools[name];
+  // MCP connectors (docs/mcp-custom-connectors.md): the speaker's own connected services, on their own user turns only
+  // (filtered at build time; prompt-mode tools left out of private turns). Never replaces a built-in tool. Loaded while
+  // the context is built (a cold tool list is a network call); merged before the model runs, waiting at most
+  // CONNECTOR_TOOLS_GRACE_MS more: a slower connector sits this turn out (a note tells the model). Never throws.
+  const connectorLoad = startConnectorTools({ turn, speakerId: turn.authorId, abortSignal: stopAbort.signal, taken: Object.keys(tools) });
   recordReactVisibility(tools, state);
-  // Coding agents change the bot's own code: only offered in the admin's own message turns when configured (not in
-  // synthesis / scheduled turns, whose input is other content; re-checked on use).
-  if (cursorInstructRefusal(turn.authorId, turn.kind)) delete tools.spawn_coding_agent;
 
   const timing = io.timing ?? new TurnTiming();
   timing.mark('context_start');
@@ -849,10 +865,20 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     timing.span('ctx_speaker', () => speakerInfo(turn.authorId)),
     loadSessionInfo(turn.threadId).catch((err) => (log.warn({ err }, 'loadSessionInfo failed'), null)),
   ]);
-  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId), moveToChannel: offersMoveButton({ enabled: codeChannels.enabled, inCodeChannel: Boolean(codeChannels.here) }) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
+  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ moveToChannel: offersMoveButton({ enabled: codeChannels.enabled, inCodeChannel: Boolean(codeChannels.here) }) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
   timing.mark('context_built');
-  timing.set('prompt_chars', system.length + built.text.length);
-  const messages: ModelMessage[] = [{ role: 'user', content: built.text }];
+  if (built.outcome?.source) {
+    // An approval outcome turn may carry on with the owner's credentials (vaultIdentity): only the approval's own owner.
+    const sourceRef = built.outcome.sourceRef ?? null;
+    const approvalOwnerId = built.outcome.source === 'approval' ? await approvalOwner(sourceRef).catch((err) => (log.warn({ err }, 'approval owner lookup failed'), null)) : null;
+    state.outcome = { source: built.outcome.source, sourceRef, approvalOwnerId };
+  }
+  const connectors = await connectorLoad.collect(CONNECTOR_TOOLS_GRACE_MS);
+  Object.assign(tools, connectors.tools);
+  const connectorNote = connectorsUnavailableNote(connectors.unavailable);
+  const turnText = connectorNote ? `${built.text}\n\n${connectorNote}` : built.text;
+  timing.set('prompt_chars', system.length + turnText.length);
+  const messages: ModelMessage[] = [{ role: 'user', content: turnText }];
   const ph: { current: 'tools' | 'final' } = { current: 'tools' };
   const setPhase = async (p: 'tools' | 'final') => {
     if (p === ph.current) return;
@@ -900,6 +926,11 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   // end_turn({ no_reply_requested: true }): the speaker asked for no reply ("don't respond to this"), so a silent
   // mention gets no fallback.
   let silenceRequested = false;
+  /**
+   * This turn's own tool call put up an approval card for the speaker ("Awaiting approval… end the turn"): that card
+   * answers them for now (its outcome turn reports back), so no fallback.
+   */
+  let approvalAsked = false;
   /** The latest step ended in a content-filter refusal (every provider tier refused): explain instead of apologising. */
   let lastStepFiltered = false;
   /** This step was refused: with toolChoice 'required' the SDK reports finishReason 'error' and keeps the real one on its ToolChoiceViolationError. */
@@ -1014,6 +1045,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             stepResults.push({ toolCallId: part.toolCallId, toolName: part.toolName, output: part.output });
             const v = VISIBLE_TOOLS[part.toolName];
             if (v) state.visible.add(v);
+            // A connector / vault call now waiting on the speaker's approval card (requestApproval, outcome mode).
+            if (typeof part.output === 'string' && part.output.startsWith(AWAITING_APPROVAL)) approvalAsked = true;
             if (v === 'send') replies.notePostedInThread(); // posted below any open activity message
             break;
           }
@@ -1190,8 +1223,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (outcome) return void (await postOutcomeFallback());
     if (previewPostedOnFailure) return;
     // A reaction (or other non-reply visible effect) already answered the user: don't throw, or the pipeline posts
-    // "Something broke" on top of it.
-    if (state.visible.size > 0) return;
+    // "Something broke" on top of it. An approval card counts too: its outcome turn reports back.
+    if (state.visible.size > 0 || approvalAsked) return;
     throw failed;
   }
 
@@ -1214,7 +1247,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   else if (state.visible.size === 0 && !previewPosted && silenceRequested && turn.kind !== 'synthesis' && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
     // Asked not to respond: no fallback, but leave a trace of it (evals can spot a misused flag).
     await appendEvent(turn.threadId, 'reply_skipped', 'bot', { turnId, noReplyRequested: true });
-  } else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
+  } else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke) && !approvalAsked) {
+    // (Not when the speaker was shown an approval card: that answers them for now, and its outcome turn reports back.)
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;

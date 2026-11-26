@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+<meta name="robots" content="noindex">
+<title>Connect to Slack</title>
+<!--
+  OAuth redirect page for smasnug's MCP connectors (docs/mcp-custom-connectors.md, "OAuth").
+  Host it anywhere static and set MCP_OAUTH_REDIRECT_URL to its URL. It never sends anything anywhere: it reads
+  ?code / ?state (or ?error) from its own URL, removes them from the address bar, and shows one string to copy back
+  into the Slack modal. The code is single-use and worthless without the PKCE verifier only the bot holds.
+-->
+<style>
+  :root { color-scheme: light dark; --bg: #f7f7f5; --fg: #1d1c1d; --muted: #616061; --card: #fff; --line: #ddd; --accent: #007a5a; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1a1d21; --fg: #e8e8e8; --muted: #ababad; --card: #222529; --line: #3a3d41; --accent: #2bac76; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px; background: var(--bg); color: var(--fg);
+         font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { width: 100%; max-width: 520px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 24px; }
+  h1 { font-size: 1.25rem; margin: 0 0 8px; }
+  p { margin: 0 0 16px; color: var(--muted); }
+  code { display: block; padding: 12px; border: 1px solid var(--line); border-radius: 8px; word-break: break-all;
+         font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; margin-bottom: 16px; user-select: all; }
+  button { width: 100%; padding: 12px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  .err { color: #e01e5a; }
+  [hidden] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <section id="ok" hidden>
+    <h1>Almost done</h1>
+    <p>Copy this code and paste it into the box in Slack. It works once and only for you.</p>
+    <code id="blob"></code>
+    <button id="copy" type="button">Copy code</button>
+  </section>
+  <section id="fail" hidden>
+    <h1 class="err">Connection not finished</h1>
+    <p id="reason"></p>
+    <p>Go back to Slack and press Connect again.</p>
+  </section>
+</main>
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search);
+    // Drop the code from the address bar and history so it isn't left lying around.
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
+    var code = q.get('code'), state = q.get('state'), error = q.get('error');
+    if (code && state && !error) {
+      // One string for the Slack modal: "<state>.<code>" (state first: it is base64url, so it has no dots).
+      var blob = state + '.' + code;
+      document.getElementById('blob').textContent = blob;
+      document.getElementById('ok').hidden = false;
+      var btn = document.getElementById('copy');
+      btn.addEventListener('click', function () {
+        var done = function () { btn.textContent = 'Copied. Paste it in Slack'; };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(blob).then(done, function () { selectBlob(); });
+        } else { selectBlob(); }
+      });
+    } else {
+      document.getElementById('reason').textContent = error
+        ? 'The service said: ' + (q.get('error_description') || error)
+        : 'This page needs the code the service sends back after you approve.';
+      document.getElementById('fail').hidden = false;
+    }
+    function selectBlob() {
+      var r = document.createRange(); r.selectNodeContents(document.getElementById('blob'));
+      var s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      btn.textContent = 'Press Ctrl+C / Cmd+C to copy';
+    }
+  })();
+</script>
+</body>
+</html>

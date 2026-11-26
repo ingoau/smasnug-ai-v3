@@ -20,6 +20,9 @@ import { djMaintenance, processHuddleFm, registerDjTools } from './huddlefm/regi
 import { registerCodeChannelTools } from './code-channels/tools.js';
 import { sweepCodeChannels } from './code-channels/lifecycle.js';
 import { processCodeChannelStatus } from './code-channels/status.js';
+import { registerVault, vaultMaintenance } from './vault/register.js';
+import { registerConnectors } from './connectors/register.js';
+import { registerHomeListActions } from './home-lists.js';
 
 // Tools (front agent only): remember, forget, propose_workspace_fact, send_message, report_user, report_failure
 registerMemoryTools();
@@ -46,9 +49,17 @@ registerAction('mod:dismiss_bot_report', (ctx) => handleBotReportModAction(ctx, 
 registerAction('mod:', (ctx) => handleModAction(ctx, publishHome));
 registerAction('fact:', (ctx) => handleFactAction(ctx, publishHome));
 registerAction('mem:', handleMemoryAction);
+// App Home "View all" dialogs (memories, workspace facts, credentials, reminders…): src/features/home-lists.ts
+registerHomeListActions();
 registerAction('admin:', handleAdminAction);
 registerAction('slash:/smasnug', handleSlash);
 registerAction('sched:', (ctx) => handleScheduleAction(ctx, publishHome));
+// Vault (docs/vault.md; off without VAULT_SECRET_KEY): list_credentials, save_credential, request_credential,
+// fetch_with_credential, approval cards and the App Home credential modal.
+registerVault(publishHome);
+// MCP connectors (docs/mcp-custom-connectors.md; off without VAULT_SECRET_KEY or an enabled catalog entry): App Home
+// connect / settings, the prompt-mode approval executor. Tools are loaded per front user turn (src/agent/front.ts).
+registerConnectors(publishHome);
 registerAppHome(publishHome);
 
 export const processors: Partial<Record<QueueName, (job: Job) => Promise<void>>> = {
@@ -67,6 +78,7 @@ export const maintenance: Record<string, { everyMs: number; run: () => Promise<v
   'features:code-channel-sweep': { everyMs: 60 * 60 * 1000, run: async () => void (await sweepCodeChannels()) },
   ...scheduleMaintenance,
   ...djMaintenance,
+  ...vaultMaintenance,
 };
 
 /** Called on SIGTERM before the worker exits. */

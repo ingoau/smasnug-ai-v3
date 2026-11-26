@@ -235,22 +235,6 @@ describe.skipIf(!INTEGRATION)('agent sessions (DMs)', () => {
       expect(await statuses(dm.channelId)).toEqual(['processing', 'active']);
     });
 
-    it('a pending coding-agent launch suspends the session too; resolving it resumes', async () => {
-      const dm = await thread(true);
-      const [p] = await sql<{ id: string }[]>`
-        insert into pending_coding_agents (thread_id, owner_id, title, instructions, expires_at)
-        values (${dm.id}, 'UADMIN', 't', 'i', now() + interval '10 minutes') returning id`;
-      expect(await s.finalSessionStatus(dm.id, 1)).toBe('suspended');
-      await s.noteSessionSuspended(dm.id);
-      expect(await redis.zscore('sessions:suspended', dm.id)).not.toBeNull();
-      await s.resumeSuspendedSession(dm.id);
-      expect(await statuses(dm.channelId)).toEqual([]); // still pending
-      await sql`update pending_coding_agents set status = 'launched' where id = ${p!.id}`;
-      await s.resumeSuspendedSession(dm.id);
-      expect(await statuses(dm.channelId)).toEqual(['active']);
-      expect(await redis.zscore('sessions:suspended', dm.id)).toBeNull();
-    });
-
     // Review #1: the expiry's silent outcome turn never touches the status, and resume / the 15 s sweep skipped while a
     // worker held the thread lock (the sweep even dropped its entry): the session stayed `suspended` for good.
     it('expiry while the thread lock is held: the session still ends active (sweep keeps its entry, thread run re-checks)', async () => {

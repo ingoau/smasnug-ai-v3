@@ -4,7 +4,8 @@ import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
 import { threadIdOf, threadTsArg } from '../core/events.js';
 import { createFile, FileError, fileStore, loadFileBytes, recordFilePosts, resolveFile, type FileMeta } from '../files/store.js';
-import { sanitizeFileName, slackSnippetType, uploadContentType } from '../files/format.js';
+import { isImageMime, sanitizeFileName, slackSnippetType, uploadContentType } from '../files/format.js';
+import { limits } from '../config.js';
 import { copyLargeFileTo, transferTimeoutMs } from '../files/large.js';
 import { urlImage } from './rich-blocks.js';
 import type { ImageArg } from './reply.js';
@@ -34,13 +35,18 @@ export async function prepareOutgoingFiles(
   const files: OutgoingFile[] = [];
   const errors: string[] = [];
   const seen = new Set<string>();
+  const resolved = new Map<string, Awaited<ReturnType<typeof resolveFile>>>();
+  for (const item of items ?? []) if (typeof item === 'string' && !resolved.has(item)) resolved.set(item, await resolveFile(item, ctx));
+  const problems = await downloadProblems([...resolved.values()]);
   for (const item of items ?? []) {
     if (typeof item === 'string') {
-      const f = await resolveFile(item, ctx);
+      const f = resolved.get(item)!;
       if ('error' in f) errors.push(f.error);
       else if (!seen.has(f.id)) {
         seen.add(f.id);
-        files.push({ fileId: f.id, filename: sanitizeFileName(f.name) });
+        const problem = problems.get(f.id);
+        if (problem) errors.push(problem);
+        else files.push({ fileId: f.id, filename: sanitizeFileName(f.name) });
       }
       continue;
     }
@@ -68,6 +74,35 @@ export async function prepareOutgoingFiles(
   return { files, errors };
 }
 
+/**
+ * An upload not fetched yet is fetched now (and kept, like any first use), so a file Slack won't let the bot download
+ * (e.g. in a channel the bot isn't in, without a user token that may read files) is reported per file before the
+ * message goes out, instead of failing the whole upload after the text is already visible. Null: it can be posted.
+ */
+async function notDownloadable(f: FileMeta): Promise<string | null> {
+  if (f.origin !== 'upload' || f.hasContent || f.blobSlackFileId) return null;
+  // Images over the store's cap aren't kept once downloaded: checking would fetch them twice.
+  if (f.size != null && f.size > limits.fileMaxBytes && isImageMime(f.mime, f.name)) return null;
+  try {
+    await loadFileBytes(f);
+    return null;
+  } catch (err) {
+    log.info({ err, fileId: f.id }, 'file to post could not be downloaded');
+    return `${f.id} (${f.name}) couldn't be attached: ${err instanceof FileError ? err.message : 'downloading it from Slack failed'}.`;
+  }
+}
+
+/** notDownloadable for several resolved files at once (in parallel; the reply waits for it): problems by file id. */
+async function downloadProblems(list: readonly (FileMeta | { error: string })[]): Promise<Map<string, string>> {
+  const metas = [...new Map(list.flatMap((f) => ('error' in f ? [] : [[f.id, f] as const]))).values()];
+  const out = new Map<string, string>();
+  await Promise.all(metas.map(async (f) => {
+    const problem = await notDownloadable(f);
+    if (problem) out.set(f.id, problem);
+  }));
+  return out;
+}
+
 /** Image types Slack's image block shows (`slack_file`: png, jpg, jpeg, gif). */
 const BLOCK_IMAGE = /^image\/(png|jpeg|gif)$/i;
 const BLOCK_IMAGE_NAME = /\.(png|jpe?g|gif)$/i;
@@ -89,20 +124,31 @@ export async function prepareImageArgs(
   ctx: { threadId: string; speakerId: string },
   items: readonly ImageInput[] | null | undefined,
   max: number,
-): Promise<{ images: ImageArg[]; attach: OutgoingFile[]; errors: string[] }> {
+): Promise<{ images: ImageArg[]; attach: OutgoingFile[]; errors: string[]; missing: number }> {
   const images: ImageArg[] = [];
   const attach: OutgoingFile[] = [];
   const errors: string[] = [];
+  let missing = 0;
   const list = items ?? [];
   if (list.length > max) errors.push(`Only the first ${max} images were shown.`);
+  const resolved = new Map<string, Awaited<ReturnType<typeof resolveFile>>>();
+  for (const item of list.slice(0, max)) if (item?.file && !resolved.has(item.file)) resolved.set(item.file, await resolveFile(item.file, ctx));
+  const problems = await downloadProblems([...resolved.values()]);
   for (const [i, item] of list.slice(0, max).entries()) {
     const n = i + 1;
     const alt = typeof item?.alt === 'string' ? item.alt : '';
     const title = typeof item?.title === 'string' && item.title.trim() ? item.title : undefined;
     if (item?.file) {
-      const f = await resolveFile(item.file, ctx);
+      const f = resolved.get(item.file)!;
       if ('error' in f) {
         errors.push(f.error);
+        missing++;
+        continue;
+      }
+      const problem = problems.get(f.id);
+      if (problem) {
+        errors.push(problem);
+        missing++;
         continue;
       }
       const file = { fileId: f.id, filename: sanitizeFileName(f.name) };
@@ -114,11 +160,16 @@ export async function prepareImageArgs(
       images.push({ n, file, alt: alt || f.description || f.name, ...(title ? { title } : {}) });
     } else if (item?.url) {
       const u = urlImage(item);
-      if (typeof u === 'string') errors.push(u);
-      else images.push({ n, url: u.url!, alt: u.alt || 'image', ...(u.title ? { title: u.title } : {}) });
-    } else errors.push(`Dropped image ${n}: it needs a file id or a url.`);
+      if (typeof u === 'string') {
+        errors.push(u);
+        missing++;
+      } else images.push({ n, url: u.url!, alt: u.alt || 'image', ...(u.title ? { title: u.title } : {}) });
+    } else {
+      errors.push(`Dropped image ${n}: it needs a file id or a url.`);
+      missing++;
+    }
   }
-  return { images, attach, errors };
+  return { images, attach, errors, missing };
 }
 
 const FAKE = () => process.env.SLACK_FAKE === '1';

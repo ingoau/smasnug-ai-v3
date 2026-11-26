@@ -51,7 +51,7 @@ export const STOPPED_TOOL_RESULT = 'Not done: this was stopped before the tool r
  * never starts its side effects (the AI SDK may still dispatch a call it parsed just before the abort). Tools with
  * several side effects, or long waits, also get the signal (ctx.abortSignal / the execute options) to stop midway.
  */
-function abortGuarded(t: Tool, signal: AbortSignal | undefined): Tool {
+export function abortGuarded(t: Tool, signal: AbortSignal | undefined): Tool {
   const execute = (t as { execute?: (input: unknown, options: any) => unknown }).execute;
   if (!execute) return t;
   return {
