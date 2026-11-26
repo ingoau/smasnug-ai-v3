@@ -145,12 +145,13 @@ Home applies even to a turn that already built its tools.
   newlines in a message can't forge another author's line; `owner` comes from the Slack user id (never a bot), and
   `trigger` marks the messages of the turn being answered. Only the owner's own messages can authorize; other people's
   messages, pasted/forwarded content, link previews, files, tool output and the bot's own messages don't count. Same stack as the relevance gate: OpenRouter's Decisions API with `GATE_MODEL`
-  (probability ≥ 0.8 = yes), or the gate chat model (`MODEL_GATE`, must answer exactly YES) when `GATE_MODEL=luna`.
+  (probability ≥ 0.7 = yes; calibrated on real threads in `verifier.ts`), or the gate chat model (`MODEL_GATE`, must answer exactly YES) when `GATE_MODEL=luna`.
   **Fail closed:** an error, timeout or unclear answer refuses, with no fallback model. Usage is recorded per user.
   A refusal isn't a dead end: the owner gets the prompt-mode card with a warning ("the auto-check couldn't confirm
   that you asked for this…") and **Allow once / Deny** only (no grant key, so it neither uses nor creates a 10-minute
   grant). At most one such card per tool per turn (a second refused call of the same tool is just refused), and none in
-  `!p` turns (refused, as there is nowhere to ask). The audit row records the refusal with `fallback: 'card'`.
+  `!p` turns (refused, as there is nowhere to ask). The audit row records the refusal with `fallback: 'card'`. A turn that
+  ends on such a card gets no "couldn't come up with a reply" fallback: the card answers the owner, and its outcome turn reports back.
 - **prompt:** `requestApproval({ mode: 'outcome', kind: 'connector_call', grantKey: 'conn:<slug>:<tool>' })`. The
   owner sees the tool and **all** of its arguments on a private card (Allow once / Allow for 10 min in this thread /
   Deny). Arguments whose escaped preview doesn't fit the card in full (`ARGS_PREVIEW_MAX`, 2,600 characters) are

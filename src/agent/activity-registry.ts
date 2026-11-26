@@ -6,6 +6,7 @@
 import { redis } from '../core/redis.js';
 import { slackCall, slackErrorCode } from '../core/slack.js';
 import { log } from '../log.js';
+import { noteSelfDeleted } from '../pipeline/store.js';
 
 const key = (turnId: number) => `activity:open:${turnId}`;
 /** Outlives any turn; a crashed turn's sweep runs when its thread is next picked up. */
@@ -26,6 +27,7 @@ export async function removeOpenActivity(turnId: number): Promise<void> {
     if (!v) return;
     const { channelId, ts } = JSON.parse(v) as { channelId: string; ts: string };
     await slackCall('chat.stopStream', { channel: channelId, ts }).catch((err) => log.debug({ code: slackErrorCode(err) }, 'stopping an abandoned activity message failed'));
+    await noteSelfDeleted(channelId, ts);
     await slackCall('chat.delete', { channel: channelId, ts });
     log.info({ turnId, channelId, ts }, 'removed the activity message of an abandoned turn');
   } catch (err) {

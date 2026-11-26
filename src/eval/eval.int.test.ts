@@ -113,6 +113,27 @@ describe.skipIf(!INTEGRATION)('eval traces integration', () => {
     expect(await sql`select id from traces where thread_id = ${s.threadId}`).toHaveLength(0);
   });
 
+  it('keeps traces when the bot deletes its own transient message (an activity message mid-turn)', async () => {
+    const s = await seed();
+    const startedAt = new Date(Date.now() - 1000);
+    const activityTs = `${Math.floor(Date.now() / 1000) - 2}.000200`;
+    await sql`insert into messages (channel_id, ts, thread_id, user_id, bot_id, text) values (${s.channel}, ${activityTs}, ${s.threadId}, 'UBOT', 'BBOT', 'searching…')`;
+    await store.noteSelfDeleted(s.channel, activityTs);
+    await store.applyDelete(s.channel, activityTs);
+    await trace.saveTrace({ threadId: s.threadId, kind: 'front', turnId: s.turnId, model: 'kept', system: 's', input: [], steps: [], outcome: 'done', startedAt });
+    expect(await sql`select id from traces where thread_id = ${s.threadId}`).toHaveLength(3);
+    await retention.runRetention();
+    expect(await sql`select id from traces where thread_id = ${s.threadId}`).toHaveLength(3);
+    const [m] = await sql<{ deleted: boolean; text: string }[]>`select deleted, text from messages where channel_id = ${s.channel} and ts = ${activityTs}`;
+    expect(m).toEqual({ deleted: true, text: '' });
+
+    // A bot message someone else removed (a moderator, the privacy withdrawal) drops the traces as before.
+    const replyTs = `${Math.floor(Date.now() / 1000) - 1}.000300`;
+    await sql`insert into messages (channel_id, ts, thread_id, user_id, bot_id, text) values (${s.channel}, ${replyTs}, ${s.threadId}, 'UBOT', 'BBOT', 'a reply')`;
+    await store.applyDelete(s.channel, replyTs);
+    expect(await sql`select id from traces where thread_id = ${s.threadId} and model = 'kept'`).toHaveLength(0);
+  });
+
   it('saves traces with strings jsonb would reject', async () => {
     const s = await seed();
     const r = new trace.TraceRecorder();

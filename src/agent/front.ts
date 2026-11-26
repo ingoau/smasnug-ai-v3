@@ -114,6 +114,8 @@ const FALLBACK_TEXT = "Sorry, I couldn't come up with a reply to that. Could you
 export const FILTERED_TEXT =
   "I can't respond to that: the model's safety filter blocked it (probably something in the conversation or what I read). Try asking differently.";
 const ERROR_NOTE = '_Something broke, try again._';
+/** How a tool result starts when it put up an approval card (connectors/tools.ts promptCall, vault/tools.ts). */
+const AWAITING_APPROVAL = 'Awaiting approval:';
 
 /** Tool names (from any module) whose successful result is visible to users. reply/react record their own. */
 const VISIBLE_TOOLS: Record<string, VisibleAction> = {
@@ -919,6 +921,11 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   // end_turn({ no_reply_requested: true }): the speaker asked for no reply ("don't respond to this"), so a silent
   // mention gets no fallback.
   let silenceRequested = false;
+  /**
+   * This turn's own tool call put up an approval card for the speaker ("Awaiting approval… end the turn"): that card
+   * answers them for now (its outcome turn reports back), so no fallback.
+   */
+  let approvalAsked = false;
   /** The latest step ended in a content-filter refusal (every provider tier refused): explain instead of apologising. */
   let lastStepFiltered = false;
   /** This step was refused: with toolChoice 'required' the SDK reports finishReason 'error' and keeps the real one on its ToolChoiceViolationError. */
@@ -1033,6 +1040,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
             stepResults.push({ toolCallId: part.toolCallId, toolName: part.toolName, output: part.output });
             const v = VISIBLE_TOOLS[part.toolName];
             if (v) state.visible.add(v);
+            // A connector / vault call now waiting on the speaker's approval card (requestApproval, outcome mode).
+            if (typeof part.output === 'string' && part.output.startsWith(AWAITING_APPROVAL)) approvalAsked = true;
             if (v === 'send') replies.notePostedInThread(); // posted below any open activity message
             break;
           }
@@ -1209,8 +1218,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     if (outcome) return void (await postOutcomeFallback());
     if (previewPostedOnFailure) return;
     // A reaction (or other non-reply visible effect) already answered the user: don't throw, or the pipeline posts
-    // "Something broke" on top of it.
-    if (state.visible.size > 0) return;
+    // "Something broke" on top of it. An approval card counts too: its outcome turn reports back.
+    if (state.visible.size > 0 || approvalAsked) return;
     throw failed;
   }
 
@@ -1233,7 +1242,8 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   else if (state.visible.size === 0 && !previewPosted && silenceRequested && turn.kind !== 'synthesis' && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
     // Asked not to respond: no fallback, but leave a trace of it (evals can spot a misused flag).
     await appendEvent(turn.threadId, 'reply_skipped', 'bot', { turnId, noReplyRequested: true });
-  } else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke)) {
+  } else if (state.visible.size === 0 && !previewPosted && needsFallback(turn, io, built.anyCancelled, built.peopleSpoke) && !approvalAsked) {
+    // (Not when the speaker was shown an approval card: that answers them for now, and its outcome turn reports back.)
     // Text the model wrote but never sent (e.g. its answer, then end_turn) beats the generic apology. Model text:
     // never a group ping.
     const text = fallbackText ? neutralizeBroadcasts(fallbackText) : lastStepFiltered ? FILTERED_TEXT : FALLBACK_TEXT;
