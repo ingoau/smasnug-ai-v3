@@ -45,11 +45,14 @@ import { noteBotReply } from '../pipeline/store.js';
 import { awaitsReply } from '../pipeline/rules.js';
 import type { FrontTurnState, VisibleAction } from './turn-state.js';
 import { clipTokens, oneLine } from './util.js';
+import { redactToolInput } from './tool-redact.js';
+import { approvalOwner } from '../features/vault/identity.js';
 import { saveTrace, TraceRecorder } from './trace.js';
 import { previewsConfigured, sandboxConfigured } from '../sandbox/settings.js';
 import { previewsOfRuns, type PreviewRow } from '../sandbox/preview/store.js';
 import { postUnannouncedPreviews } from '../sandbox/preview/reply-blocks.js';
 import { offersMoveButton } from '../features/code-channels/logic.js';
+import { CONNECTOR_TOOLS_GRACE_MS, connectorsUnavailableNote, startConnectorTools } from '../features/connectors/tools.js';
 import { hiddenToolsFor, loadCodeChannelTurnContext, NO_CODE_CHANNELS, renderChildrenSection, renderHereSection, type CodeChannelTurnContext } from '../features/code-channels/turn-context.js';
 
 export interface TurnIO {
@@ -348,7 +351,8 @@ export function summarizeToolCalls(calls: { tool: string; args: unknown }[]): { 
     .map((c) => {
       let args = '';
       try {
-        args = JSON.stringify(c.args ?? {});
+        // Secret inputs (save_credential's value / password / totp) never reach the event or the next turn.
+        args = JSON.stringify(redactToolInput(c.tool, c.args) ?? {});
       } catch {
         args = '{}';
       }
@@ -844,6 +848,11 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   const tools = toolsFor('front', { threadId: turn.threadId, channelId, threadTs, speakerId: turn.authorId, turnId, abortSignal: stopAbort.signal, extras });
   for (const name of hiddenToolsFor(codeChannels)) delete tools[name];
   if (privateTo) for (const name of PRIVATE_HIDDEN_TOOLS) delete tools[name];
+  // MCP connectors (docs/mcp-custom-connectors.md): the speaker's own connected services, on their own user turns only
+  // (filtered at build time; prompt-mode tools left out of private turns). Never replaces a built-in tool. Loaded while
+  // the context is built (a cold tool list is a network call); merged before the model runs, waiting at most
+  // CONNECTOR_TOOLS_GRACE_MS more: a slower connector sits this turn out (a note tells the model). Never throws.
+  const connectorLoad = startConnectorTools({ turn, speakerId: turn.authorId, abortSignal: stopAbort.signal, taken: Object.keys(tools) });
   recordReactVisibility(tools, state);
   // Coding agents change the bot's own code: only offered in the admin's own message turns when configured (not in
   // synthesis / scheduled turns, whose input is other content; re-checked on use).
@@ -857,8 +866,18 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   ]);
   const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId), moveToChannel: offersMoveButton({ enabled: codeChannels.enabled, inCodeChannel: Boolean(codeChannels.here) }) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
   timing.mark('context_built');
-  timing.set('prompt_chars', system.length + built.text.length);
-  const messages: ModelMessage[] = [{ role: 'user', content: built.text }];
+  if (built.outcome?.source) {
+    // An approval outcome turn may carry on with the owner's credentials (vaultIdentity): only the approval's own owner.
+    const sourceRef = built.outcome.sourceRef ?? null;
+    const approvalOwnerId = built.outcome.source === 'approval' ? await approvalOwner(sourceRef).catch((err) => (log.warn({ err }, 'approval owner lookup failed'), null)) : null;
+    state.outcome = { source: built.outcome.source, sourceRef, approvalOwnerId };
+  }
+  const connectors = await connectorLoad.collect(CONNECTOR_TOOLS_GRACE_MS);
+  Object.assign(tools, connectors.tools);
+  const connectorNote = connectorsUnavailableNote(connectors.unavailable);
+  const turnText = connectorNote ? `${built.text}\n\n${connectorNote}` : built.text;
+  timing.set('prompt_chars', system.length + turnText.length);
+  const messages: ModelMessage[] = [{ role: 'user', content: turnText }];
   const ph: { current: 'tools' | 'final' } = { current: 'tools' };
   const setPhase = async (p: 'tools' | 'final') => {
     if (p === ph.current) return;

@@ -10,14 +10,20 @@ async function dispatch(ctx: ActionContext) {
     return;
   }
   // Not a conversation turn: don't count it, and don't pass the channel (channel disable must not block
-  // `/smasnug on`). Memory actions stay available to suspended users so they can delete their own memory.
-  const entry = await guardEntry(ctx.userId, undefined, { countMessage: false, allowSuspended: ctx.actionId.startsWith('mem:') });
+  // `/smasnug on`). Suspended users keep what only removes or refuses something of theirs: deleting their memory,
+  // deleting a stored credential, denying a vault card (never approving one).
+  const entry = await guardEntry(ctx.userId, undefined, { countMessage: false, allowSuspended: allowedWhileSuspended(ctx.actionId) });
   if (!entry.ok) return;
   try {
     await handler(ctx);
   } catch (err) {
     log.error({ err, actionId: ctx.actionId, userId: ctx.userId }, 'interaction handler failed');
   }
+}
+
+/** Actions a suspended user may still take. */
+export function allowedWhileSuspended(actionId: string): boolean {
+  return actionId.startsWith('mem:') || actionId === 'vault:delete' || actionId === 'vault:deny';
 }
 
 export async function handleInteractive(body: any) {

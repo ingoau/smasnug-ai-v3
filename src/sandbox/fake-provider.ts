@@ -22,8 +22,10 @@ export class FakeProvider implements SandboxProvider {
   createDelayMs = 0;
   /** A slow snapshot (the box stays listed meanwhile, as on Modal). */
   pauseDelayMs = 0;
-  /** Commands of sandbox_exec (SBX_CMD) → result. Default: echo the command. */
-  onExec: (cmd: string, box: FakeBox) => { exitCode?: number; stdout?: string; stderr?: string } = (cmd) => ({ stdout: `ran: ${cmd}\n` });
+  /** Commands of sandbox_exec and the browser tools (SBX_CMD) → result. Default: echo the command. */
+  onExec: (cmd: string, box: FakeBox, stdin?: Buffer, env?: Record<string, string>) => { exitCode?: number; stdout?: string; stderr?: string } = (cmd) => ({ stdout: `ran: ${cmd}\n` });
+  /** Every other exec's script (writeFile, rm, chmod…), in order. */
+  scripts: string[] = [];
   private n = 0;
 
   async create(spec: SandboxSpec): Promise<Handle> {
@@ -76,13 +78,22 @@ export class FakeProvider implements SandboxProvider {
     });
     const script = argv[argv.length - 1] ?? '';
     if (o.env?.SBX_CMD !== undefined) {
-      const r = this.onExec(o.env.SBX_CMD, b);
+      const r = this.onExec(o.env.SBX_CMD, b, o.stdin, o.env);
       return res(r.exitCode ?? 0, r.stdout ?? '', r.stderr ?? '');
     }
+    this.scripts.push(script);
     // writeFile: mkdir -p DIR && cat > FILE
     const cat = /cat > '([^']+)'$/.exec(script);
     if (cat) {
       b.files.set(cat[1]!, Buffer.from(o.stdin ?? Buffer.alloc(0)));
+      return res(0);
+    }
+    // rm -rf -- '/dir' ['/dir2' …] anywhere in the script (vault cleanup)
+    const rms = [...script.matchAll(/rm -rf -- ((?:'[^']+' ?)+)/g)];
+    if (rms.length) {
+      for (const m of rms)
+        for (const dir of [...m[1]!.matchAll(/'([^']+)'/g)].map((x) => x[1]!))
+          for (const k of [...b.files.keys()]) if (k === dir || k.startsWith(`${dir}/`)) b.files.delete(k);
       return res(0);
     }
     // request_preview's check
@@ -94,7 +105,7 @@ export class FakeProvider implements SandboxProvider {
       const total = files.reduce((s, [, d]) => s + d.length, 0);
       const max = files.reduce((m, [p, d]) => (d.length > m[0] ? ([d.length, p] as [number, string]) : m), [0, ''] as [number, string]);
       const index = b.files.has(`${dir}/index.html`) ? 'INDEX\n' : '';
-      return res(0, `${index}FILES ${files.length}\nLINKS 0\nTOTAL ${total}\nMAX ${max[0]} ${max[1]}\n`);
+      return res(0, `${index}REAL ${dir}\nSHARED 0\nFILES ${files.length}\nLINKS 0\nTOTAL ${total}\nMAX ${max[0]} ${max[1]}\n`);
     }
     const tar = /tar --format=gnu -cf (\S+) -C '([^']+)' \.$/.exec(script);
     if (tar) {

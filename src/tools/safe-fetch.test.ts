@@ -3,7 +3,7 @@ import zlib from 'node:zlib';
 import type { AddressInfo } from 'node:net';
 import { Writable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { BlockedUrlError, checkUrl, isBlockedIp, safeFetch, SINK_SKIPPED_MAX_BYTES } from './safe-fetch.js';
+import { BlockedUrlError, checkUrl, isBlockedIp, redirectMethod, safeFetch, SINK_SKIPPED_MAX_BYTES } from './safe-fetch.js';
 
 const base = { maxBytes: 1024 * 1024, timeoutMs: 3000 };
 
@@ -202,5 +202,22 @@ describe('checkUrl / isBlockedIp', () => {
       expect(isBlockedIp(ip), ip).toBe(true);
     }
     expect(checkUrl('https://example.com/a').hostname).toBe('example.com');
+  });
+});
+
+describe('redirectMethod (requests without a body)', () => {
+  it('keeps GET/HEAD, turns POST on 301/302 and anything on 303 into GET', () => {
+    expect(redirectMethod('GET', 307)).toBe('GET');
+    expect(redirectMethod('HEAD', 301)).toBe('HEAD');
+    expect(redirectMethod('POST', 302)).toBe('GET');
+    expect(redirectMethod('POST', 301)).toBe('GET');
+    expect(redirectMethod('DELETE', 303)).toBe('GET');
+  });
+
+  it('refuses to replay other methods at another address', () => {
+    expect(() => redirectMethod('DELETE', 302)).toThrow(BlockedUrlError);
+    expect(() => redirectMethod('PUT', 301)).toThrow(BlockedUrlError);
+    expect(() => redirectMethod('POST', 307)).toThrow(BlockedUrlError);
+    expect(() => redirectMethod('PATCH', 308)).toThrow(BlockedUrlError);
   });
 });

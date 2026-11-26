@@ -48,11 +48,17 @@ export const PRIVATE_HIDDEN_TOOLS: ReadonlySet<string> = new Set([
   'archive_code_channel',
   // Posts to the moderators and, once approved, goes into every turn's prompt.
   'propose_workspace_fact',
+  // Vault: an approval's outcome turn answers in the thread, not privately.
+  'fetch_with_credential',
+  'request_credential',
 ]);
 
 /** Front tools fine in a private turn: read-only, private to the speaker, or adapted (reply, canvases, files). */
 export const PRIVATE_ALLOWED_TOOLS: ReadonlySet<string> = new Set([
   'end_turn',
+  // Vault: only the speaker's own credentials; notices are ephemeral to them.
+  'list_credentials',
+  'save_credential',
   'reply',
   'spawn_subagent',
   'message_subagent',

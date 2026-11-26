@@ -138,6 +138,28 @@ const Env = z.object({
    * Needs the manifest's `features.code_channels.enabled` and the `code_channels:manage` scope.
    */
   CODE_CHANNELS: z.enum(['0', '1']).default('0'),
+  /**
+   * Vault (per-user credentials, docs/vault.md, src/features/vault/): master key for AES-256-GCM (32 bytes, base64;
+   * `openssl rand -base64 32`). Each user's secrets use a key derived from it (HKDF over the user id). Keep it outside
+   * Postgres. Unset = no vault, no connectors, no saved browser sessions.
+   */
+  VAULT_SECRET_KEY: z.string().optional(),
+  /**
+   * MCP connectors (docs/mcp-custom-connectors.md): the admin-curated catalog, a JSON file (array of definitions).
+   * Relative paths resolve from the working directory. Missing file = empty catalog.
+   */
+  CONNECTORS_FILE: z.string().default('connectors.json'),
+  /**
+   * The static OAuth callback page (oauth/index.html, hosted anywhere): the redirect URI connectors register with
+   * dynamic client registration. Unset = OAuth connectors can't be connected (API-key ones still work).
+   */
+  MCP_OAUTH_REDIRECT_URL: z.string().url().optional(),
+  /**
+   * Browser tools (src/sandbox/browser/): domains the agent may never open (comma-separated; subdomains included),
+   * on top of the built-in private-address block. `BROWSER_ALLOW_DOMAINS` set = only those domains.
+   */
+  BROWSER_DENY_DOMAINS: z.string().optional(),
+  BROWSER_ALLOW_DOMAINS: z.string().optional(),
 });
 
 export const env = Env.parse(process.env);
@@ -246,6 +268,16 @@ export const limits = {
   cardCoalesceMs: 1500,
   cardTitleMaxChars: 40,
   pendingSendTtlMs: 5 * 60 * 1000,
+  /** Vault: how long an owner's approval card stays clickable. */
+  vaultApprovalTtlMs: 10 * 60 * 1000,
+  /** Vault: "Allow for 10 minutes in this thread". */
+  vaultGrantMs: 10 * 60 * 1000,
+  /** Vault: how long a subagent's tool waits for the owner to click before giving up. */
+  vaultWaitMs: 5 * 60 * 1000,
+  /** Vault: credentials per user. */
+  vaultMaxCredentials: 25,
+  /** Vault: largest secret (a saved browser session can be big). */
+  vaultMaxSecretBytes: 512 * 1024,
   memoryExtractIdleMs: 30 * 60 * 1000,
   /** Threads quiet for longer than this are never extracted (a backlog would spend the model budget on stale talk). */
   memoryExtractMaxAgeMs: 14 * 24 * 60 * 60 * 1000,
@@ -449,6 +481,9 @@ export const limits = {
    */
   sandboxExportMaxBytes: 20 * 1024 * 1024,
   userSandboxExecsPerHour: 200,
+  /** browser_* tool calls (src/sandbox/browser/), per user per hour. */
+  userBrowserActionsPerHour: 400,
+  userCredentialUsesPerHour: 60,
   userLiveSandboxes: 2,
   globalLiveSandboxes: 8,
   /** Live sandbox minutes per user per UTC day (sum of usage segments). */

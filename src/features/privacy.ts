@@ -97,7 +97,7 @@ export function withdrawButton(agreedNow: boolean) {
         type: 'plain_text',
         text:
           (agreedNow ? "I'll stop answering you until you agree again, and permanently delete " : 'This permanently deletes ') +
-          "what I remember about you, your messages and files I've stored, our DMs, your reminders and watches, and records of my answers in those conversations. " +
+          "what I remember about you, your messages and files I've stored, our DMs, reminders, watches, saved credentials and records of my answers there. " +
           'Other copies go within 30 days.',
       },
       confirm: { type: 'plain_text', text: agreedNow ? 'Withdraw & delete' : 'Delete' },

@@ -39,6 +39,11 @@ export interface SubagentRow {
   cursorAgentUrl?: string | null;
   /** Has used a code sandbox (set on its first allowed sandbox tool call): sandbox model, longer run cap (src/sandbox/). */
   sandbox?: boolean;
+  /**
+   * May use its owner's vault (migration 357, docs/vault.md "Identity"): spawned by the owner on their own user turn and
+   * never steered or resumed by anyone else or by a non-user turn since.
+   */
+  vaultTrusted?: boolean;
 }
 
 export interface RunRow {
@@ -105,6 +110,8 @@ export async function spawnSubagent(opts: {
   title: string;
   instructions: string;
   seedFrom?: string;
+  /** Started by its owner on their own user turn: may use the owner's vault (SubagentRow.vaultTrusted). */
+  vaultTrusted?: boolean;
 }): Promise<{ subagentId: string; runId: number; cardId: number }> {
   await checkStartLimits(opts.ownerId, opts.threadId);
   let instructions = opts.instructions;
@@ -122,9 +129,9 @@ export async function spawnSubagent(opts: {
   const cardId = await ensureTurnCard({ threadId: opts.threadId, turnId: opts.turnId });
   const runId = await sql.begin(async (tx) => {
     // Started by a private (`!p`) turn: private to its owner (hidden from every other turn, subagentVisibleTo).
-    await tx`insert into subagents (id, thread_id, owner_id, title, status, seeded_from, private_to)
+    await tx`insert into subagents (id, thread_id, owner_id, title, status, seeded_from, private_to, vault_trusted)
              values (${subagentId}, ${opts.threadId}, ${opts.ownerId}, ${title}, 'running', ${seededFrom},
-               (select case when ephemeral then ${opts.ownerId} end from turns where id = ${opts.turnId}))`;
+               (select case when ephemeral then ${opts.ownerId} end from turns where id = ${opts.turnId}), ${Boolean(opts.vaultTrusted)})`;
     const [run] = await tx<{ id: number }[]>`
       insert into runs (subagent_id, thread_id, card_id, turn_id, instructions, is_resume, status, model)
       values (${subagentId}, ${opts.threadId}, ${cardId}, ${opts.turnId}, ${instructions}, false, 'queued', ${model}) returning id`;
@@ -167,6 +174,11 @@ export async function messageSubagent(opts: {
   const res = await sql.begin(async (tx): Promise<MessageResult | { error: string }> => {
     const [sa] = await tx<SubagentRow[]>`select * from subagents where id = ${opts.subagentId} for update`;
     if (!sa) return { error: `No subagent ${opts.subagentId}.` };
+    // Steered or resumed by someone other than its owner, or by a non-user turn (reminder, watch, outcome, synthesis):
+    // it loses its owner's vault for good (docs/vault.md, "Identity"). Same transaction as the inbox / run insert, so
+    // the run never reads the message while still trusted.
+    if ((sa.status === 'running' || sa.status === 'idle') && sa.vaultTrusted && (opts.turnKind !== 'user' || opts.speakerId !== sa.ownerId))
+      await tx`update subagents set vault_trusted = false where id = ${sa.id}`;
     if (sa.status === 'running') {
       await tx`insert into subagent_inbox (subagent_id, text) values (${sa.id}, ${opts.text})`;
       const note = oneLine(opts.note || deriveSteerNote(opts.text), 80);

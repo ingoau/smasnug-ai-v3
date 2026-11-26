@@ -34,10 +34,11 @@ type Tx = TransactionSql<{}>;
 /** `huddlefm`: DJ mode notices (grant answered, session ended, chatter; src/features/huddlefm/notices.ts). */
 /** `button_action`: an action button's bound call failed (src/agent/reply-quiet.ts). */
 /** `preview`: a live preview deployed (or failed) after the subagent's run ended (src/sandbox/preview/flow.ts). */
-export type OutcomeSource = 'send' | 'coding_launch' | 'huddlefm' | 'button_action' | 'preview';
+/** `approval`: an action its owner approved (or denied) on a vault card (src/features/vault/approvals.ts). */
+export type OutcomeSource = 'send' | 'coding_launch' | 'huddlefm' | 'button_action' | 'preview' | 'approval';
 
 /** Sources whose turns carry a code-written fallback (front.ts posts it when the turn shows nothing). */
-export const OUTCOME_SOURCES: readonly string[] = ['send', 'coding_launch', 'huddlefm', 'button_action', 'preview'];
+export const OUTCOME_SOURCES: readonly string[] = ['send', 'coding_launch', 'huddlefm', 'button_action', 'preview', 'approval'];
 
 /**
  * A source may post its fallback as a message of its own (e.g. with buttons) instead of the plain text: the renderer
