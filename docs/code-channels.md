@@ -172,7 +172,7 @@ with partner access. `agents.sessions.*` is public at `docs.slack.dev/reference/
   - Shows: the kind (task with the brief's first line / forked from <origin permalink> / adopted), who opened it,
     created, last activity; waiting-on-reply, pending send confirmations and the auto-archive date when relevant;
     running and queued runs started from any conversation in the channel (`:0` or a thread there: title, subagent /
-    sandbox / coding agent, state, started) or "Nothing running."; the last 5 finished runs (done / failed / cancelled,
+    sandbox, state, started) or "Nothing running."; the last 5 finished runs (done / failed / cancelled,
     when). Times are Slack date tokens (`{ago}`, `{date_short_pretty}`), rendered by the client. Lists are capped (10
     running, 5 finished, titles 80 chars, section text < 3000).
   - Refreshed right after create / adoption (after setCommands, direct call), and via `requestCodeChannelStatus`

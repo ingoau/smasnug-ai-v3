@@ -20,7 +20,6 @@ export interface ResultSubagent {
   title: string;
   status: string;
   ownerId: string;
-  kind: string;
   sandbox: boolean;
   summary: string | null;
 }
@@ -38,7 +37,7 @@ export interface ResultRun {
 
 /** The tool's text: status, the latest run's full result (clipped) and files, then earlier runs in one line each. */
 export function formatSubagentResult(s: ResultSubagent, runs: ResultRun[], files: Map<number, FileListing[]>, budget = RESULT_BUDGET): string {
-  const kind = s.kind === 'cursor' ? ' [coding agent, Cursor]' : s.sandbox ? ' [sandbox]' : '';
+  const kind = s.sandbox ? ' [sandbox]' : '';
   const lines = [`${s.id} "${s.title}"${kind} (owner <@${s.ownerId}>) — subagent ${s.status}`];
   if (!runs.length) return [...lines, s.summary ? `Summary: ${s.summary}` : 'No runs yet.'].join('\n');
   // Newest first. A run still in progress is reported as such, with the latest finished one's result after it.
@@ -73,7 +72,7 @@ export function formatSubagentResult(s: ResultSubagent, runs: ResultRun[], files
 export async function readSubagentResult(threadId: string, subagentId: string): Promise<string> {
   const id = subagentId.trim();
   const [s] = await sql<ResultSubagent[]>`
-    select id, title, status, owner_id, kind, sandbox, summary from subagents where id = ${id} and thread_id = ${threadId}`;
+    select id, title, status, owner_id, sandbox, summary from subagents where id = ${id} and thread_id = ${threadId}`;
   if (!s) return `No subagent "${id}" in this thread. Use an id from <subagents> or an earlier spawn_subagent result.`;
   const runs = await sql<ResultRun[]>`
     select id, status, instructions, result, error, details, is_resume, finished_at from runs

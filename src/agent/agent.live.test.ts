@@ -13,10 +13,6 @@ if (LIVE) {
   } catch {}
   process.env.SLACK_FAKE = '1';
   process.env.LOG_LEVEL ??= 'warn';
-  // Coding agents on (fake key: a proposal never calls Cursor before Launch), with a test admin, for the musing case.
-  process.env.ADMIN_USER_ID = 'U_LIVEADMIN';
-  process.env.CURSOR_API_KEY ||= 'crsr_live_test';
-  process.env.CURSOR_REPO ||= 'https://github.com/example/repo';
 }
 
 /** Sandbox access per test: `deny` makes canUseSandbox refuse like an unverified user. */
@@ -777,36 +773,14 @@ describe.skipIf(!LIVE)('agent integration (LIVE)', () => {
   it('a capability that is not available here is declined plainly, without setup questions', async () => {
     const { runFrontTurn } = await import('./front.js');
     const before = (await fakeCalls()).length;
-    // Not the admin: coding agents aren't offered to this speaker.
     const { tid, turn } = await dmTurn('NOCAP', '', 'can you spin up a coding agent to open a PR on your own code that makes your replies shorter?');
     await runFrontTurn(turn, io());
     const o = await outcome(tid, before);
     const tools = await turnToolNames(tid);
     // eslint-disable-next-line no-console
     console.log('no capability:', JSON.stringify(o.replies), JSON.stringify(tools));
-    expect(tools).not.toContain('spawn_coding_agent');
     expect(o.replies.join(' ')).not.toMatch(/which repo|what repo|repo (url|link)|link (to )?(the|your) repo|github (url|link)/i);
   }, 90_000);
-
-  it('an admin musing about the bot gets a brief acknowledgement, not a coding agent proposal', async () => {
-    const { runFrontTurn } = await import('./front.js');
-    const th = await freshThread('MUSE');
-    const admin = 'U_LIVEADMIN';
-    const msgTs = `${Number(th.ts) + 5}.000100`;
-    threadText.set(th.id, {
-      history: '',
-      newMessages: `[${msgTs}] <@${admin}> Ingo: <@UBOT> hmm, your reminder confirmations should probably be shorter at some point`,
-    });
-    const before = (await fakeCalls()).length;
-    const [t] = await sql<any[]>`insert into turns (thread_id, author_id, is_mention, message_ts, status) values (${th.id}, ${admin}, true, ${[msgTs]}, 'running') returning *`;
-    await runFrontTurn({ ...t, id: Number(t.id) }, io(true));
-    const o = await outcome(th.id, before);
-    const tools = await turnToolNames(th.id);
-    // eslint-disable-next-line no-console
-    console.log('admin musing:', JSON.stringify(o), JSON.stringify(tools));
-    expect(tools).not.toContain('spawn_coding_agent');
-    expect(o.replies.length + o.reactionsAdded).toBeGreaterThan(0);
-  }, 120_000);
 
   it('an uploaded image in context is looked at with read_file / ask_file', async () => {
     const { runFrontTurn } = await import('./front.js');

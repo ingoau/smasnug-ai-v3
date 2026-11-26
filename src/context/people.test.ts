@@ -56,13 +56,11 @@ describe('speaker details', () => {
   });
 
   it('privileges: bot admin (from config) apart from the Slack workspace role; "none" otherwise', () => {
-    expect(privilegesLine(user({ isAdmin: true }), { botAdmin: true, codingAgents: true })).toBe(
-      'Privileges: bot admin (runs this bot: moderation, kill switches; can launch coding agents), Slack workspace admin',
-    );
-    expect(privilegesLine(user(), { botAdmin: true, codingAgents: false })).toBe('Privileges: bot admin (runs this bot: moderation, kill switches)');
-    expect(privilegesLine(user({ isAdmin: true, isOwner: true }), { botAdmin: false, codingAgents: false })).toBe('Privileges: Slack workspace owner');
-    expect(privilegesLine(user(), { botAdmin: false, codingAgents: false })).toBe('Privileges: none');
-    expect(privilegesLine(null, { botAdmin: false, codingAgents: false })).toBe('Privileges: none');
+    expect(privilegesLine(user({ isAdmin: true }), { botAdmin: true })).toBe('Privileges: bot admin (runs this bot: moderation, kill switches), Slack workspace admin');
+    expect(privilegesLine(user(), { botAdmin: true })).toBe('Privileges: bot admin (runs this bot: moderation, kill switches)');
+    expect(privilegesLine(user({ isAdmin: true, isOwner: true }), { botAdmin: false })).toBe('Privileges: Slack workspace owner');
+    expect(privilegesLine(user(), { botAdmin: false })).toBe('Privileges: none');
+    expect(privilegesLine(null, { botAdmin: false })).toBe('Privileges: none');
   });
 
   it('drops an expired status, keeps one expiring later, and ignores a non-emoji emoji field', () => {

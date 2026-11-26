@@ -5,7 +5,7 @@ export interface TurnRow {
   authorId: string;
   /**
    * 'scheduled': a fired reminder or watch notification (input in scheduled_turn_inputs, src/features/schedule), or
-   * the outcome of a confirmation the agent asked for (send_message / coding-agent launch; src/features/outcome-turn.ts).
+   * the outcome of a confirmation the agent asked for (send_message, live previews, vault approvals…; src/features/outcome-turn.ts).
    */
   kind: 'user' | 'synthesis' | 'scheduled';
   isMention: boolean;

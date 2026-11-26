@@ -1,13 +1,13 @@
 /**
  * Outcome turns: the agent hears back when a confirmation it asked for is resolved. send_message outside the thread
- * and spawn_coding_agent only propose (the user gets an ephemeral preview with buttons) and the agent's turn ends;
- * when the user clicks (Send / Cancel, Cancel on a launch), a definitive failure happens, or the preview expires, a
+ * only proposes (the user gets an ephemeral preview with buttons) and the agent's turn ends;
+ * when the user clicks (Send / Cancel), a definitive failure happens, or the preview expires, a
  * front turn runs in the pending row's thread with the requester as speaker and a system notice stating the outcome
  * as its input.
  *
  * It reuses the 'scheduled' turn kind (stored input in scheduled_turn_inputs, rendered by front.ts in place of new
  * messages) added for reminders: that kind already means "a turn not started by a user message, whose input is a
- * stored notice", and every path that cares (reply delivery, no coding agents from non-user turns, status) treats it
+ * stored notice", and every path that cares (reply delivery, vault trust, status) treats it
  * right. A dedicated kind would only have to be threaded through the same places with identical behaviour.
  *
  * Exactly once per pending row: the caller's status transition (a conditional update on the pending row) and the turn
@@ -35,10 +35,10 @@ type Tx = TransactionSql<{}>;
 /** `button_action`: an action button's bound call failed (src/agent/reply-quiet.ts). */
 /** `preview`: a live preview deployed (or failed) after the subagent's run ended (src/sandbox/preview/flow.ts). */
 /** `approval`: an action its owner approved (or denied) on a vault card (src/features/vault/approvals.ts). */
-export type OutcomeSource = 'send' | 'coding_launch' | 'huddlefm' | 'button_action' | 'preview' | 'approval';
+export type OutcomeSource = 'send' | 'huddlefm' | 'button_action' | 'preview' | 'approval';
 
 /** Sources whose turns carry a code-written fallback (front.ts posts it when the turn shows nothing). */
-export const OUTCOME_SOURCES: readonly string[] = ['send', 'coding_launch', 'huddlefm', 'button_action', 'preview', 'approval'];
+export const OUTCOME_SOURCES: readonly string[] = ['send', 'huddlefm', 'button_action', 'preview', 'approval'];
 
 /**
  * A source may post its fallback as a message of its own (e.g. with buttons) instead of the plain text: the renderer

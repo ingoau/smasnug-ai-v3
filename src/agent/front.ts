@@ -20,6 +20,7 @@ import { renderTurnRules } from '../features/memory/rules.js';
 import { scheduledTurnInput } from '../features/schedule/deliver.js';
 import { OUTCOME_SOURCES, outcomeObsolete, renderOutcomeFallback } from '../features/outcome-turn.js';
 import { loadPendingActions, renderPendingActions } from '../features/pending.js';
+import { isAdmin } from '../features/util.js';
 import { renderDjState } from '../features/huddlefm/render.js';
 import { neutralizeBroadcasts } from '../pipeline/guidelines.js';
 import { chatModel, isClaude, modelDisplayName, MODELS, modelOptions } from '../models.js';
@@ -28,7 +29,7 @@ import { TurnTiming } from '../core/timing.js';
 import { freezeCard, retireOldButtons } from './cards.js';
 import { enqueueCardTitle, enqueueSessionTitle } from './titles.js';
 import { TurnCard } from './turn-card.js';
-import { CODING_AGENTS_PROMPT, frontSystemPrompt, MOVE_TO_CHANNEL_PROMPT } from './prompts/front.js';
+import { frontSystemPrompt, MOVE_TO_CHANNEL_PROMPT } from './prompts/front.js';
 import { skillsPrompt } from './skills.js';
 import { placeTargetFor } from './reply-buttons-store.js';
 import { ReplyManager, markdownMessage } from './reply.js';
@@ -36,7 +37,6 @@ import { PRIVATE_HIDDEN_TOOLS, postPrivateNote } from './private-reply.js';
 import { activeRunsInThread, maybeSynthesize } from './subagents.js';
 import { renderBatchStatus, renderOpenBatches } from './batch-status.js';
 import { loadSinceRound, renderSinceRound, type SinceItem } from './round-since.js';
-import { cursorInstructRefusal, cursorRefusal, isCursorAdmin } from './cursor/agents.js';
 import { activityForTool, quietAfterReply } from './activity.js';
 import { decidePlainText, endsTurnAfterStep, PLAIN_TEXT_NUDGE_NOTE, postablePlainText, replyEndsWithLookups, REPLY_WITH_LOOKUPS_NOTE, type StepCall, type StepResultPart } from './turn-end.js';
 import { countLookupSteps, LOOKUP_RESTRICT_NOTE, LOOKUP_TOOLS, lookupGuard, lookupNudgeNote, nonLookupTools, type LookupGuard } from './lookup-guard.js';
@@ -149,7 +149,7 @@ function frontModelNames(): { model: string; fallbackModel?: string } {
   return { model: modelDisplayName(MODELS.front), ...(isClaude(MODELS.front) ? { fallbackModel: modelDisplayName(env.MODEL_LUNA) } : {}) };
 }
 
-async function buildSystem(opts: { codingAgents?: boolean; moveToChannel?: boolean } = {}): Promise<string> {
+async function buildSystem(opts: { moveToChannel?: boolean } = {}): Promise<string> {
   const facts = (await renderWorkspaceFacts().catch((err) => (log.warn({ err }, 'renderWorkspaceFacts failed'), ''))).trim();
   let system = frontSystemPrompt(env.BOT_DISPLAY_NAME, { sandbox: sandboxConfigured(), previews: previewsConfigured(), emojiUpload: userbotConfigured(), adminUserId: env.ADMIN_USER_ID, privacyConsent: env.PRIVACY_CONSENT === 'on', ...frontModelNames() });
   // HuddleFM and sandbox instructions are skills (skills/huddle-dj, skills/code-sandboxes), listed only when configured.
@@ -157,8 +157,6 @@ async function buildSystem(opts: { codingAgents?: boolean; moveToChannel?: boole
   if (skillIndex) system = `${system}\n\n${skillIndex}`;
   if (facts) system = `${system}\n\n# Workspace facts (approved knowledge about this Slack)\n${clipTokens(facts, BUDGET.workspaceFacts)}`;
   if (opts.moveToChannel) system = `${system}\n\n${MOVE_TO_CHANNEL_PROMPT}`;
-  // Admin-only section last: the shared prefix stays the same for everyone.
-  if (opts.codingAgents) system = `${system}\n\n${CODING_AGENTS_PROMPT}`;
   return system;
 }
 
@@ -192,7 +190,7 @@ export async function renderParticipantsSection(ids: string[] | undefined, speak
  * so this section stays the same from turn to turn.
  */
 export function renderSpeaker(authorId: string, speaker: Speaker, now: Date, viewingChannelId?: string | null): string {
-  const privileges = privilegesLine(speaker.info, { botAdmin: isCursorAdmin(authorId), codingAgents: !cursorRefusal(authorId) });
+  const privileges = privilegesLine(speaker.info, { botAdmin: isAdmin(authorId) });
   const lines = [personRef(authorId, profileText(speaker.name)), ...speakerDetailLines(speaker.info, now), privileges, `Time zone: ${speaker.tz || 'UTC'}`];
   if (viewingChannelId) lines.push(`User is currently viewing <#${viewingChannelId}> (e.g. "this channel").`);
   return lines.join('\n');
@@ -225,8 +223,8 @@ export function formatLocalTime(now: Date, tz: string | undefined): string {
 /** The thread's subagents (running + idle; expired/cancelled excluded) for the front agent. */
 /** `viewer`: the user of a private (`!p`) turn, who also sees their private subagents (others never do). */
 export async function renderSnapshot(threadId: string, viewer: string | null = null): Promise<string> {
-  const rows = await sql<{ id: string; ownerId: string; title: string; status: string; summary: string | null; current: string | null; lastError: string | null; runStatus: string | null; kind: string; sandbox: boolean }[]>`
-    select s.id, s.owner_id, s.title, s.status, s.summary, s.kind, s.sandbox,
+  const rows = await sql<{ id: string; ownerId: string; title: string; status: string; summary: string | null; current: string | null; lastError: string | null; runStatus: string | null; sandbox: boolean }[]>`
+    select s.id, s.owner_id, s.title, s.status, s.summary, s.sandbox,
       (select coalesce(r.details, r.status) from runs r where r.subagent_id = s.id and r.status in ('queued', 'running') order by r.id desc limit 1) as current,
       (select r.error from runs r where r.subagent_id = s.id and r.status not in ('queued', 'running') order by r.id desc limit 1) as last_error
     from subagents s where s.thread_id = ${threadId} and s.status in ('running', 'idle')
@@ -238,7 +236,7 @@ export async function renderSnapshot(threadId: string, viewer: string | null = n
       // An idle subagent whose last run failed keeps its older summary: say it failed, or the failure is invisible here.
       const failed = r.lastError ? ` (last run FAILED: ${oneLine(r.lastError, 80)})` : '';
       const state = r.status === 'running' ? `running${r.current ? `: ${oneLine(r.current, 80)}` : ''}` : `idle${failed}${r.summary ? `: ${oneLine(r.summary, 120)}` : ''}`;
-      return `- ${r.id} "${r.title}"${r.kind === 'cursor' ? ' [coding agent, Cursor]' : r.sandbox ? ' [sandbox]' : ''} (owner <@${r.ownerId}>) — ${state}`;
+      return `- ${r.id} "${r.title}"${r.sandbox ? ' [sandbox]' : ''} (owner <@${r.ownerId}>) — ${state}`;
     })
     .join('\n');
 }
@@ -504,8 +502,8 @@ async function buildTurnMessage(
     parts.push(SYNTHESIS_INSTRUCTION);
     if (queued) parts.push(queued);
   } else if (turn.kind === 'scheduled') {
-    // A fired reminder or watch notification (src/features/schedule), a confirmation outcome (send_message /
-    // coding-agent launch, src/features/outcome-turn.ts) or a HuddleFM DJ notice (src/features/huddlefm/notices.ts):
+    // A fired reminder or watch notification (src/features/schedule), a confirmation outcome (send_message,
+    // live previews, vault approvals…, src/features/outcome-turn.ts) or a HuddleFM DJ notice (src/features/huddlefm/notices.ts):
     // its stored input replaces new messages.
     const sched = await scheduledTurnInput(turn.id).catch((err) => (log.warn({ err }, 'scheduledTurnInput failed'), null));
     const isOutcome = Boolean(sched && OUTCOME_SOURCES.includes(sched.source));
@@ -555,8 +553,7 @@ const MAX_UNHANDLED = 10;
 
 /**
  * For a non-user turn: people's messages it must leave alone. (1) User turns already queued in this thread (messages
- * that arrived meanwhile): they run right after this one with their speaker's own tools (e.g. the admin's
- * spawn_coding_agent, never offered in a results turn). (2) Human messages stored after the bot's last reply (within
+ * that arrived meanwhile): they run right after this one with their speaker's own identity and permissions. (2) Human messages stored after the bot's last reply (within
  * the last 15 minutes) that are in no turn yet: still in their debounce window or at the relevance gate. They get a
  * turn of their own if they're meant for the bot, so a results / reminder turn that starts meanwhile must not answer
  * them too (prod: a results turn answered a question that its own turn then answered again).
@@ -854,9 +851,6 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
   // CONNECTOR_TOOLS_GRACE_MS more: a slower connector sits this turn out (a note tells the model). Never throws.
   const connectorLoad = startConnectorTools({ turn, speakerId: turn.authorId, abortSignal: stopAbort.signal, taken: Object.keys(tools) });
   recordReactVisibility(tools, state);
-  // Coding agents change the bot's own code: only offered in the admin's own message turns when configured (not in
-  // synthesis / scheduled turns, whose input is other content; re-checked on use).
-  if (cursorInstructRefusal(turn.authorId, turn.kind)) delete tools.spawn_coding_agent;
 
   const timing = io.timing ?? new TurnTiming();
   timing.mark('context_start');
@@ -864,7 +858,7 @@ export async function runFrontTurn(turn: TurnRow, io: TurnIO): Promise<void> {
     timing.span('ctx_speaker', () => speakerInfo(turn.authorId)),
     loadSessionInfo(turn.threadId).catch((err) => (log.warn({ err }, 'loadSessionInfo failed'), null)),
   ]);
-  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ codingAgents: !cursorRefusal(turn.authorId), moveToChannel: offersMoveButton({ enabled: codeChannels.enabled, inCodeChannel: Boolean(codeChannels.here) }) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
+  const [system, built] = await Promise.all([timing.span('ctx_system', () => buildSystem({ moveToChannel: offersMoveButton({ enabled: codeChannels.enabled, inCodeChannel: Boolean(codeChannels.here) }) })), buildTurnMessage(turn, speaker, io.viewingChannelId, timing, session, codeChannels)]);
   timing.mark('context_built');
   if (built.outcome?.source) {
     // An approval outcome turn may carry on with the owner's credentials (vaultIdentity): only the approval's own owner.
