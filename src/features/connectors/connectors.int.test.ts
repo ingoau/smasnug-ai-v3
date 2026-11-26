@@ -170,21 +170,38 @@ describe.skipIf(!INTEGRATION)('connectors integration', () => {
     expect(found).toContain('### notes__get_note');
     expect(found).toContain('"id":{"type":"string"}');
     expect(String(await exec(r.tools.find_connector_tools, { names: ['add.note', 'zzz'] }))).toMatch(/### notes__add_note[\s\S]*Not found: zzz/);
+    // The input schema (what the SDK validates before execute) takes a JSON string and keeps stray keys.
+    const schema = (r.tools.use_connector as any).inputSchema;
+    expect(schema.safeParse({ tool: 'x', arguments: '{"a":1}' }).success).toBe(true);
+    expect(schema.parse({ tool: 'x', id: 'n1' })).toEqual({ tool: 'x', id: 'n1' });
     const before = srv.calls.length;
-    expect(String(await exec(r.tools.use_connector, { tool: 'notes__get_note', arguments: { id: 5 } }))).toMatch(/^Not run: `id` must be string/);
-    expect(String(await exec(r.tools.use_connector, { tool: 'nope' }))).toMatch(/^No connector tool named/);
+    const bad = String(await exec(r.tools.use_connector, { tool: 'notes__get_note', arguments: { id: 5 } }));
+    expect(bad).toMatch(/^Not run: the arguments don't match notes__get_note's schema\.\n<untrusted_content/);
+    expect(bad).toContain('`id` must be string');
+    expect(String(await exec(r.tools.use_connector, { tool: 'nope' }))).toMatch(/^Not run: no connector tool named/);
+    // Only the exact full name runs; a short name is a suggestion.
+    expect(String(await exec(r.tools.use_connector, { tool: 'get_note', arguments: { id: 'n2' } }))).toMatch(/^Not run: use the full name\. Did you mean `notes__get_note`/);
+    expect(String(await exec(r.tools.use_connector, { tool: 'notes__get_note', id: 'n2' }))).toMatch(/^Not run: put notes__get_note's arguments inside `arguments`/);
     expect(srv.calls.length).toBe(before);
-    const out = String(await exec(r.tools.use_connector, { tool: 'get_note', arguments: '{"id":"n2"}' }));
+    const out = String(await exec(r.tools.use_connector, { tool: 'notes__get_note', arguments: '{"id":"n2"}' }));
     expect(out).toContain('called get_note {"id":"n2"}');
     expect(out).not.toContain(KEY);
     // Prompt mode still asks on a card, with the result prefix front.ts looks for.
     expect(String(await exec(r.tools.use_connector, { tool: 'notes__add_note', arguments: { text: 'hi' } }))).toMatch(/^Awaiting approval/);
     expect(srv.calls.length).toBe(before + 1);
+    // Auto mode: the verifier's refusal still becomes a warning card.
+    await settings.setKnob(owner, 'notes', 'read', 'auto');
+    h.verifierApproves = false;
+    const a = await tools.startConnectorTools({ turn, speakerId: owner, taken: [], inlineLimits }).collect();
+    expect(String(await exec(a.tools.use_connector, { tool: 'notes__get_note', arguments: { id: 'n3' } }))).toMatch(/^Awaiting approval: the safety check couldn't confirm/);
+    expect(srv.calls.length).toBe(before + 1);
+    h.verifierApproves = true;
+    await settings.setKnob(owner, 'notes', 'read', 'always_allow');
     // !p: prompt-mode tools are neither listed nor callable.
     const p = await tools.startConnectorTools({ turn: { ...turn, ephemeral: true }, speakerId: owner, taken: [], inlineLimits }).collect();
     expect(p.index).toContain('get_note');
     expect(p.index).not.toContain('add_note');
-    expect(String(await exec(p.tools.use_connector, { tool: 'notes__add_note', arguments: { text: 'hi' } }))).toMatch(/^No connector tool named/);
+    expect(String(await exec(p.tools.use_connector, { tool: 'notes__add_note', arguments: { text: 'hi' } }))).toMatch(/^Not run: no connector tool named/);
     // Below the limits: the tools themselves, no index.
     const inline = await tools.startConnectorTools({ turn, speakerId: owner, taken: [] }).collect();
     expect(inline.index).toBe('');

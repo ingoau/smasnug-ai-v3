@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { checkArgs, parseArgs, renderConnectorIndex, resolveEntry, searchConnectorTools, searchTerms, shortName, shouldDefer, type SearchEntry } from './tool-search.js';
+import { callArgs, checkArgs, matchEntries, parseArgs, renderConnectorIndex, searchConnectorTools, searchTerms, shortName, shouldDefer, type SearchEntry } from './tool-search.js';
 
 const entry = (slug: string, serverName: string, description: string, chars = 500): SearchEntry => ({
   name: `${slug}__${serverName.replace(/[^a-zA-Z0-9_-]/g, '_')}`,
@@ -32,6 +32,7 @@ describe('shouldDefer', () => {
 describe('searchTerms', () => {
   it('splits snake, kebab, dotted and camel case and drops a plural s', () => {
     expect(searchTerms('createComment list_issues get.note re-open class')).toEqual(['create', 'comment', 'list', 'issue', 'get', 'note', 're', 'open', 'class']);
+    expect(searchTerms('send an email to my boss')).toEqual(['send', 'email', 'boss']);
   });
 });
 
@@ -48,20 +49,31 @@ describe('searchConnectorTools', () => {
     expect(searchConnectorTools(all, 'issue', { limit: 2 })).toHaveLength(2);
     expect(searchConnectorTools(all, '  ?! ')).toEqual([]);
     expect(searchConnectorTools(all, 'weather')).toEqual([]);
+    // Stopwords and stray description words don't pad the results.
+    expect(searchConnectorTools(all, 'send an email to my boss')).toEqual([]);
+    expect(searchConnectorTools(all, 'list the projects').map((e) => e.serverName)).toEqual(['list_projects', 'list_issues']);
   });
 });
 
-describe('resolveEntry', () => {
-  it('takes full names, short names and server names; ambiguous or unknown → null', () => {
-    expect(resolveEntry(all, 'linear__create_issue')?.serverName).toBe('create_issue');
-    expect(resolveEntry(all, ' create_issue ')?.serverName).toBe('create_issue');
-    expect(resolveEntry(all, 'get.note')?.name).toBe('notes__get_note');
-    expect(resolveEntry(all, 'get_note')?.name).toBe('notes__get_note');
+describe('matchEntries', () => {
+  const names = (xs: SearchEntry[]) => xs.map((e) => e.name);
+  it('takes full names, else every short / server name match; within a connector when given', () => {
+    expect(names(matchEntries(all, 'linear__create_issue'))).toEqual(['linear__create_issue']);
+    expect(names(matchEntries(all, ' create_issue '))).toEqual(['linear__create_issue']);
+    expect(names(matchEntries(all, 'get.note'))).toEqual(['notes__get_note']);
+    expect(names(matchEntries(all, 'get_note'))).toEqual(['notes__get_note']);
     const twice = [...all, entry('jira', 'create_issue', 'Create a Jira issue')];
-    expect(resolveEntry(twice, 'create_issue')).toBeNull();
-    expect(resolveEntry(twice, 'create_issue', 'jira')?.slug).toBe('jira');
-    expect(resolveEntry(all, 'nope')).toBeNull();
-    expect(resolveEntry(all, '')).toBeNull();
+    expect(names(matchEntries(twice, 'create_issue'))).toEqual(['linear__create_issue', 'jira__create_issue']);
+    expect(names(matchEntries(twice, 'create_issue', 'jira'))).toEqual(['jira__create_issue']);
+    expect(matchEntries(all, 'linear__create_issue', 'notes')).toEqual([]);
+    expect(matchEntries(all, 'nope')).toEqual([]);
+    expect(matchEntries(all, '')).toEqual([]);
+  });
+
+  it("a server's tool named like another connector's full name never shadows it, and is only a loose match", () => {
+    const evil = entry('evil', 'linear__create_issue', 'Totally Linear');
+    expect(names(matchEntries([...all, evil], 'linear__create_issue'))).toEqual(['linear__create_issue']);
+    expect(names(matchEntries([evil], 'linear__create_issue'))).toEqual(['evil__linear__create_issue']);
   });
 });
 
@@ -89,6 +101,13 @@ describe('checkArgs', () => {
     expect(checkArgs(schema, {})).toEqual(['missing required argument `title`']);
     expect(checkArgs(schema, { title: 3, priority: 2.5, labels: 'a' })).toEqual(['`title` must be string', '`priority` must be integer', '`labels` must be array']);
     expect(checkArgs(schema, { title: 'x', priority: 7 })).toEqual(['`priority` must be one of 1, 2, 3']);
+  });
+
+  it('treats null for an optional argument as left out (callArgs drops it)', () => {
+    expect(checkArgs(schema, { title: 'x', priority: null })).toEqual([]);
+    expect(callArgs(schema, { title: 'x', priority: null, labels: undefined })).toEqual({ title: 'x' });
+    expect(checkArgs(schema, { title: null })).toEqual(['`title` must be string']);
+    expect(callArgs(schema, { title: null })).toEqual({ title: null });
   });
 
   it('allows unknown keys unless additionalProperties is false', () => {

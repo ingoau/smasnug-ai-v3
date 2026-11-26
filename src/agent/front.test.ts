@@ -34,6 +34,8 @@ const h = vi.hoisted(() => ({
   synth: [] as unknown[][],
   /** The speaker's connector tools this turn (startConnectorTools). */
   connectorTools: {} as Record<string, unknown>,
+  /** Their `<connectors>` index when deferred. */
+  connectorIndex: '',
 }));
 
 vi.mock('../db/index.js', () => {
@@ -44,7 +46,7 @@ vi.mock('../db/index.js', () => {
 });
 vi.mock('../features/connectors/tools.js', async (orig) => ({
   ...(await orig<typeof import('../features/connectors/tools.js')>()),
-  startConnectorTools: () => ({ collect: async () => ({ tools: h.connectorTools, unavailable: [] }) }),
+  startConnectorTools: () => ({ collect: async () => ({ tools: h.connectorTools, unavailable: [], index: h.connectorIndex }) }),
 }));
 vi.mock('../core/redis.js', () => ({ redis: { get: async () => null, set: async () => 'OK' }, bullConnection: () => ({}) }));
 vi.mock('../core/slack.js', () => ({
@@ -199,6 +201,7 @@ beforeEach(() => {
   h.slackHook = undefined;
   h.sqlHook = undefined;
   h.connectorTools = {};
+  h.connectorIndex = '';
   h.postedCards = [];
   h.retired = [];
   h.ctx = {};
@@ -291,6 +294,16 @@ describe('runFrontTurn (mock model)', () => {
     await runFrontTurn(turn({ id: 84 }), io(true).io);
     expect(h.slack.filter((c) => c.method === 'chat.postMessage')).toHaveLength(0);
     expect(h.events.some((e) => e.type === 'reply' && e.payload?.fallback)).toBe(false);
+  });
+
+  it('deferred connector tools: the index goes in the turn message, not the system prompt', async () => {
+    h.connectorIndex = '<connectors>\n- Notes (`notes`, 9 tools): get_note\n</connectors>';
+    h.model = mockModel([toolStep(['react', { emoji: 'tada' }]), textStep('')]);
+    await runFrontTurn(turn({ id: 85 }), io(true).io);
+    expect(turnText()).toContain('- Notes (`notes`, 9 tools): get_note');
+    const system = ((h.model as any).doStreamCalls as any[])[0].prompt[0];
+    expect(system.role).toBe('system');
+    expect(JSON.stringify(system)).not.toContain('<connectors>');
   });
 
   it('a skipped reaction on a mention still gets the fallback (nothing was visible)', async () => {
