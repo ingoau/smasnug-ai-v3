@@ -17,7 +17,7 @@ const h = vi.hoisted(() => {
     process.env.LOG_LEVEL = 'silent';
   }
   process.env.OPENROUTER_KEY ||= 'test';
-  return { def: null as ConnectorDef | null, verifierApproves: false, slowListMs: 0 };
+  return { def: null as ConnectorDef | null, verifierApproves: false, slowListMs: 0, manyTools: 0 };
 });
 
 vi.mock('./catalog.js', async (orig) => ({
@@ -46,6 +46,13 @@ function startServer(): Promise<{ server: http.Server; url: string; calls: strin
       const reply = (result: unknown) => res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'sess-1' }).end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }));
       if (msg.method === 'initialize') return reply({ protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'test', version: '1' } });
       if (msg.method === 'tools/list' && h.slowListMs) await new Promise((r) => setTimeout(r, h.slowListMs));
+      if (msg.method === 'tools/list' && h.manyTools) {
+        // Paginated: 25 per page, cursor = the next offset.
+        const from = Number(msg.params?.cursor ?? 0);
+        const to = Math.min(from + 25, h.manyTools);
+        const tools = Array.from({ length: to - from }, (_, i) => ({ name: `tool_${from + i}`, description: `Tool number ${from + i}`, inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }));
+        return reply({ tools, ...(to < h.manyTools ? { nextCursor: String(to) } : {}) });
+      }
       if (msg.method === 'tools/list')
         return reply({
           tools: [
@@ -207,6 +214,22 @@ describe.skipIf(!INTEGRATION)('connectors integration', () => {
     expect(inline.index).toBe('');
     expect(Object.keys(inline.tools).sort()).toEqual(['notes__add_note', 'notes__get_note', 'notes__slow']);
     await sql`delete from vault_approvals where owner_id = ${owner}`;
+  });
+
+  it('offers every tool the server lists, across tools/list pages (no default cap)', async () => {
+    await settings.setKnob(owner, 'notes', 'read', 'always_allow');
+    h.manyTools = 75;
+    await settings.invalidateTools(owner, 'notes');
+    try {
+      const r = await tools.startConnectorTools({ turn, speakerId: owner, taken: [] }).collect();
+      expect(Object.keys(r.tools).sort()).toEqual(['find_connector_tools', 'use_connector']);
+      expect(r.index).toContain('(`notes`, 75 tools)');
+      expect(r.index).toContain('tool_74');
+      expect(String(await exec(r.tools.use_connector, { tool: 'notes__tool_74', arguments: {} }))).toContain('called tool_74');
+    } finally {
+      h.manyTools = 0;
+      await settings.invalidateTools(owner, 'notes');
+    }
   });
 
   it('a setting changed to Never after the build refuses at call time', async () => {

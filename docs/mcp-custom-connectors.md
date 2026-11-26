@@ -37,7 +37,7 @@ credentials, prompt-mode approvals are vault approval cards, every call lands in
   // or { "type": "api_key", "header": "X-Api-Key", "scheme": "", "help": "Where to create a key…" }
   //    (default header Authorization with scheme Bearer)
   "tools": { "find_records": "read", "delete_records": "delete" }, // optional class overrides
-  "maxTools": 25                     // optional, 1–60 (default 25)
+  "maxTools": 25                     // optional, 1–500 (default: every tool the server lists)
 }
 ```
 
@@ -112,7 +112,9 @@ Connector tools are added in `src/agent/front.ts` right after `toolsFor('front',
   Anthropic's API refuses there) are dropped, the schema becomes `additionalProperties: true`, and the dropped rules
   are appended to the tool description (trimmed, untrusted). A non-object schema, one over 12 KB or an unresolvable
   `$ref` becomes a permissive object, again with the schema described in the description.
-- At most `maxTools` per connector (default 25) and 120 per turn. Tool lists are cached in Redis per (user, connector)
+- Every tool the server lists, unless the definition sets `maxTools`; 500 per connector and 500 per turn as safety
+  ceilings (more than a few are deferred anyway, see Tool search). A listing follows `tools/list` cursors (up to 20
+  pages within its timeout). Tool lists are cached in Redis per (user, connector)
   for 10 minutes (`conn:tools:<user>:<slug>`); connect, disconnect and settings changes invalidate it. A failed listing
   (10 s timeout) is remembered for 2 minutes (`conn:toolsfail:<user>:<slug>`) so a down server isn't retried every
   turn; App Home's *Edit actions* ignores that and retries.

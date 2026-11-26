@@ -31,7 +31,6 @@ import {
   classifyTool,
   cleanDescription,
   connectorToolName,
-  CONNECTOR_TOOLS_DEFAULT,
   CONNECTOR_TOOLS_MAX,
   prepareInputSchema,
   renderToolResult,
@@ -502,7 +501,7 @@ export function startConnectorTools(o: { turn: LoadTurn; speakerId: string; abor
             return;
           }
           let n = 0;
-          const cap = l.def.maxTools ?? CONNECTOR_TOOLS_DEFAULT;
+          const cap = l.def.maxTools ?? Infinity;
           for (const t of l.tools) {
             if (n >= cap || offered.length >= TURN_CONNECTOR_TOOLS_MAX) break;
             const cls = classifyTool(l.def, t);
